@@ -2382,7 +2382,7 @@ public class DynamicPropertiesStore extends TronStoreWithRevoking<BytesCapsule> 
   }
 
   public boolean useNewRewardAlgorithm() {
-    return getNewRewardAlgorithmEffectiveCycle() != Long.MAX_VALUE;
+    return (getNewRewardAlgorithmEffectiveCycle() != Long.MAX_VALUE) || (getAllowTvmVote() == 1);
   }
 
   public void saveNewRewardAlgorithmEffectiveCycle() {
