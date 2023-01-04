@@ -4,6 +4,7 @@ import static org.tron.protos.Protocol.Transaction.Result.contractResult;
 import static org.tron.protos.Protocol.Transaction.Result.contractResult.REVERT;
 import static org.tron.protos.Protocol.Transaction.Result.contractResult.SUCCESS;
 
+
 import java.io.File;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -12,7 +13,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Consumer;
-
 import lombok.extern.slf4j.Slf4j;
 import org.bouncycastle.util.encoders.Hex;
 import org.junit.After;
@@ -301,7 +301,6 @@ public class VoteTest {
     VMConfig.initAllowTvmVote(1);
     manager.getDynamicPropertiesStore().saveChangeDelegation(1);
     manager.getDynamicPropertiesStore().saveAllowTvmVote(1);
-    manager.getDynamicPropertiesStore().saveNewRewardAlgorithmEffectiveCycle();
   }
 
   @After
@@ -774,6 +773,51 @@ public class VoteTest {
       payRewardAndDoMaintenance(1);
     }
   }
+
+  @Test
+  public void testNewRewardPerformance() throws Exception {
+    manager.getDynamicPropertiesStore().saveNewRewardAlgorithmEffectiveCycle();
+    int cycle= 1000;
+    byte[] voteContractA = deployContract("VoteA", ABI, CODE);
+    byte[] voteContractB = deployContract("VoteB", ABI, CODE);
+
+    // cycle-1
+    {
+      // freeze balance to get tron power
+      freezeBalance(voteContractA);
+      freezeBalance(voteContractB);
+
+      // vote through smart contract
+      voteWitness(voteContractA,
+          Arrays.asList(witnessAStr, witnessBStr),
+          Arrays.asList(1234L, 4321L));
+      voteWitness(voteContractB,
+          Arrays.asList(witnessAStr, witnessBStr),
+          Arrays.asList(12L, 21L));
+
+      payRewardAndDoMaintenance(1);
+    }
+
+    // cycle-2 ~ cycle-72999
+    {
+      payRewardAndDoMaintenance(cycle);
+    }
+
+    mortgageService.queryReward(voteContractA);
+
+    // calculate-50
+    {
+      int oldTimes = 50;
+      long start = System.nanoTime();
+      for (int i = 1; i <= oldTimes; i++) {
+        if (i % 5 == 0) {
+          logger.info("in progress-{}: {}", i, (System.nanoTime() - start) / 1000 / i);
+        }
+        mortgageService.queryReward(voteContractA);
+      }
+      logger.info("total: {}", (System.nanoTime() - start) / 1000 / oldTimes);
+    }
+}
 
   /**
    *   F - Freeze, U - Unfreeze
