@@ -218,13 +218,24 @@ public class MortgageService {
     long reward = 0;
     long newAlgorithmCycle = dynamicPropertiesStore.getNewRewardAlgorithmEffectiveCycle();
     if (beginCycle < newAlgorithmCycle) {
+      long timeNs = System.nanoTime();
       long oldEndCycle = Math.min(endCycle, newAlgorithmCycle);
       for (long cycle = beginCycle; cycle < oldEndCycle; cycle++) {
         reward += computeReward(cycle, accountCapsule);
       }
+
+      long diffMics = (System.nanoTime() - timeNs) / 1000;
+      long diffVoteNum = accountCapsule.getVotesList().size();
+      long diffCycle = oldEndCycle - beginCycle;
+      long diffNum = diffCycle * diffVoteNum;
+      if (diffCycle > 1000) {
+        logger.warn("reward diffNum:{},diffMics:{},diffCycle:{},diffVoteNum:{}", diffNum, diffMics,
+            diffCycle, diffVoteNum);
+      }
       beginCycle = oldEndCycle;
     }
     if (beginCycle < endCycle) {
+      long timeNs = System.nanoTime();
       for (Vote vote : accountCapsule.getVotesList()) {
         byte[] srAddress = vote.getVoteAddress().toByteArray();
         BigInteger beginVi = delegationStore.getWitnessVi(beginCycle - 1, srAddress);
@@ -236,6 +247,14 @@ public class MortgageService {
         long userVote = vote.getVoteCount();
         reward += deltaVi.multiply(BigInteger.valueOf(userVote))
             .divide(DelegationStore.DECIMAL_OF_VI_REWARD).longValue();
+      }
+      long diffCycle = endCycle - beginCycle;
+      long diffVoteNum = accountCapsule.getVotesList().size();
+      long diffNum = diffCycle * diffVoteNum;
+      long diffMics = (System.nanoTime() - timeNs) / 1000;
+      if (diffCycle > 1000) {
+        logger.warn("new reward diffNum:{},diffMics:{},diffCycle:{},diffVoteNum:{}", diffNum,
+            diffMics, diffCycle, diffVoteNum);
       }
     }
     return reward;
