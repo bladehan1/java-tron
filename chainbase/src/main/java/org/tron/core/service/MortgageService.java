@@ -212,7 +212,7 @@ public class MortgageService {
       Metrics.histogramObserve(MetricKeys.Histogram.BLOCK_CYCLE, (double)diffCycle);
       if (diffCycle >= 1000) {
         diffMics = diffMics / diffNum * 1000;
-        Metrics.histogramObserve(MetricKeys.Histogram.BLOCK_REWARD_DELAY1000, diffMics,"");
+        Metrics.histogramObserve(MetricKeys.Histogram.BLOCK_REWARD_DELAY1000, diffMics);
       } else if (diffCycle >= 100) {
         diffMics = diffMics / diffNum * 100;
         Metrics.histogramObserve(MetricKeys.Histogram.BLOCK_REWARD_DELAY100, diffMics);
