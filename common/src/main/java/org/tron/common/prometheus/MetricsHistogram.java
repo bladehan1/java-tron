@@ -46,6 +46,20 @@ public class MetricsHistogram {
     init(MetricKeys.Histogram.BLOCK_FETCH_LATENCY, "fetch block latency.");
     init(MetricKeys.Histogram.BLOCK_RECEIVE_DELAY,
         "receive block delay time, receiveTime - blockTime.");
+
+    init(MetricKeys.Histogram.BLOCK_NEW_REWARD_DELAY,
+        "BLOCK_NEW_REWARD_DELAY - blockTime.");
+    init(MetricKeys.Histogram.BLOCK_REWARD_DELAY1,
+        "BLOCK_REWARD_DELAY - blockTime.");
+    init(MetricKeys.Histogram.BLOCK_REWARD_DELAY10,
+        "BLOCK_REWARD_DELAY - blockTime.");
+    init(MetricKeys.Histogram.BLOCK_REWARD_DELAY100,
+        "BLOCK_REWARD_DELAY - blockTime.");
+    init(MetricKeys.Histogram.BLOCK_REWARD_DELAY1000,
+        "BLOCK_REWARD_DELAY - blockTime.");
+    init(MetricKeys.Histogram.BLOCK_CYCLE,
+        "BLOCK_CYCLE - blockTime.");
+
   }
 
   private MetricsHistogram() {

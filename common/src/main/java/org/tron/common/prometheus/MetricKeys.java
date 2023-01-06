@@ -62,6 +62,13 @@ public class MetricKeys {
     public static final String BLOCK_FETCH_LATENCY = "tron:block_fetch_latency_seconds";
     public static final String BLOCK_RECEIVE_DELAY = "tron:block_receive_delay_seconds";
 
+    public static final String BLOCK_NEW_REWARD_DELAY = "tron:block_new_reward_delay_microseconds";
+    public static final String BLOCK_REWARD_DELAY1 = "tron:block_reward1_delay_microseconds";
+    public static final String BLOCK_REWARD_DELAY10 = "tron:block_reward10_delay_microseconds";
+    public static final String BLOCK_REWARD_DELAY100 = "tron:block_reward100_delay_microseconds";
+    public static final String BLOCK_REWARD_DELAY1000 = "tron:block_reward1000_delay_microseconds";
+    public static final String BLOCK_CYCLE = "tron:block_cycle_num";
+
     private Histogram() {
       throw new IllegalStateException("Histogram");
     }

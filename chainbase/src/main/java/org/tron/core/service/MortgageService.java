@@ -10,6 +10,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.collections4.CollectionUtils;
 import org.bouncycastle.util.encoders.Hex;
 import org.springframework.stereotype.Component;
+import org.tron.common.prometheus.MetricKeys;
+import org.tron.common.prometheus.Metrics;
 import org.tron.common.utils.StringUtil;
 import org.tron.core.capsule.AccountCapsule;
 import org.tron.core.capsule.WitnessCapsule;
@@ -203,14 +205,23 @@ public class MortgageService {
       for (long cycle = beginCycle; cycle < oldEndCycle; cycle++) {
         reward += computeReward(cycle, accountCapsule);
       }
-
       long diffMics = (System.nanoTime() - timeNs) / 1000;
       long diffVoteNum = accountCapsule.getVotesList().size();
       long diffCycle = oldEndCycle - beginCycle;
       long diffNum = diffCycle * diffVoteNum;
-      if (diffCycle > 1000) {
-        logger.warn("reward diffNum:{},diffMics:{},diffCycle:{},diffVoteNum:{}", diffNum, diffMics,
-            diffCycle, diffVoteNum);
+      Metrics.histogramObserve(MetricKeys.Histogram.BLOCK_CYCLE, (double)diffCycle);
+      if (diffCycle >= 1000) {
+        diffMics = diffMics / diffNum * 1000;
+        Metrics.histogramObserve(MetricKeys.Histogram.BLOCK_REWARD_DELAY1000, diffMics,"");
+      } else if (diffCycle >= 100) {
+        diffMics = diffMics / diffNum * 100;
+        Metrics.histogramObserve(MetricKeys.Histogram.BLOCK_REWARD_DELAY100, diffMics);
+      } else if (diffCycle >= 10) {
+        diffMics = diffMics / diffNum * 10;
+        Metrics.histogramObserve(MetricKeys.Histogram.BLOCK_REWARD_DELAY10, diffMics);
+      } else {
+        diffMics = diffMics / diffNum;
+        Metrics.histogramObserve(MetricKeys.Histogram.BLOCK_REWARD_DELAY1, diffMics);
       }
       beginCycle = oldEndCycle;
     }
@@ -227,15 +238,10 @@ public class MortgageService {
         long userVote = vote.getVoteCount();
         reward += deltaVi.multiply(BigInteger.valueOf(userVote))
             .divide(DelegationStore.DECIMAL_OF_VI_REWARD).longValue();
+
       }
-      long diffCycle = endCycle - beginCycle;
-      long diffVoteNum = accountCapsule.getVotesList().size();
-      long diffNum = diffCycle * diffVoteNum;
-      long diffMics = (System.nanoTime() - timeNs) / 1000;
-      if (diffCycle > 1000) {
-        logger.warn("new reward diffNum:{},diffMics:{},diffCycle:{},diffVoteNum:{}", diffNum,
-            diffMics, diffCycle, diffVoteNum);
-      }
+      long diffMics = (System.nanoTime() - timeNs) / 1000 / accountCapsule.getVotesList().size();
+      Metrics.histogramObserve(MetricKeys.Histogram.BLOCK_NEW_REWARD_DELAY, diffMics);
     }
     return reward;
   }
