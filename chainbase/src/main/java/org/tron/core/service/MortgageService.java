@@ -223,6 +223,7 @@ public class MortgageService {
         diffMics = diffMics / diffNum;
         Metrics.histogramObserve(MetricKeys.Histogram.BLOCK_REWARD_DELAY1, diffMics);
       }
+      logger.warn("myreward old, mics:{},diffNum:{},beginCycle:{},endCycle:{}",diffMics,diffNum,beginCycle,endCycle);
       beginCycle = oldEndCycle;
     }
     if (beginCycle < endCycle) {
@@ -241,6 +242,7 @@ public class MortgageService {
 
       }
       long diffMics = (System.nanoTime() - timeNs) / 1000 / accountCapsule.getVotesList().size();
+      logger.warn("myreward new, mics:{},beginCycle:{},endCycle:{}",diffMics,beginCycle,endCycle);
       Metrics.histogramObserve(MetricKeys.Histogram.BLOCK_NEW_REWARD_DELAY, diffMics);
     }
     return reward;
