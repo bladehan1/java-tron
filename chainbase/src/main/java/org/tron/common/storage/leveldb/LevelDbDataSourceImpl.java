@@ -17,8 +17,9 @@ package org.tron.common.storage.leveldb;
 
 import static org.fusesource.leveldbjni.JniDBFactory.factory;
 
+
 import com.google.common.collect.Sets;
-import java.io.File;
+import com.google.common.primitives.Bytes;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -30,18 +31,14 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
-import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
-
-import com.google.common.primitives.Bytes;
 import lombok.NoArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.iq80.leveldb.CompressionType;
 import org.iq80.leveldb.DB;
 import org.iq80.leveldb.DBIterator;
 import org.iq80.leveldb.Logger;
@@ -80,6 +77,7 @@ public class LevelDbDataSourceImpl extends DbStat implements DbSourceInter<byte[
       innerLogger.info("{} {}", dataBaseName, message);
     }
   };
+  private ReadOptions readOptions=new ReadOptions().fillCache(false);
 
   /**
    * constructor.
@@ -198,6 +196,9 @@ public class LevelDbDataSourceImpl extends DbStat implements DbSourceInter<byte[
   public byte[] getData(byte[] key) {
     resetDbLock.readLock().lock();
     try {
+      if(dataBaseName.equals("delegation")){
+        return database.get(key,readOptions);
+      }
       return database.get(key);
     } finally {
       resetDbLock.readLock().unlock();
