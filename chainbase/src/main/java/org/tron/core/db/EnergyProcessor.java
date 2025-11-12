@@ -4,6 +4,8 @@ import static org.tron.common.math.Maths.max;
 import static org.tron.common.math.Maths.min;
 import static org.tron.core.config.Parameter.ChainConstant.BLOCK_PRODUCED_INTERVAL;
 import static org.tron.core.config.Parameter.ChainConstant.TRX_PRECISION;
+import static org.tron.protos.contract.Common.ResourceCode.ENERGY;
+
 
 import lombok.extern.slf4j.Slf4j;
 import org.tron.common.parameter.CommonParameter;
@@ -15,8 +17,6 @@ import org.tron.core.exception.ContractValidateException;
 import org.tron.core.store.AccountStore;
 import org.tron.core.store.DynamicPropertiesStore;
 import org.tron.protos.Protocol.Account.AccountResource;
-
-import static org.tron.protos.contract.Common.ResourceCode.ENERGY;
 
 @Slf4j(topic = "DB")
 public class EnergyProcessor extends ResourceProcessor {
@@ -98,6 +98,11 @@ public class EnergyProcessor extends ResourceProcessor {
   public boolean useEnergy(AccountCapsule accountCapsule, long energy, long now) {
 
     long energyUsage = accountCapsule.getEnergyUsage();
+
+    if (useFreeEnergy(accountCapsule, energyUsage, now)) {
+      return true;
+    }
+
     long latestConsumeTime = accountCapsule.getAccountResource().getLatestConsumeTimeForEnergy();
     long energyLimit = calculateGlobalEnergyLimit(accountCapsule);
     long newEnergyUsage;
@@ -143,6 +148,7 @@ public class EnergyProcessor extends ResourceProcessor {
     if (dynamicPropertiesStore.supportUnfreezeDelay()) {
       return calculateGlobalEnergyLimitV2(frozeBalance);
     }
+
     if (frozeBalance < TRX_PRECISION) {
       return 0;
     }
@@ -178,6 +184,53 @@ public class EnergyProcessor extends ResourceProcessor {
     long newEnergyUsage = recovery(accountCapsule, ENERGY, energyUsage, latestConsumeTime, now);
 
     return max(energyLimit - newEnergyUsage, 0, this.disableJavaLangMath()); // us
+  }
+
+  public boolean useFreeEnergy(AccountCapsule accountCapsule, long energy, long now) {
+    long freeEnergyLimit = dynamicPropertiesStore.getFreeNetLimit();
+    long freeEnergyUsage = accountCapsule.getFreeEnergyUsage();
+    long latestConsumeFreeEnergyTime = accountCapsule.getLatestConsumeFreeEnergyTime();
+    long newFreeEnergyUsage = increase(freeEnergyUsage, 0, latestConsumeFreeEnergyTime, now);
+
+    if (energy > (freeEnergyLimit - newFreeEnergyUsage)) {
+      logger.debug("Free energy usage is running out."
+              + " energy: {}, freeEnergyLimit: {}, newFreeEnergyUsage: {}.",
+          energy, freeEnergyLimit, newFreeEnergyUsage);
+      return false;
+    }
+      // TODO confirm energy public limit
+//    long publicNetLimit = dynamicPropertiesStore.getPublicNetLimit();
+//    long publicNetUsage = dynamicPropertiesStore.getPublicNetUsage();
+//    long publicNetTime = dynamicPropertiesStore.getPublicNetTime();
+//
+//    long newPublicNetUsage = increase(publicNetUsage, 0, publicNetTime, now);
+//
+//    if (energy > (publicNetLimit - newPublicNetUsage)) {
+//      logger.debug("Free public net usage is running out."
+//              + " Bytes: {}, publicNetLimit: {}, newPublicNetUsage: {}.",
+//          energy, publicNetLimit, newPublicNetUsage);
+//      return false;
+//    }
+
+    latestConsumeFreeEnergyTime = now;
+    // TODO confirm now is headerBlockTime
+    long latestOperationTime = now;
+//    publicNetTime = now;
+    newFreeEnergyUsage = increase(newFreeEnergyUsage, energy, latestConsumeFreeEnergyTime, now);
+//    newPublicNetUsage = increase(newPublicNetUsage, energy, publicNetTime, now);
+    accountCapsule.setFreeEnergyUsage(newFreeEnergyUsage);
+    accountCapsule.setLatestConsumeFreeEnergyTime(latestConsumeFreeEnergyTime);
+    accountCapsule.setLatestOperationTime(latestOperationTime);
+
+//    dynamicPropertiesStore.savePublicNetUsage(newPublicNetUsage);
+//    dynamicPropertiesStore.savePublicNetTime(publicNetTime);
+    accountStore.put(accountCapsule.createDbKey(), accountCapsule);
+    return true;
+  }
+
+  private long recovery(AccountCapsule accountCapsule, long energy, long now) {
+
+    return 0;
   }
 
   private long getHeadSlot() {

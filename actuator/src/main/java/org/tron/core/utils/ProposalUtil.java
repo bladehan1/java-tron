@@ -513,7 +513,17 @@ public class ProposalUtil {
         }
         break;
       }
-
+      case FREE_ENERGY_LIMIT: {
+        if (!forkController.pass(ForkBlockVersionEnum.VERSION_4_8_2)) {
+          throw new ContractValidateException("Bad chain parameter id [FREE_ENERGY_LIMIT]");
+        }
+        //TODO value range
+        if (value < 0 || value > 100_000L) {
+          throw new ContractValidateException(
+              "Bad chain parameter value, valid range is [0,100_000]");
+        }
+        break;
+      }
       case ALLOW_ACCOUNT_ASSET_OPTIMIZATION: {
         if (!forkController.pass(ForkBlockVersionEnum.VERSION_4_3)) {
           throw new ContractValidateException(
@@ -955,7 +965,8 @@ public class ProposalUtil {
     CONSENSUS_LOGIC_OPTIMIZATION(88), // 0, 1
     ALLOW_TVM_BLOB(89), // 0, 1
     PROPOSAL_EXPIRE_TIME(92), // (0, 31536003000)
-    ALLOW_TVM_SELFDESTRUCT_RESTRICTION(94); // 0, 1
+    ALLOW_TVM_SELFDESTRUCT_RESTRICTION(94), // 0, 1
+    FREE_ENERGY_LIMIT(95); // 5000, [0, 100_000] TODO realValue
 
     private long code;
 

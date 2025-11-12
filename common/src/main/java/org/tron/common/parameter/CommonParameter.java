@@ -643,6 +643,10 @@ public class CommonParameter {
 
   @Getter
   @Setter
+  public long freeEnergyLimit;
+
+  @Getter
+  @Setter
   public List<String> disabledApiList;
 
   @Getter

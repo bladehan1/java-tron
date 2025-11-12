@@ -265,6 +265,11 @@ public class ReceiptCapsule {
       contractResult contractResult,
       EnergyProcessor energyProcessor,
       long now) throws BalanceInsufficientException {
+    // use free energy
+    if (energyProcessor.useFreeEnergy(account, usage, now)) {
+      return;
+    }
+
     long accountEnergyLeft;
     if (dynamicPropertiesStore.getAllowTvmFreeze() == 1
         || dynamicPropertiesStore.supportUnfreezeDelay()) {

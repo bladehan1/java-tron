@@ -355,6 +355,15 @@ public class AccountCapsule implements ProtoCapsule<Account>, Comparable<Account
     this.account = this.account.toBuilder().setLatestConsumeFreeTime(latestTime).build();
   }
 
+  public long getLatestConsumeFreeEnergyTime() {
+    return this.account.getLatestConsumeFreeEnergyTime();
+  }
+
+  public void setLatestConsumeFreeEnergyTime(long latestTime) {
+    this.account = this.account.toBuilder().setLatestConsumeFreeEnergyTime(latestTime).build();
+  }
+
+
   public void addDelegatedFrozenBalanceForBandwidth(long balance) {
     this.account = this.account.toBuilder().setDelegatedFrozenBalanceForBandwidth(
         this.account.getDelegatedFrozenBalanceForBandwidth() + balance).build();
@@ -1187,8 +1196,17 @@ public class AccountCapsule implements ProtoCapsule<Account>, Comparable<Account
     return this.account.getFreeNetUsage();
   }
 
+
   public void setFreeNetUsage(long freeNetUsage) {
     this.account = this.account.toBuilder().setFreeNetUsage(freeNetUsage).build();
+  }
+
+  public long getFreeEnergyUsage() {
+    return this.account.getFreeEnergyUsage();
+  }
+
+  public void setFreeEnergyUsage(long freeEnergyUsage) {
+    this.account = this.account.toBuilder().setFreeEnergyUsage(freeEnergyUsage).build();
   }
 
   public void addAllFreeAssetNetUsageV2(Map<String, Long> map) {

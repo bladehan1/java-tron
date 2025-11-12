@@ -2980,8 +2980,18 @@ public class DynamicPropertiesStore extends TronStoreWithRevoking<BytesCapsule> 
         .orElse(CommonParameter.getInstance().getProposalExpireTime());
   }
 
-  private static class DynamicResourceProperties {
+  public long getFreeEnergyLimit() {
+    return Optional.ofNullable(getUnchecked(DynamicResourceProperties.FREE_ENERGY_LIMIT))
+        .map(BytesCapsule::getData)
+        .map(ByteArray::toLong)
+        .orElse(CommonParameter.getInstance().getFreeEnergyLimit());
+  }
 
+  public void saveFreeEnergyLimit(long value) {
+    this.put(DynamicResourceProperties.FREE_ENERGY_LIMIT, new BytesCapsule(ByteArray.fromLong(value)));}
+
+  private static class DynamicResourceProperties {
+    // Asset limit
     private static final byte[] ONE_DAY_NET_LIMIT = "ONE_DAY_NET_LIMIT".getBytes();
     //public free bandwidth
     private static final byte[] PUBLIC_NET_USAGE = "PUBLIC_NET_USAGE".getBytes();
@@ -3008,6 +3018,8 @@ public class DynamicPropertiesStore extends TronStoreWithRevoking<BytesCapsule> 
     private static final byte[] ADAPTIVE_RESOURCE_LIMIT_TARGET_RATIO =
         "ADAPTIVE_RESOURCE_LIMIT_TARGET_RATIO"
             .getBytes();
+    private static final byte[] FREE_ENERGY_LIMIT =
+        "FREE_ENERGY_LIMIT".getBytes();
 
   }
 

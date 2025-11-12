@@ -392,6 +392,10 @@ public class ProposalService extends ProposalUtil {
           manager.getDynamicPropertiesStore().saveProposalExpireTime(entry.getValue());
           break;
         }
+        case FREE_ENERGY_LIMIT: {
+          manager.getDynamicPropertiesStore().saveFreeEnergyLimit(entry.getValue());
+          break;
+        }
         default:
           find = false;
           break;
