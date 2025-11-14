@@ -129,6 +129,8 @@ public interface Repository {
 
   long getAccountLeftEnergyFromFreeze(AccountCapsule accountCapsule);
 
+  long getAccountFreeEnergy(AccountCapsule accountCapsule);
+
   long getAccountEnergyUsage(AccountCapsule accountCapsule);
 
   Pair<Long, Long> getAccountEnergyUsageBalanceAndRestoreSeconds(AccountCapsule accountCapsule);
