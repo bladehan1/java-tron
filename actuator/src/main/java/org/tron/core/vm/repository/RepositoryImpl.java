@@ -195,14 +195,15 @@ public class RepositoryImpl implements Repository {
   }
 
   @Override
-  public long  getAccountFreeEnergy(AccountCapsule accountCapsule){
+  public long getAccountFreeEnergy(AccountCapsule accountCapsule) {
     long now = getHeadSlot();
 
-    long freeEnergyLimit = getDynamicPropertiesStore().getFreeNetLimit();
+    long freeEnergyLimit = getDynamicPropertiesStore().getFreeEnergyLimit();
     long freeEnergyUsage = accountCapsule.getFreeEnergyUsage();
     long latestConsumeFreeEnergyTime = accountCapsule.getLatestConsumeFreeEnergyTime();
 
-    long newFreeEnergyUsage = increase(freeEnergyUsage, 0,latestConsumeFreeEnergyTime, now, Parameter.ChainConstant.WINDOW_SIZE_MS / BLOCK_PRODUCED_INTERVAL);
+    long newFreeEnergyUsage = increase(freeEnergyUsage, 0, latestConsumeFreeEnergyTime, now,
+        Parameter.ChainConstant.WINDOW_SIZE_MS / BLOCK_PRODUCED_INTERVAL);
 
     return max(freeEnergyLimit - newFreeEnergyUsage, 0, VMConfig.disableJavaLangMath()); // us
   }

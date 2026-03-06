@@ -212,7 +212,6 @@ public class ReceiptCapsule {
     if (receipt.getEnergyUsageTotal() <= 0) {
       return;
     }
-
     if (Objects.isNull(origin) && dynamicPropertiesStore.getAllowTvmConstantinople() == 1) {
       payEnergyBill(dynamicPropertiesStore, accountStore, forkController, caller,
           receipt.getEnergyUsageTotal(), receipt.getResult(), energyProcessor, now);

@@ -517,10 +517,9 @@ public class ProposalUtil {
         if (!forkController.pass(ForkBlockVersionEnum.VERSION_4_8_2)) {
           throw new ContractValidateException("Bad chain parameter id [FREE_ENERGY_LIMIT]");
         }
-        //TODO value range
-        if (value < 0 || value > 100_000L) {
+        if (value < 0 || value > 10_000_000L) {
           throw new ContractValidateException(
-              "Bad chain parameter value, valid range is [0,100_000]");
+              "Bad chain parameter value, valid range is [0,10_000_000]");
         }
         break;
       }

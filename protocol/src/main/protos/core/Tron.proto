@@ -185,11 +185,12 @@ message Account {
   map<string, int64> latest_asset_operation_timeV2 = 58;
   int64 free_net_usage = 19;
   int64 free_energy_usage = 61;
+  int64 latest_consume_free_energy_time = 62;
+
   map<string, int64> free_asset_net_usage = 20;
   map<string, int64> free_asset_net_usageV2 = 59;
   int64 latest_consume_time = 21;
   int64 latest_consume_free_time = 22;
-  int64 latest_consume_free_energy_time = 62;
 
   // the identity of this account, case insensitive
   bytes account_id = 23;

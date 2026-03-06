@@ -570,7 +570,7 @@ public class VMActuator implements Actuator2 {
     long availableEnergy = addExact(leftFrozenEnergy, energyFromBalance,
         VMConfig.disableJavaLangMath());
 
-    // TODO free energy use alone
+    // free energy use alone
     long freeEnergy = rootRepository.getAccountFreeEnergy(account);
     availableEnergy = max(freeEnergy, availableEnergy, VMConfig.disableJavaLangMath());
 

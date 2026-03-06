@@ -99,10 +99,6 @@ public class EnergyProcessor extends ResourceProcessor {
 
     long energyUsage = accountCapsule.getEnergyUsage();
 
-    if (useFreeEnergy(accountCapsule, energyUsage, now)) {
-      return true;
-    }
-
     long latestConsumeTime = accountCapsule.getAccountResource().getLatestConsumeTimeForEnergy();
     long energyLimit = calculateGlobalEnergyLimit(accountCapsule);
     long newEnergyUsage;
@@ -187,7 +183,11 @@ public class EnergyProcessor extends ResourceProcessor {
   }
 
   public boolean useFreeEnergy(AccountCapsule accountCapsule, long energy, long now) {
-    long freeEnergyLimit = dynamicPropertiesStore.getFreeNetLimit();
+    long freeEnergyLimit = dynamicPropertiesStore.getFreeEnergyLimit();
+    if (freeEnergyLimit <= 0L) {
+      return false;
+    }
+
     long freeEnergyUsage = accountCapsule.getFreeEnergyUsage();
     long latestConsumeFreeEnergyTime = accountCapsule.getLatestConsumeFreeEnergyTime();
     long newFreeEnergyUsage = increase(freeEnergyUsage, 0, latestConsumeFreeEnergyTime, now);
