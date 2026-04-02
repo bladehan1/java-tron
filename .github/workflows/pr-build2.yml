@@ -50,9 +50,9 @@ jobs:
       - name: Run quick framework tests (3 classes)
         run: |
           ./gradlew :framework:test \
+            --tests org.tron.core.config.args.ArgsTest \
+            --tests org.tron.common.jetty.SizeLimitHandlerTest \
             --tests org.tron.common.ParameterTest \
-            --tests org.tron.common.ComparatorTest \
-            --tests org.tron.common.BaseMethodTest \
             --no-daemon
 
       - name: Run quick plugins tests (3 classes)
@@ -114,9 +114,9 @@ jobs:
       - name: Run quick framework tests (3 classes, base)
         run: |
           ./gradlew :framework:test \
+            --tests org.tron.core.config.args.ArgsTest \
+            --tests org.tron.common.jetty.SizeLimitHandlerTest \
             --tests org.tron.common.ParameterTest \
-            --tests org.tron.common.ComparatorTest \
-            --tests org.tron.common.BaseMethodTest \
             --no-daemon
 
       - name: Run quick plugins tests (3 classes, base)
