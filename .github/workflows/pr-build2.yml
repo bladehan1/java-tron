@@ -47,20 +47,16 @@ jobs:
           restore-keys: |
             debian11-x86_64-quick-gradle-
 
-      - name: Run framework tests for request-size coverage
+      - name: Run minimal framework tests (delta-negative case)
         run: |
           ./gradlew :framework:test \
             --tests org.tron.core.config.args.ArgsTest \
-            --tests org.tron.common.jetty.SizeLimitHandlerTest \
-            --tests org.tron.common.ParameterTest \
             --no-daemon
 
-      - name: Run quick plugins tests (3 classes)
+      - name: Run minimal plugins tests (delta-negative case)
         run: |
           ./gradlew :plugins:test \
             --tests org.tron.plugins.utils.ByteArrayTest \
-            --tests org.tron.plugins.DbCopyTest \
-            --tests org.tron.plugins.DbMoveTest \
             --no-daemon
 
       - name: Generate module coverage reports
