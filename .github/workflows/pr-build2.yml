@@ -47,12 +47,14 @@ jobs:
           restore-keys: |
             debian11-x86_64-quick-gradle-
 
-      - name: Run quick framework tests (3 classes)
+      - name: Run framework tests for request-size coverage
         run: |
           ./gradlew :framework:test \
             --tests org.tron.core.config.args.ArgsTest \
             --tests org.tron.common.jetty.SizeLimitHandlerTest \
             --tests org.tron.common.ParameterTest \
+            --tests org.tron.core.jsonrpc.JsonrpcServiceTest \
+            --tests org.tron.core.services.filter.HttpApiAccessFilterTest \
             --no-daemon
 
       - name: Run quick plugins tests (3 classes)
@@ -111,12 +113,14 @@ jobs:
           restore-keys: |
             debian11-x86_64-quick-gradle-
 
-      - name: Run quick framework tests (3 classes, base)
+      - name: Run framework tests for request-size coverage (base)
         run: |
           ./gradlew :framework:test \
             --tests org.tron.core.config.args.ArgsTest \
             --tests org.tron.common.jetty.SizeLimitHandlerTest \
             --tests org.tron.common.ParameterTest \
+            --tests org.tron.core.jsonrpc.JsonrpcServiceTest \
+            --tests org.tron.core.services.filter.HttpApiAccessFilterTest \
             --no-daemon
 
       - name: Run quick plugins tests (3 classes, base)
