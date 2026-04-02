@@ -55,6 +55,8 @@ jobs:
             --tests org.tron.common.ParameterTest \
             --tests org.tron.core.jsonrpc.JsonrpcServiceTest \
             --tests org.tron.core.services.filter.HttpApiAccessFilterTest \
+            --tests org.tron.program.SolidityNodeTest \
+            --tests org.tron.core.pbft.PbftApiTest \
             --no-daemon
 
       - name: Run quick plugins tests (3 classes)
@@ -121,6 +123,8 @@ jobs:
             --tests org.tron.common.ParameterTest \
             --tests org.tron.core.jsonrpc.JsonrpcServiceTest \
             --tests org.tron.core.services.filter.HttpApiAccessFilterTest \
+            --tests org.tron.program.SolidityNodeTest \
+            --tests org.tron.core.pbft.PbftApiTest \
             --no-daemon
 
       - name: Run quick plugins tests (3 classes, base)
