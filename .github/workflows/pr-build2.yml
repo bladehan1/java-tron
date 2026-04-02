@@ -218,7 +218,7 @@ jobs:
           set -euo pipefail
 
           MIN_CHANGED=60
-          MAX_DROP=-0.02
+          MAX_DROP=0.03
 
           sanitize() {
             echo "$1" | tr -d ' %'
@@ -286,7 +286,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
           if [ "$DELTA_OK" -ne 1 ]; then
-            echo "Coverage gate failed: overall coverage dropped more than 0.02%."
+            echo "Coverage gate failed: overall coverage delta is below 0.03%."
             echo "base=${BASE_OVERALL}% pr=${PR_OVERALL}% delta=${DELTA}%"
             exit 1
           fi
