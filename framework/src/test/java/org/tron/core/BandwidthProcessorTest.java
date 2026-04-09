@@ -93,6 +93,8 @@ public class BandwidthProcessorTest extends BaseTest {
             ByteArray.fromString(ASSET_NAME_V2),
             assetIssueCapsuleV2);
 
+
+    
     AccountCapsule ownerCapsule =
         new AccountCapsule(
             ByteString.copyFromUtf8("owner"),
