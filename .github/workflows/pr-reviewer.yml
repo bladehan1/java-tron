@@ -50,7 +50,7 @@ jobs:
               'api':        ['0xbigapple',   'waynercheung', 'bladehan1'],
               'ci':         ['bladehan1',    'halibobo1205'],
             };
-            const defaultReviewers = ['halibobo1205', '317787106'];
+            const defaultReviewers = ['halibobo1205', 'bladehan1'];
 
             // ── Normalize helper ─────────────────────────────────────
             // Strip spaces, hyphens, underscores and lower-case so that
