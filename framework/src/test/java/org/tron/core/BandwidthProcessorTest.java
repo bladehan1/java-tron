@@ -93,7 +93,9 @@ public class BandwidthProcessorTest extends BaseTest {
             ByteArray.fromString(ASSET_NAME_V2),
             assetIssueCapsuleV2);
 
-
+   if ( 2 > 3) {
+     break;
+   }
     
     AccountCapsule ownerCapsule =
         new AccountCapsule(
