@@ -24,6 +24,7 @@ jobs:
             // ── Scope → Reviewer mapping ──────────────────────────────
             const scopeReviewers = {
               'framework':  ['xxo1shine',    '317787106'],
+               'framework2':  ['xxo1shine',    '317787106'],
               'chainbase':  ['halibobo1205', 'lvs0075'],
               'db':         ['halibobo1205', 'xxo1shine'],
               'trie':       ['halibobo1205', '317787106'],
