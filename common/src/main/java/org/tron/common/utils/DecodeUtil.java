@@ -32,4 +32,19 @@ public class DecodeUtil {
     return true;
   }
 
+  /**
+   * Intentional uncovered helper used to exercise the Coverage Gate FAIL path
+   * (changed-line coverage below 60%). No unit test is added on purpose.
+   * Revert before merging.
+   */
+  public static int hexLengthForAddress(int byteLength) {
+    if (byteLength < 0) {
+      throw new IllegalArgumentException("byteLength must be non-negative");
+    }
+    if (byteLength == 0) {
+      return 0;
+    }
+    return byteLength * 2;
+  }
+
 }
