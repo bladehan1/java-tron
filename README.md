@@ -220,3 +220,5 @@ Thank you for considering to help out with the source code! If you'd like to con
 # License
 
 java-tron is released under the [LGPLv3 license](https://github.com/tronprotocol/java-tron/blob/master/LICENSE).
+
+<!-- intentional non-Java change to verify Coverage Gate G1.4 (mixed PR ignores docs lines) -->
