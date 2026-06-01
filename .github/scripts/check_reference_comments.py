@@ -61,6 +61,14 @@ Known limitations (all rated LOW risk for reference.conf):
   C. False pass — a key with no real comment is incorrectly classified as
      documented:
 
+     * Block opened on the next line:  key =\n{
+       opening_after_key() only scans the current line for '{' or '['.
+       If the opening brace appears on the next line, no named frame is
+       pushed for the key, so the genesis.block exemption and array-element
+       deduplication silently stop working for that block's contents.
+       reference.conf always opens blocks on the same line as the key
+       (e.g. "genesis.block = {") — risk: none.
+
      * Bare URL value:  key = http://example.com
        has_inline_comment() sees '//' in the URL and returns True, treating
        the URL as an inline comment.  Quoting the URL ("http://...") avoids
@@ -162,8 +170,8 @@ def in_genesis_block(stack, key=None):
     return key == "genesis.block" or any(frame["name"] == "genesis.block" for frame in stack)
 
 
-def pop_frame(stack, opener):
-    target_type = "object" if opener == "}" else "array"
+def pop_frame(stack, closer):
+    target_type = "object" if closer == "}" else "array"
     while stack:
         frame = stack.pop()
         if frame["type"] == target_type:
