@@ -99,7 +99,7 @@ public class PbftMessageHandle {
       compareList = maintenanceManager.getBeforeWitness();
     }
     return Param.getInstance().getMiners().stream()
-        .filter(miner -> compareList.contains(miner.getWitnessAddress()))
+        .filter(miner -> compareList.contains(miner.getEffectiveWitnessAddress()))
         .collect(Collectors.toList());
   }
 

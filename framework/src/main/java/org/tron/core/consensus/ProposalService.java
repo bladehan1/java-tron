@@ -412,6 +412,14 @@ public class ProposalService extends ProposalUtil {
               .saveAllowHardenExchangeCalculation(entry.getValue());
           break;
         }
+        case ALLOW_FN_DSA_512: {
+          manager.getDynamicPropertiesStore().saveAllowFnDsa512(entry.getValue());
+          break;
+        }
+        case ALLOW_ML_DSA_44: {
+          manager.getDynamicPropertiesStore().saveAllowMlDsa44(entry.getValue());
+          break;
+        }
         default:
           find = false;
           break;

@@ -1507,6 +1507,16 @@ public class Wallet {
         .setValue(dbManager.getDynamicPropertiesStore().getAllowHardenExchangeCalculation())
         .build());
 
+    builder.addChainParameter(Protocol.ChainParameters.ChainParameter.newBuilder()
+        .setKey("getAllowFnDsa512")
+        .setValue(dbManager.getDynamicPropertiesStore().getAllowFnDsa512())
+        .build());
+
+    builder.addChainParameter(Protocol.ChainParameters.ChainParameter.newBuilder()
+        .setKey("getAllowMlDsa44")
+        .setValue(dbManager.getDynamicPropertiesStore().getAllowMlDsa44())
+        .build());
+
     return builder.build();
   }
 
