@@ -679,11 +679,9 @@ public class TransactionCapsule implements ProtoCapsule<Transaction> {
             "pq_auth_sig not allowed: no post-quantum scheme is activated");
       }
 
-      if (signatureCount == 0) {
-        throw new ValidateSignatureException("miss sig");
-      }
-      if (this.transaction.getRawData().getContractCount() <= 0) {
-        throw new ValidateSignatureException("miss contract");
+      if (signatureCount == 0
+          || this.transaction.getRawData().getContractCount() <= 0) {
+        throw new ValidateSignatureException("miss sig or contract");
       }
       if (signatureCount > dynamicPropertiesStore.getTotalSignNum()) {
         throw new ValidateSignatureException("too many signatures");

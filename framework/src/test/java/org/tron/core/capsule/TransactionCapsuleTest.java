@@ -550,8 +550,8 @@ public class TransactionCapsuleTest extends BaseTest {
     FNDSA512 kp = new FNDSA512();
     byte[] sig = FNDSA512.sign(kp.getPrivateKey(), new byte[32]);
 
-    // No contracts in raw_data, but a pq_auth_sig is attached so we get past
-    // the "miss sig" guard and into the "miss contract" branch.
+    // No contracts in raw_data, but a pq_auth_sig is attached so the signature
+    // count is non-zero; the missing-contract branch must still reject it.
     Transaction tx = Transaction.newBuilder()
         .setRawData(raw.newBuilder().build())
         .addPqAuthSig(PQAuthSig.newBuilder()
@@ -566,7 +566,7 @@ public class TransactionCapsuleTest extends BaseTest {
           dbManager.getDynamicPropertiesStore());
       Assert.fail("transaction with no contracts must be rejected");
     } catch (ValidateSignatureException e) {
-      Assert.assertTrue(e.getMessage().contains("miss contract"));
+      Assert.assertTrue(e.getMessage().contains("miss sig or contract"));
     }
   }
 
