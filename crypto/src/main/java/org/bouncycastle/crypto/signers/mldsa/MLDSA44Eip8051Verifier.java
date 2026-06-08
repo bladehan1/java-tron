@@ -135,14 +135,14 @@ public final class MLDSA44Eip8051Verifier {
   private static void decodePoly(byte[] in, int offset, Poly out) {
     int pos = offset;
     for (int i = 0; i < MLDSAEngine.DilithiumN; i++) {
-      int coeff = ((in[pos] & 0xff) << 24)
-          | ((in[pos + 1] & 0xff) << 16)
-          | ((in[pos + 2] & 0xff) << 8)
-          | (in[pos + 3] & 0xff);
+      long coeff = ((long) (in[pos] & 0xff) << 24)
+          | ((long) (in[pos + 1] & 0xff) << 16)
+          | ((long) (in[pos + 2] & 0xff) << 8)
+          | (long) (in[pos + 3] & 0xff);
       if (coeff >= MLDSAEngine.DilithiumQ) {
         throw new IllegalArgumentException("invalid ML-DSA field element");
       }
-      out.setCoeffIndex(i, coeff);
+      out.setCoeffIndex(i, (int) coeff);
       pos += FIELD_ELEMENT_BYTES;
     }
   }

@@ -239,6 +239,9 @@ public class TransactionUtil {
           } catch (ArithmeticException e) {
             throw new PermissionException("weight overflow");
           }
+        } else if (trx.getPqAuthSigCount() > 0) {
+          throw new PermissionException(
+              "pq_auth_sig not allowed: no post-quantum scheme is activated");
         }
 
         tswBuilder.addAllApprovedList(approveList);

@@ -637,4 +637,32 @@ public class TransactionCapsuleTest extends BaseTest {
       Assert.assertTrue(expected.getMessage().contains("no post-quantum scheme is activated"));
     }
   }
+
+  @Test
+  public void toStringRendersSignedTransferContract() {
+    // A signed transfer tx exercises the contract-list rendering path of
+    // toString(), including the per-contract type/address lines, the
+    // TransferContract amount branch, and the legacy `sign=` rendering.
+    Transaction tx = buildTransferTx(PQ_OWNER_HEX, 0);
+    ECKey key = new ECKey();
+    byte[] sig = key.sign(txId(tx)).toByteArray();
+    Transaction signed = tx.toBuilder()
+        .addSignature(ByteString.copyFrom(sig))
+        .build();
+
+    String rendered = new TransactionCapsule(signed).toString();
+    Assert.assertTrue(rendered.contains("contract list:{"));
+    Assert.assertTrue(rendered.contains("TransferContract"));
+    Assert.assertTrue(rendered.contains("transfer amount=1"));
+    Assert.assertTrue(rendered.contains("sign="));
+  }
+
+  @Test
+  public void toStringRendersEmptyContractList() {
+    Transaction empty = Transaction.newBuilder()
+        .setRawData(raw.newBuilder().build())
+        .build();
+    String rendered = new TransactionCapsule(empty).toString();
+    Assert.assertTrue(rendered.contains("contract list is empty"));
+  }
 }

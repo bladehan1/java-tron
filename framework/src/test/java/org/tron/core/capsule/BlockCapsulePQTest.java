@@ -308,4 +308,58 @@ public class BlockCapsulePQTest extends BaseTest {
     Assert.assertFalse(block.validateSignature(
         dbManager.getDynamicPropertiesStore(), dbManager.getAccountStore()));
   }
+
+  @Test(expected = ValidateSignatureException.class)
+  public void pqAuthSigWrongPublicKeyLengthRejected() throws Exception {
+    dbManager.getDynamicPropertiesStore().saveAllowMultiSign(1L);
+    dbManager.getDynamicPropertiesStore().saveAllowFnDsa512(1L);
+    AccountCapsule witness = buildWitnessAccount(pqAddress);
+    dbManager.getAccountStore().put(witnessAddress, witness);
+
+    byte[] parentHash = new byte[32];
+    BlockCapsule block = buildUnsignedBlock(parentHash);
+    byte[] digest = block.getRawHashBytes();
+    // Truncate the public key so it no longer matches the scheme's fixed length;
+    // validation must reject before any address derivation.
+    byte[] shortPk = new byte[pqKeypair.getPublicKey().length - 1];
+    System.arraycopy(pqKeypair.getPublicKey(), 0, shortPk, 0, shortPk.length);
+    block.setPqAuthSig(PQAuthSig.newBuilder()
+        .setScheme(PQScheme.FN_DSA_512)
+        .setPublicKey(ByteString.copyFrom(shortPk))
+        .setSignature(ByteString.copyFrom(signPQ(digest)))
+        .build());
+    block.validateSignature(
+        dbManager.getDynamicPropertiesStore(), dbManager.getAccountStore());
+  }
+
+  @Test(expected = ValidateSignatureException.class)
+  public void pqAuthSigWrongSignatureLengthRejected() throws Exception {
+    dbManager.getDynamicPropertiesStore().saveAllowMultiSign(1L);
+    dbManager.getDynamicPropertiesStore().saveAllowFnDsa512(1L);
+    AccountCapsule witness = buildWitnessAccount(pqAddress);
+    dbManager.getAccountStore().put(witnessAddress, witness);
+
+    byte[] parentHash = new byte[32];
+    BlockCapsule block = buildUnsignedBlock(parentHash);
+    // A one-byte signature is far below the scheme's minimum length, so the
+    // length guard rejects it before the cryptographic verify is attempted.
+    block.setPqAuthSig(buildPQAuthSig(new byte[] {0x01}));
+    block.validateSignature(
+        dbManager.getDynamicPropertiesStore(), dbManager.getAccountStore());
+  }
+
+  @Test(expected = ValidateSignatureException.class)
+  public void pqAuthSigWitnessAccountNotFoundRejected() throws Exception {
+    // allowMultiSign forces the verifier to resolve the witness account from the
+    // store; with no account put there, it must raise "witness account not found".
+    dbManager.getDynamicPropertiesStore().saveAllowMultiSign(1L);
+    dbManager.getDynamicPropertiesStore().saveAllowFnDsa512(1L);
+
+    byte[] parentHash = new byte[32];
+    BlockCapsule block = buildUnsignedBlock(parentHash);
+    byte[] digest = block.getRawHashBytes();
+    block.setPqAuthSig(buildPQAuthSig(signPQ(digest)));
+    block.validateSignature(
+        dbManager.getDynamicPropertiesStore(), dbManager.getAccountStore());
+  }
 }
