@@ -257,7 +257,7 @@ public class TransactionCapsule implements ProtoCapsule<Transaction> {
       long weight = getWeight(permission, address);
       if (weight == 0) {
         throw new PermissionException(
-            ByteArray.toHexString(sig.toByteArray()) + " is signed by " + encode58Check(address)
+            ByteArray.toHexString(hash) + " is signed by " + encode58Check(address)
                 + " but it is not contained of permission.");
       }
       if (ForkController.instance().pass(Parameter.ForkBlockVersionEnum.VERSION_4_7_1)) {
