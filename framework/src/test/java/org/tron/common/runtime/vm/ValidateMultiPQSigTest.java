@@ -49,10 +49,6 @@ public class ValidateMultiPQSigTest extends BaseTest {
   private static final DataWord ADDR_0X1A = new DataWord(
       "000000000000000000000000000000000000000000000000000000000000001a");
 
-  // Old per-scheme slot — must NOT resolve to anything after the 0x17 → 0x1a merge.
-  private static final DataWord ADDR_0X17 = new DataWord(
-      "0000000000000000000000000000000000000000000000000000000000000017");
-
   private static final String METHOD_SIGN =
       "validatemultipqsign(address,uint256,bytes32,bytes[],uint8[],bytes[],bytes[])";
 
@@ -113,13 +109,6 @@ public class ValidateMultiPQSigTest extends BaseTest {
     PrecompiledContract pc = PrecompiledContracts.getContractForAddress(ADDR_0X1A);
     Assert.assertNotNull(pc);
     Assert.assertTrue(pc instanceof ValidateMultiPQSig);
-  }
-
-  @Test
-  public void legacy0x17SlotIsUnallocated() {
-    // 0x17 used to host a Falcon-only multi-sign; after the merge it must
-    // resolve to nothing so calls fall through to the empty-precompile path.
-    Assert.assertNull(PrecompiledContracts.getContractForAddress(ADDR_0X17));
   }
 
   // ---------- happy paths ----------

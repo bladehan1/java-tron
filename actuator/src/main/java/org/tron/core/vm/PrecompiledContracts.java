@@ -127,10 +127,10 @@ public class PrecompiledContracts {
   private static final VerifyFnDsa512 verifyFnDsa512 = new VerifyFnDsa512();
   private static final BatchValidateFnDsa512 batchValidateFnDsa512 = new BatchValidateFnDsa512();
 
-  private static final VerifyMlDsa44Eip8051 verifyMlDsa44Eip8051 = new VerifyMlDsa44Eip8051();
   private static final VerifyMlDsa44 verifyMlDsa44 = new VerifyMlDsa44();
   private static final BatchValidateMlDsa44 batchValidateMlDsa44 = new BatchValidateMlDsa44();
   private static final ValidateMultiPQSig validateMultiPqSig = new ValidateMultiPQSig();
+  private static final VerifyMlDsa44Eip8051 verifyMlDsa44Eip8051 = new VerifyMlDsa44Eip8051();
 
   // FreezeV2 PrecompileContracts
   private static final GetChainParameter getChainParameter = new GetChainParameter();
@@ -234,25 +234,24 @@ public class PrecompiledContracts {
   private static final DataWord verifyFnDsa512Addr = new DataWord(
       "0000000000000000000000000000000000000000000000000000000000000016");
 
-  // 0x17 is intentionally unallocated. An earlier draft used it for a
-  // Falcon-only multi-sign precompile; that contract was merged into the
-  // algorithm-agnostic 0x1a ValidateMultiPQSig before either slot was
-  // activated. Re-allocating 0x17 requires a new TIP.
-
-  // 0x18: batch independent Falcon-512 verify — bitmap of (sig, pk, addr)
+  // 0x17: batch independent Falcon-512 verify — bitmap of (sig, pk, addr)
   // matches; mixed-algorithm contracts call 0x0A and 0x18 separately and OR
   // the bitmaps client-side.
   private static final DataWord batchValidateFnDsa512Addr = new DataWord(
-      "0000000000000000000000000000000000000000000000000000000000000018");
+      "0000000000000000000000000000000000000000000000000000000000000017");
 
   // 0x12: EIP-8051 VERIFY_MLDSA. Uses the EIP expanded public key layout
   // [A_hat 16384B | tr 32B | t1_ntt 4096B], not the 1312B FIPS public key.
   private static final DataWord verifyMlDsa44Eip8051Addr = new DataWord(
       "0000000000000000000000000000000000000000000000000000000000000012");
 
-  // 0x19: existing TRON draft address for ML-DSA-44 single verify. Kept for
+  // 0x18: existing TRON draft address for ML-DSA-44 single verify. Kept for
   // compatibility with contracts/tests already targeting this PR branch.
   private static final DataWord verifyMlDsa44Addr = new DataWord(
+      "0000000000000000000000000000000000000000000000000000000000000018");
+
+  // 0x19: batch independent ML-DSA-44 verify — bitmap output, same shape as 0x18.
+  private static final DataWord batchValidateMlDsa44Addr = new DataWord(
       "0000000000000000000000000000000000000000000000000000000000000019");
 
   // 0x1a: algorithm-agnostic Permission multi-sign — accepts ECDSA and any
@@ -262,10 +261,6 @@ public class PrecompiledContracts {
   // were never activated.
   private static final DataWord validateMultiPqSigAddr = new DataWord(
       "000000000000000000000000000000000000000000000000000000000000001a");
-
-  // 0x1b: batch independent ML-DSA-44 verify — bitmap output, same shape as 0x18.
-  private static final DataWord batchValidateMlDsa44Addr = new DataWord(
-      "000000000000000000000000000000000000000000000000000000000000001b");
 
   public static PrecompiledContract getOptimizedContractForConstant(PrecompiledContract contract) {
     try {
@@ -497,6 +492,35 @@ public class PrecompiledContracts {
       int bytesLen = words[offset + bytesOffset + 1].intValueSafe();
       bytesArray[i] = extractBytes(data, (bytesOffset + offset + 2) * WORD_SIZE,
           bytesLen);
+    }
+    return bytesArray;
+  }
+
+  private static byte[][] extractBytesArrayChecked(DataWord[] words, int offset, byte[] data) {
+    if (offset > words.length - 1) {
+      return new byte[0][];
+    }
+    int len = words[offset].intValueSafe();
+    if ((long) offset + len + 1 > words.length) {
+      return new byte[0][];
+    }
+    byte[][] bytesArray = new byte[len][];
+    for (int i = 0; i < len; i++) {
+      int bytesOffsetBytes = words[offset + i + 1].intValueSafe();
+      if (bytesOffsetBytes % WORD_SIZE != 0) {
+        return new byte[0][];
+      }
+      int bytesOffset = bytesOffsetBytes / WORD_SIZE;
+      if ((long) offset + bytesOffset + 1 > words.length - 1) {
+        return new byte[0][];
+      }
+      int bytesLen = words[offset + bytesOffset + 1].intValueSafe();
+      long fromL = ((long) bytesOffset + offset + 2) * WORD_SIZE;
+      long toL = fromL + bytesLen;
+      if (fromL > data.length || toL > data.length) {
+        return new byte[0][];
+      }
+      bytesArray[i] = extractBytes(data, (int) fromL, bytesLen);
     }
     return bytesArray;
   }
@@ -2620,8 +2644,8 @@ public class PrecompiledContracts {
 
 
   /**
-   * 0x18 BatchValidateFnDsa512 — independent per-element Falcon-512 verify.
-   * <p>Returns a 256-bit bitmap (matching 0x0A) where bit {@code i} is set iff
+   * 0x17 BatchValidateFnDsa512 — independent per-element Falcon-512 verify.
+   * <p>Returns a 256-bit bitmap (matching 0x09) where bit {@code i} is set iff
    * {@code derive(pk_i) == expectedAddr_i} AND {@code FNDSA512.verify(pk_i, hash, sig_i)}.
    *
    * <p>ABI:
@@ -2707,12 +2731,12 @@ public class PrecompiledContracts {
         return Pair.of(true, DATA_FALSE);
       }
 
-      byte[][] signatures = extractBytesArray(words, sigArrayWord, data);
-      byte[][] publicKeys = extractBytesArray(words, pkArrayWord, data);
+      byte[][] signatures = extractBytesArrayChecked(words, sigArrayWord, data);
+      byte[][] publicKeys = extractBytesArrayChecked(words, pkArrayWord, data);
       byte[][] addresses = extractBytes32Array(words, addrArrayWord);
 
       int cnt = signatures.length;
-      if (cnt == 0) {
+      if (cnt == 0 || publicKeys.length != cnt || addresses.length != cnt) {
         return Pair.of(true, DATA_FALSE);
       }
 
@@ -3001,8 +3025,11 @@ public class PrecompiledContracts {
         }
 
         byte[][] ecdsaSigs = extractSigArray(words, ecdsaArrayWord, rawData);
-        byte[][] pqSigs = extractBytesArray(words, pqSigArrayWord, rawData);
-        byte[][] pqPks = extractBytesArray(words, pqPkArrayWord, rawData);
+        byte[][] pqSigs = extractBytesArrayChecked(words, pqSigArrayWord, rawData);
+        byte[][] pqPks = extractBytesArrayChecked(words, pqPkArrayWord, rawData);
+        if (pqSigs.length != schemeCnt || pqPks.length != schemeCnt) {
+          return Pair.of(true, DATA_FALSE);
+        }
         int[] schemes = new int[schemeCnt];
         for (int i = 0; i < schemeCnt; i++) {
           schemes[i] = words[schemeArrayWord + 1 + i].intValueSafe();
@@ -3018,24 +3045,19 @@ public class PrecompiledContracts {
         }
 
         long totalWeight = 0L;
-        List<byte[]> executedSignList = new ArrayList<>();
+        List<byte[]> seenAddrs = new ArrayList<>();
 
         for (byte[] sign : ecdsaSigs) {
           byte[] recoveredAddr = recoverAddrBySign(sign, hash);
-          byte[] dedupKey = merge(recoveredAddr, sign);
-          if (ByteArray.matrixContains(executedSignList, recoveredAddr)) {
-            if (ByteArray.matrixContains(executedSignList, dedupKey)) {
-              continue;
-            }
-            MUtil.checkCPUTime();
+          if (ByteArray.matrixContains(seenAddrs, recoveredAddr)) {
+            continue;
           }
           long weight = TransactionCapsule.getWeight(permission, recoveredAddr);
           if (weight == 0) {
             return Pair.of(true, DATA_FALSE);
           }
           totalWeight += weight;
-          executedSignList.add(dedupKey);
-          executedSignList.add(recoveredAddr);
+          seenAddrs.add(recoveredAddr);
         }
 
         for (int i = 0; i < schemes.length; i++) {
@@ -3081,7 +3103,7 @@ public class PrecompiledContracts {
           // Both Falcon and Dilithium signing are randomized → the same key
           // can produce many valid sigs for one message, so dedup keys on the
           // derived address only (the sig blob is not a stable identity).
-          if (ByteArray.matrixContains(executedSignList, derivedAddr)) {
+          if (ByteArray.matrixContains(seenAddrs, derivedAddr)) {
             continue;
           }
           long weight = TransactionCapsule.getWeight(permission, derivedAddr);
@@ -3092,7 +3114,7 @@ public class PrecompiledContracts {
             return Pair.of(true, DATA_FALSE);
           }
           totalWeight += weight;
-          executedSignList.add(derivedAddr);
+          seenAddrs.add(derivedAddr);
         }
 
         if (totalWeight >= permission.getThreshold()) {
@@ -3108,10 +3130,10 @@ public class PrecompiledContracts {
   }
 
   /**
-   * 0x1b BatchValidateMlDsa44 — independent per-element ML-DSA-44 verify.
+   * 0x19 BatchValidateMlDsa44 — independent per-element ML-DSA-44 verify.
    * Returns a 256-bit bitmap where bit {@code i} is set iff
    * {@code derive(pk_i) == expectedAddr_i} AND {@code MLDSA44.verify(pk_i, hash, sig_i)}.
-   * Same ABI shape as 0x18, with sigs 2420 B and pks 1312 B.
+   * Same ABI shape as 0x17, with sigs 2420 B and pks 1312 B.
    * {@code MAX_SIZE = 16}; energy is {@code cnt × 4000}.
    */
   public static class BatchValidateMlDsa44 extends PrecompiledContract {
@@ -3176,12 +3198,12 @@ public class PrecompiledContracts {
         return Pair.of(true, DATA_FALSE);
       }
 
-      byte[][] signatures = extractBytesArray(words, sigArrayWord, data);
-      byte[][] publicKeys = extractBytesArray(words, pkArrayWord, data);
+      byte[][] signatures = extractBytesArrayChecked(words, sigArrayWord, data);
+      byte[][] publicKeys = extractBytesArrayChecked(words, pkArrayWord, data);
       byte[][] addresses = extractBytes32Array(words, addrArrayWord);
 
       int cnt = signatures.length;
-      if (cnt == 0) {
+      if (cnt == 0 || publicKeys.length != cnt || addresses.length != cnt) {
         return Pair.of(true, DATA_FALSE);
       }
 

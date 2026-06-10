@@ -12,7 +12,7 @@ import org.tron.core.vm.config.VMConfig;
 
 /**
  * Unit tests for the ML-DSA-44 verify precompile (FIPS 204 / Dilithium-2).
- * Address 0x12 follows EIP-8051 with expanded public keys; 0x19 remains the
+ * Address 0x12 follows EIP-8051 with expanded public keys; 0x18 remains the
  * existing TRON draft path with standard 1312-byte public keys.
  */
 public class MlDsa44PrecompileTest {
@@ -21,7 +21,7 @@ public class MlDsa44PrecompileTest {
       "0000000000000000000000000000000000000000000000000000000000000012");
 
   private static final DataWord MLDSA_DRAFT_ADDR = new DataWord(
-      "0000000000000000000000000000000000000000000000000000000000000019");
+      "0000000000000000000000000000000000000000000000000000000000000018");
 
   private static final int EIP8051_INPUT_LENGTH = 32 + MLDSA44.SIGNATURE_LENGTH + 20512;
 
@@ -55,12 +55,12 @@ public class MlDsa44PrecompileTest {
   }
 
   @Test
-  public void draftAddress19StillReturnsContract() {
+  public void draftAddress18StillReturnsContract() {
     Assert.assertNotNull(PrecompiledContracts.getContractForAddress(MLDSA_DRAFT_ADDR));
   }
 
   @Test
-  public void draftAddress19ValidSignature_returnsOne() {
+  public void draftAddress18ValidSignature_returnsOne() {
     MLDSA44 key = new MLDSA44();
     byte[] sig = key.sign(MESSAGE_HASH);
     byte[] input = buildInput(MESSAGE_HASH, sig, key.getPublicKey());
@@ -74,7 +74,7 @@ public class MlDsa44PrecompileTest {
   }
 
   @Test
-  public void draftAddress19TamperedMessage_returnsZero() {
+  public void draftAddress18TamperedMessage_returnsZero() {
     MLDSA44 key = new MLDSA44();
     byte[] sig = key.sign(MESSAGE_HASH);
     byte[] tampered = MESSAGE_HASH.clone();
@@ -89,7 +89,7 @@ public class MlDsa44PrecompileTest {
   }
 
   @Test
-  public void draftAddress19TamperedSignature_returnsZero() {
+  public void draftAddress18TamperedSignature_returnsZero() {
     MLDSA44 key = new MLDSA44();
     byte[] sig = key.sign(MESSAGE_HASH);
     sig[0] ^= 0x01;
@@ -103,7 +103,7 @@ public class MlDsa44PrecompileTest {
   }
 
   @Test
-  public void draftAddress19WrongPublicKey_returnsZero() {
+  public void draftAddress18WrongPublicKey_returnsZero() {
     MLDSA44 signer = new MLDSA44();
     MLDSA44 other = new MLDSA44();
     byte[] sig = signer.sign(MESSAGE_HASH);
@@ -117,7 +117,7 @@ public class MlDsa44PrecompileTest {
   }
 
   @Test
-  public void draftAddress19NullInput_returnsZero() {
+  public void draftAddress18NullInput_returnsZero() {
     Pair<Boolean, byte[]> result =
         PrecompiledContracts.getContractForAddress(MLDSA_DRAFT_ADDR).execute(null);
 
@@ -126,7 +126,7 @@ public class MlDsa44PrecompileTest {
   }
 
   @Test
-  public void draftAddress19ShortInput_returnsZero() {
+  public void draftAddress18ShortInput_returnsZero() {
     Pair<Boolean, byte[]> result =
         PrecompiledContracts.getContractForAddress(MLDSA_DRAFT_ADDR).execute(new byte[100]);
 
@@ -135,7 +135,7 @@ public class MlDsa44PrecompileTest {
   }
 
   @Test
-  public void draftAddress19WrongLengthInput_returnsZero() {
+  public void draftAddress18WrongLengthInput_returnsZero() {
     // ML-DSA-44 input is fixed-length 3764B; any other length must be rejected.
     int expected = 32 + MLDSA44.SIGNATURE_LENGTH + MLDSA44.PUBLIC_KEY_LENGTH;
     byte[] oneByteShort = new byte[expected - 1];
@@ -146,7 +146,7 @@ public class MlDsa44PrecompileTest {
   }
 
   @Test
-  public void draftAddress19TrailingBytes_returnsZero() {
+  public void draftAddress18TrailingBytes_returnsZero() {
     // Strict equality: even one extra trailing byte must be rejected.
     MLDSA44 key = new MLDSA44();
     byte[] sig = key.sign(MESSAGE_HASH);
