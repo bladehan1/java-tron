@@ -222,7 +222,12 @@ public class LevelDbDataSourceImpl extends DbStat implements DbSourceInter<byte[
     resetDbLock.readLock().lock();
     try (Histogram.Timer timer = Metrics.histogramStartTimer(
         MetricKeys.Histogram.DB_OPERATE_LATENCY, LEVELDB, dataBaseName, "get")) {
-      return database.get(key);
+      byte[] value = database.get(key);
+      if (value != null) {
+        Metrics.histogramObserve(MetricKeys.Histogram.DB_OPERATE_BYTES,
+            value.length, LEVELDB, dataBaseName, "get");
+      }
+      return value;
     } finally {
       resetDbLock.readLock().unlock();
     }
@@ -234,6 +239,8 @@ public class LevelDbDataSourceImpl extends DbStat implements DbSourceInter<byte[
     try (Histogram.Timer timer = Metrics.histogramStartTimer(
         MetricKeys.Histogram.DB_OPERATE_LATENCY, LEVELDB, dataBaseName, "put")) {
       database.put(key, value, writeOptions);
+      Metrics.histogramObserve(MetricKeys.Histogram.DB_OPERATE_BYTES,
+          value.length, LEVELDB, dataBaseName, "put");
     } finally {
       resetDbLock.readLock().unlock();
     }
@@ -439,6 +446,9 @@ public class LevelDbDataSourceImpl extends DbStat implements DbSourceInter<byte[
     try (Histogram.Timer timer = Metrics.histogramStartTimer(
         MetricKeys.Histogram.DB_OPERATE_LATENCY, LEVELDB, dataBaseName, "batch")) {
       updateByBatchInner(rows, options);
+      Metrics.histogramObserve(MetricKeys.Histogram.DB_OPERATE_BYTES,
+          rows.values().stream().filter(v -> v != null).mapToLong(v -> v.length).sum(),
+          LEVELDB, dataBaseName, "batch");
     } catch (Exception e) {
       try {
         updateByBatchInner(rows, options);

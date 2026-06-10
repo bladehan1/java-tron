@@ -88,6 +88,7 @@ public class MetricKeys {
      * FullNode handshakes are not sampled.
      */
     public static final String HANDSHAKE_LATENCY = "tron:handshake_latency_seconds";
+    public static final String DB_OPERATE_BYTES = "tron:db_operate_bytes";
 
     private Histogram() {
       throw new IllegalStateException("Histogram");
