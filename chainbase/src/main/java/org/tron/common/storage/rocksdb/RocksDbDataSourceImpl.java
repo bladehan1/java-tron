@@ -231,6 +231,7 @@ public class RocksDbDataSourceImpl extends DbStat implements DbSourceInter<byte[
 
   @Override
   public void putData(byte[] key, byte[] value) {
+    int size = value.length;
     resetDbLock.readLock().lock();
     try (Histogram.Timer timer = Metrics.histogramStartTimer(
         MetricKeys.Histogram.DB_OPERATE_LATENCY, ROCKSDB, dataBaseName, "put")) {
@@ -238,33 +239,34 @@ public class RocksDbDataSourceImpl extends DbStat implements DbSourceInter<byte[
       checkArgNotNull(key, "key");
       checkArgNotNull(value, "value");
       database.put(key, value);
-      Metrics.histogramObserve(MetricKeys.Histogram.DB_OPERATE_BYTES,
-          value.length, ROCKSDB, dataBaseName, "put");
     } catch (RocksDBException e) {
       throw new RuntimeException(dataBaseName, e);
     } finally {
       resetDbLock.readLock().unlock();
     }
+    Metrics.histogramObserve(MetricKeys.Histogram.DB_OPERATE_BYTES,
+        size, ROCKSDB, dataBaseName, "put");
   }
 
   @Override
   public byte[] getData(byte[] key) {
     resetDbLock.readLock().lock();
+    byte[] value;
     try (Histogram.Timer timer = Metrics.histogramStartTimer(
         MetricKeys.Histogram.DB_OPERATE_LATENCY, ROCKSDB, dataBaseName, "get")) {
       throwIfNotAlive();
       checkArgNotNull(key, "key");
-      byte[] value = database.get(key);
-      if (value != null) {
-        Metrics.histogramObserve(MetricKeys.Histogram.DB_OPERATE_BYTES,
-            value.length, ROCKSDB, dataBaseName, "get");
-      }
-      return value;
+      value = database.get(key);
     } catch (RocksDBException e) {
       throw new RuntimeException(dataBaseName, e);
     } finally {
       resetDbLock.readLock().unlock();
     }
+    if (value != null) {
+      Metrics.histogramObserve(MetricKeys.Histogram.DB_OPERATE_BYTES,
+          value.length, ROCKSDB, dataBaseName, "get");
+    }
+    return value;
   }
 
   @Override
@@ -340,13 +342,12 @@ public class RocksDbDataSourceImpl extends DbStat implements DbSourceInter<byte[
   }
 
   private void updateByBatch(Map<byte[], byte[]> rows, WriteOptions options) {
+    long totalBytes = rows.values().stream()
+        .filter(v -> v != null).mapToLong(v -> v.length).sum();
     resetDbLock.readLock().lock();
     try (Histogram.Timer timer = Metrics.histogramStartTimer(
         MetricKeys.Histogram.DB_OPERATE_LATENCY, ROCKSDB, dataBaseName, "batch")) {
       updateByBatchInner(rows, options);
-      Metrics.histogramObserve(MetricKeys.Histogram.DB_OPERATE_BYTES,
-          rows.values().stream().filter(v -> v != null).mapToLong(v -> v.length).sum(),
-          ROCKSDB, dataBaseName, "batch");
     } catch (Exception e) {
       try {
         updateByBatchInner(rows, options);
@@ -356,6 +357,8 @@ public class RocksDbDataSourceImpl extends DbStat implements DbSourceInter<byte[
     } finally {
       resetDbLock.readLock().unlock();
     }
+    Metrics.histogramObserve(MetricKeys.Histogram.DB_OPERATE_BYTES,
+        totalBytes, ROCKSDB, dataBaseName, "batch");
   }
 
   public List<byte[]> getKeysNext(byte[] key, long limit) {
