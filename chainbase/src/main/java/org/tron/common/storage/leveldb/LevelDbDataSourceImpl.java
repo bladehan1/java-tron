@@ -444,8 +444,8 @@ public class LevelDbDataSourceImpl extends DbStat implements DbSourceInter<byte[
   }
 
   private void updateByBatch(Map<byte[], byte[]> rows, WriteOptions options) {
-    long totalBytes = rows.values().stream()
-        .filter(v -> v != null).mapToLong(v -> v.length).sum();
+    long totalBytes = Metrics.enabled()
+        ? rows.values().stream().filter(v -> v != null).mapToLong(v -> v.length).sum() : 0;
     resetDbLock.readLock().lock();
     try (Histogram.Timer timer = Metrics.histogramStartTimer(
         MetricKeys.Histogram.DB_OPERATE_LATENCY, LEVELDB, dataBaseName, "batch")) {
