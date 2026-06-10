@@ -42,6 +42,7 @@ import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
 import lombok.NoArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import io.prometheus.client.Histogram;
 import org.iq80.leveldb.DB;
 import org.iq80.leveldb.DBIterator;
 import org.iq80.leveldb.Options;
@@ -50,6 +51,8 @@ import org.iq80.leveldb.WriteBatch;
 import org.iq80.leveldb.WriteOptions;
 import org.tron.common.es.ExecutorServiceManager;
 import org.tron.common.parameter.CommonParameter;
+import org.tron.common.prometheus.MetricKeys;
+import org.tron.common.prometheus.Metrics;
 import org.tron.common.storage.WriteOptionsWrapper;
 import org.tron.common.storage.metric.DbStat;
 import org.tron.common.utils.FileUtil;
@@ -217,7 +220,8 @@ public class LevelDbDataSourceImpl extends DbStat implements DbSourceInter<byte[
   @Override
   public byte[] getData(byte[] key) {
     resetDbLock.readLock().lock();
-    try {
+    try (Histogram.Timer timer = Metrics.histogramStartTimer(
+        MetricKeys.Histogram.DB_OPERATE_LATENCY, LEVELDB, dataBaseName, "get")) {
       return database.get(key);
     } finally {
       resetDbLock.readLock().unlock();
@@ -227,7 +231,8 @@ public class LevelDbDataSourceImpl extends DbStat implements DbSourceInter<byte[
   @Override
   public void putData(byte[] key, byte[] value) {
     resetDbLock.readLock().lock();
-    try {
+    try (Histogram.Timer timer = Metrics.histogramStartTimer(
+        MetricKeys.Histogram.DB_OPERATE_LATENCY, LEVELDB, dataBaseName, "put")) {
       database.put(key, value, writeOptions);
     } finally {
       resetDbLock.readLock().unlock();
@@ -237,7 +242,8 @@ public class LevelDbDataSourceImpl extends DbStat implements DbSourceInter<byte[
   @Override
   public void deleteData(byte[] key) {
     resetDbLock.readLock().lock();
-    try {
+    try (Histogram.Timer timer = Metrics.histogramStartTimer(
+        MetricKeys.Histogram.DB_OPERATE_LATENCY, LEVELDB, dataBaseName, "delete")) {
       database.delete(key, writeOptions);
     } finally {
       resetDbLock.readLock().unlock();
@@ -430,7 +436,8 @@ public class LevelDbDataSourceImpl extends DbStat implements DbSourceInter<byte[
 
   private void updateByBatch(Map<byte[], byte[]> rows, WriteOptions options) {
     resetDbLock.readLock().lock();
-    try {
+    try (Histogram.Timer timer = Metrics.histogramStartTimer(
+        MetricKeys.Histogram.DB_OPERATE_LATENCY, LEVELDB, dataBaseName, "batch")) {
       updateByBatchInner(rows, options);
     } catch (Exception e) {
       try {
