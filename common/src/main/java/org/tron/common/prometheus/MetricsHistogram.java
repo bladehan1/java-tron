@@ -61,6 +61,14 @@ public class MetricsHistogram {
         0.0001, 0.0005, 0.001, 0.01};
     init(MetricKeys.Histogram.DB_OPERATE_LATENCY, "db operate latency .", dbBuckets,
         "type", "db", "op");
+
+    // 1B, 2B, 4B … 1MB, 2MB — 22 buckets covering expected range
+    double[] dbBytesBuckets = new double[]{
+        1, 2, 4, 8, 16, 32, 64, 128, 256, 512,
+        1024, 2048, 4096, 8192, 16384, 32768, 65536,
+        131072, 262144, 524288, 1048576, 2097152};
+    init(MetricKeys.Histogram.DB_OPERATE_BYTES, "db operate data size in bytes.", dbBytesBuckets,
+        "type", "db", "op");
   }
 
   private MetricsHistogram() {

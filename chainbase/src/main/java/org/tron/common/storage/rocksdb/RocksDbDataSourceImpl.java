@@ -238,6 +238,8 @@ public class RocksDbDataSourceImpl extends DbStat implements DbSourceInter<byte[
       checkArgNotNull(key, "key");
       checkArgNotNull(value, "value");
       database.put(key, value);
+      Metrics.histogramObserve(MetricKeys.Histogram.DB_OPERATE_BYTES,
+          value.length, ROCKSDB, dataBaseName, "put");
     } catch (RocksDBException e) {
       throw new RuntimeException(dataBaseName, e);
     } finally {
@@ -252,7 +254,12 @@ public class RocksDbDataSourceImpl extends DbStat implements DbSourceInter<byte[
         MetricKeys.Histogram.DB_OPERATE_LATENCY, ROCKSDB, dataBaseName, "get")) {
       throwIfNotAlive();
       checkArgNotNull(key, "key");
-      return database.get(key);
+      byte[] value = database.get(key);
+      if (value != null) {
+        Metrics.histogramObserve(MetricKeys.Histogram.DB_OPERATE_BYTES,
+            value.length, ROCKSDB, dataBaseName, "get");
+      }
+      return value;
     } catch (RocksDBException e) {
       throw new RuntimeException(dataBaseName, e);
     } finally {
@@ -337,6 +344,9 @@ public class RocksDbDataSourceImpl extends DbStat implements DbSourceInter<byte[
     try (Histogram.Timer timer = Metrics.histogramStartTimer(
         MetricKeys.Histogram.DB_OPERATE_LATENCY, ROCKSDB, dataBaseName, "batch")) {
       updateByBatchInner(rows, options);
+      Metrics.histogramObserve(MetricKeys.Histogram.DB_OPERATE_BYTES,
+          rows.values().stream().filter(v -> v != null).mapToLong(v -> v.length).sum(),
+          ROCKSDB, dataBaseName, "batch");
     } catch (Exception e) {
       try {
         updateByBatchInner(rows, options);

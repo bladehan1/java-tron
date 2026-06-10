@@ -69,6 +69,7 @@ public class MetricKeys {
     public static final String BLOCK_RECEIVE_DELAY = "tron:block_receive_delay_seconds";
     public static final String BLOCK_TRANSACTION_COUNT = "tron:block_transaction_count";
     public static final String DB_OPERATE_LATENCY = "tron:db_operate_latency_seconds";
+    public static final String DB_OPERATE_BYTES = "tron:db_operate_bytes";
 
     private Histogram() {
       throw new IllegalStateException("Histogram");
