@@ -21,6 +21,7 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.stream.Collectors;
 import lombok.NoArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import io.prometheus.client.Histogram;
 import org.rocksdb.Checkpoint;
 import org.rocksdb.Options;
 import org.rocksdb.ReadOptions;
@@ -31,6 +32,8 @@ import org.rocksdb.Status;
 import org.rocksdb.WriteBatch;
 import org.rocksdb.WriteOptions;
 import org.tron.common.error.TronDBException;
+import org.tron.common.prometheus.MetricKeys;
+import org.tron.common.prometheus.Metrics;
 import org.tron.common.setting.RocksDbSettings;
 import org.tron.common.storage.WriteOptionsWrapper;
 import org.tron.common.storage.metric.DbStat;
@@ -229,7 +232,8 @@ public class RocksDbDataSourceImpl extends DbStat implements DbSourceInter<byte[
   @Override
   public void putData(byte[] key, byte[] value) {
     resetDbLock.readLock().lock();
-    try {
+    try (Histogram.Timer timer = Metrics.histogramStartTimer(
+        MetricKeys.Histogram.DB_OPERATE_LATENCY, ROCKSDB, dataBaseName, "put")) {
       throwIfNotAlive();
       checkArgNotNull(key, "key");
       checkArgNotNull(value, "value");
@@ -244,7 +248,8 @@ public class RocksDbDataSourceImpl extends DbStat implements DbSourceInter<byte[
   @Override
   public byte[] getData(byte[] key) {
     resetDbLock.readLock().lock();
-    try {
+    try (Histogram.Timer timer = Metrics.histogramStartTimer(
+        MetricKeys.Histogram.DB_OPERATE_LATENCY, ROCKSDB, dataBaseName, "get")) {
       throwIfNotAlive();
       checkArgNotNull(key, "key");
       return database.get(key);
@@ -258,7 +263,8 @@ public class RocksDbDataSourceImpl extends DbStat implements DbSourceInter<byte[
   @Override
   public void deleteData(byte[] key) {
     resetDbLock.readLock().lock();
-    try {
+    try (Histogram.Timer timer = Metrics.histogramStartTimer(
+        MetricKeys.Histogram.DB_OPERATE_LATENCY, ROCKSDB, dataBaseName, "delete")) {
       throwIfNotAlive();
       checkArgNotNull(key, "key");
       database.delete(key);
@@ -328,7 +334,8 @@ public class RocksDbDataSourceImpl extends DbStat implements DbSourceInter<byte[
 
   private void updateByBatch(Map<byte[], byte[]> rows, WriteOptions options) {
     resetDbLock.readLock().lock();
-    try {
+    try (Histogram.Timer timer = Metrics.histogramStartTimer(
+        MetricKeys.Histogram.DB_OPERATE_LATENCY, ROCKSDB, dataBaseName, "batch")) {
       updateByBatchInner(rows, options);
     } catch (Exception e) {
       try {
