@@ -4,12 +4,15 @@ import static org.junit.Assert.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
 import static org.tron.core.config.Parameter.ChainConstant.FROZEN_PERIOD;
 
+import com.google.protobuf.ByteString;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
 import java.util.Random;
 
 import lombok.SneakyThrows;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.tuple.Pair;
 import org.bouncycastle.util.encoders.Hex;
 import org.junit.AfterClass;
 import org.junit.Assert;
@@ -27,6 +30,7 @@ import org.tron.common.utils.DecodeUtil;
 import org.tron.core.Constant;
 import org.tron.core.Wallet;
 import org.tron.core.capsule.AccountCapsule;
+import org.tron.core.capsule.AssetIssueCapsule;
 import org.tron.core.config.args.Args;
 import org.tron.core.exception.ContractValidateException;
 import org.tron.core.store.StoreFactory;
@@ -45,6 +49,7 @@ import org.tron.core.vm.program.Program;
 import org.tron.core.vm.program.invoke.ProgramInvokeMockImpl;
 import org.tron.core.vm.repository.Repository;
 import org.tron.protos.Protocol;
+import org.tron.protos.contract.AssetIssueContractOuterClass.AssetIssueContract;
 
 @Slf4j
 public class OperationsTest extends BaseTest {
@@ -783,9 +788,215 @@ public class OperationsTest extends BaseTest {
         DataWord.ZERO(), DataWord.ZERO(),
         DataWord.ZERO(), false);
     program.callToPrecompiledAddress(messageCall, new PrecompiledContracts.ECRecover());
+    Assert.assertTrue(program.getResult().getInternalTransactions().isEmpty());
 
     DecodeUtil.addressPreFixByte = prePrefixByte;
     VMConfig.initAllowTvmSelfdestructRestriction(0);
+  }
+
+  @Test
+  public void testCallPrecompiledAddressWithValueAddsInternalTransaction()
+      throws ContractValidateException {
+    invoke = new ProgramInvokeMockImpl();
+    Protocol.Transaction trx = Protocol.Transaction.getDefaultInstance();
+    InternalTransaction interTrx =
+        new InternalTransaction(trx, InternalTransaction.TrxType.TRX_UNKNOWN_TYPE);
+
+    byte prePrefixByte = DecodeUtil.addressPreFixByte;
+    DecodeUtil.addressPreFixByte = Constant.ADD_PRE_FIX_BYTE_MAINNET;
+    try {
+      DataWord precompiledAddressWord = new DataWord(4);
+      byte[] precompiledAddress = precompiledAddressWord.toTronAddress();
+      byte[] senderAddress = invoke.getContractAddress().toTronAddress();
+      long value = 123L;
+
+      invoke.getDeposit().createAccount(precompiledAddress, Protocol.AccountType.Normal);
+      invoke.getDeposit().addBalance(senderAddress, 1000L);
+
+      program = new Program(new byte[0], new byte[0], invoke, interTrx);
+      MessageCall messageCall = new MessageCall(
+          Op.CALL, new DataWord(10000),
+          precompiledAddressWord, new DataWord(value),
+          DataWord.ZERO(), DataWord.ZERO(),
+          DataWord.ZERO(), DataWord.ZERO(),
+          DataWord.ZERO(), false);
+      program.callToPrecompiledAddress(messageCall, new PrecompiledContracts.Identity());
+
+      Assert.assertEquals(1000L - value, invoke.getDeposit().getBalance(senderAddress));
+      Assert.assertEquals(value, invoke.getDeposit().getBalance(precompiledAddress));
+      Assert.assertEquals(1, program.getResult().getInternalTransactions().size());
+
+      InternalTransaction internalTx = program.getResult().getInternalTransactions().get(0);
+      Assert.assertFalse(internalTx.isRejected());
+      Assert.assertEquals("call", internalTx.getNote());
+      Assert.assertEquals(value, internalTx.getValue());
+      Assert.assertEquals(1L, internalTx.getNonce());
+      Assert.assertArrayEquals(senderAddress, internalTx.getSender());
+      Assert.assertArrayEquals(precompiledAddress, internalTx.getTransferToAddress());
+    } finally {
+      DecodeUtil.addressPreFixByte = prePrefixByte;
+    }
+  }
+
+  @Test
+  public void testCallPrecompiledAddressWithTokenAddsInternalTransaction()
+      throws ContractValidateException {
+    byte prePrefixByte = DecodeUtil.addressPreFixByte;
+    DecodeUtil.addressPreFixByte = Constant.ADD_PRE_FIX_BYTE_MAINNET;
+    long tokenId = chainBaseManager.getDynamicPropertiesStore().getTokenIdNum() + 1;
+    byte[] tokenIdBytes = Long.toString(tokenId).getBytes();
+    try {
+      chainBaseManager.getDynamicPropertiesStore().saveAllowSameTokenName(1);
+      chainBaseManager.getDynamicPropertiesStore().saveTokenIdNum(tokenId);
+      AssetIssueContract assetIssueContract = AssetIssueContract.newBuilder()
+          .setOwnerAddress(ByteString.copyFrom(invokeAddress()))
+          .setName(ByteString.copyFromUtf8("precompile-token"))
+          .setId(Long.toString(tokenId))
+          .build();
+      AssetIssueCapsule assetIssueCapsule = new AssetIssueCapsule(assetIssueContract);
+      chainBaseManager.getAssetIssueV2Store()
+          .put(assetIssueCapsule.createDbV2Key(), assetIssueCapsule);
+
+      StoreFactory.init();
+      StoreFactory storeFactory = StoreFactory.getInstance();
+      storeFactory.setChainBaseManager(chainBaseManager);
+      invoke = new ProgramInvokeMockImpl(storeFactory, new byte[0], invokeAddress());
+      InternalTransaction interTrx = new InternalTransaction(
+          Protocol.Transaction.getDefaultInstance(),
+          InternalTransaction.TrxType.TRX_UNKNOWN_TYPE);
+      program = new Program(new byte[0], new byte[0], invoke, interTrx);
+
+      DataWord precompiledAddressWord = new DataWord(4);
+      byte[] precompiledAddress = precompiledAddressWord.toTronAddress();
+      byte[] senderAddress = invoke.getContractAddress().toTronAddress();
+      long value = 123L;
+      invoke.getDeposit().createAccount(precompiledAddress, Protocol.AccountType.Normal);
+      invoke.getDeposit().addTokenBalance(senderAddress, tokenIdBytes, 1000L);
+
+      MessageCall messageCall = new MessageCall(
+          Op.CALLTOKEN, new DataWord(10000),
+          precompiledAddressWord, new DataWord(value),
+          DataWord.ZERO(), DataWord.ZERO(),
+          DataWord.ZERO(), DataWord.ZERO(),
+          new DataWord(tokenId), true);
+      program.callToPrecompiledAddress(messageCall, new PrecompiledContracts.Identity());
+
+      Assert.assertEquals(1000L - value,
+          invoke.getDeposit().getTokenBalance(senderAddress, tokenIdBytes));
+      Assert.assertEquals(value,
+          invoke.getDeposit().getTokenBalance(precompiledAddress, tokenIdBytes));
+      Assert.assertEquals(1, program.getResult().getInternalTransactions().size());
+
+      InternalTransaction internalTx = program.getResult().getInternalTransactions().get(0);
+      Assert.assertFalse(internalTx.isRejected());
+      Assert.assertEquals("call", internalTx.getNote());
+      Assert.assertEquals(0L, internalTx.getValue());
+      Assert.assertEquals(1L, internalTx.getNonce());
+      Assert.assertEquals(value,
+          internalTx.getTokenInfo().get(Long.toString(tokenId)).longValue());
+      Assert.assertArrayEquals(senderAddress, internalTx.getSender());
+      Assert.assertArrayEquals(precompiledAddress, internalTx.getTransferToAddress());
+    } finally {
+      DecodeUtil.addressPreFixByte = prePrefixByte;
+    }
+  }
+
+  @Test
+  public void testFailedPrecompiledAddressCallDoesNotAddInternalTransaction()
+      throws ContractValidateException {
+    invoke = new ProgramInvokeMockImpl();
+    InternalTransaction interTrx = new InternalTransaction(
+        Protocol.Transaction.getDefaultInstance(),
+        InternalTransaction.TrxType.TRX_UNKNOWN_TYPE);
+    program = new Program(new byte[0], new byte[0], invoke, interTrx);
+
+    byte prePrefixByte = DecodeUtil.addressPreFixByte;
+    DecodeUtil.addressPreFixByte = Constant.ADD_PRE_FIX_BYTE_MAINNET;
+    try {
+      DataWord precompiledAddressWord = new DataWord(4);
+      byte[] precompiledAddress = precompiledAddressWord.toTronAddress();
+      byte[] senderAddress = invoke.getContractAddress().toTronAddress();
+      long value = 123L;
+      invoke.getDeposit().createAccount(precompiledAddress, Protocol.AccountType.Normal);
+      invoke.getDeposit().addBalance(senderAddress, 1000L);
+
+      PrecompiledContracts.PrecompiledContract failedContract =
+          new PrecompiledContracts.PrecompiledContract() {
+            @Override
+            public long getEnergyForData(byte[] data) {
+              return 0;
+            }
+
+            @Override
+            public Pair<Boolean, byte[]> execute(byte[] data) {
+              return Pair.of(false, new byte[0]);
+            }
+          };
+      MessageCall messageCall = new MessageCall(
+          Op.CALL, new DataWord(10000),
+          precompiledAddressWord, new DataWord(value),
+          DataWord.ZERO(), DataWord.ZERO(),
+          DataWord.ZERO(), DataWord.ZERO(),
+          DataWord.ZERO(), false);
+      program.callToPrecompiledAddress(messageCall, failedContract);
+
+      Assert.assertEquals(1000L, invoke.getDeposit().getBalance(senderAddress));
+      Assert.assertEquals(0L, invoke.getDeposit().getBalance(precompiledAddress));
+      Assert.assertTrue(program.getResult().getInternalTransactions().isEmpty());
+    } finally {
+      DecodeUtil.addressPreFixByte = prePrefixByte;
+    }
+  }
+
+  @Test
+  public void testPrecompiledAddressTransferChangesFollowingInternalTransactionHash()
+      throws ContractValidateException {
+    invoke = new ProgramInvokeMockImpl();
+    InternalTransaction interTrx = new InternalTransaction(
+        Protocol.Transaction.getDefaultInstance(),
+        InternalTransaction.TrxType.TRX_UNKNOWN_TYPE);
+    program = new Program(new byte[0], new byte[0], invoke, interTrx);
+
+    byte prePrefixByte = DecodeUtil.addressPreFixByte;
+    DecodeUtil.addressPreFixByte = Constant.ADD_PRE_FIX_BYTE_MAINNET;
+    try {
+      DataWord precompiledAddressWord = new DataWord(4);
+      byte[] precompiledAddress = precompiledAddressWord.toTronAddress();
+      byte[] senderAddress = invoke.getContractAddress().toTronAddress();
+      invoke.getDeposit().createAccount(precompiledAddress, Protocol.AccountType.Normal);
+      invoke.getDeposit().addBalance(senderAddress, 1000L);
+
+      MessageCall messageCall = new MessageCall(
+          Op.CALL, new DataWord(10000),
+          precompiledAddressWord, DataWord.ONE(),
+          DataWord.ZERO(), DataWord.ZERO(),
+          DataWord.ZERO(), DataWord.ZERO(),
+          DataWord.ZERO(), false);
+      program.callToPrecompiledAddress(messageCall, new PrecompiledContracts.Identity());
+
+      byte[] followingAddress = new DataWord(5).toTronAddress();
+      byte[] followingData = {1, 2, 3};
+      long followingValue = 7L;
+      InternalTransaction legacyFollowingTx = new InternalTransaction(
+          interTrx.getHash(), program.getCallDeep(), 0, senderAddress, followingAddress,
+          followingValue, followingData, "call", 1L, null);
+
+      program.increaseNonce();
+      InternalTransaction upgradedFollowingTx = program.getResult().addInternalTransaction(
+          interTrx.getHash(), program.getCallDeep(), senderAddress, followingAddress,
+          followingValue, followingData, "call", program.getNonce(), null);
+
+      Assert.assertEquals(1L, legacyFollowingTx.getNonce());
+      Assert.assertEquals(2L, upgradedFollowingTx.getNonce());
+      Assert.assertFalse(Arrays.equals(
+          legacyFollowingTx.getHash(), upgradedFollowingTx.getHash()));
+    } finally {
+      DecodeUtil.addressPreFixByte = prePrefixByte;
+    }
+  }
+
+  private byte[] invokeAddress() {
+    return Hex.decode("41471fd3ad3e9eeadeec4608b92d16ce6b500704cc");
   }
 
   // TIP-854 outer-frame containment: a CALL to validateMultiSign or
