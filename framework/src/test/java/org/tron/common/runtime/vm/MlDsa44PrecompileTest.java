@@ -12,18 +12,12 @@ import org.tron.core.vm.config.VMConfig;
 
 /**
  * Unit tests for the ML-DSA-44 verify precompile (FIPS 204 / Dilithium-2).
- * Address 0x12 follows EIP-8051 with expanded public keys; 0x18 remains the
- * existing TRON draft path with standard 1312-byte public keys.
+ * Address 0x18: standard 1312-byte FIPS public key layout.
  */
 public class MlDsa44PrecompileTest {
 
-  private static final DataWord MLDSA_EIP8051_ADDR = new DataWord(
-      "0000000000000000000000000000000000000000000000000000000000000012");
-
   private static final DataWord MLDSA_DRAFT_ADDR = new DataWord(
       "0000000000000000000000000000000000000000000000000000000000000018");
-
-  private static final int EIP8051_INPUT_LENGTH = 32 + MLDSA44.SIGNATURE_LENGTH + 20512;
 
   private static final byte[] MESSAGE_HASH = new byte[32];
 
@@ -46,12 +40,7 @@ public class MlDsa44PrecompileTest {
   @Test
   public void switchOff_returnsNull() {
     VMConfig.initAllowMlDsa44(0L);
-    Assert.assertNull(PrecompiledContracts.getContractForAddress(MLDSA_EIP8051_ADDR));
-  }
-
-  @Test
-  public void switchOn_returnsEip8051Contract() {
-    Assert.assertNotNull(PrecompiledContracts.getContractForAddress(MLDSA_EIP8051_ADDR));
+    Assert.assertNull(PrecompiledContracts.getContractForAddress(MLDSA_DRAFT_ADDR));
   }
 
   @Test
@@ -156,35 +145,6 @@ public class MlDsa44PrecompileTest {
 
     Pair<Boolean, byte[]> result =
         PrecompiledContracts.getContractForAddress(MLDSA_DRAFT_ADDR).execute(padded);
-
-    Assert.assertTrue(result.getLeft());
-    Assert.assertArrayEquals(DataWord.ZERO().getData(), result.getRight());
-  }
-
-  @Test
-  public void eip8051Address12RejectsStandardPublicKeyLayout() {
-    MLDSA44 key = new MLDSA44();
-    byte[] sig = key.sign(MESSAGE_HASH);
-    byte[] standardInput = buildInput(MESSAGE_HASH, sig, key.getPublicKey());
-
-    Pair<Boolean, byte[]> result =
-        PrecompiledContracts.getContractForAddress(MLDSA_EIP8051_ADDR).execute(standardInput);
-
-    Assert.assertTrue(result.getLeft());
-    Assert.assertArrayEquals(DataWord.ZERO().getData(), result.getRight());
-  }
-
-  @Test
-  public void eip8051Address12RejectsNonCanonicalFieldElement() {
-    byte[] input = new byte[EIP8051_INPUT_LENGTH];
-    int pkOffset = 32 + MLDSA44.SIGNATURE_LENGTH;
-    input[pkOffset] = 0x00;
-    input[pkOffset + 1] = 0x7f;
-    input[pkOffset + 2] = (byte) 0xe0;
-    input[pkOffset + 3] = 0x01;
-
-    Pair<Boolean, byte[]> result =
-        PrecompiledContracts.getContractForAddress(MLDSA_EIP8051_ADDR).execute(input);
 
     Assert.assertTrue(result.getLeft());
     Assert.assertArrayEquals(DataWord.ZERO().getData(), result.getRight());
