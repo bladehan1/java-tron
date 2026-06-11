@@ -1743,6 +1743,16 @@ public class Program {
         this.refundEnergy(msg.getEnergy().longValue() - requiredEnergy, CALL_PRE_COMPILED);
         this.stackPushOne();
         returnDataBuffer = out.getRight();
+        if (endowment > 0) {
+          increaseNonce();
+          HashMap<String, Long> tokenInfo = null;
+          if (isTokenTransfer) {
+            tokenInfo = new HashMap<>();
+            tokenInfo.put(new String(stripLeadingZeroes(tokenId)), endowment);
+          }
+          addInternalTx(null, senderAddress, contextAddress, !isTokenTransfer ? endowment : 0,
+              data, "call", nonce, tokenInfo);
+        }
         deposit.commit();
       } else {
         // spend all energy on failure, push zero and revert state changes

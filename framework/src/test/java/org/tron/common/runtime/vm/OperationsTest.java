@@ -783,9 +783,53 @@ public class OperationsTest extends BaseTest {
         DataWord.ZERO(), DataWord.ZERO(),
         DataWord.ZERO(), false);
     program.callToPrecompiledAddress(messageCall, new PrecompiledContracts.ECRecover());
+    Assert.assertTrue(program.getResult().getInternalTransactions().isEmpty());
 
     DecodeUtil.addressPreFixByte = prePrefixByte;
     VMConfig.initAllowTvmSelfdestructRestriction(0);
+  }
+
+  @Test
+  public void testCallPrecompiledAddressWithValueAddsInternalTransaction()
+      throws ContractValidateException {
+    invoke = new ProgramInvokeMockImpl();
+    Protocol.Transaction trx = Protocol.Transaction.getDefaultInstance();
+    InternalTransaction interTrx =
+        new InternalTransaction(trx, InternalTransaction.TrxType.TRX_UNKNOWN_TYPE);
+
+    byte prePrefixByte = DecodeUtil.addressPreFixByte;
+    DecodeUtil.addressPreFixByte = Constant.ADD_PRE_FIX_BYTE_MAINNET;
+    try {
+      program = new Program(new byte[0], new byte[0], invoke, interTrx);
+      DataWord precompiledAddressWord = new DataWord(4);
+      byte[] precompiledAddress = precompiledAddressWord.toTronAddress();
+      byte[] senderAddress = invoke.getContractAddress().toTronAddress();
+      long value = 123L;
+
+      invoke.getDeposit().createAccount(precompiledAddress, Protocol.AccountType.Normal);
+      invoke.getDeposit().addBalance(senderAddress, 1000L);
+
+      MessageCall messageCall = new MessageCall(
+          Op.CALL, new DataWord(10000),
+          precompiledAddressWord, new DataWord(value),
+          DataWord.ZERO(), DataWord.ZERO(),
+          DataWord.ZERO(), DataWord.ZERO(),
+          DataWord.ZERO(), false);
+      program.callToPrecompiledAddress(messageCall, new PrecompiledContracts.Identity());
+
+      Assert.assertEquals(1000L - value, invoke.getDeposit().getBalance(senderAddress));
+      Assert.assertEquals(value, invoke.getDeposit().getBalance(precompiledAddress));
+      Assert.assertEquals(1, program.getResult().getInternalTransactions().size());
+
+      InternalTransaction internalTx = program.getResult().getInternalTransactions().get(0);
+      Assert.assertFalse(internalTx.isRejected());
+      Assert.assertEquals("call", internalTx.getNote());
+      Assert.assertEquals(value, internalTx.getValue());
+      Assert.assertArrayEquals(senderAddress, internalTx.getSender());
+      Assert.assertArrayEquals(precompiledAddress, internalTx.getTransferToAddress());
+    } finally {
+      DecodeUtil.addressPreFixByte = prePrefixByte;
+    }
   }
 
   // TIP-854 outer-frame containment: a CALL to validateMultiSign or
