@@ -394,10 +394,14 @@ public class BatchValidateFnDsa512Test {
     // bytesOffsetBytes % WORD_SIZE != 0 guard in extractBytesArrayChecked.
     contract.setConstantCall(true);
     byte[] input = new byte[12 * 32];
-    setWord(input, 1, 128);  setWord(input, 2, 224);  setWord(input, 3, 320);
+    setWord(input, 1, 128);
+    setWord(input, 2, 224);
+    setWord(input, 3, 320);
     setWord(input, 4, 1);   // sigs count = 1
     setWord(input, 5, 15);  // pointer = 15: not a multiple of 32
-    setWord(input, 7, 1);   setWord(input, 8, 32);  setWord(input, 9, 1);
+    setWord(input, 7, 1);
+    setWord(input, 8, 32);
+    setWord(input, 9, 1);
     setWord(input, 10, 1);
 
     Pair<Boolean, byte[]> result = contract.execute(input);

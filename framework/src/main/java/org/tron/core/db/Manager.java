@@ -187,6 +187,7 @@ import org.tron.protos.contract.BalanceContract;
 public class Manager {
 
   private static final int SHIELDED_TRANS_IN_BLOCK_COUNTS = 1;
+  private static final int PQ_TRANS_IN_BLOCK_COUNTS = 1000;
   private static final String SAVE_BLOCK = "Save block: {}";
   private static final int SLEEP_TIME_OUT = 50;
   private static final int TX_ID_CACHE_SIZE = 100_000;
@@ -194,6 +195,8 @@ public class Manager {
   private static final int NO_BLOCK_WAITING_LOCK = 0;
   private final int shieldedTransInPendingMaxCounts =
       Args.getInstance().getShieldedTransInPendingMaxCounts();
+  private final int pqTransInPendingMaxCounts =
+      Args.getInstance().getPqTransInPendingMaxCounts();
   @Getter
   @Setter
   public boolean eventPluginLoaded = false;
@@ -249,6 +252,8 @@ public class Manager {
   private BlockingQueue<TransactionCapsule> pendingTransactions;
   @Getter
   private AtomicInteger shieldedTransInPendingCounts = new AtomicInteger(0);
+  @Getter
+  private AtomicInteger pqTransInPendingCounts = new AtomicInteger(0);
   // transactions popped
   private List<TransactionCapsule> poppedTransactions =
       Collections.synchronizedList(Lists.newArrayList());
@@ -930,6 +935,10 @@ public class Manager {
                   && shieldedTransInPendingCounts.get() >= shieldedTransInPendingMaxCounts) {
             return false;
           }
+          if (isPQTransaction(trx.getInstance())
+                  && pqTransInPendingCounts.get() >= pqTransInPendingMaxCounts) {
+            return false;
+          }
           if (!session.valid()) {
             session.setValue(revokingStore.buildSession());
           }
@@ -944,6 +953,9 @@ public class Manager {
           }
           if (isShieldedTransaction(trx.getInstance())) {
             shieldedTransInPendingCounts.incrementAndGet();
+          }
+          if (isPQTransaction(trx.getInstance())) {
+            pqTransInPendingCounts.incrementAndGet();
           }
         }
       }
@@ -1319,6 +1331,14 @@ public class Manager {
                     block.getNum(), SHIELDED_TRANS_IN_BLOCK_COUNTS));
           }
 
+          if (block.getTransactions().stream()
+                  .filter(tran -> isPQTransaction(tran.getInstance()))
+                  .count() > PQ_TRANS_IN_BLOCK_COUNTS) {
+            throw new BadBlockException(
+                String.format("num: %d, pq transaction count > %d",
+                    block.getNum(), PQ_TRANS_IN_BLOCK_COUNTS));
+          }
+
           BlockCapsule newBlock;
           try {
             newBlock = this.khaosDb.push(block);
@@ -1655,6 +1675,7 @@ public class Manager {
 
     Set<String> accountSet = new HashSet<>();
     AtomicInteger shieldedTransCounts = new AtomicInteger(0);
+    AtomicInteger pqTransCounts = new AtomicInteger(0);
     List<TransactionCapsule> toBePacked = new ArrayList<>();
     long currentSize = blockCapsule.getInstance().getSerializedSize();
     boolean isSort = Args.getInstance().isOpenTransactionSort();
@@ -1713,6 +1734,11 @@ public class Manager {
           && shieldedTransCounts.incrementAndGet() > SHIELDED_TRANS_IN_BLOCK_COUNTS) {
         continue;
       }
+      //pq transaction
+      boolean isPqTransaction = isPQTransaction(transaction);
+      if (isPqTransaction && pqTransCounts.get() >= PQ_TRANS_IN_BLOCK_COUNTS) {
+        continue;
+      }
       //multi sign transaction
       byte[] owner = trx.getOwnerAddress();
       String ownerAddress = ByteArray.toHexString(owner);
@@ -1738,6 +1764,9 @@ public class Manager {
         accountStateCallBack.exeTransFinish();
         tmpSession.merge();
         toBePacked.add(trx);
+        if (isPqTransaction) {
+          pqTransCounts.incrementAndGet();
+        }
         currentSize += trxPackSize;
         if (fromPending) {
           logSize[2] += 1;
@@ -1849,6 +1878,10 @@ public class Manager {
       default:
         return false;
     }
+  }
+
+  private boolean isPQTransaction(Transaction transaction) {
+    return transaction.getPqAuthSigCount() > 0;
   }
 
   private boolean isExchangeTransaction(Transaction transaction) {

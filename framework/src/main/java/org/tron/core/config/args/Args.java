@@ -619,6 +619,7 @@ public class Args extends CommonParameter {
 
     PARAMETER.maxFastForwardNum = nc.getMaxFastForwardNum();
     PARAMETER.shieldedTransInPendingMaxCounts = nc.getShieldedTransInPendingMaxCounts();
+    PARAMETER.pqTransInPendingMaxCounts = nc.getPqTransInPendingMaxCounts();
     PARAMETER.agreeNodeCount = nc.getAgreeNodeCount();
 
     PARAMETER.openHistoryQueryWhenLiteFN = nc.isOpenHistoryQueryWhenLiteFN();

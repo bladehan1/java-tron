@@ -385,6 +385,9 @@ public class CommonParameter {
   public int shieldedTransInPendingMaxCounts; // clearParam: 10
   @Getter
   @Setter
+  public int pqTransInPendingMaxCounts; // clearParam: 1000
+  @Getter
+  @Setter
   public long changedDelegation;
   @Getter
   @Setter
