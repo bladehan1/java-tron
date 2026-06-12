@@ -49,6 +49,7 @@ public final class MLDSA44 implements PQSignature {
   public static final int SEED_LENGTH = 32;
 
   private static final MLDSAParameters PARAMS = MLDSAParameters.ml_dsa_44;
+  private static final SecureRandom SIGNING_RNG = new SecureRandom();
 
   private final byte[] privateKey;
   private final byte[] publicKey;
@@ -156,7 +157,7 @@ public final class MLDSA44 implements PQSignature {
     }
     MLDSAPrivateKeyParameters sk = new MLDSAPrivateKeyParameters(PARAMS, privateKey);
     MLDSASigner signer = new MLDSASigner();
-    signer.init(true, new ParametersWithRandom(sk, new SecureRandom()));
+    signer.init(true, new ParametersWithRandom(sk, SIGNING_RNG));
     signer.update(message, 0, message.length);
     try {
       return signer.generateSignature();
