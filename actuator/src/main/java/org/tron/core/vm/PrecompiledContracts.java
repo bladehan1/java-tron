@@ -948,8 +948,7 @@ public class PrecompiledContracts {
      * TIP-7883: ModExp gas cost increase.
      * New pricing formula with higher minimum cost and no divisor.
      */
-    private long getEnergyTIP7883(int baseLen, int modLen,
-        byte[] expHighBytes, int expLen) {
+    private long getEnergyTIP7883(int baseLen, int modLen, byte[] expHighBytes, int expLen) {
       long multComplexity = getMultComplexityTIP7883(baseLen, modLen);
       long iterCount = getIterationCountTIP7883(expHighBytes, expLen);
 
@@ -1424,8 +1423,6 @@ public class PrecompiledContracts {
       private byte[] addr;
       private int nonce;
     }
-
-
   }
 
   public abstract static class VerifyProof extends PrecompiledContract {
