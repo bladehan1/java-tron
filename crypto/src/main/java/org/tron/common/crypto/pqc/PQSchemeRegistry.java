@@ -201,6 +201,41 @@ public final class PQSchemeRegistry {
     return SCHEMES.keySet();
   }
 
+  /**
+   * Returns the number of bytes that one {@code pq_auth_sig} entry (field 6 of
+   * {@code BlockHeader}) will add to the block's wire size for the given scheme.
+   * Used by {@code generateBlock} to pre-reserve space before the transaction
+   * packing loop, so the produced block never exceeds the receiver-side
+   * {@code maxBlockSize} check in {@code BlockMsgHandler}.
+   *
+   * <p>Wire layout (proto3 length-delimited encoding):
+   * <pre>
+   *   BlockHeader field 6 (message):  tag(1B) + varint(bodyLen) + body
+   *   PQAuthSig body:
+   *     field 1 (scheme, enum/varint): tag(1B) + value(1B)
+   *     field 2 (public_key, bytes):   tag(1B) + varint(pubKeyLen) + pubKeyLen
+   *     field 3 (signature, bytes):    tag(1B) + varint(sigLen)    + sigLen
+   * </pre>
+   * For variable-length schemes (FN_DSA_512 / Falcon) the maximum signature
+   * length is used so the reservation is always an upper bound.
+   */
+  public static int computePQAuthSigWireSize(PQScheme scheme) {
+    SchemeInfo info = require(scheme);
+    int pubKeyLen = info.publicKeyLength;
+    int sigLen = info.signatureLength;  // upper bound for variable-length schemes
+    int body = 2  // scheme: tag(1B) + value(1B)
+        + 1 + varintSize(pubKeyLen) + pubKeyLen
+        + 1 + varintSize(sigLen) + sigLen;
+    return 1 + varintSize(body) + body;
+  }
+
+  private static int varintSize(int value) {
+    if (value < 1 << 7) return 1;
+    if (value < 1 << 14) return 2;
+    if (value < 1 << 21) return 3;
+    return 4;
+  }
+
   public static int getPrivateKeyLength(PQScheme scheme) {
     return require(scheme).privateKeyLength;
   }

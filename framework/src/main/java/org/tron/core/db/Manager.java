@@ -1680,6 +1680,12 @@ public class Manager {
     AtomicInteger pqTransCounts = new AtomicInteger(0);
     List<TransactionCapsule> toBePacked = new ArrayList<>();
     long currentSize = blockCapsule.getInstance().getSerializedSize();
+    if (miner.isPq()) {
+      // signBlockCapsuleWithPQ appends the PQAuthSig after this loop; reserve its
+      // wire size now so the packed block never exceeds maxBlockSize on receivers.
+      PQScheme pqScheme = miner.getPq().getScheme();
+      currentSize += PQSchemeRegistry.computePQAuthSigWireSize(pqScheme);
+    }
     boolean isSort = Args.getInstance().isOpenTransactionSort();
     int[] logSize = new int[] {pendingTransactions.size(), rePushTransactions.size(), 0, 0};
     while (pendingTransactions.size() > 0 || rePushTransactions.size() > 0) {
@@ -1724,7 +1730,7 @@ public class Manager {
       }
 
       // check the block size
-      long trxPackSize = trx.computeTrxSizeForBlockMessage();
+      long trxPackSize = trx.computeTrxSizeForBlockMessage() + Constant.MAX_RESULT_SIZE_IN_TX;
       if ((currentSize + trxPackSize)
           > ChainConstant.BLOCK_SIZE) {
         postponedTrxCount++;
