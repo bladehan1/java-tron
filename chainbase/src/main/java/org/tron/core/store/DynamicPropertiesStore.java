@@ -3149,6 +3149,10 @@ public class DynamicPropertiesStore extends TronStoreWithRevoking<BytesCapsule> 
       case ML_DSA_44:
         return allowMlDsa44();
       default:
+        if (PQSchemeRegistry.contains(scheme)) {
+          throw new IllegalStateException(
+              "Missing governance flag mapping for registered PQ scheme: " + scheme);
+        }
         return false;
     }
   }

@@ -172,6 +172,14 @@ public class LocalWitnesses {
       int expectedPubLen = PQSchemeRegistry.getPublicKeyLength(scheme);
       validatePqKey(kp.getPrivateKey(), expectedPrivLen, "PQ private key");
       validatePqKey(kp.getPublicKey(), expectedPubLen, "PQ public key");
+      try {
+        PQSchemeRegistry.fromKeypair(scheme,
+            ByteArray.fromHexString(kp.getPrivateKey()),
+            ByteArray.fromHexString(kp.getPublicKey()));
+      } catch (IllegalArgumentException e) {
+        throw new TronError("PQ private/public keypair mismatch for scheme: " + scheme,
+            TronError.ErrCode.WITNESS_INIT);
+      }
     }
     this.pqKeypairs = pqKeypairs;
   }
