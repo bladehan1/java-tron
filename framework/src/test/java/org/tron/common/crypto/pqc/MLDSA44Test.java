@@ -269,15 +269,12 @@ public class MLDSA44Test {
   public void registryDispatchMatchesDirectCalls() {
     byte[] msg = "registry-dispatch".getBytes();
     byte[] sigDirect = MLDSA44.sign(sk.getEncoded(), msg);
-    assertTrue(PQSchemeRegistry.verify(
-        PQScheme.ML_DSA_44, pk.getEncoded(), msg, sigDirect));
-    byte[] sigViaRegistry = PQSchemeRegistry.sign(
-        PQScheme.ML_DSA_44, sk.getEncoded(), msg);
+    assertTrue(PQSchemeRegistry.verify(PQScheme.ML_DSA_44, pk.getEncoded(), msg, sigDirect));
+    byte[] sigViaRegistry = PQSchemeRegistry.sign(PQScheme.ML_DSA_44, sk.getEncoded(), msg);
     assertTrue(MLDSA44.verify(pk.getEncoded(), msg, sigViaRegistry));
     assertEquals(MLDSA44.PUBLIC_KEY_LENGTH,
         PQSchemeRegistry.getPublicKeyLength(PQScheme.ML_DSA_44));
-    assertEquals(MLDSA44.SIGNATURE_LENGTH,
-        PQSchemeRegistry.getSignatureLength(PQScheme.ML_DSA_44));
+    assertEquals(MLDSA44.SIGNATURE_LENGTH, PQSchemeRegistry.getSignatureLength(PQScheme.ML_DSA_44));
   }
 
   @Test
@@ -348,8 +345,7 @@ public class MLDSA44Test {
 
   @Test
   public void keypairConstructorRejectsMismatchedHalves() {
-    MLDSAPublicKeyParameters strangerPk =
-        (MLDSAPublicKeyParameters) freshKeyPair().getPublic();
+    MLDSAPublicKeyParameters strangerPk = (MLDSAPublicKeyParameters) freshKeyPair().getPublic();
     try {
       new MLDSA44(sk.getEncoded(), strangerPk.getEncoded());
       fail("mismatched private/public key pair must be rejected");

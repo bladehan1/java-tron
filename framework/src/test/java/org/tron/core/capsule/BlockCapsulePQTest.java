@@ -42,8 +42,7 @@ public class BlockCapsulePQTest extends BaseTest {
     witnessKey = new ECKey();
     witnessAddress = witnessKey.getAddress();
     pqKeypair = new FNDSA512();
-    pqAddress = PQSchemeRegistry.computeAddress(
-        PQScheme.FN_DSA_512, pqKeypair.getPublicKey());
+    pqAddress = PQSchemeRegistry.computeAddress(PQScheme.FN_DSA_512, pqKeypair.getPublicKey());
   }
 
   /**
@@ -64,10 +63,7 @@ public class BlockCapsulePQTest extends BaseTest {
    * scenarios, pass {@link #witnessAddress}.
    */
   private AccountCapsule buildWitnessAccount(byte[] keyAddress) {
-    Key kb = Key.newBuilder()
-        .setAddress(ByteString.copyFrom(keyAddress))
-        .setWeight(1)
-        .build();
+    Key kb = Key.newBuilder().setAddress(ByteString.copyFrom(keyAddress)).setWeight(1).build();
     Permission witnessPerm = Permission.newBuilder()
         .setType(PermissionType.Witness)
         .setId(1)
@@ -159,8 +155,7 @@ public class BlockCapsulePQTest extends BaseTest {
     BlockCapsule block = buildUnsignedBlock(parentHash);
     byte[] digest = block.getRawHashBytes();
     block.setPqAuthSig(buildPQAuthSig(signPQ(digest)));
-    block.validateSignature(
-        dbManager.getDynamicPropertiesStore(), dbManager.getAccountStore());
+    block.validateSignature(dbManager.getDynamicPropertiesStore(), dbManager.getAccountStore());
   }
 
   @Test(expected = ValidateSignatureException.class)
@@ -181,8 +176,7 @@ public class BlockCapsulePQTest extends BaseTest {
         .build();
     Block dual = signed.getInstance().toBuilder().setBlockHeader(dualHeader).build();
     BlockCapsule block = new BlockCapsule(dual);
-    block.validateSignature(
-        dbManager.getDynamicPropertiesStore(), dbManager.getAccountStore());
+    block.validateSignature(dbManager.getDynamicPropertiesStore(), dbManager.getAccountStore());
   }
 
   @Test
@@ -219,8 +213,7 @@ public class BlockCapsulePQTest extends BaseTest {
         .build();
     Assert.assertEquals(PQScheme.UNKNOWN_PQ_SCHEME, defaultScheme.getScheme());
     block.setPqAuthSig(defaultScheme);
-    block.validateSignature(
-        dbManager.getDynamicPropertiesStore(), dbManager.getAccountStore());
+    block.validateSignature(dbManager.getDynamicPropertiesStore(), dbManager.getAccountStore());
   }
 
   @Test
@@ -253,8 +246,7 @@ public class BlockCapsulePQTest extends BaseTest {
     BlockCapsule block = buildUnsignedBlock(parentHash);
     byte[] digest = block.getRawHashBytes();
     block.setPqAuthSig(buildPQAuthSig(signPQ(digest)));
-    block.validateSignature(
-        dbManager.getDynamicPropertiesStore(), dbManager.getAccountStore());
+    block.validateSignature(dbManager.getDynamicPropertiesStore(), dbManager.getAccountStore());
   }
 
   /**
@@ -328,8 +320,7 @@ public class BlockCapsulePQTest extends BaseTest {
         .setPublicKey(ByteString.copyFrom(shortPk))
         .setSignature(ByteString.copyFrom(signPQ(digest)))
         .build());
-    block.validateSignature(
-        dbManager.getDynamicPropertiesStore(), dbManager.getAccountStore());
+    block.validateSignature(dbManager.getDynamicPropertiesStore(), dbManager.getAccountStore());
   }
 
   @Test(expected = ValidateSignatureException.class)
@@ -344,8 +335,7 @@ public class BlockCapsulePQTest extends BaseTest {
     // A one-byte signature is far below the scheme's minimum length, so the
     // length guard rejects it before the cryptographic verify is attempted.
     block.setPqAuthSig(buildPQAuthSig(new byte[] {0x01}));
-    block.validateSignature(
-        dbManager.getDynamicPropertiesStore(), dbManager.getAccountStore());
+    block.validateSignature(dbManager.getDynamicPropertiesStore(), dbManager.getAccountStore());
   }
 
   @Test(expected = ValidateSignatureException.class)
@@ -359,7 +349,6 @@ public class BlockCapsulePQTest extends BaseTest {
     BlockCapsule block = buildUnsignedBlock(parentHash);
     byte[] digest = block.getRawHashBytes();
     block.setPqAuthSig(buildPQAuthSig(signPQ(digest)));
-    block.validateSignature(
-        dbManager.getDynamicPropertiesStore(), dbManager.getAccountStore());
+    block.validateSignature(dbManager.getDynamicPropertiesStore(), dbManager.getAccountStore());
   }
 }

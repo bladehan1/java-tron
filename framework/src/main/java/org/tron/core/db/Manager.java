@@ -195,8 +195,7 @@ public class Manager {
   private static final int NO_BLOCK_WAITING_LOCK = 0;
   private final int shieldedTransInPendingMaxCounts =
       Args.getInstance().getShieldedTransInPendingMaxCounts();
-  private final int pqTransInPendingMaxCounts =
-      Args.getInstance().getPqTransInPendingMaxCounts();
+  private final int pqTransInPendingMaxCounts = Args.getInstance().getPqTransInPendingMaxCounts();
   @Getter
   @Setter
   public boolean eventPluginLoaded = false;
@@ -1583,8 +1582,7 @@ public class Manager {
         trace.exec();
         trace.setResult();
         logger.info("Retry result when push: {}, for tx id: {}, tx resultCode in receipt: {}.",
-            blockCap.hasWitnessSignature(), txId,
-            trace.getReceipt().getResult());
+            blockCap.hasWitnessSignature(), txId, trace.getReceipt().getResult());
       }
       if (blockCap.hasWitnessSignature()) {
         trace.check();

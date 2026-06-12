@@ -77,8 +77,7 @@ public class ArgsPqConfigTest {
     TronError err = assertThrows(TronError.class,
         () -> Args.setParam(new String[]{"--witness"}, conf.toString()));
     assertEquals(TronError.ErrCode.WITNESS_INIT, err.getErrCode());
-    assertTrue(err.getMessage(),
-        err.getMessage().contains("seed is not supported for FN_DSA_512"));
+    assertTrue(err.getMessage(), err.getMessage().contains("seed is not supported for FN_DSA_512"));
   }
 
   @Test
@@ -97,8 +96,7 @@ public class ArgsPqConfigTest {
     TronError err = assertThrows(TronError.class,
         () -> Args.setParam(new String[]{"--witness"}, conf.toString()));
     assertEquals(TronError.ErrCode.WITNESS_INIT, err.getErrCode());
-    assertTrue(err.getMessage(),
-        err.getMessage().contains("exactly one of `key` or `seed`"));
+    assertTrue(err.getMessage(), err.getMessage().contains("exactly one of `key` or `seed`"));
   }
 
   @Test
@@ -108,15 +106,13 @@ public class ArgsPqConfigTest {
     TronError err = assertThrows(TronError.class,
         () -> Args.setParam(new String[]{"--witness"}, conf.toString()));
     assertEquals(TronError.ErrCode.WITNESS_INIT, err.getErrCode());
-    assertTrue(err.getMessage(),
-        err.getMessage().contains("exactly one of `key` or `seed`"));
+    assertTrue(err.getMessage(), err.getMessage().contains("exactly one of `key` or `seed`"));
   }
 
   @Test
   public void mlDsa44SeedWrongLengthRejected() throws IOException {
     String shortSeed = Hex.toHexString(filled(MLDSA44.SEED_LENGTH - 1, (byte) 0x02));
-    Path conf = writeConfWithEntry(
-        "{ scheme = \"ML_DSA_44\", seed = \"" + shortSeed + "\" }");
+    Path conf = writeConfWithEntry("{ scheme = \"ML_DSA_44\", seed = \"" + shortSeed + "\" }");
 
     TronError err = assertThrows(TronError.class,
         () -> Args.setParam(new String[]{"--witness"}, conf.toString()));
@@ -143,8 +139,7 @@ public class ArgsPqConfigTest {
   @Test
   public void mlDsa44KeyWrongLengthRejected() throws IOException {
     String shortKey = Hex.toHexString(filled(MLDSA44.PRIVATE_KEY_LENGTH - 1, (byte) 0x0D));
-    Path conf = writeConfWithEntry(
-        "{ scheme = \"ML_DSA_44\", key = \"" + shortKey + "\" }");
+    Path conf = writeConfWithEntry("{ scheme = \"ML_DSA_44\", key = \"" + shortKey + "\" }");
 
     TronError err = assertThrows(TronError.class,
         () -> Args.setParam(new String[]{"--witness"}, conf.toString()));
@@ -155,14 +150,12 @@ public class ArgsPqConfigTest {
   @Test
   public void fnDsa512PrivOnlyKeyRejected() throws IOException {
     String privOnly = Hex.toHexString(filled(FNDSA512.PRIVATE_KEY_LENGTH, (byte) 0x0E));
-    Path conf = writeConfWithEntry(
-        "{ scheme = \"FN_DSA_512\", key = \"" + privOnly + "\" }");
+    Path conf = writeConfWithEntry("{ scheme = \"FN_DSA_512\", key = \"" + privOnly + "\" }");
 
     TronError err = assertThrows(TronError.class,
         () -> Args.setParam(new String[]{"--witness"}, conf.toString()));
     assertEquals(TronError.ErrCode.WITNESS_INIT, err.getErrCode());
-    assertTrue(err.getMessage(),
-        err.getMessage().contains("extended priv‖pub"));
+    assertTrue(err.getMessage(), err.getMessage().contains("extended priv‖pub"));
     assertTrue(err.getMessage(), !err.getMessage().contains("priv-only"));
   }
 

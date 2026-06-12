@@ -30,8 +30,11 @@ import org.tron.protos.Protocol.PQScheme;
  */
 public final class PQSchemeRegistry {
 
-  /** Stateless sign/verify/keygen dispatch bound to a single PQ scheme. */
+  /**
+   * Stateless sign/verify/keygen dispatch bound to a single PQ scheme.
+   */
   public interface SignatureOps {
+
     byte[] sign(byte[] privateKey, byte[] message);
 
     boolean verify(byte[] publicKey, byte[] message, byte[] signature);
@@ -59,13 +62,17 @@ public final class PQSchemeRegistry {
    * its own canonical fingerprint.
    */
   public interface FingerprintHash {
-    /** Returns the full digest of {@code data} (no truncation). */
+
+    /**
+     * Returns the full digest of {@code data} (no truncation).
+     */
     byte[] digest(byte[] data);
   }
 
   private static final FingerprintHash KECCAK_256 = Hash::sha3;
 
   private static final class SchemeInfo {
+
     final int privateKeyLength;
     final int publicKeyLength;
     final int signatureLength;
@@ -274,7 +281,9 @@ public final class PQSchemeRegistry {
     return length >= info.signatureMinLength && length <= info.signatureLength;
   }
 
-  /** Lower bound of the per-scheme signature-length band. */
+  /**
+   * Lower bound of the per-scheme signature-length band.
+   */
   public static int getSignatureMinLength(PQScheme scheme) {
     return require(scheme).signatureMinLength;
   }
@@ -300,8 +309,7 @@ public final class PQSchemeRegistry {
    * scheme; cryptographic consistency between the two halves is the caller's
    * responsibility.
    */
-  public static PQSignature fromKeypair(
-      PQScheme scheme, byte[] privateKey, byte[] publicKey) {
+  public static PQSignature fromKeypair(PQScheme scheme, byte[] privateKey, byte[] publicKey) {
     return require(scheme).ops.fromKeypair(privateKey, publicKey);
   }
 
@@ -357,13 +365,11 @@ public final class PQSchemeRegistry {
       throw new IllegalArgumentException("scheme must not be null");
     }
     if (scheme == PQScheme.UNKNOWN_PQ_SCHEME) {
-      throw new IllegalArgumentException(
-          "no PQSignature registered for scheme: " + scheme);
+      throw new IllegalArgumentException("no PQSignature registered for scheme: " + scheme);
     }
     SchemeInfo info = SCHEMES.get(scheme);
     if (info == null) {
-      throw new IllegalArgumentException(
-          "no PQSignature registered for scheme: " + scheme);
+      throw new IllegalArgumentException("no PQSignature registered for scheme: " + scheme);
     }
     return info;
   }

@@ -679,8 +679,7 @@ public class TransactionCapsule implements ProtoCapsule<Transaction> {
             "pq_auth_sig not allowed: no post-quantum scheme is activated");
       }
 
-      if (signatureCount == 0
-          || this.transaction.getRawData().getContractCount() <= 0) {
+      if (signatureCount == 0 || this.transaction.getRawData().getContractCount() <= 0) {
         throw new ValidateSignatureException("miss sig or contract");
       }
       if (signatureCount > dynamicPropertiesStore.getTotalSignNum()) {
@@ -762,8 +761,7 @@ public class TransactionCapsule implements ProtoCapsule<Transaction> {
       byte[] derivedAddr = PQSchemeRegistry.computeAddress(scheme, pk);
       ByteString addrBs = ByteString.copyFrom(derivedAddr);
       if (!signedAddresses.add(addrBs)) {
-        throw new PermissionException(
-            encode58Check(derivedAddr) + " has signed twice!");
+        throw new PermissionException(encode58Check(derivedAddr) + " has signed twice!");
       }
       Key matched = null;
       for (Key k : permission.getKeysList()) {

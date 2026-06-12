@@ -132,12 +132,15 @@ public class PrecompiledContracts {
 
   // FreezeV2 PrecompileContracts
   private static final GetChainParameter getChainParameter = new GetChainParameter();
-  private static final AvailableUnfreezeV2Size availableUnfreezeV2Size = new AvailableUnfreezeV2Size();
+  private static final AvailableUnfreezeV2Size availableUnfreezeV2Size =
+      new AvailableUnfreezeV2Size();
   private static final UnfreezableBalanceV2 unfreezableBalanceV2 = new UnfreezableBalanceV2();
-  private static final ExpireUnfreezeBalanceV2 expireUnfreezeBalanceV2 = new ExpireUnfreezeBalanceV2();
+  private static final ExpireUnfreezeBalanceV2 expireUnfreezeBalanceV2 =
+      new ExpireUnfreezeBalanceV2();
   private static final DelegatableResource delegatableResource = new DelegatableResource();
   private static final ResourceV2 resourceV2 = new ResourceV2();
-  private static final CheckUnDelegateResource checkUnDelegateResource = new CheckUnDelegateResource();
+  private static final CheckUnDelegateResource checkUnDelegateResource =
+      new CheckUnDelegateResource();
   private static final ResourceUsage resourceUsage = new ResourceUsage();
   private static final TotalResource totalResource = new TotalResource();
   private static final TotalDelegatedResource totalDelegatedResource = new TotalDelegatedResource();
@@ -558,11 +561,9 @@ public class PrecompiledContracts {
    * a length word that still fits inside {@code words}. Sister check to
    * {@link #isValidAbiEncoding} for ABIs whose items are not uniform width.
    */
-  private static boolean isValidArrayOffset(DataWord[] words, int offsetWordIndex,
-      int headWords) {
+  private static boolean isValidArrayOffset(DataWord[] words, int offsetWordIndex, int headWords) {
     long offsetBytes = words[offsetWordIndex].longValueSafe();
-    if (offsetBytes < (long) headWords * WORD_SIZE
-        || offsetBytes % WORD_SIZE != 0) {
+    if (offsetBytes < (long) headWords * WORD_SIZE || offsetBytes % WORD_SIZE != 0) {
       return false;
     }
     long lengthWordIdx = offsetBytes / WORD_SIZE;
@@ -846,7 +847,6 @@ public class PrecompiledContracts {
       int expLen = parseLen(data, 1);
       int modLen = parseLen(data, 2);
 
-
       byte[] expHighBytes = parseBytes(data, addSafely(ARGS_OFFSET, baseLen), min(expLen, 32,
           VMConfig.disableJavaLangMath()));
 
@@ -948,8 +948,7 @@ public class PrecompiledContracts {
      * TIP-7883: ModExp gas cost increase.
      * New pricing formula with higher minimum cost and no divisor.
      */
-    private long getEnergyTIP7883(int baseLen, int modLen,
-                                  byte[] expHighBytes, int expLen) {
+    private long getEnergyTIP7883(int baseLen, int modLen, byte[] expHighBytes, int expLen) {
       long multComplexity = getMultComplexityTIP7883(baseLen, modLen);
       long iterCount = getIterationCountTIP7883(expHighBytes, expLen);
 
@@ -1329,7 +1328,7 @@ public class PrecompiledContracts {
       try {
         return doExecute(data);
       } catch (Throwable t) {
-        if (t instanceof InterruptedException){
+        if (t instanceof InterruptedException) {
           Thread.currentThread().interrupt();
         }
         return Pair.of(true, new byte[WORD_SIZE]);
@@ -1424,8 +1423,6 @@ public class PrecompiledContracts {
       private byte[] addr;
       private int nonce;
     }
-
-
   }
 
   public abstract static class VerifyProof extends PrecompiledContract {
@@ -2634,6 +2631,7 @@ public class PrecompiledContracts {
 
   /**
    * 0x17 BatchValidateFnDsa512 — independent per-element Falcon-512 verify.
+   *
    * <p>Returns a 256-bit bitmap (matching 0x09) where bit {@code i} is set iff
    * {@code derive(pk_i) == expectedAddr_i} AND {@code FNDSA512.verify(pk_i, hash, sig_i)}.
    *
@@ -2766,10 +2764,8 @@ public class PrecompiledContracts {
       return Pair.of(true, res);
     }
 
-    private static boolean verifyOne(byte[] sig, byte[] pk, byte[] hash,
-                                     byte[] expectedAddr) {
-      if (pk == null || pk.length != PK_LEN
-          || sig == null || sig.length != SIG_SLOT_LEN) {
+    private static boolean verifyOne(byte[] sig, byte[] pk, byte[] hash, byte[] expectedAddr) {
+      if (pk == null || pk.length != PK_LEN || sig == null || sig.length != SIG_SLOT_LEN) {
         return false;
       }
       // The slot is the EIP-8052 headerless body; rebuild the BC-headered sig.
@@ -2801,8 +2797,7 @@ public class PrecompiledContracts {
       @Override
       public PqVerifyResult call() {
         try {
-          return new PqVerifyResult(
-              verifyOne(signature, publicKey, hash, expectedAddr), nonce);
+          return new PqVerifyResult(verifyOne(signature, publicKey, hash, expectedAddr), nonce);
         } finally {
           countDownLatch.countDown();
         }
@@ -3199,10 +3194,8 @@ public class PrecompiledContracts {
       return Pair.of(true, res);
     }
 
-    private static boolean verifyOne(byte[] sig, byte[] pk, byte[] hash,
-                                     byte[] expectedAddr) {
-      if (pk == null || pk.length != PK_LEN
-          || sig == null || sig.length != SIG_LEN) {
+    private static boolean verifyOne(byte[] sig, byte[] pk, byte[] hash, byte[] expectedAddr) {
+      if (pk == null || pk.length != PK_LEN || sig == null || sig.length != SIG_LEN) {
         return false;
       }
       try {
@@ -3229,8 +3222,7 @@ public class PrecompiledContracts {
       @Override
       public PqVerifyResult call() {
         try {
-          return new PqVerifyResult(
-              verifyOne(signature, publicKey, hash, expectedAddr), nonce);
+          return new PqVerifyResult(verifyOne(signature, publicKey, hash, expectedAddr), nonce);
         } finally {
           countDownLatch.countDown();
         }

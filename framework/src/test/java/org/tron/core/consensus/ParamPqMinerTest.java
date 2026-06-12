@@ -35,8 +35,7 @@ public class ParamPqMinerTest {
   }
 
   private static Miner newEcdsaMiner() {
-    return Param.getInstance().new Miner(
-        new byte[] {1, 2, 3}, ECDSA_KEY_ADDR, ECDSA_WITNESS_ADDR);
+    return Param.getInstance().new Miner(new byte[] {1, 2, 3}, ECDSA_KEY_ADDR, ECDSA_WITNESS_ADDR);
   }
 
   @Test

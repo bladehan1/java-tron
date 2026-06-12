@@ -98,8 +98,7 @@ public class RelayService {
         "Fast forward config, isWitness: {}, keySize: {}, pqKeySize: {}, fastForwardNodes: {}",
         parameter.isWitness(), keySize, pqKeySize, fastForwardNodes.size());
 
-    if (!parameter.isWitness() || (keySize == 0 && pqKeySize == 0)
-        || fastForwardNodes.isEmpty()) {
+    if (!parameter.isWitness() || (keySize == 0 && pqKeySize == 0) || fastForwardNodes.isEmpty()) {
       return;
     }
 
@@ -125,8 +124,7 @@ public class RelayService {
    * Whether the channel's remote peer is in {@code node.fastForward.nodes}.
    */
   public boolean isFastForwardPeer(Channel channel) {
-    if (fastForwardNodes.isEmpty() || channel == null
-        || channel.getInetAddress() == null) {
+    if (fastForwardNodes.isEmpty() || channel == null || channel.getInetAddress() == null) {
       return false;
     }
     for (InetSocketAddress ff : fastForwardNodes) {

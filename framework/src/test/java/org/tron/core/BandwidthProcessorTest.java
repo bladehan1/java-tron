@@ -916,17 +916,14 @@ public class BandwidthProcessorTest extends BaseTest {
 
     TransactionCapsule baseTrx = new TransactionCapsule(contract,
         chainBaseManager.getAccountStore());
-    Transaction withAuth = baseTrx.getInstance().toBuilder()
-        .addPqAuthSig(pqAuthSig)
-        .build();
+    Transaction withAuth = baseTrx.getInstance().toBuilder().addPqAuthSig(pqAuthSig).build();
     TransactionCapsule trx = new TransactionCapsule(withAuth);
     TransactionTrace trace = new TransactionTrace(trx, StoreFactory.getInstance(),
         new RuntimeImpl());
 
     long cap = chainBaseManager.getDynamicPropertiesStore().getMaxCreateAccountTxSize();
     long rawSize = trx.getInstance().toBuilder().clearRet().build().getSerializedSize();
-    Assert.assertTrue("test precondition: raw tx must exceed cap with pq_auth_sig",
-        rawSize > cap);
+    Assert.assertTrue("test precondition: raw tx must exceed cap with pq_auth_sig", rawSize > cap);
 
     BandwidthProcessor processor = new BandwidthProcessor(chainBaseManager);
     try {
@@ -978,9 +975,7 @@ public class BandwidthProcessorTest extends BaseTest {
 
     TransactionCapsule baseTrx = new TransactionCapsule(contract,
         chainBaseManager.getAccountStore());
-    Transaction withAuth = baseTrx.getInstance().toBuilder()
-        .addPqAuthSig(pqAuthSig)
-        .build();
+    Transaction withAuth = baseTrx.getInstance().toBuilder().addPqAuthSig(pqAuthSig).build();
     TransactionCapsule trx = new TransactionCapsule(withAuth);
     TransactionTrace trace = new TransactionTrace(trx, StoreFactory.getInstance(),
         new RuntimeImpl());

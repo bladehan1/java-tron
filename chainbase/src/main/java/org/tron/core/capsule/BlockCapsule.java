@@ -202,8 +202,7 @@ public class BlockCapsule implements ProtoCapsule<Block> {
   public boolean validateSignature(DynamicPropertiesStore dynamicPropertiesStore,
       AccountStore accountStore) throws ValidateSignatureException {
     BlockHeader header = block.getBlockHeader();
-    byte[] witnessAccountAddress = header.getRawData().getWitnessAddress()
-        .toByteArray();
+    byte[] witnessAccountAddress = header.getRawData().getWitnessAddress().toByteArray();
 
     byte[] witnessPermissionAddress;
     if (dynamicPropertiesStore.getAllowMultiSign() != 1) {
@@ -265,12 +264,10 @@ public class BlockCapsule implements ProtoCapsule<Block> {
      */
     PQScheme scheme = pqAuthSig.getScheme();
     if (!PQSchemeRegistry.contains(scheme)) {
-      throw new ValidateSignatureException(
-          "pq_auth_sig scheme " + scheme + " is not registered");
+      throw new ValidateSignatureException("pq_auth_sig scheme " + scheme + " is not registered");
     }
     if (!dynamicPropertiesStore.isPqSchemeAllowed(scheme)) {
-      throw new ValidateSignatureException(
-          "pq_auth_sig scheme " + scheme + " is not activated");
+      throw new ValidateSignatureException("pq_auth_sig scheme " + scheme + " is not activated");
     }
 
     byte[] publicKey = pqAuthSig.getPublicKey().toByteArray();
