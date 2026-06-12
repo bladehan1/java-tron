@@ -73,10 +73,8 @@ import org.tron.protos.contract.SmartContractOuterClass.TriggerSmartContract;
  */
 public class PQTxSender {
 
-  private static final String HOST =
-      System.getProperty("pqc.host", "localhost");
-  private static final int PORT =
-      Integer.parseInt(System.getProperty("pqc.port", "50051"));
+  private static final String HOST = System.getProperty("pqc.host", "localhost");
+  private static final int PORT = Integer.parseInt(System.getProperty("pqc.port", "50051"));
 
   /**
    * Recipient of the demo transfer.
@@ -180,10 +178,7 @@ public class PQTxSender {
     System.out.println("ECDSA TRC20 TPS:      " + ecdsaTrc20Tps);
 
     // ── 2. Connect via gRPC ───────────────────────────────────────────────
-    ManagedChannel channel = ManagedChannelBuilder
-        .forAddress(HOST, PORT)
-        .usePlaintext()
-        .build();
+    ManagedChannel channel = ManagedChannelBuilder.forAddress(HOST, PORT).usePlaintext().build();
     WalletBlockingStub stub = WalletGrpc.newBlockingStub(channel);
 
     try {
@@ -421,9 +416,7 @@ public class PQTxSender {
 
   private static Transaction signWithEcdsa(Transaction tx, ECKey ecdsaKey, byte[] txId) {
     ECDSASignature signature = ecdsaKey.sign(txId);
-    return tx.toBuilder()
-        .addSignature(ByteString.copyFrom(signature.toByteArray()))
-        .build();
+    return tx.toBuilder().addSignature(ByteString.copyFrom(signature.toByteArray())).build();
   }
 
   private static Transaction buildTransferTransaction(byte[] ownerAddr, byte[] blockHash,

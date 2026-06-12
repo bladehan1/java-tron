@@ -300,10 +300,8 @@ public class FNDSA512Test {
   public void registryDispatchMatchesDirectCalls() {
     byte[] msg = "registry-dispatch".getBytes();
     byte[] sigDirect = FNDSA512.sign(sk.getEncoded(), msg);
-    assertTrue(PQSchemeRegistry.verify(
-        PQScheme.FN_DSA_512, pk.getH(), msg, sigDirect));
-    byte[] sigViaRegistry = PQSchemeRegistry.sign(
-        PQScheme.FN_DSA_512, sk.getEncoded(), msg);
+    assertTrue(PQSchemeRegistry.verify(PQScheme.FN_DSA_512, pk.getH(), msg, sigDirect));
+    byte[] sigViaRegistry = PQSchemeRegistry.sign(PQScheme.FN_DSA_512, sk.getEncoded(), msg);
     assertTrue(FNDSA512.verify(pk.getH(), msg, sigViaRegistry));
     assertEquals(FNDSA512.PUBLIC_KEY_LENGTH,
         PQSchemeRegistry.getPublicKeyLength(PQScheme.FN_DSA_512));
@@ -378,8 +376,7 @@ public class FNDSA512Test {
 
   @Test
   public void keypairConstructorRejectsMismatchedHalves() {
-    FalconPublicKeyParameters strangerPk =
-        (FalconPublicKeyParameters) freshKeyPair().getPublic();
+    FalconPublicKeyParameters strangerPk = (FalconPublicKeyParameters) freshKeyPair().getPublic();
     try {
       new FNDSA512(sk.getEncoded(), strangerPk.getH());
       fail("mismatched private/public key pair must be rejected");

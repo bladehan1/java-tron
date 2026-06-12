@@ -175,8 +175,7 @@ public class ProposalServiceTest extends BaseTest {
     dbManager.getDynamicPropertiesStore().saveAllowMlDsa44(0L);
     Assert.assertFalse(dbManager.getDynamicPropertiesStore().allowMlDsa44());
 
-    Proposal proposal = Proposal.newBuilder()
-        .putParameters(ALLOW_ML_DSA_44.getCode(), 1L).build();
+    Proposal proposal = Proposal.newBuilder().putParameters(ALLOW_ML_DSA_44.getCode(), 1L).build();
     ProposalCapsule proposalCapsule = new ProposalCapsule(proposal);
     boolean result = ProposalService.process(dbManager, proposalCapsule);
     Assert.assertTrue(result);

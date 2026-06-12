@@ -70,12 +70,10 @@ public final class MLDSA44 implements PQSignature {
 
   public MLDSA44(byte[] privateKey, byte[] publicKey) {
     if (privateKey == null || privateKey.length != PRIVATE_KEY_LENGTH) {
-      throw new IllegalArgumentException(
-          "ML-DSA private key length must be " + PRIVATE_KEY_LENGTH);
+      throw new IllegalArgumentException("ML-DSA private key length must be " + PRIVATE_KEY_LENGTH);
     }
     if (publicKey == null || publicKey.length != PUBLIC_KEY_LENGTH) {
-      throw new IllegalArgumentException(
-          "ML-DSA public key length must be " + PUBLIC_KEY_LENGTH);
+      throw new IllegalArgumentException("ML-DSA public key length must be " + PUBLIC_KEY_LENGTH);
     }
     requireConsistent(privateKey, publicKey);
     this.privateKey = privateKey.clone();
@@ -130,12 +128,10 @@ public final class MLDSA44 implements PQSignature {
 
   public static boolean verify(byte[] publicKey, byte[] message, byte[] signature) {
     if (publicKey == null || publicKey.length != PUBLIC_KEY_LENGTH) {
-      throw new IllegalArgumentException(
-          "ML-DSA public key length must be " + PUBLIC_KEY_LENGTH);
+      throw new IllegalArgumentException("ML-DSA public key length must be " + PUBLIC_KEY_LENGTH);
     }
     if (signature == null || signature.length != SIGNATURE_LENGTH) {
-      throw new IllegalArgumentException(
-          "ML-DSA signature length must be " + SIGNATURE_LENGTH);
+      throw new IllegalArgumentException("ML-DSA signature length must be " + SIGNATURE_LENGTH);
     }
     if (message == null) {
       throw new IllegalArgumentException("message must not be null");
@@ -153,8 +149,7 @@ public final class MLDSA44 implements PQSignature {
 
   public static byte[] sign(byte[] privateKey, byte[] message) {
     if (privateKey == null || privateKey.length != PRIVATE_KEY_LENGTH) {
-      throw new IllegalArgumentException(
-          "ML-DSA private key length must be " + PRIVATE_KEY_LENGTH);
+      throw new IllegalArgumentException("ML-DSA private key length must be " + PRIVATE_KEY_LENGTH);
     }
     if (message == null) {
       throw new IllegalArgumentException("message must not be null");
@@ -179,8 +174,7 @@ public final class MLDSA44 implements PQSignature {
    */
   public static byte[] derivePublicKey(byte[] privateKey) {
     if (privateKey == null || privateKey.length != PRIVATE_KEY_LENGTH) {
-      throw new IllegalArgumentException(
-          "ML-DSA private key length must be " + PRIVATE_KEY_LENGTH);
+      throw new IllegalArgumentException("ML-DSA private key length must be " + PRIVATE_KEY_LENGTH);
     }
     MLDSAPrivateKeyParameters sk = new MLDSAPrivateKeyParameters(PARAMS, privateKey);
     return sk.getPublicKey();

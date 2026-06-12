@@ -491,8 +491,7 @@ public class TransactionUtilTest extends BaseTest {
     assertEquals(65, validSig.size());
 
     // Pad the 65-byte signature with trailing junk bytes.
-    ByteString oversized = validSig.concat(
-        ByteString.copyFrom(new byte[] {1, 2, 3, 4, 5}));
+    ByteString oversized = validSig.concat(ByteString.copyFrom(new byte[] {1, 2, 3, 4, 5}));
     assertEquals(70, oversized.size());
 
     TransactionSignWeight reply = transactionUtil.getTransactionSignWeight(
@@ -538,8 +537,7 @@ public class TransactionUtilTest extends BaseTest {
       overLimit.addSignature(oneSig);
     }
 
-    TransactionSignWeight reply = transactionUtil.getTransactionSignWeight(
-        overLimit.build());
+    TransactionSignWeight reply = transactionUtil.getTransactionSignWeight(overLimit.build());
     assertEquals(TransactionSignWeight.Result.response_code.OTHER_ERROR,
         reply.getResult().getCode());
     Assert.assertTrue(reply.getResult().getMessage().contains("too many signatures"));

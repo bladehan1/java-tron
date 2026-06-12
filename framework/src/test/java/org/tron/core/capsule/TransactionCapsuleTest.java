@@ -130,10 +130,8 @@ public class TransactionCapsuleTest extends BaseTest {
 
   // --------------------- FN-DSA pq_auth_sig verification (V2) ---------------------
 
-  private static final String PQ_OWNER_HEX =
-      "41abd4b9367799eaa3197fecb144eb71de1e049abc";
-  private static final String PQ_TO_HEX =
-      "41548794500882809695a8a687866e76d4271a1abc";
+  private static final String PQ_OWNER_HEX = "41abd4b9367799eaa3197fecb144eb71de1e049abc";
+  private static final String PQ_TO_HEX = "41548794500882809695a8a687866e76d4271a1abc";
 
   private Transaction buildTransferTx(String ownerHex, int permissionId) {
     TransferContract transfer = TransferContract.newBuilder()
@@ -155,8 +153,7 @@ public class TransactionCapsuleTest extends BaseTest {
    * The signer address is derived from the public key by the scheme's
    * fingerprint hash (see {@link PQSchemeRegistry#computeAddress}).
    */
-  private void putAccountWithPQPermission(
-      String ownerHex, byte[] pqPublicKey, PQScheme scheme) {
+  private void putAccountWithPQPermission(String ownerHex, byte[] pqPublicKey, PQScheme scheme) {
     byte[] addr = ByteArray.fromHexString(ownerHex);
     byte[] signerAddr = PQSchemeRegistry.computeAddress(scheme, pqPublicKey);
     Key pqKey = Key.newBuilder()
@@ -187,8 +184,7 @@ public class TransactionCapsuleTest extends BaseTest {
         .build();
     TransactionCapsule cap = new TransactionCapsule(tx);
     try {
-      cap.validatePubSignature(dbManager.getAccountStore(),
-          dbManager.getDynamicPropertiesStore());
+      cap.validatePubSignature(dbManager.getAccountStore(), dbManager.getDynamicPropertiesStore());
       Assert.fail("should reject pq_auth_sig before activation");
     } catch (ValidateSignatureException e) {
       Assert.assertTrue(e.getMessage().contains("no post-quantum scheme is activated"));
@@ -264,8 +260,7 @@ public class TransactionCapsuleTest extends BaseTest {
 
     TransactionCapsule cap = new TransactionCapsule(signed);
     try {
-      cap.validatePubSignature(dbManager.getAccountStore(),
-          dbManager.getDynamicPropertiesStore());
+      cap.validatePubSignature(dbManager.getAccountStore(), dbManager.getDynamicPropertiesStore());
       Assert.fail("duplicate signer should be rejected");
     } catch (ValidateSignatureException e) {
       Assert.assertTrue(e.getMessage().contains("has signed twice"));
@@ -293,8 +288,7 @@ public class TransactionCapsuleTest extends BaseTest {
         .build();
     TransactionCapsule cap = new TransactionCapsule(signed);
     try {
-      cap.validatePubSignature(dbManager.getAccountStore(),
-          dbManager.getDynamicPropertiesStore());
+      cap.validatePubSignature(dbManager.getAccountStore(), dbManager.getDynamicPropertiesStore());
       Assert.fail("tampered signature should be rejected");
     } catch (ValidateSignatureException e) {
       Assert.assertTrue(e.getMessage().contains("pq sig invalid"));
@@ -323,8 +317,7 @@ public class TransactionCapsuleTest extends BaseTest {
         .build();
     TransactionCapsule cap = new TransactionCapsule(signed);
     try {
-      cap.validatePubSignature(dbManager.getAccountStore(),
-          dbManager.getDynamicPropertiesStore());
+      cap.validatePubSignature(dbManager.getAccountStore(), dbManager.getDynamicPropertiesStore());
       Assert.fail("signer outside permission should be rejected");
     } catch (ValidateSignatureException e) {
       Assert.assertTrue(e.getMessage().contains("not contained of permission"));
@@ -357,10 +350,7 @@ public class TransactionCapsuleTest extends BaseTest {
         .setParameter(Any.pack(trigger))
         .setPermissionId(permissionId)
         .build();
-    raw rawData = raw.newBuilder()
-        .addContract(c)
-        .setFeeLimit(150_000_000L)
-        .build();
+    raw rawData = raw.newBuilder().addContract(c).setFeeLimit(150_000_000L).build();
     return Transaction.newBuilder().setRawData(rawData).build();
   }
 
@@ -468,8 +458,7 @@ public class TransactionCapsuleTest extends BaseTest {
         .build();
     TransactionCapsule cap = new TransactionCapsule(signed);
     try {
-      cap.validatePubSignature(dbManager.getAccountStore(),
-          dbManager.getDynamicPropertiesStore());
+      cap.validatePubSignature(dbManager.getAccountStore(), dbManager.getDynamicPropertiesStore());
       Assert.fail("wrong public key length must be rejected");
     } catch (ValidateSignatureException e) {
       Assert.assertTrue(e.getMessage().contains("public key or signature length mismatch"));
@@ -494,8 +483,7 @@ public class TransactionCapsuleTest extends BaseTest {
         .build();
     TransactionCapsule cap = new TransactionCapsule(signed);
     try {
-      cap.validatePubSignature(dbManager.getAccountStore(),
-          dbManager.getDynamicPropertiesStore());
+      cap.validatePubSignature(dbManager.getAccountStore(), dbManager.getDynamicPropertiesStore());
       Assert.fail("wrong signature length must be rejected");
     } catch (ValidateSignatureException e) {
       Assert.assertTrue(e.getMessage().contains("public key or signature length mismatch"));
@@ -523,8 +511,7 @@ public class TransactionCapsuleTest extends BaseTest {
         .build();
     TransactionCapsule cap = new TransactionCapsule(signed);
     try {
-      cap.validatePubSignature(dbManager.getAccountStore(),
-          dbManager.getDynamicPropertiesStore());
+      cap.validatePubSignature(dbManager.getAccountStore(), dbManager.getDynamicPropertiesStore());
       Assert.fail("unsupported scheme must be rejected");
     } catch (ValidateSignatureException e) {
       Assert.assertTrue(e.getMessage().contains("unsupported pq scheme"));
@@ -536,8 +523,7 @@ public class TransactionCapsuleTest extends BaseTest {
     Transaction tx = buildTransferTx(PQ_OWNER_HEX, 0);
     TransactionCapsule cap = new TransactionCapsule(tx);
     try {
-      cap.validatePubSignature(dbManager.getAccountStore(),
-          dbManager.getDynamicPropertiesStore());
+      cap.validatePubSignature(dbManager.getAccountStore(), dbManager.getDynamicPropertiesStore());
       Assert.fail("transaction with no signatures must be rejected");
     } catch (ValidateSignatureException e) {
       Assert.assertTrue(e.getMessage().contains("miss sig"));
@@ -562,8 +548,7 @@ public class TransactionCapsuleTest extends BaseTest {
         .build();
     TransactionCapsule cap = new TransactionCapsule(tx);
     try {
-      cap.validatePubSignature(dbManager.getAccountStore(),
-          dbManager.getDynamicPropertiesStore());
+      cap.validatePubSignature(dbManager.getAccountStore(), dbManager.getDynamicPropertiesStore());
       Assert.fail("transaction with no contracts must be rejected");
     } catch (ValidateSignatureException e) {
       Assert.assertTrue(e.getMessage().contains("miss sig or contract"));
@@ -630,8 +615,7 @@ public class TransactionCapsuleTest extends BaseTest {
         .build();
     TransactionCapsule cap = new TransactionCapsule(signed);
     try {
-      cap.validatePubSignature(dbManager.getAccountStore(),
-          dbManager.getDynamicPropertiesStore());
+      cap.validatePubSignature(dbManager.getAccountStore(), dbManager.getDynamicPropertiesStore());
       Assert.fail("FN-DSA must be rejected when ALLOW_FN_DSA_512 is 0");
     } catch (ValidateSignatureException expected) {
       Assert.assertTrue(expected.getMessage().contains("no post-quantum scheme is activated"));
@@ -646,9 +630,7 @@ public class TransactionCapsuleTest extends BaseTest {
     Transaction tx = buildTransferTx(PQ_OWNER_HEX, 0);
     ECKey key = new ECKey();
     byte[] sig = key.sign(txId(tx)).toByteArray();
-    Transaction signed = tx.toBuilder()
-        .addSignature(ByteString.copyFrom(sig))
-        .build();
+    Transaction signed = tx.toBuilder().addSignature(ByteString.copyFrom(sig)).build();
 
     String rendered = new TransactionCapsule(signed).toString();
     Assert.assertTrue(rendered.contains("contract list:{"));
@@ -659,9 +641,7 @@ public class TransactionCapsuleTest extends BaseTest {
 
   @Test
   public void toStringRendersEmptyContractList() {
-    Transaction empty = Transaction.newBuilder()
-        .setRawData(raw.newBuilder().build())
-        .build();
+    Transaction empty = Transaction.newBuilder().setRawData(raw.newBuilder().build()).build();
     String rendered = new TransactionCapsule(empty).toString();
     Assert.assertTrue(rendered.contains("contract list is empty"));
   }

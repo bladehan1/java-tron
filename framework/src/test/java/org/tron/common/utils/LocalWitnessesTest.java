@@ -37,8 +37,7 @@ public class LocalWitnessesTest {
   @Test
   public void fnDsa512AcceptsValidKeypair() {
     LocalWitnesses lw = new LocalWitnesses();
-    lw.setPqKeypairs(Collections.singletonList(
-        new PqKeypair(PQScheme.FN_DSA_512, priv, pub)));
+    lw.setPqKeypairs(Collections.singletonList(new PqKeypair(PQScheme.FN_DSA_512, priv, pub)));
     assertEquals(1, lw.getPqKeypairs().size());
     assertEquals(PQScheme.FN_DSA_512, lw.getPqKeypairs().get(0).getScheme());
   }

@@ -49,8 +49,7 @@ public class PQFullNode {
   /** P2P listen port (different from PQWitnessNode). */
   static final int P2P_PORT = 18889;
 
-  private static final String WITNESS_HOST =
-      System.getProperty("pqc.witness.host", "127.0.0.1");
+  private static final String WITNESS_HOST = System.getProperty("pqc.witness.host", "127.0.0.1");
   private static final int WITNESS_P2P_PORT = Integer.parseInt(
       System.getProperty("pqc.witness.p2p.port", String.valueOf(PQWitnessNode.P2P_PORT)));
 
@@ -86,8 +85,7 @@ public class PQFullNode {
     File dbDir = Files.createTempDirectory("pqc-fullnode-").toFile();
     dbDir.deleteOnExit();
 
-    Args.setParam(new String[]{"--output-directory", dbDir.getAbsolutePath()},
-        "config-test.conf");
+    Args.setParam(new String[]{"--output-directory", dbDir.getAbsolutePath()}, "config-test.conf");
     Args.getInstance().setRpcEnable(true);
     Args.getInstance().setFullNodeHttpEnable(true);
     Args.getInstance().setFullNodeHttpPort(HTTP_PORT);

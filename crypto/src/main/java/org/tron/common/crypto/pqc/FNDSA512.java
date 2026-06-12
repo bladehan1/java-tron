@@ -115,12 +115,10 @@ public final class FNDSA512 implements PQSignature {
 
   public FNDSA512(byte[] privateKey, byte[] publicKey) {
     if (privateKey == null || privateKey.length != PRIVATE_KEY_LENGTH) {
-      throw new IllegalArgumentException(
-          "FN-DSA private key length must be " + PRIVATE_KEY_LENGTH);
+      throw new IllegalArgumentException("FN-DSA private key length must be " + PRIVATE_KEY_LENGTH);
     }
     if (publicKey == null || publicKey.length != PUBLIC_KEY_LENGTH) {
-      throw new IllegalArgumentException(
-          "FN-DSA public key length must be " + PUBLIC_KEY_LENGTH);
+      throw new IllegalArgumentException("FN-DSA public key length must be " + PUBLIC_KEY_LENGTH);
     }
     requireConsistent(privateKey, publicKey);
     this.privateKey = privateKey.clone();
@@ -219,8 +217,7 @@ public final class FNDSA512 implements PQSignature {
 
   public static boolean verify(byte[] publicKey, byte[] message, byte[] signature) {
     if (publicKey == null || publicKey.length != PUBLIC_KEY_LENGTH) {
-      throw new IllegalArgumentException(
-          "FN-DSA public key length must be " + PUBLIC_KEY_LENGTH);
+      throw new IllegalArgumentException("FN-DSA public key length must be " + PUBLIC_KEY_LENGTH);
     }
     if (signature == null
         || signature.length < SIGNATURE_MIN_LENGTH

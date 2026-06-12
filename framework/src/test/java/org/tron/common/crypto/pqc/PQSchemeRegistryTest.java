@@ -56,10 +56,8 @@ public class PQSchemeRegistryTest {
 
   @Test
   public void getSeedLengthReturnsRegisteredValue() {
-    assertEquals(FNDSA512.SEED_LENGTH,
-        PQSchemeRegistry.getSeedLength(PQScheme.FN_DSA_512));
-    assertEquals(MLDSA44.SEED_LENGTH,
-        PQSchemeRegistry.getSeedLength(PQScheme.ML_DSA_44));
+    assertEquals(FNDSA512.SEED_LENGTH, PQSchemeRegistry.getSeedLength(PQScheme.FN_DSA_512));
+    assertEquals(MLDSA44.SEED_LENGTH, PQSchemeRegistry.getSeedLength(PQScheme.ML_DSA_44));
   }
 
   @Test
@@ -121,8 +119,7 @@ public class PQSchemeRegistryTest {
   @Test
   public void deriveHashRejectsWrongLengthPublicKey() {
     try {
-      PQSchemeRegistry.deriveHash(
-          PQScheme.FN_DSA_512, new byte[FNDSA512.PUBLIC_KEY_LENGTH - 1]);
+      PQSchemeRegistry.deriveHash(PQScheme.FN_DSA_512, new byte[FNDSA512.PUBLIC_KEY_LENGTH - 1]);
       fail("short public key must be rejected");
     } catch (IllegalArgumentException expected) {
       assertTrue(expected.getMessage().contains("public key length"));
@@ -161,10 +158,8 @@ public class PQSchemeRegistryTest {
 
   @Test
   public void resolveIsPassThrough() {
-    assertEquals(PQScheme.FN_DSA_512,
-        PQSchemeRegistry.resolve(PQScheme.FN_DSA_512));
-    assertEquals(PQScheme.UNKNOWN_PQ_SCHEME,
-        PQSchemeRegistry.resolve(PQScheme.UNKNOWN_PQ_SCHEME));
+    assertEquals(PQScheme.FN_DSA_512, PQSchemeRegistry.resolve(PQScheme.FN_DSA_512));
+    assertEquals(PQScheme.UNKNOWN_PQ_SCHEME, PQSchemeRegistry.resolve(PQScheme.UNKNOWN_PQ_SCHEME));
     assertTrue(PQSchemeRegistry.resolve(null) == null);
   }
 

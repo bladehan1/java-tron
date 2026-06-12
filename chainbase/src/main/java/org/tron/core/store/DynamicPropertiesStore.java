@@ -3144,12 +3144,9 @@ public class DynamicPropertiesStore extends TronStoreWithRevoking<BytesCapsule> 
       return false;
     }
     switch (scheme) {
-      case FN_DSA_512:
-        return allowFnDsa512();
-      case ML_DSA_44:
-        return allowMlDsa44();
-      default:
-        return false;
+      case FN_DSA_512: return allowFnDsa512();
+      case ML_DSA_44: return allowMlDsa44();
+      default: return false;
     }
   }
 

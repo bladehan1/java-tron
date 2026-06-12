@@ -265,8 +265,7 @@ public final class PQSchemeRegistry {
    * scheme; cryptographic consistency between the two halves is the caller's
    * responsibility.
    */
-  public static PQSignature fromKeypair(
-      PQScheme scheme, byte[] privateKey, byte[] publicKey) {
+  public static PQSignature fromKeypair(PQScheme scheme, byte[] privateKey, byte[] publicKey) {
     return require(scheme).ops.fromKeypair(privateKey, publicKey);
   }
 
@@ -322,13 +321,11 @@ public final class PQSchemeRegistry {
       throw new IllegalArgumentException("scheme must not be null");
     }
     if (scheme == PQScheme.UNKNOWN_PQ_SCHEME) {
-      throw new IllegalArgumentException(
-          "no PQSignature registered for scheme: " + scheme);
+      throw new IllegalArgumentException("no PQSignature registered for scheme: " + scheme);
     }
     SchemeInfo info = SCHEMES.get(scheme);
     if (info == null) {
-      throw new IllegalArgumentException(
-          "no PQSignature registered for scheme: " + scheme);
+      throw new IllegalArgumentException("no PQSignature registered for scheme: " + scheme);
     }
     return info;
   }

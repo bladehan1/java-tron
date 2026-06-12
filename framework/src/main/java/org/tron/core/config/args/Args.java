@@ -938,8 +938,7 @@ public class Args extends CommonParameter {
     // the legacy override for the ECDSA side.
     LocalWitnesses pqWitnesses = null;
     if (hasPqKeys) {
-      pqWitnesses = buildPqWitnesses(
-          lwConfig.getPqEntries(), lwConfig.getPqAccountAddress());
+      pqWitnesses = buildPqWitnesses(lwConfig.getPqEntries(), lwConfig.getPqAccountAddress());
     }
 
     if (ecdsaWitnesses == null && pqWitnesses == null) {
@@ -958,8 +957,7 @@ public class Args extends CommonParameter {
       merged.initWitnessAccountAddress(
           ecdsaWitnesses.getWitnessAccountAddress(),
           PARAMETER.isECKeyCryptoEngine());
-      merged.initPqWitnessAccountAddress(
-          pqWitnesses.getPqWitnessAccountAddress());
+      merged.initPqWitnessAccountAddress(pqWitnesses.getPqWitnessAccountAddress());
       localWitnesses = merged;
     } else if (ecdsaWitnesses != null) {
       localWitnesses = ecdsaWitnesses;

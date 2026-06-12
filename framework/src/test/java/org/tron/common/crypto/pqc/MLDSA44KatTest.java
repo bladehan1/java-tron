@@ -105,10 +105,8 @@ public class MLDSA44KatTest {
   public void allVectorsDeriveExpectedPublicAndPrivateKey() {
     for (KatVector v : VECTORS) {
       MLDSA44 k = new MLDSA44(v.seed);
-      assertEquals(v.label + ": pk length",
-          MLDSA44.PUBLIC_KEY_LENGTH, k.getPublicKey().length);
-      assertEquals(v.label + ": sk length",
-          MLDSA44.PRIVATE_KEY_LENGTH, k.getPrivateKey().length);
+      assertEquals(v.label + ": pk length", MLDSA44.PUBLIC_KEY_LENGTH, k.getPublicKey().length);
+      assertEquals(v.label + ": sk length", MLDSA44.PRIVATE_KEY_LENGTH, k.getPrivateKey().length);
       assertEquals(v.label + ": pk SHA-256 must match KAT vector",
           v.pkSha256, hex(sha256(k.getPublicKey())));
       assertEquals(v.label + ": sk SHA-256 must match KAT vector",
@@ -121,13 +119,10 @@ public class MLDSA44KatTest {
     for (KatVector v : VECTORS) {
       MLDSA44 k = new MLDSA44(v.seed);
       byte[] addr = k.getAddress();
-      assertEquals(v.label + ": address length",
-          21, addr.length);
+      assertEquals(v.label + ": address length", 21, addr.length);
 
-      byte[] viaRegistry =
-          PQSchemeRegistry.computeAddress(PQScheme.ML_DSA_44, k.getPublicKey());
-      assertArrayEquals(v.label + ": registry dispatch must match instance",
-          addr, viaRegistry);
+      byte[] viaRegistry = PQSchemeRegistry.computeAddress(PQScheme.ML_DSA_44, k.getPublicKey());
+      assertArrayEquals(v.label + ": registry dispatch must match instance", addr, viaRegistry);
     }
   }
 
@@ -166,22 +161,15 @@ public class MLDSA44KatTest {
       skDigests.add(v.skSha256);
       addresses.add(hex(new MLDSA44(v.seed).getAddress()));
     }
-    assertEquals("KAT pk digests must be pairwise distinct",
-        VECTORS.length, pkDigests.size());
-    assertEquals("KAT sk digests must be pairwise distinct",
-        VECTORS.length, skDigests.size());
-    assertEquals("KAT addresses must be pairwise distinct",
-        VECTORS.length, addresses.size());
+    assertEquals("KAT pk digests must be pairwise distinct", VECTORS.length, pkDigests.size());
+    assertEquals("KAT sk digests must be pairwise distinct", VECTORS.length, skDigests.size());
+    assertEquals("KAT addresses must be pairwise distinct", VECTORS.length, addresses.size());
   }
 
   @Test
   public void signaturesFromKatKeysVerifyUnderTheirOwnPublicKey() {
     byte[][] messages = {
-        new byte[0],
-        "x".getBytes(),
-        "tron-ml-dsa-kat-message".getBytes(),
-        new byte[1024],
-    };
+        new byte[0], "x".getBytes(), "tron-ml-dsa-kat-message".getBytes(), new byte[1024]};
     for (KatVector v : VECTORS) {
       MLDSA44 k = new MLDSA44(v.seed);
       for (byte[] msg : messages) {

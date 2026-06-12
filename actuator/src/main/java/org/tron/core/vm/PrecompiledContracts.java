@@ -558,11 +558,9 @@ public class PrecompiledContracts {
    * a length word that still fits inside {@code words}. Sister check to
    * {@link #isValidAbiEncoding} for ABIs whose items are not uniform width.
    */
-  private static boolean isValidArrayOffset(DataWord[] words, int offsetWordIndex,
-      int headWords) {
+  private static boolean isValidArrayOffset(DataWord[] words, int offsetWordIndex, int headWords) {
     long offsetBytes = words[offsetWordIndex].longValueSafe();
-    if (offsetBytes < (long) headWords * WORD_SIZE
-        || offsetBytes % WORD_SIZE != 0) {
+    if (offsetBytes < (long) headWords * WORD_SIZE || offsetBytes % WORD_SIZE != 0) {
       return false;
     }
     long lengthWordIdx = offsetBytes / WORD_SIZE;
@@ -2766,10 +2764,8 @@ public class PrecompiledContracts {
       return Pair.of(true, res);
     }
 
-    private static boolean verifyOne(byte[] sig, byte[] pk, byte[] hash,
-                                     byte[] expectedAddr) {
-      if (pk == null || pk.length != PK_LEN
-          || sig == null || sig.length != SIG_SLOT_LEN) {
+    private static boolean verifyOne(byte[] sig, byte[] pk, byte[] hash, byte[] expectedAddr) {
+      if (pk == null || pk.length != PK_LEN || sig == null || sig.length != SIG_SLOT_LEN) {
         return false;
       }
       // The slot is the EIP-8052 headerless body; rebuild the BC-headered sig.
@@ -2801,8 +2797,7 @@ public class PrecompiledContracts {
       @Override
       public PqVerifyResult call() {
         try {
-          return new PqVerifyResult(
-              verifyOne(signature, publicKey, hash, expectedAddr), nonce);
+          return new PqVerifyResult(verifyOne(signature, publicKey, hash, expectedAddr), nonce);
         } finally {
           countDownLatch.countDown();
         }
@@ -3199,10 +3194,8 @@ public class PrecompiledContracts {
       return Pair.of(true, res);
     }
 
-    private static boolean verifyOne(byte[] sig, byte[] pk, byte[] hash,
-                                     byte[] expectedAddr) {
-      if (pk == null || pk.length != PK_LEN
-          || sig == null || sig.length != SIG_LEN) {
+    private static boolean verifyOne(byte[] sig, byte[] pk, byte[] hash, byte[] expectedAddr) {
+      if (pk == null || pk.length != PK_LEN || sig == null || sig.length != SIG_LEN) {
         return false;
       }
       try {
@@ -3229,8 +3222,7 @@ public class PrecompiledContracts {
       @Override
       public PqVerifyResult call() {
         try {
-          return new PqVerifyResult(
-              verifyOne(signature, publicKey, hash, expectedAddr), nonce);
+          return new PqVerifyResult(verifyOne(signature, publicKey, hash, expectedAddr), nonce);
         } finally {
           countDownLatch.countDown();
         }

@@ -214,20 +214,16 @@ public class UtilTest extends BaseTest {
         .build();
 
     String json = Util.printTransactionToJSON(original, false).toJSONString();
-    Assert.assertTrue("JSON output should contain pq_auth_sig field",
-        json.contains("pq_auth_sig"));
+    Assert.assertTrue("JSON output should contain pq_auth_sig field", json.contains("pq_auth_sig"));
 
     Transaction.Builder rebuilt = Transaction.newBuilder();
     JsonFormat.merge(json, rebuilt, false);
     Transaction decoded = rebuilt.build();
 
     Assert.assertEquals(1, decoded.getPqAuthSigCount());
-    Assert.assertEquals(pqAuthSig.getScheme(),
-        decoded.getPqAuthSig(0).getScheme());
-    Assert.assertEquals(pqAuthSig.getPublicKey(),
-        decoded.getPqAuthSig(0).getPublicKey());
-    Assert.assertEquals(pqAuthSig.getSignature(),
-        decoded.getPqAuthSig(0).getSignature());
+    Assert.assertEquals(pqAuthSig.getScheme(), decoded.getPqAuthSig(0).getScheme());
+    Assert.assertEquals(pqAuthSig.getPublicKey(), decoded.getPqAuthSig(0).getPublicKey());
+    Assert.assertEquals(pqAuthSig.getSignature(), decoded.getPqAuthSig(0).getSignature());
   }
 
   private Transaction buildTooManySigsTransaction() {

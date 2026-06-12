@@ -323,10 +323,7 @@ public class RelayServiceTest extends BaseTest {
       Assert.assertFalse(service.checkHelloMessage(helloMessage, channel));
 
       // Neither legacy signature nor pq_auth_sig set → mutex rejects.
-      helloMessage.setHelloMessage(base.toBuilder()
-          .clearSignature()
-          .clearPqAuthSig()
-          .build());
+      helloMessage.setHelloMessage(base.toBuilder().clearSignature().clearPqAuthSig().build());
       Assert.assertFalse(service.checkHelloMessage(helloMessage, channel));
 
       // PQ public key length mismatch → reject.

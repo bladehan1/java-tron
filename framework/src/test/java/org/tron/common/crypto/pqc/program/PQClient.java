@@ -46,10 +46,8 @@ public class PQClient {
 
   private static final PQScheme PQ_SCHEME = PQScheme.valueOf(
       System.getProperty("pqc.scheme", PQWitnessNode.PQ_SCHEME.name()));
-  private static final String HOST =
-      System.getProperty("pqc.host", "localhost");
-  private static final int PORT =
-      Integer.parseInt(System.getProperty("pqc.port", "50051"));
+  private static final String HOST = System.getProperty("pqc.host", "localhost");
+  private static final int PORT = Integer.parseInt(System.getProperty("pqc.port", "50051"));
 
   /** Recipient of the demo transfer. */
   private static final byte[] TO_ADDR =
@@ -78,10 +76,7 @@ public class PQClient {
     System.out.println("Signer address: " + ByteArray.toHexString(signerAddr));
 
     // ── 2. Connect via gRPC ───────────────────────────────────────────────
-    ManagedChannel channel = ManagedChannelBuilder
-        .forAddress(HOST, PORT)
-        .usePlaintext()
-        .build();
+    ManagedChannel channel = ManagedChannelBuilder.forAddress(HOST, PORT).usePlaintext().build();
     WalletBlockingStub stub = WalletGrpc.newBlockingStub(channel)
         .withDeadlineAfter(10, TimeUnit.SECONDS);
 

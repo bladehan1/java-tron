@@ -111,8 +111,7 @@ public class LocalWitnesses {
     if (!CollectionUtils.isEmpty(pqKeypairs)) {
       PqKeypair first = pqKeypairs.get(0);
       byte[] pubKey = ByteArray.fromHexString(first.getPublicKey());
-      this.pqWitnessAccountAddress = PQSchemeRegistry.computeAddress(
-          first.getScheme(), pubKey);
+      this.pqWitnessAccountAddress = PQSchemeRegistry.computeAddress(first.getScheme(), pubKey);
     }
   }
 
@@ -189,8 +188,7 @@ public class LocalWitnesses {
           TronError.ErrCode.WITNESS_INIT);
     }
     if (!StringUtil.isHexadecimal(hex)) {
-      throw new TronError(label + " must be hex string",
-          TronError.ErrCode.WITNESS_INIT);
+      throw new TronError(label + " must be hex string", TronError.ErrCode.WITNESS_INIT);
     }
   }
 
