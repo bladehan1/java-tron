@@ -89,7 +89,9 @@ public final class FNDSA512 implements PQSignature {
    * retries on honest input is astronomically small.
    */
   private static final int SIGN_RETRY_BUDGET = 16;
-  /** Falcon keygen seeds an internal SHAKE256 from 48 bytes of randomness. */
+  /**
+   * Falcon keygen seeds an internal SHAKE256 from 48 bytes of randomness.
+   */
   public static final int SEED_LENGTH = 48;
 
   private static final FalconParameters PARAMS = FalconParameters.falcon_512;
@@ -135,9 +137,8 @@ public final class FNDSA512 implements PQSignature {
   public static FNDSA512 fromPrivateKeyWithPublicKey(byte[] extendedPrivateKey) {
     if (extendedPrivateKey == null
         || extendedPrivateKey.length != PRIVATE_KEY_WITH_PUBLIC_KEY_LENGTH) {
-      throw new IllegalArgumentException(
-          "FN-DSA extended private key length must be "
-              + PRIVATE_KEY_WITH_PUBLIC_KEY_LENGTH);
+      throw new IllegalArgumentException("FN-DSA extended private key length must be "
+          + PRIVATE_KEY_WITH_PUBLIC_KEY_LENGTH);
     }
     byte[] sk = new byte[PRIVATE_KEY_LENGTH];
     byte[] pk = new byte[PUBLIC_KEY_LENGTH];
@@ -161,7 +162,9 @@ public final class FNDSA512 implements PQSignature {
     return PUBLIC_KEY_LENGTH;
   }
 
-  /** Returns the canonical signature length upper bound (signatures are variable-length). */
+  /**
+   * Returns the canonical signature length upper bound (signatures are variable-length).
+   */
   @Override
   public int getSignatureLength() {
     return SIGNATURE_MAX_LENGTH;
@@ -222,9 +225,8 @@ public final class FNDSA512 implements PQSignature {
     if (signature == null
         || signature.length < SIGNATURE_MIN_LENGTH
         || signature.length > SIGNATURE_MAX_LENGTH) {
-      throw new IllegalArgumentException(
-          "FN-DSA signature length must be "
-              + SIGNATURE_MIN_LENGTH + ".." + SIGNATURE_MAX_LENGTH);
+      throw new IllegalArgumentException("FN-DSA signature length must be "
+          + SIGNATURE_MIN_LENGTH + ".." + SIGNATURE_MAX_LENGTH);
     }
     if (message == null) {
       throw new IllegalArgumentException("message must not be null");
@@ -367,10 +369,9 @@ public final class FNDSA512 implements PQSignature {
   private static void validatePrivateKeyBytes(byte[] privateKey) {
     if (privateKey == null
         || (privateKey.length != PRIVATE_KEY_LENGTH
-            && privateKey.length != PRIVATE_KEY_WITH_PUBLIC_KEY_LENGTH)) {
-      throw new IllegalArgumentException(
-          "FN-DSA private key length must be " + PRIVATE_KEY_LENGTH
-              + " or " + PRIVATE_KEY_WITH_PUBLIC_KEY_LENGTH);
+        && privateKey.length != PRIVATE_KEY_WITH_PUBLIC_KEY_LENGTH)) {
+      throw new IllegalArgumentException("FN-DSA private key length must be " + PRIVATE_KEY_LENGTH
+          + " or " + PRIVATE_KEY_WITH_PUBLIC_KEY_LENGTH);
     }
   }
 }

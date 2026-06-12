@@ -17,8 +17,8 @@ package org.tron.core.utils;
 
 import static org.tron.common.crypto.Hash.sha3omit12;
 import static org.tron.common.math.Maths.max;
-import static org.tron.core.config.Parameter.ChainConstant.DELEGATE_COST_BASE_SIZE;
 import static org.tron.core.Constant.PER_SIGN_LENGTH;
+import static org.tron.core.config.Parameter.ChainConstant.DELEGATE_COST_BASE_SIZE;
 import static org.tron.core.config.Parameter.ChainConstant.TRX_PRECISION;
 
 import com.google.common.base.CaseFormat;
@@ -52,9 +52,9 @@ import org.tron.protos.Protocol.Permission.PermissionType;
 import org.tron.protos.Protocol.Transaction;
 import org.tron.protos.Protocol.Transaction.Contract;
 import org.tron.protos.Protocol.Transaction.Result.contractResult;
+import org.tron.protos.contract.BalanceContract.DelegateResourceContract;
 import org.tron.protos.contract.SmartContractOuterClass.CreateSmartContract;
 import org.tron.protos.contract.SmartContractOuterClass.TriggerSmartContract;
-import org.tron.protos.contract.BalanceContract.DelegateResourceContract;
 
 @Slf4j(topic = "capsule")
 @Component
@@ -84,7 +84,8 @@ public class TransactionUtil {
   }
 
   public static boolean validAccountId(byte[] accountId) {
-    return validReadableBytes(accountId, MAX_ACCOUNT_ID_LEN) && accountId.length >= MIN_ACCOUNT_ID_LEN;
+    return validReadableBytes(accountId, MAX_ACCOUNT_ID_LEN)
+        && accountId.length >= MIN_ACCOUNT_ID_LEN;
   }
 
   public static boolean validAssetName(byte[] assetName) {
@@ -246,7 +247,7 @@ public class TransactionUtil {
         tswBuilder.setPermission(permission);
         long currentWeight = 0L;
         List<ByteString> approveList = new ArrayList<>();
-        if (trx.getSignatureCount() > 0 ) {
+        if (trx.getSignatureCount() > 0) {
           currentWeight = TransactionCapsule.checkWeight(permission, trx.getSignatureList(),
               Sha256Hash.hash(CommonParameter.getInstance()
                   .isECKeyCryptoEngine(), trx.getRawData().toByteArray()), approveList);
@@ -257,7 +258,7 @@ public class TransactionUtil {
             long pqWeight = TransactionCapsule.validatePQSignatureGetWeight(trx, permission,
                 chainBaseManager.getDynamicPropertiesStore(), approveList);
             // sum all signature weight
-            currentWeight = StrictMathWrapper.addExact(currentWeight,pqWeight);
+            currentWeight = StrictMathWrapper.addExact(currentWeight, pqWeight);
           } catch (ArithmeticException e) {
             throw new PermissionException("weight overflow");
           }
@@ -297,13 +298,13 @@ public class TransactionUtil {
     DelegateResourceContract.Builder builder;
     if (dps.supportMaxDelegateLockPeriod()) {
       builder = DelegateResourceContract.newBuilder()
-              .setLock(true)
-              .setLockPeriod(dps.getMaxDelegateLockPeriod())
-              .setBalance(balance);
+          .setLock(true)
+          .setLockPeriod(dps.getMaxDelegateLockPeriod())
+          .setBalance(balance);
     } else {
       builder = DelegateResourceContract.newBuilder()
-              .setLock(true)
-              .setBalance(balance);
+          .setLock(true)
+          .setBalance(balance);
     }
     long builderSize = builder.build().getSerializedSize();
     DelegateResourceContract.Builder builder2 = DelegateResourceContract.newBuilder()
