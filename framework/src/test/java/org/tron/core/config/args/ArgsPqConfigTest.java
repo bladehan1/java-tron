@@ -69,15 +69,23 @@ public class ArgsPqConfigTest {
   }
 
   @Test
-  public void fnDsa512SeedRejected() throws IOException {
+  public void fnDsa512SeedAcceptedWithWarning() throws IOException {
+    // FN_DSA_512 seed is now allowed (non-deterministic drift risk is logged as a
+    // warning instead of a hard error, so operators can choose to use seed in dev).
     byte[] seed = filled(FNDSA512.SEED_LENGTH, (byte) 0x03);
     Path conf = writeConfWithEntry(
         "{ scheme = \"FN_DSA_512\", seed = \"" + Hex.toHexString(seed) + "\" }");
 
-    TronError err = assertThrows(TronError.class,
-        () -> Args.setParam(new String[]{"--witness"}, conf.toString()));
-    assertEquals(TronError.ErrCode.WITNESS_INIT, err.getErrCode());
-    assertTrue(err.getMessage(), err.getMessage().contains("seed is not supported for FN_DSA_512"));
+    Args.setParam(new String[]{"--witness"}, conf.toString());
+
+    LocalWitnesses lw = Args.getLocalWitnesses();
+    assertEquals(1, lw.getPqKeypairs().size());
+    PqKeypair kp = lw.getPqKeypairs().get(0);
+    assertEquals(PQScheme.FN_DSA_512, kp.getScheme());
+
+    PQSignature expected = PQSchemeRegistry.fromSeed(PQScheme.FN_DSA_512, seed);
+    assertEquals(Hex.toHexString(expected.getPrivateKey()), kp.getPrivateKey());
+    assertEquals(Hex.toHexString(expected.getPublicKey()), kp.getPublicKey());
   }
 
   @Test
