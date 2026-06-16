@@ -554,5 +554,40 @@ public class RocksDbDataSourceImpl extends DbStat implements DbSourceInter<byte[
 
   @Override public void stat() {
     this.statProperty();
+    this.statMemory();
+  }
+
+  /**
+   * RocksDB-only approximate memory usage (bytes), exposed as gauges labeled by property:
+   * <ul>
+   *   <li>{@code block-cache-usage} -- memory occupied by entries in the block cache</li>
+   *   <li>{@code cur-size-all-mem-tables} -- size of active and unflushed immutable memtables</li>
+   *   <li>{@code estimate-table-readers-mem} -- memory used by index and filter blocks</li>
+   * </ul>
+   */
+  private static final String[] MEMORY_PROPERTIES = {
+      "rocksdb.block-cache-usage",
+      "rocksdb.cur-size-all-mem-tables",
+      "rocksdb.estimate-table-readers-mem"
+  };
+
+  private void statMemory() {
+    resetDbLock.readLock().lock();
+    try {
+      if (!isAlive()) {
+        return;
+      }
+      for (String property : MEMORY_PROPERTIES) {
+        try {
+          long value = database.getLongProperty(property);
+          Metrics.gaugeSet(MetricKeys.Gauge.DB_MEMORY_BYTES, value,
+              getEngine(), getName(), property);
+        } catch (RocksDBException e) {
+          logger.warn("DB {} get property {} error", getName(), property, e);
+        }
+      }
+    } finally {
+      resetDbLock.readLock().unlock();
+    }
   }
 }
