@@ -17,6 +17,16 @@ This file tracks Prometheus metric additions, changes, and removals in java-tron
 
 - `tron:sr_set_change` (Counter, labels `action`, `witness`) — incremented once per witness whenever the active SR set rotates at a maintenance boundary. `action` is one of `add` / `remove`. Cardinality grows with the number of distinct witnesses that have ever entered or left the active set, not with the active set size at any given moment. ([#6624](https://github.com/tronprotocol/java-tron/pull/6624))
 
+#### DB
+
+- `tron:db_operate_latency_seconds` (Histogram, labels `type`, `db`, `op`) — latency of a single database operation. `type` is the storage engine (`LEVELDB` or `ROCKSDB`); `op` is one of `get` / `put` / `delete` / `batch`. Buckets are microsecond-resolution, spanning `1µs–10ms` (`[0.000001 … 0.0001, 0.0005, 0.001, 0.01]`, 22 steps), densified in the 1–100µs range where in-memory hits land.
+
+- `tron:db_operate_bytes` (Histogram, labels `type`, `db`, `op`) — payload size in bytes per database operation. `type` is the storage engine; `op` is one of `get` / `put` / `batch` (`get` observes the returned value length and is skipped when the key is absent; `batch` observes the total value bytes in the write batch). Buckets are powers of two spanning `1B–2MB` (22 steps).
+
+- `tron:db_event` (Counter, labels `type`, `db`, `event`) — count of LevelDB internal events, captured from the LevelDB logger callback. `type` is always `LEVELDB`; `event` is one of `recover` / `compact` / `delete` / `create`. RocksDB does not emit this counter.
+
+- `tron:db_memory_bytes` (Gauge, labels `type`, `db`, `property`) — approximate RocksDB memory usage in bytes, sampled on the existing 6-hour `db-stats` schedule. `type` is always `ROCKSDB`; `property` is one of `rocksdb.block-cache-usage` (block cache memory), `rocksdb.cur-size-all-mem-tables` (active and unflushed memtable size), or `rocksdb.estimate-table-readers-mem` (index and filter block memory). LevelDB does not emit this gauge.
+
 **Pre-4.8.2 Baseline**
 
 Snapshot of metrics emitted prior to this changelog. Per-version provenance is not tracked here; consult `git log` on [`common/src/main/java/org/tron/common/prometheus/`](common/src/main/java/org/tron/common/prometheus/) for exact origin of each metric.
