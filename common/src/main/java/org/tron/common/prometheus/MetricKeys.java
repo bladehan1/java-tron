@@ -36,6 +36,7 @@ public class MetricKeys {
     public static final String PEERS = "tron:peers";
     public static final String DB_SIZE_BYTES = "tron:db_size_bytes";
     public static final String DB_SST_LEVEL = "tron:db_sst_level";
+    public static final String DB_MEMORY_BYTES = "tron:db_memory_bytes";
     public static final String MANAGER_QUEUE = "tron:manager_queue_size";
     public static final String TX_CACHE = "tron:tx_cache";
 
