@@ -18,6 +18,7 @@ import org.tron.common.crypto.SignUtils;
 import org.tron.common.es.ExecutorServiceManager;
 import org.tron.common.utils.Sha256Hash;
 import org.tron.core.ChainBaseManager;
+import org.tron.core.capsule.TransactionCapsule;
 import org.tron.core.config.args.Args;
 import org.tron.core.exception.P2pException;
 import org.tron.core.exception.P2pException.TypeEnum;
@@ -90,7 +91,7 @@ public class TransactionsMsgHandler implements TronMsgHandler {
     TransactionsMessage transactionsMessage = (TransactionsMessage) msg;
     check(peer, transactionsMessage);
     for (Transaction trx : transactionsMessage.getTransactions().getTransactionsList()) {
-      Item item = new Item(new TransactionMessage(trx).getMessageId(), InventoryType.TRX);
+      Item item = new Item(new TransactionCapsule(trx).getTransactionId(), InventoryType.TRX);
       peer.getAdvInvRequest().remove(item);
     }
     int smartContractQueueSize = 0;
@@ -104,7 +105,7 @@ public class TransactionsMsgHandler implements TronMsgHandler {
       int type = trx.getRawData().getContract(0).getType().getNumber();
       if (type == ContractType.TriggerSmartContract_VALUE
           || type == ContractType.CreateSmartContract_VALUE) {
-        if (!smartContractQueue.offer(new TrxEvent(peer, new TransactionMessage(trx)))) {
+        if (!smartContractQueue.offer(new TrxEvent(peer, trx))) {
           smartContractQueueSize = smartContractQueue.size();
           trxHandlePoolQueueSize = queue.size();
           dropSmartContractCount++;
@@ -112,7 +113,7 @@ public class TransactionsMsgHandler implements TronMsgHandler {
       } else {
         try {
           ExecutorServiceManager.submit(
-              trxHandlePool, () -> handleTransaction(peer, new TransactionMessage(trx)));
+              trxHandlePool, () -> handleTransaction(peer, trx));
         } catch (RejectedExecutionException e) {
           logger.warn("Submit task to {} failed", trxEsName);
           break;
@@ -130,7 +131,7 @@ public class TransactionsMsgHandler implements TronMsgHandler {
     List<Transaction> list = msg.getTransactions().getTransactionsList();
     Set<Sha256Hash> seen = new HashSet<>(list.size() * 2);
     for (Transaction trx : list) {
-      Sha256Hash id = new TransactionMessage(trx).getMessageId();
+      Sha256Hash id = new TransactionCapsule(trx).getTransactionId();
       if (!seen.add(id)) {
         throw new P2pException(TypeEnum.BAD_MESSAGE,
             "TransactionsMessage contains duplicate transaction: " + id);
@@ -159,7 +160,7 @@ public class TransactionsMsgHandler implements TronMsgHandler {
         while (queue.size() < MAX_SMART_CONTRACT_SUBMIT_SIZE && smartContractQueue.size() > 0) {
           TrxEvent event = smartContractQueue.take();
           ExecutorServiceManager.submit(
-              trxHandlePool, () -> handleTransaction(event.getPeer(), event.getMsg()));
+              trxHandlePool, () -> handleTransaction(event.getPeer(), event.getTrx()));
         }
       } catch (InterruptedException e) {
         logger.warn("Handle smart server interrupted");
@@ -170,33 +171,35 @@ public class TransactionsMsgHandler implements TronMsgHandler {
     }, 1000, 20, TimeUnit.MILLISECONDS);
   }
 
-  private void handleTransaction(PeerConnection peer, TransactionMessage trx) {
+  private void handleTransaction(PeerConnection peer, Transaction trx) {
+    TransactionCapsule transactionCapsule = new TransactionCapsule(trx);
+    Sha256Hash messageId = transactionCapsule.getTransactionId();
     if (peer.isBadPeer()) {
-      logger.warn("Drop trx {} from {}, peer is bad peer", trx.getMessageId(),
+      logger.warn("Drop trx {} from {}, peer is bad peer", messageId,
           peer.getInetAddress());
       return;
     }
 
-    if (advService.getMessage(new Item(trx.getMessageId(), InventoryType.TRX)) != null) {
+    if (advService.getMessage(new Item(messageId, InventoryType.TRX)) != null) {
       return;
     }
 
     try {
-      trx.getTransactionCapsule().checkExpiration(chainBaseManager.getNextBlockSlotTime());
-      tronNetDelegate.pushTransaction(trx.getTransactionCapsule());
-      advService.broadcast(trx);
+      transactionCapsule.checkExpiration(chainBaseManager.getNextBlockSlotTime());
+      tronNetDelegate.pushTransaction(transactionCapsule);
+      advService.broadcast(new TransactionMessage(trx));
     } catch (P2pException e) {
       logger.warn("Trx {} from peer {} process failed. type: {}, reason: {}",
-          trx.getMessageId(), peer.getInetAddress(), e.getType(), e.getMessage());
+          messageId, peer.getInetAddress(), e.getType(), e.getMessage());
       if (e.getType().equals(TypeEnum.BAD_TRX)) {
         peer.setBadPeer(true);
         peer.disconnect(ReasonCode.BAD_TX);
       }
     } catch (TransactionExpirationException e) {
       logger.warn("{}. trx: {}, peer: {}",
-          e.getMessage(), trx.getMessageId(), peer.getInetAddress());
+          e.getMessage(), messageId, peer.getInetAddress());
     } catch (Exception e) {
-      logger.error("Trx {} from peer {} process failed", trx.getMessageId(), peer.getInetAddress(),
+      logger.error("Trx {} from peer {} process failed", messageId, peer.getInetAddress(),
           e);
     }
   }
@@ -206,13 +209,13 @@ public class TransactionsMsgHandler implements TronMsgHandler {
     @Getter
     private PeerConnection peer;
     @Getter
-    private TransactionMessage msg;
+    private Transaction trx;
     @Getter
     private long time;
 
-    public TrxEvent(PeerConnection peer, TransactionMessage msg) {
+    public TrxEvent(PeerConnection peer, Transaction trx) {
       this.peer = peer;
-      this.msg = msg;
+      this.trx = trx;
       this.time = System.currentTimeMillis();
     }
   }

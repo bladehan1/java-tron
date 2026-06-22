@@ -272,18 +272,20 @@ public class TransactionsMsgHandlerTest extends BaseTest {
       TransactionMessage trxMsg = new TransactionMessage(trx);
 
       Method handleTx = TransactionsMsgHandler.class.getDeclaredMethod(
-          "handleTransaction", PeerConnection.class, TransactionMessage.class);
+          "handleTransaction", PeerConnection.class, Protocol.Transaction.class);
       handleTx.setAccessible(true);
 
       // happy path → push and broadcast
       Mockito.when(chainBaseManager.getNextBlockSlotTime()).thenReturn(now);
-      handleTx.invoke(handler, peer, trxMsg);
+      handleTx.invoke(handler, peer, trx);
+      // handleTransaction builds its own TransactionMessage from trx; Message.equals()
+      // compares wire bytes so this still matches trxMsg's content.
       Mockito.verify(advService).broadcast(trxMsg);
 
       // P2pException BAD_TRX → disconnect
       Mockito.doThrow(new P2pException(TypeEnum.BAD_TRX, "bad"))
           .when(tronNetDelegate).pushTransaction(Mockito.any());
-      handleTx.invoke(handler, peer, trxMsg);
+      handleTx.invoke(handler, peer, trx);
       Mockito.verify(peer).setBadPeer(true);
       Mockito.verify(peer).disconnect(Protocol.ReasonCode.BAD_TX);
     } finally {
