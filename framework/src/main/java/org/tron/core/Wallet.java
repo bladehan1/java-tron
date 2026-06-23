@@ -676,13 +676,21 @@ public class Wallet {
           }
         }
 
+        List<ByteString> approveList = new ArrayList<>();
         if (trx.getSignatureCount() > 0) {
-          List<ByteString> approveList = new ArrayList<>();
           byte[] hash = Sha256Hash.hash(CommonParameter
               .getInstance().isECKeyCryptoEngine(), trx.getRawData().toByteArray());
           TransactionCapsule.checkWeight(permission, trx.getSignatureList(), hash, approveList);
-          tswBuilder.addAllApprovedList(approveList);
         }
+        if (trx.getPqAuthSigCount() > 0) {
+          if (!chainBaseManager.getDynamicPropertiesStore().isAnyPqSchemeAllowed()) {
+            throw new PermissionException(
+                "pq_auth_sig not allowed: no post-quantum scheme is activated");
+          }
+          TransactionCapsule.validatePQSignatureGetWeight(trx, permission,
+              chainBaseManager.getDynamicPropertiesStore(), approveList);
+        }
+        tswBuilder.addAllApprovedList(approveList);
         resultBuilder.setCode(TransactionApprovedList.Result.response_code.SUCCESS);
       } catch (SignatureFormatException signEx) {
         resultBuilder.setCode(TransactionApprovedList.Result.response_code.SIGNATURE_FORMAT_ERROR);

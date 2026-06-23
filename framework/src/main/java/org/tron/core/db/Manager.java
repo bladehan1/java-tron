@@ -969,7 +969,7 @@ public class Manager {
 
   public void consumeMultiSignFee(TransactionCapsule trx, TransactionTrace trace)
       throws AccountResourceInsufficientException {
-    if (trx.getInstance().getSignatureCount() > 1) {
+    if (trx.getInstance().getSignatureCount() + trx.getInstance().getPqAuthSigCount() > 1) {
       long fee = getDynamicPropertiesStore().getMultiSignFee();
       boolean disableJavaLangMath = getDynamicPropertiesStore().disableJavaLangMath();
       List<Contract> contracts = trx.getInstance().getRawData().getContractList();
@@ -1228,7 +1228,8 @@ public class Manager {
       return false;
     }
 
-    if (tx1.getInstance().getSignatureCount() != tx2.getInstance().getSignatureCount()) {
+    if (tx1.getInstance().getSignatureCount() != tx2.getInstance().getSignatureCount()
+        || tx1.getInstance().getPqAuthSigCount() != tx2.getInstance().getPqAuthSigCount()) {
       return false;
     }
 
@@ -1239,6 +1240,15 @@ public class Manager {
       if (!sig1.equals(sig2)) {
         flag = false;
         break;
+      }
+    }
+
+    if (flag) {
+      for (int i = 0; i < tx1.getInstance().getPqAuthSigCount(); i++) {
+        if (!tx1.getInstance().getPqAuthSig(i).equals(tx2.getInstance().getPqAuthSig(i))) {
+          flag = false;
+          break;
+        }
       }
     }
 
