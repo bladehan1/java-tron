@@ -9,6 +9,7 @@ import static org.tron.core.exception.BadBlockException.TypeEnum.CALC_MERKLE_ROO
 import static org.tron.protos.Protocol.Transaction.Contract.ContractType.TransferContract;
 import static org.tron.protos.Protocol.Transaction.Result.contractResult.SUCCESS;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
 import com.google.common.collect.Lists;
@@ -1223,7 +1224,8 @@ public class Manager {
 
   }
 
-  private boolean isSameSig(TransactionCapsule tx1, TransactionCapsule tx2) {
+  @VisibleForTesting
+  boolean isSameSig(TransactionCapsule tx1, TransactionCapsule tx2) {
     if (tx1 == null || tx2 == null) {
       return false;
     }

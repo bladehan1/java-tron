@@ -24,7 +24,6 @@ import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -1003,21 +1002,73 @@ public class ManagerTest extends BaseMethodTest {
         .build();
   }
 
-  /**
-   * Builds two transactions sharing the same raw_data (hence the same txId) but with
-   * {@code pendingSigs}/{@code blockSigs} as their respective pq_auth_sig lists, puts the
-   * first in the pending pool, and asserts how many of the second {@code getVerifyTxs}
-   * sends back for re-verification.
-   */
-  private void assertGetVerifyTxsPqAuthSig(List<PQAuthSig> pendingSigs, List<PQAuthSig> blockSigs,
-      int expectedReverifyCount) {
+  private TransactionCapsule pqAndEcdsaSignedCapsule(String ecdsaSig, PQAuthSig... pqSigs) {
+    TransferContract c = TransferContract.newBuilder()
+        .setOwnerAddress(ByteString.copyFrom("f1".getBytes()))
+        .setAmount(1).build();
+    Transaction.Builder builder = new TransactionCapsule(c, ContractType.TransferContract)
+        .getInstance().toBuilder();
+    if (ecdsaSig != null) {
+      builder.addSignature(ByteString.copyFrom(ecdsaSig.getBytes()));
+    }
+    for (PQAuthSig sig : pqSigs) {
+      builder.addPqAuthSig(sig);
+    }
+    return new TransactionCapsule(builder.build());
+  }
+
+  // isSameSig is package-private (@VisibleForTesting) so these exercise it directly,
+  // instead of indirectly through getVerifyTxs's pending-pool/BlockCapsule scaffolding.
+
+  @Test
+  public void isSameSigNullIsFalse() {
+    TransactionCapsule tx = pqAndEcdsaSignedCapsule(null);
+    Assert.assertFalse(dbManager.isSameSig(null, tx));
+    Assert.assertFalse(dbManager.isSameSig(tx, null));
+  }
+
+  @Test
+  public void isSameSigPqAuthSigContentDiffers() {
+    Assert.assertFalse(dbManager.isSameSig(
+        pqAndEcdsaSignedCapsule(null, pqAuthSig("pubA", "sigA")),
+        pqAndEcdsaSignedCapsule(null, pqAuthSig("pubB", "sigB"))));
+  }
+
+  @Test
+  public void isSameSigPqAuthSigCountDiffers() {
+    Assert.assertFalse(dbManager.isSameSig(
+        pqAndEcdsaSignedCapsule(null),
+        pqAndEcdsaSignedCapsule(null, pqAuthSig("pubA", "sigA"))));
+  }
+
+  @Test
+  public void isSameSigPqAuthSigIdenticalIsTrue() {
+    PQAuthSig sig = pqAuthSig("pubA", "sigA");
+    Assert.assertTrue(dbManager.isSameSig(
+        pqAndEcdsaSignedCapsule(null, sig),
+        pqAndEcdsaSignedCapsule(null, sig)));
+  }
+
+  @Test
+  public void isSameSigHybridEcdsaMatchesButPqDiffers() {
+    // The exact bug scenario: an identical ECDSA list must not mask a differing
+    // pq_auth_sig list.
+    Assert.assertFalse(dbManager.isSameSig(
+        pqAndEcdsaSignedCapsule("a", pqAuthSig("pubA", "sigA")),
+        pqAndEcdsaSignedCapsule("a", pqAuthSig("pubB", "sigB"))));
+  }
+
+  @Test
+  public void getVerifyTxsClosesPqAuthSigBypass() {
+    // Integration proof: a block tx sharing the pending tx's txId (raw_data is
+    // identical) but carrying a different pq_auth_sig must still be sent back for
+    // re-verification by getVerifyTxs, not silently marked already-verified.
     TransferContract c1 = TransferContract.newBuilder()
         .setOwnerAddress(ByteString.copyFrom("f1".getBytes()))
         .setAmount(1).build();
     Transaction base = new TransactionCapsule(c1, ContractType.TransferContract).getInstance();
-
-    Transaction pendingTx = base.toBuilder().addAllPqAuthSig(pendingSigs).build();
-    Transaction blockTx = base.toBuilder().addAllPqAuthSig(blockSigs).build();
+    Transaction pendingTx = base.toBuilder().addPqAuthSig(pqAuthSig("pubA", "sigA")).build();
+    Transaction blockTx = base.toBuilder().addPqAuthSig(pqAuthSig("pubB", "sigB")).build();
     Assert.assertEquals(new TransactionCapsule(pendingTx).getTransactionId(),
         new TransactionCapsule(blockTx).getTransactionId());
 
@@ -1030,41 +1081,10 @@ public class ManagerTest extends BaseMethodTest {
       BlockCapsule capsule = new BlockCapsule(0, ByteString.EMPTY, 0, list);
 
       List<TransactionCapsule> txs = dbManager.getVerifyTxs(capsule);
-      Assert.assertEquals(expectedReverifyCount, txs.size());
+      Assert.assertEquals(1, txs.size());
     } finally {
       dbManager.getPendingTransactions().clear();
     }
-  }
-
-  @Test
-  public void getVerifyTxsPqAuthSigContentDifferRequiresReverify() {
-    // Same txId, different pq_auth_sig content: isSameSig must not treat these as the
-    // same signature, or the block tx would skip real verification.
-    assertGetVerifyTxsPqAuthSig(
-        Collections.singletonList(pqAuthSig("pubA", "sigA")),
-        Collections.singletonList(pqAuthSig("pubB", "sigB")),
-        1);
-  }
-
-  @Test
-  public void getVerifyTxsPqAuthSigCountDifferRequiresReverify() {
-    // Same txId, pending has no pq_auth_sig but the block tx adds one: count mismatch
-    // must force re-verification rather than matching on the (empty) ECDSA list alone.
-    assertGetVerifyTxsPqAuthSig(
-        Collections.emptyList(),
-        Collections.singletonList(pqAuthSig("pubA", "sigA")),
-        1);
-  }
-
-  @Test
-  public void getVerifyTxsPqAuthSigIdenticalSkipsReverify() {
-    // Regression: identical pq_auth_sig content on both sides must still take the
-    // already-verified fast path, so the fix does not regress the optimization.
-    PQAuthSig sigA = pqAuthSig("pubA", "sigA");
-    assertGetVerifyTxsPqAuthSig(
-        Collections.singletonList(sigA),
-        Collections.singletonList(sigA),
-        0);
   }
 
   @Test
