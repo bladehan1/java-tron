@@ -1680,7 +1680,12 @@ public class WalletTest extends BaseTest {
 
   @Test
   public void testApprovedListPqNotActivated() throws Exception {
+    // Disable every registered PQ scheme, not just FN_DSA_512: Wallet gates on
+    // isAnyPqSchemeAllowed(), so a scheme left enabled by default or a prior test
+    // would silently skip the "no post-quantum scheme is activated" path.
     chainBaseManager.getDynamicPropertiesStore().saveAllowFnDsa512(0L);
+    chainBaseManager.getDynamicPropertiesStore().saveAllowMlDsa44(0L);
+    Assert.assertFalse(chainBaseManager.getDynamicPropertiesStore().isAnyPqSchemeAllowed());
     FNDSA512 kp = new FNDSA512();
     byte[] signerAddr = PQSchemeRegistry.computeAddress(PQScheme.FN_DSA_512, kp.getPublicKey());
 

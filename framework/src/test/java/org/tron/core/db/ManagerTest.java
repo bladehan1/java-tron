@@ -24,6 +24,7 @@ import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -994,28 +995,29 @@ public class ManagerTest extends BaseMethodTest {
     Assert.assertEquals(txs.size(), 1);
   }
 
-  @Test
-  public void getVerifyTxsPqAuthSigContentDifferRequiresReverify() {
-    // Same txId (raw_data is identical), different pq_auth_sig content: isSameSig must
-    // not treat these as the same signature, or the block tx would skip real verification.
+  private static PQAuthSig pqAuthSig(String publicKey, String signature) {
+    return PQAuthSig.newBuilder()
+        .setScheme(PQScheme.FN_DSA_512)
+        .setPublicKey(ByteString.copyFrom(publicKey.getBytes()))
+        .setSignature(ByteString.copyFrom(signature.getBytes()))
+        .build();
+  }
+
+  /**
+   * Builds two transactions sharing the same raw_data (hence the same txId) but with
+   * {@code pendingSigs}/{@code blockSigs} as their respective pq_auth_sig lists, puts the
+   * first in the pending pool, and asserts how many of the second {@code getVerifyTxs}
+   * sends back for re-verification.
+   */
+  private void assertGetVerifyTxsPqAuthSig(List<PQAuthSig> pendingSigs, List<PQAuthSig> blockSigs,
+      int expectedReverifyCount) {
     TransferContract c1 = TransferContract.newBuilder()
         .setOwnerAddress(ByteString.copyFrom("f1".getBytes()))
         .setAmount(1).build();
-    TransactionCapsule t1 = new TransactionCapsule(c1, ContractType.TransferContract);
+    Transaction base = new TransactionCapsule(c1, ContractType.TransferContract).getInstance();
 
-    PQAuthSig sigA = PQAuthSig.newBuilder()
-        .setScheme(PQScheme.FN_DSA_512)
-        .setPublicKey(ByteString.copyFrom("pubA".getBytes()))
-        .setSignature(ByteString.copyFrom("sigA".getBytes()))
-        .build();
-    PQAuthSig sigB = PQAuthSig.newBuilder()
-        .setScheme(PQScheme.FN_DSA_512)
-        .setPublicKey(ByteString.copyFrom("pubB".getBytes()))
-        .setSignature(ByteString.copyFrom("sigB".getBytes()))
-        .build();
-
-    Transaction pendingTx = t1.getInstance().toBuilder().addPqAuthSig(sigA).build();
-    Transaction blockTx = t1.getInstance().toBuilder().addPqAuthSig(sigB).build();
+    Transaction pendingTx = base.toBuilder().addAllPqAuthSig(pendingSigs).build();
+    Transaction blockTx = base.toBuilder().addAllPqAuthSig(blockSigs).build();
     Assert.assertEquals(new TransactionCapsule(pendingTx).getTransactionId(),
         new TransactionCapsule(blockTx).getTransactionId());
 
@@ -1028,78 +1030,41 @@ public class ManagerTest extends BaseMethodTest {
       BlockCapsule capsule = new BlockCapsule(0, ByteString.EMPTY, 0, list);
 
       List<TransactionCapsule> txs = dbManager.getVerifyTxs(capsule);
-      Assert.assertEquals(1, txs.size());
+      Assert.assertEquals(expectedReverifyCount, txs.size());
     } finally {
       dbManager.getPendingTransactions().clear();
     }
+  }
+
+  @Test
+  public void getVerifyTxsPqAuthSigContentDifferRequiresReverify() {
+    // Same txId, different pq_auth_sig content: isSameSig must not treat these as the
+    // same signature, or the block tx would skip real verification.
+    assertGetVerifyTxsPqAuthSig(
+        Collections.singletonList(pqAuthSig("pubA", "sigA")),
+        Collections.singletonList(pqAuthSig("pubB", "sigB")),
+        1);
   }
 
   @Test
   public void getVerifyTxsPqAuthSigCountDifferRequiresReverify() {
     // Same txId, pending has no pq_auth_sig but the block tx adds one: count mismatch
     // must force re-verification rather than matching on the (empty) ECDSA list alone.
-    TransferContract c1 = TransferContract.newBuilder()
-        .setOwnerAddress(ByteString.copyFrom("f1".getBytes()))
-        .setAmount(1).build();
-    TransactionCapsule t1 = new TransactionCapsule(c1, ContractType.TransferContract);
-
-    Transaction pendingTx = t1.getInstance();
-    Transaction blockTx = t1.getInstance().toBuilder()
-        .addPqAuthSig(PQAuthSig.newBuilder()
-            .setScheme(PQScheme.FN_DSA_512)
-            .setPublicKey(ByteString.copyFrom("pubA".getBytes()))
-            .setSignature(ByteString.copyFrom("sigA".getBytes()))
-            .build())
-        .build();
-    Assert.assertEquals(new TransactionCapsule(pendingTx).getTransactionId(),
-        new TransactionCapsule(blockTx).getTransactionId());
-
-    dbManager.getPendingTransactions().clear();
-    try {
-      dbManager.getPendingTransactions().add(new TransactionCapsule(pendingTx));
-
-      List<Transaction> list = new ArrayList<>();
-      list.add(blockTx);
-      BlockCapsule capsule = new BlockCapsule(0, ByteString.EMPTY, 0, list);
-
-      List<TransactionCapsule> txs = dbManager.getVerifyTxs(capsule);
-      Assert.assertEquals(1, txs.size());
-    } finally {
-      dbManager.getPendingTransactions().clear();
-    }
+    assertGetVerifyTxsPqAuthSig(
+        Collections.emptyList(),
+        Collections.singletonList(pqAuthSig("pubA", "sigA")),
+        1);
   }
 
   @Test
   public void getVerifyTxsPqAuthSigIdenticalSkipsReverify() {
     // Regression: identical pq_auth_sig content on both sides must still take the
     // already-verified fast path, so the fix does not regress the optimization.
-    TransferContract c1 = TransferContract.newBuilder()
-        .setOwnerAddress(ByteString.copyFrom("f1".getBytes()))
-        .setAmount(1).build();
-    TransactionCapsule t1 = new TransactionCapsule(c1, ContractType.TransferContract);
-
-    PQAuthSig sigA = PQAuthSig.newBuilder()
-        .setScheme(PQScheme.FN_DSA_512)
-        .setPublicKey(ByteString.copyFrom("pubA".getBytes()))
-        .setSignature(ByteString.copyFrom("sigA".getBytes()))
-        .build();
-
-    Transaction pendingTx = t1.getInstance().toBuilder().addPqAuthSig(sigA).build();
-    Transaction blockTx = t1.getInstance().toBuilder().addPqAuthSig(sigA).build();
-
-    dbManager.getPendingTransactions().clear();
-    try {
-      dbManager.getPendingTransactions().add(new TransactionCapsule(pendingTx));
-
-      List<Transaction> list = new ArrayList<>();
-      list.add(blockTx);
-      BlockCapsule capsule = new BlockCapsule(0, ByteString.EMPTY, 0, list);
-
-      List<TransactionCapsule> txs = dbManager.getVerifyTxs(capsule);
-      Assert.assertEquals(0, txs.size());
-    } finally {
-      dbManager.getPendingTransactions().clear();
-    }
+    PQAuthSig sigA = pqAuthSig("pubA", "sigA");
+    assertGetVerifyTxsPqAuthSig(
+        Collections.singletonList(sigA),
+        Collections.singletonList(sigA),
+        0);
   }
 
   @Test
