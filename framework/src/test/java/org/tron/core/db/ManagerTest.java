@@ -109,7 +109,10 @@ import org.tron.core.store.IncrementalMerkleTreeStore;
 import org.tron.core.store.StoreFactory;
 import org.tron.protos.Protocol;
 import org.tron.protos.Protocol.Account;
+import org.tron.protos.Protocol.AccountType;
 import org.tron.protos.Protocol.Block;
+import org.tron.protos.Protocol.PQAuthSig;
+import org.tron.protos.Protocol.PQScheme;
 import org.tron.protos.Protocol.Transaction;
 import org.tron.protos.Protocol.Transaction.Contract.ContractType;
 import org.tron.protos.contract.AccountContract;
@@ -208,6 +211,112 @@ public class ManagerTest extends BaseMethodTest {
     Assert.assertEquals(1, item.getNum());
     Assert.assertEquals(1, item.getTransactionIds().size());
     Assert.assertEquals(trx.getTransactionId().toString(), item.getTransactionIds().get(0));
+  }
+
+  private static PQAuthSig dummyPqAuthSig() {
+    return PQAuthSig.newBuilder()
+        .setScheme(PQScheme.FN_DSA_512)
+        .setPublicKey(ByteString.copyFrom(new byte[1]))
+        .setSignature(ByteString.copyFrom(new byte[1]))
+        .build();
+  }
+
+  private AccountCapsule putMultiSignFeeOwner(String name) {
+    ECKey ownerKey = new ECKey(Utils.getRandom());
+    byte[] ownerAddress = ownerKey.getAddress();
+    AccountCapsule owner = new AccountCapsule(ByteString.copyFromUtf8(name),
+        ByteString.copyFrom(ownerAddress), AccountType.Normal, 10_000_000_000L);
+    chainManager.getAccountStore().put(ownerAddress, owner);
+    return owner;
+  }
+
+  private TransactionCapsule buildTransferTxFrom(byte[] ownerAddress) {
+    TransferContract tc = TransferContract.newBuilder()
+        .setOwnerAddress(ByteString.copyFrom(ownerAddress))
+        .setToAddress(ByteString.copyFrom(ownerAddress))
+        .setAmount(1L)
+        .build();
+    return new TransactionCapsule(tc, ContractType.TransferContract);
+  }
+
+  @Test
+  public void consumeMultiSignFeePqOnlyCharged() throws Exception {
+    AccountCapsule owner = putMultiSignFeeOwner("multisignfee-pq");
+    byte[] ownerAddress = owner.getAddress().toByteArray();
+
+    Transaction tx = buildTransferTxFrom(ownerAddress).getInstance().toBuilder()
+        .addPqAuthSig(dummyPqAuthSig())
+        .addPqAuthSig(dummyPqAuthSig())
+        .build();
+    TransactionCapsule trx = new TransactionCapsule(tx);
+    TransactionTrace trace = new TransactionTrace(trx, StoreFactory.getInstance(),
+        new RuntimeImpl());
+
+    long fee = dbManager.getDynamicPropertiesStore().getMultiSignFee();
+    dbManager.consumeMultiSignFee(trx, trace);
+
+    Assert.assertEquals(10_000_000_000L - fee,
+        chainManager.getAccountStore().get(ownerAddress).getBalance());
+    Assert.assertEquals(fee, trace.getReceipt().getMultiSignFee());
+  }
+
+  @Test
+  public void consumeMultiSignFeeHybridCharged() throws Exception {
+    AccountCapsule owner = putMultiSignFeeOwner("multisignfee-hybrid");
+    byte[] ownerAddress = owner.getAddress().toByteArray();
+
+    Transaction tx = buildTransferTxFrom(ownerAddress).getInstance().toBuilder()
+        .addSignature(ByteString.copyFrom(new byte[]{1}))
+        .addPqAuthSig(dummyPqAuthSig())
+        .build();
+    TransactionCapsule trx = new TransactionCapsule(tx);
+    TransactionTrace trace = new TransactionTrace(trx, StoreFactory.getInstance(),
+        new RuntimeImpl());
+
+    long fee = dbManager.getDynamicPropertiesStore().getMultiSignFee();
+    dbManager.consumeMultiSignFee(trx, trace);
+
+    Assert.assertEquals(10_000_000_000L - fee,
+        chainManager.getAccountStore().get(ownerAddress).getBalance());
+    Assert.assertEquals(fee, trace.getReceipt().getMultiSignFee());
+  }
+
+  @Test
+  public void consumeMultiSignFeeSingleEcdsaNotCharged() throws Exception {
+    AccountCapsule owner = putMultiSignFeeOwner("multisignfee-single-ecdsa");
+    byte[] ownerAddress = owner.getAddress().toByteArray();
+
+    Transaction tx = buildTransferTxFrom(ownerAddress).getInstance().toBuilder()
+        .addSignature(ByteString.copyFrom(new byte[]{1}))
+        .build();
+    TransactionCapsule trx = new TransactionCapsule(tx);
+    TransactionTrace trace = new TransactionTrace(trx, StoreFactory.getInstance(),
+        new RuntimeImpl());
+
+    dbManager.consumeMultiSignFee(trx, trace);
+
+    Assert.assertEquals(10_000_000_000L,
+        chainManager.getAccountStore().get(ownerAddress).getBalance());
+    Assert.assertEquals(0L, trace.getReceipt().getMultiSignFee());
+  }
+
+  @Test
+  public void consumeMultiSignFeeSinglePqNotCharged() throws Exception {
+    AccountCapsule owner = putMultiSignFeeOwner("multisignfee-single-pq");
+    byte[] ownerAddress = owner.getAddress().toByteArray();
+
+    Transaction tx = buildTransferTxFrom(ownerAddress).getInstance().toBuilder()
+        .addPqAuthSig(dummyPqAuthSig())
+        .build();
+    TransactionCapsule trx = new TransactionCapsule(tx);
+    TransactionTrace trace = new TransactionTrace(trx, StoreFactory.getInstance(),
+        new RuntimeImpl());
+
+    dbManager.consumeMultiSignFee(trx, trace);
+
+    Assert.assertEquals(10_000_000_000L,
+        chainManager.getAccountStore().get(ownerAddress).getBalance());
+    Assert.assertEquals(0L, trace.getReceipt().getMultiSignFee());
   }
 
   @Test
@@ -883,6 +992,99 @@ public class ManagerTest extends BaseMethodTest {
     dbManager.getPendingTransactions().add(new TransactionCapsule(t2Bak));
     txs = dbManager.getVerifyTxs(capsule);
     Assert.assertEquals(txs.size(), 1);
+  }
+
+  private static PQAuthSig pqAuthSig(String publicKey, String signature) {
+    return PQAuthSig.newBuilder()
+        .setScheme(PQScheme.FN_DSA_512)
+        .setPublicKey(ByteString.copyFrom(publicKey.getBytes()))
+        .setSignature(ByteString.copyFrom(signature.getBytes()))
+        .build();
+  }
+
+  private TransactionCapsule pqAndEcdsaSignedCapsule(String ecdsaSig, PQAuthSig... pqSigs) {
+    TransferContract c = TransferContract.newBuilder()
+        .setOwnerAddress(ByteString.copyFrom("f1".getBytes()))
+        .setAmount(1).build();
+    Transaction.Builder builder = new TransactionCapsule(c, ContractType.TransferContract)
+        .getInstance().toBuilder();
+    if (ecdsaSig != null) {
+      builder.addSignature(ByteString.copyFrom(ecdsaSig.getBytes()));
+    }
+    for (PQAuthSig sig : pqSigs) {
+      builder.addPqAuthSig(sig);
+    }
+    return new TransactionCapsule(builder.build());
+  }
+
+  // isSameSig is package-private (@VisibleForTesting) so these exercise it directly,
+  // instead of indirectly through getVerifyTxs's pending-pool/BlockCapsule scaffolding.
+
+  @Test
+  public void isSameSigNullIsFalse() {
+    TransactionCapsule tx = pqAndEcdsaSignedCapsule(null);
+    Assert.assertFalse(dbManager.isSameSig(null, tx));
+    Assert.assertFalse(dbManager.isSameSig(tx, null));
+  }
+
+  @Test
+  public void isSameSigPqAuthSigContentDiffers() {
+    Assert.assertFalse(dbManager.isSameSig(
+        pqAndEcdsaSignedCapsule(null, pqAuthSig("pubA", "sigA")),
+        pqAndEcdsaSignedCapsule(null, pqAuthSig("pubB", "sigB"))));
+  }
+
+  @Test
+  public void isSameSigPqAuthSigCountDiffers() {
+    Assert.assertFalse(dbManager.isSameSig(
+        pqAndEcdsaSignedCapsule(null),
+        pqAndEcdsaSignedCapsule(null, pqAuthSig("pubA", "sigA"))));
+  }
+
+  @Test
+  public void isSameSigPqAuthSigIdenticalIsTrue() {
+    PQAuthSig sig = pqAuthSig("pubA", "sigA");
+    Assert.assertTrue(dbManager.isSameSig(
+        pqAndEcdsaSignedCapsule(null, sig),
+        pqAndEcdsaSignedCapsule(null, sig)));
+  }
+
+  @Test
+  public void isSameSigHybridEcdsaMatchesButPqDiffers() {
+    // The exact bug scenario: an identical ECDSA list must not mask a differing
+    // pq_auth_sig list.
+    Assert.assertFalse(dbManager.isSameSig(
+        pqAndEcdsaSignedCapsule("a", pqAuthSig("pubA", "sigA")),
+        pqAndEcdsaSignedCapsule("a", pqAuthSig("pubB", "sigB"))));
+  }
+
+  @Test
+  public void getVerifyTxsClosesPqAuthSigBypass() {
+    // Integration proof: a block tx sharing the pending tx's txId (raw_data is
+    // identical) but carrying a different pq_auth_sig must still be sent back for
+    // re-verification by getVerifyTxs, not silently marked already-verified.
+    TransferContract c1 = TransferContract.newBuilder()
+        .setOwnerAddress(ByteString.copyFrom("f1".getBytes()))
+        .setAmount(1).build();
+    Transaction base = new TransactionCapsule(c1, ContractType.TransferContract).getInstance();
+    Transaction pendingTx = base.toBuilder().addPqAuthSig(pqAuthSig("pubA", "sigA")).build();
+    Transaction blockTx = base.toBuilder().addPqAuthSig(pqAuthSig("pubB", "sigB")).build();
+    Assert.assertEquals(new TransactionCapsule(pendingTx).getTransactionId(),
+        new TransactionCapsule(blockTx).getTransactionId());
+
+    dbManager.getPendingTransactions().clear();
+    try {
+      dbManager.getPendingTransactions().add(new TransactionCapsule(pendingTx));
+
+      List<Transaction> list = new ArrayList<>();
+      list.add(blockTx);
+      BlockCapsule capsule = new BlockCapsule(0, ByteString.EMPTY, 0, list);
+
+      List<TransactionCapsule> txs = dbManager.getVerifyTxs(capsule);
+      Assert.assertEquals(1, txs.size());
+    } finally {
+      dbManager.getPendingTransactions().clear();
+    }
   }
 
   @Test

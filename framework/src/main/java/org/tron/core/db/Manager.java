@@ -9,6 +9,7 @@ import static org.tron.core.exception.BadBlockException.TypeEnum.CALC_MERKLE_ROO
 import static org.tron.protos.Protocol.Transaction.Contract.ContractType.TransferContract;
 import static org.tron.protos.Protocol.Transaction.Result.contractResult.SUCCESS;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
 import com.google.common.collect.Lists;
@@ -969,7 +970,7 @@ public class Manager {
 
   public void consumeMultiSignFee(TransactionCapsule trx, TransactionTrace trace)
       throws AccountResourceInsufficientException {
-    if (trx.getInstance().getSignatureCount() > 1) {
+    if (trx.getInstance().getSignatureCount() + trx.getInstance().getPqAuthSigCount() > 1) {
       long fee = getDynamicPropertiesStore().getMultiSignFee();
       boolean disableJavaLangMath = getDynamicPropertiesStore().disableJavaLangMath();
       List<Contract> contracts = trx.getInstance().getRawData().getContractList();
@@ -1223,12 +1224,14 @@ public class Manager {
 
   }
 
-  private boolean isSameSig(TransactionCapsule tx1, TransactionCapsule tx2) {
+  @VisibleForTesting
+  boolean isSameSig(TransactionCapsule tx1, TransactionCapsule tx2) {
     if (tx1 == null || tx2 == null) {
       return false;
     }
 
-    if (tx1.getInstance().getSignatureCount() != tx2.getInstance().getSignatureCount()) {
+    if (tx1.getInstance().getSignatureCount() != tx2.getInstance().getSignatureCount()
+        || tx1.getInstance().getPqAuthSigCount() != tx2.getInstance().getPqAuthSigCount()) {
       return false;
     }
 
@@ -1239,6 +1242,15 @@ public class Manager {
       if (!sig1.equals(sig2)) {
         flag = false;
         break;
+      }
+    }
+
+    if (flag) {
+      for (int i = 0; i < tx1.getInstance().getPqAuthSigCount(); i++) {
+        if (!tx1.getInstance().getPqAuthSig(i).equals(tx2.getInstance().getPqAuthSig(i))) {
+          flag = false;
+          break;
+        }
       }
     }
 

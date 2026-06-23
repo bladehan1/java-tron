@@ -32,6 +32,7 @@ import com.google.protobuf.ByteString;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import javax.annotation.Resource;
 import lombok.SneakyThrows;
 import lombok.extern.slf4j.Slf4j;
@@ -51,8 +52,11 @@ import org.tron.api.GrpcAPI.ProposalList;
 import org.tron.common.BaseTest;
 import org.tron.common.TestConstants;
 import org.tron.common.crypto.ECKey;
+import org.tron.common.crypto.pqc.FNDSA512;
+import org.tron.common.crypto.pqc.PQSchemeRegistry;
 import org.tron.common.parameter.CommonParameter;
 import org.tron.common.utils.ByteArray;
+import org.tron.common.utils.Sha256Hash;
 import org.tron.common.utils.Utils;
 import org.tron.core.actuator.DelegateResourceActuator;
 import org.tron.core.actuator.FreezeBalanceActuator;
@@ -88,6 +92,11 @@ import org.tron.protos.Protocol.Block;
 import org.tron.protos.Protocol.BlockHeader;
 import org.tron.protos.Protocol.BlockHeader.raw;
 import org.tron.protos.Protocol.Exchange;
+import org.tron.protos.Protocol.Key;
+import org.tron.protos.Protocol.PQAuthSig;
+import org.tron.protos.Protocol.PQScheme;
+import org.tron.protos.Protocol.Permission;
+import org.tron.protos.Protocol.Permission.PermissionType;
 import org.tron.protos.Protocol.Proposal;
 import org.tron.protos.Protocol.Transaction;
 import org.tron.protos.Protocol.Transaction.Contract;
@@ -1564,6 +1573,153 @@ public class WalletTest extends BaseTest {
         rejected.getResult().getCode());
     Assert.assertTrue(rejected.getResult().getMessage().contains("too many signatures"));
     assertEquals(0, rejected.getApprovedListCount());
+  }
+
+  private static byte[] txIdOf(Transaction unsigned) {
+    return Sha256Hash.of(CommonParameter.getInstance().isECKeyCryptoEngine(),
+        unsigned.getRawData().toByteArray()).getBytes();
+  }
+
+  private Transaction buildApprovedListTransferTx(byte[] ownerAddress) {
+    return Transaction.newBuilder().setRawData(
+        Transaction.raw.newBuilder().addContract(
+            Contract.newBuilder().setType(ContractType.TransferContract)
+                .setParameter(Any.pack(TransferContract.newBuilder().setAmount(1)
+                    .setOwnerAddress(ByteString.copyFrom(ownerAddress))
+                    .setToAddress(ByteString.copyFrom(
+                        ByteArray.fromHexString(RECEIVER_ADDRESS)))
+                    .build())).build()).build()).build();
+  }
+
+  @Test
+  public void testApprovedListPqOnlySigner() throws Exception {
+    chainBaseManager.getDynamicPropertiesStore().saveAllowFnDsa512(1L);
+    FNDSA512 kp = new FNDSA512();
+    byte[] signerAddr = PQSchemeRegistry.computeAddress(PQScheme.FN_DSA_512, kp.getPublicKey());
+
+    ECKey accountKey = new ECKey(Utils.getRandom());
+    byte[] ownerAddress = accountKey.getAddress();
+    AccountCapsule owner = new AccountCapsule(
+        ByteString.copyFromUtf8("approved-pq-owner"),
+        ByteString.copyFrom(ownerAddress),
+        Protocol.AccountType.Normal,
+        initBalance);
+    Permission ownerPermission = Permission.newBuilder()
+        .setType(PermissionType.Owner)
+        .setPermissionName("owner")
+        .setThreshold(1)
+        .addKeys(Key.newBuilder().setAddress(ByteString.copyFrom(signerAddr)).setWeight(1L).build())
+        .build();
+    owner.updatePermissions(ownerPermission, null, Collections.emptyList());
+    chainBaseManager.getAccountStore().put(ownerAddress, owner);
+
+    Transaction unsigned = buildApprovedListTransferTx(ownerAddress);
+    byte[] sig = FNDSA512.sign(kp.getPrivateKey(), txIdOf(unsigned));
+    Transaction signed = unsigned.toBuilder()
+        .addPqAuthSig(PQAuthSig.newBuilder()
+            .setScheme(PQScheme.FN_DSA_512)
+            .setPublicKey(ByteString.copyFrom(kp.getPublicKey()))
+            .setSignature(ByteString.copyFrom(sig))
+            .build())
+        .build();
+
+    GrpcAPI.TransactionApprovedList reply = wallet.getTransactionApprovedList(signed);
+    assertEquals(GrpcAPI.TransactionApprovedList.Result.response_code.SUCCESS,
+        reply.getResult().getCode());
+    assertEquals(1, reply.getApprovedListCount());
+    assertEquals(ByteString.copyFrom(signerAddr), reply.getApprovedList(0));
+  }
+
+  @Test
+  public void testApprovedListHybridEcdsaAndPq() throws Exception {
+    chainBaseManager.getDynamicPropertiesStore().saveAllowFnDsa512(1L);
+    ECKey ecKey = new ECKey(Utils.getRandom());
+    FNDSA512 kp = new FNDSA512();
+    byte[] pqSignerAddr = PQSchemeRegistry.computeAddress(PQScheme.FN_DSA_512, kp.getPublicKey());
+
+    ECKey accountKey = new ECKey(Utils.getRandom());
+    byte[] ownerAddress = accountKey.getAddress();
+    AccountCapsule owner = new AccountCapsule(
+        ByteString.copyFromUtf8("approved-hybrid-owner"),
+        ByteString.copyFrom(ownerAddress),
+        Protocol.AccountType.Normal,
+        initBalance);
+    Permission ownerPermission = Permission.newBuilder()
+        .setType(PermissionType.Owner)
+        .setPermissionName("owner")
+        .setThreshold(2)
+        .addKeys(Key.newBuilder().setAddress(ByteString.copyFrom(ecKey.getAddress()))
+            .setWeight(1L).build())
+        .addKeys(Key.newBuilder().setAddress(ByteString.copyFrom(pqSignerAddr))
+            .setWeight(1L).build())
+        .build();
+    owner.updatePermissions(ownerPermission, null, Collections.emptyList());
+    chainBaseManager.getAccountStore().put(ownerAddress, owner);
+
+    Transaction unsigned = buildApprovedListTransferTx(ownerAddress);
+
+    TransactionCapsule capsule = new TransactionCapsule(unsigned);
+    capsule.sign(ecKey.getPrivKeyBytes());
+    ByteString ecdsaSig = capsule.getInstance().getSignature(0);
+
+    byte[] pqSig = FNDSA512.sign(kp.getPrivateKey(), txIdOf(unsigned));
+    Transaction signed = unsigned.toBuilder()
+        .addSignature(ecdsaSig)
+        .addPqAuthSig(PQAuthSig.newBuilder()
+            .setScheme(PQScheme.FN_DSA_512)
+            .setPublicKey(ByteString.copyFrom(kp.getPublicKey()))
+            .setSignature(ByteString.copyFrom(pqSig))
+            .build())
+        .build();
+
+    GrpcAPI.TransactionApprovedList reply = wallet.getTransactionApprovedList(signed);
+    assertEquals(GrpcAPI.TransactionApprovedList.Result.response_code.SUCCESS,
+        reply.getResult().getCode());
+    assertEquals(2, reply.getApprovedListCount());
+  }
+
+  @Test
+  public void testApprovedListPqNotActivated() throws Exception {
+    // Disable every registered PQ scheme, not just FN_DSA_512: Wallet gates on
+    // isAnyPqSchemeAllowed(), so a scheme left enabled by default or a prior test
+    // would silently skip the "no post-quantum scheme is activated" path.
+    chainBaseManager.getDynamicPropertiesStore().saveAllowFnDsa512(0L);
+    chainBaseManager.getDynamicPropertiesStore().saveAllowMlDsa44(0L);
+    Assert.assertFalse(chainBaseManager.getDynamicPropertiesStore().isAnyPqSchemeAllowed());
+    FNDSA512 kp = new FNDSA512();
+    byte[] signerAddr = PQSchemeRegistry.computeAddress(PQScheme.FN_DSA_512, kp.getPublicKey());
+
+    ECKey accountKey = new ECKey(Utils.getRandom());
+    byte[] ownerAddress = accountKey.getAddress();
+    AccountCapsule owner = new AccountCapsule(
+        ByteString.copyFromUtf8("approved-pq-inactive-owner"),
+        ByteString.copyFrom(ownerAddress),
+        Protocol.AccountType.Normal,
+        initBalance);
+    Permission ownerPermission = Permission.newBuilder()
+        .setType(PermissionType.Owner)
+        .setPermissionName("owner")
+        .setThreshold(1)
+        .addKeys(Key.newBuilder().setAddress(ByteString.copyFrom(signerAddr)).setWeight(1L).build())
+        .build();
+    owner.updatePermissions(ownerPermission, null, Collections.emptyList());
+    chainBaseManager.getAccountStore().put(ownerAddress, owner);
+
+    Transaction unsigned = buildApprovedListTransferTx(ownerAddress);
+    Transaction signed = unsigned.toBuilder()
+        .addPqAuthSig(PQAuthSig.newBuilder()
+            .setScheme(PQScheme.FN_DSA_512)
+            .setPublicKey(ByteString.copyFrom(kp.getPublicKey()))
+            .setSignature(ByteString.copyFrom(new byte[1]))
+            .build())
+        .build();
+
+    GrpcAPI.TransactionApprovedList reply = wallet.getTransactionApprovedList(signed);
+    assertEquals(GrpcAPI.TransactionApprovedList.Result.response_code.OTHER_ERROR,
+        reply.getResult().getCode());
+    Assert.assertTrue(reply.getResult().getMessage().contains(
+        "no post-quantum scheme is activated"));
+    assertEquals(0, reply.getApprovedListCount());
   }
 }
 

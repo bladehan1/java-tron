@@ -816,8 +816,8 @@ public class ProposalUtilTest extends BaseTest {
     long maintenanceTimeInterval = forkUtils.getManager().getDynamicPropertiesStore()
         .getMaintenanceTimeInterval();
     long hardForkTime =
-        ((ForkBlockVersionEnum.VERSION_4_8_2_PQ1.getHardForkTime() - 1) / maintenanceTimeInterval + 1)
-            * maintenanceTimeInterval;
+        ((ForkBlockVersionEnum.VERSION_4_8_2_PQ1.getHardForkTime() - 1)
+            / maintenanceTimeInterval + 1) * maintenanceTimeInterval;
     forkUtils.getManager().getDynamicPropertiesStore()
         .saveLatestBlockHeaderTimestamp(hardForkTime - 1);
 
@@ -878,8 +878,8 @@ public class ProposalUtilTest extends BaseTest {
     long maintenanceTimeInterval = forkUtils.getManager().getDynamicPropertiesStore()
         .getMaintenanceTimeInterval();
     long hardForkTime =
-        ((ForkBlockVersionEnum.VERSION_4_8_2_PQ1.getHardForkTime() - 1) / maintenanceTimeInterval + 1)
-            * maintenanceTimeInterval;
+        ((ForkBlockVersionEnum.VERSION_4_8_2_PQ1.getHardForkTime() - 1)
+            / maintenanceTimeInterval + 1) * maintenanceTimeInterval;
     forkUtils.getManager().getDynamicPropertiesStore()
         .saveLatestBlockHeaderTimestamp(hardForkTime - 1);
 
