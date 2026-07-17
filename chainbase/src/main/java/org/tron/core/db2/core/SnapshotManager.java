@@ -34,6 +34,12 @@ import org.tron.common.utils.StorageUtils;
 import org.tron.core.db.RevokingDatabase;
 import org.tron.core.db.TronDatabase;
 import org.tron.core.db2.ISession;
+import org.tron.core.db2.archive.ArchiveStoreScope;
+import org.tron.core.db2.archive.BlockChangeView;
+import org.tron.core.db2.archive.BlockReverseDiff;
+import org.tron.core.db2.archive.BlockReverseDiffSink;
+import org.tron.core.db2.archive.BlockSnapshotMeta;
+import org.tron.core.db2.archive.OldValueCollector;
 import org.tron.core.db2.common.DB;
 import org.tron.core.db2.common.IRevokingDB;
 import org.tron.core.db2.common.Key;
@@ -83,6 +89,9 @@ public class SnapshotManager implements RevokingDatabase {
   private volatile int maxFlushCount = DEFAULT_MIN_FLUSH_COUNT;
 
   private int checkpointVersion = 1;   // default v1
+
+  private OldValueCollector oldValueCollector;
+  private BlockReverseDiffSink blockReverseDiffSink;
 
   public SnapshotManager(String checkpointPath) {
   }
@@ -218,6 +227,82 @@ public class SnapshotManager implements RevokingDatabase {
     });
   }
 
+  /**
+   * Commits a block session and materializes its reverse diff using the configured collector.
+   * Plain transaction/pending sessions must continue to use {@link #commit()} or merge/revoke.
+   */
+  public synchronized void commit(BlockSnapshotMeta meta) {
+    Objects.requireNonNull(meta, "meta");
+    if (activeSession <= 0) {
+      throw new RevokingStoreIllegalStateException(activeSession);
+    }
+
+    validateBlockMeta(meta);
+    for (Chainbase db : dbs) {
+      Snapshot head = db.getHead();
+      if (!Snapshot.isImpl(head)) {
+        throw new IllegalStateException(
+            "Cannot bind block metadata to non-SnapshotImpl head: " + db.getDbName());
+      }
+      ((SnapshotImpl) head).setBlockSnapshotMeta(meta);
+    }
+
+    BlockReverseDiff reverseDiff = null;
+    if (oldValueCollector != null) {
+      reverseDiff = oldValueCollector.collect(BlockChangeView.capture(meta, dbs));
+    }
+
+    dbs.forEach(db -> {
+      if (db.getHead().isOptimized()) {
+        db.getHead().reloadToMem();
+      }
+    });
+
+    if (reverseDiff != null) {
+      blockReverseDiffSink.accept(reverseDiff);
+    }
+    --activeSession;
+  }
+
+  private void validateBlockMeta(BlockSnapshotMeta meta) {
+    BlockSnapshotMeta previousMeta = null;
+    for (Chainbase db : dbs) {
+      if (!ArchiveStoreScope.isStateDatabase(db.getDbName())) {
+        continue;
+      }
+      Snapshot head = db.getHead();
+      if (!Snapshot.isImpl(head)) {
+        continue;
+      }
+      Snapshot previous = head.getPrevious();
+      BlockSnapshotMeta candidate = Snapshot.isImpl(previous)
+          ? ((SnapshotImpl) previous).getBlockSnapshotMeta() : null;
+      if (candidate != null && previousMeta != null && !previousMeta.equals(candidate)) {
+        throw new IllegalStateException("Previous block metadata differs across state databases");
+      }
+      if (candidate != null) {
+        previousMeta = candidate;
+      }
+    }
+    if (previousMeta == null) {
+      return;
+    }
+    if (meta.getEpoch() != previousMeta.getEpoch() + 1
+        || meta.getBlockNumber() != previousMeta.getBlockNumber() + 1
+        || !Arrays.equals(meta.getParentHash(), previousMeta.getBlockHash())) {
+      throw new IllegalStateException(
+          "Non-contiguous block snapshot metadata: previous=" + previousMeta + ", current=" + meta);
+    }
+  }
+
+  /** Enables archive collection after all Chainbase stores have registered. */
+  public synchronized void installArchiveCollector(OldValueCollector collector,
+      BlockReverseDiffSink sink) {
+    ArchiveStoreScope.validate(dbs);
+    oldValueCollector = Objects.requireNonNull(collector, "collector");
+    blockReverseDiffSink = Objects.requireNonNull(sink, "sink");
+  }
+
   public synchronized void pop() {
     if (activeSession != 0) {
       throw new RevokingStoreIllegalStateException(
@@ -227,6 +312,28 @@ public class SnapshotManager implements RevokingDatabase {
     if (size <= 0) {
       throw new RevokingStoreIllegalStateException(
           String.format("there is not snapshot to be popped, current: %d", size));
+    }
+
+    if (blockReverseDiffSink != null) {
+      BlockSnapshotMeta meta = null;
+      for (Chainbase db : dbs) {
+        if (!ArchiveStoreScope.isStateDatabase(db.getDbName())) {
+          continue;
+        }
+        Snapshot head = db.getHead();
+        if (Snapshot.isImpl(head)) {
+          BlockSnapshotMeta candidate = ((SnapshotImpl) head).getBlockSnapshotMeta();
+          if (candidate != null && meta != null && !meta.equals(candidate)) {
+            throw new IllegalStateException("Mismatched block metadata while reverting snapshots");
+          }
+          if (candidate != null) {
+            meta = candidate;
+          }
+        }
+      }
+      if (meta != null) {
+        blockReverseDiffSink.revert(meta);
+      }
     }
 
     disabled = true;
@@ -286,7 +393,22 @@ public class SnapshotManager implements RevokingDatabase {
 
   private void refresh() {
     List<ListenableFuture<?>> futures = new ArrayList<>(dbs.size());
+    Chainbase properties = null;
+    if (oldValueCollector != null) {
+      properties = dbs.stream()
+          .filter(db -> "properties".equals(db.getDbName()))
+          .findFirst()
+          .orElse(null);
+      if (properties != null) {
+        // Account root projection reads the durable optimization flag. Make that dependency
+        // deterministic when archive mode projects account-asset changes at block boundaries.
+        refreshOne(properties);
+      }
+    }
     for (Chainbase db : dbs) {
+      if (db == properties) {
+        continue;
+      }
       futures.add(flushServices.get(db.getDbName()).submit(() -> refreshOne(db)));
     }
     Future<?> future = Futures.allAsList(futures);
@@ -581,8 +703,14 @@ public class SnapshotManager implements RevokingDatabase {
 
     @Override
     public void commit() {
-      applySnapshot = false;
       snapshotManager.commit();
+      applySnapshot = false;
+    }
+
+    @Override
+    public void commit(BlockSnapshotMeta meta) {
+      snapshotManager.commit(meta);
+      applySnapshot = false;
     }
 
     @Override
