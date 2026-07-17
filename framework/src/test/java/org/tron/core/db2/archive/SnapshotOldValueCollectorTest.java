@@ -6,7 +6,10 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.google.common.primitives.Bytes;
@@ -34,7 +37,9 @@ import org.tron.core.db2.core.Chainbase;
 import org.tron.core.db2.core.SnapshotImpl;
 import org.tron.core.db2.core.SnapshotManager;
 import org.tron.core.db2.core.SnapshotRoot;
+import org.tron.core.exception.TronError;
 import org.tron.core.store.AccountAssetStore;
+import org.tron.core.store.CheckTmpStore;
 import org.tron.protos.Protocol.Account;
 
 public class SnapshotOldValueCollectorTest extends BaseMethodTest {
@@ -301,6 +306,34 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
         .findFirst().orElseThrow(AssertionError::new);
     assertArrayEquals(Longs.toByteArray(100L),
         find(assetGroup, assetKey).getOldValue().getValue());
+    manager.shutdown();
+  }
+
+  @Test
+  public void archiveDurabilityFailurePreventsCheckpointAndRefresh() throws Exception {
+    MemoryDb memoryDb = new MemoryDb("abi");
+    SnapshotManager manager = new SnapshotManager("");
+    Chainbase database = new Chainbase(new SnapshotRoot(memoryDb));
+    manager.add(database);
+    manager.enable();
+    manager.setUnChecked(false);
+    CheckTmpStore checkpoint = mock(CheckTmpStore.class);
+    manager.setCheckTmpStore(checkpoint);
+    DurableBlockReverseDiffSink sink = mock(DurableBlockReverseDiffSink.class);
+    manager.installArchiveCollector(new SnapshotOldValueCollector(), sink);
+    try (ISession block = manager.buildSession()) {
+      database.put(bytes("key"), bytes("value"));
+      block.commit(BlockSnapshotMeta.forBlock(1, hash(1), hash(0), 1L));
+    }
+    java.lang.reflect.Field flushCount = SnapshotManager.class.getDeclaredField("flushCount");
+    flushCount.setAccessible(true);
+    flushCount.setInt(manager, 1);
+    doThrow(new ArchivePersistenceException("injected"))
+        .when(sink).awaitCommitted(1L);
+
+    assertThrows(TronError.class, manager::flush);
+    verify(sink).awaitCommitted(1L);
+    verify(checkpoint, never()).updateByBatch(any(Map.class));
     manager.shutdown();
   }
 
