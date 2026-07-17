@@ -12,6 +12,8 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import lombok.Getter;
+import lombok.Setter;
+import org.tron.core.db2.archive.BlockSnapshotMeta;
 import org.tron.core.db2.common.HashDB;
 import org.tron.core.db2.common.Key;
 import org.tron.core.db2.common.Value;
@@ -22,6 +24,10 @@ public class SnapshotImpl extends AbstractSnapshot<Key, Value> {
 
   @Getter
   protected Snapshot root;
+
+  @Getter
+  @Setter
+  private BlockSnapshotMeta blockSnapshotMeta;
 
   SnapshotImpl(Snapshot snapshot) {
     root = snapshot.getRoot();
