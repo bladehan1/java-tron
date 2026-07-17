@@ -81,6 +81,9 @@ public abstract class TronStoreWithRevoking<T extends ProtoCapsule> implements I
 
   @PostConstruct
   private void init() {
+    if (revokingDB instanceof Chainbase) {
+      ((Chainbase) revokingDB).setRegistrationSource(getClass().getName());
+    }
     revokingDatabase.add(revokingDB);
     dbStatService.register(db);
   }

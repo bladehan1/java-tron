@@ -36,6 +36,7 @@ public class Chainbase implements IRevokingDB {
   private ThreadLocal<Cursor> cursor = new ThreadLocal<>();
   private ThreadLocal<Long> offset = new ThreadLocal<>();
   private Snapshot head;
+  private String registrationSource = Chainbase.class.getName();
 
   public Chainbase(Snapshot head) {
     this.head = head;
@@ -45,6 +46,14 @@ public class Chainbase implements IRevokingDB {
 
   public String getDbName() {
     return head.getDbName();
+  }
+
+  public String getRegistrationSource() {
+    return registrationSource;
+  }
+
+  public void setRegistrationSource(String registrationSource) {
+    this.registrationSource = registrationSource;
   }
 
   @Override

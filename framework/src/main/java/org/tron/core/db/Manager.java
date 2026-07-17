@@ -113,6 +113,7 @@ import org.tron.core.db.api.EnergyPriceHistoryLoader;
 import org.tron.core.db.api.MigrateTurkishKeyHelper;
 import org.tron.core.db.api.MoveAbiHelper;
 import org.tron.core.db2.ISession;
+import org.tron.core.db2.archive.BlockSnapshotMeta;
 import org.tron.core.db2.core.Chainbase;
 import org.tron.core.db2.core.SnapshotManager;
 import org.tron.core.exception.AccountResourceInsufficientException;
@@ -1091,6 +1092,14 @@ public class Manager {
     }
   }
 
+  private void commitBlockSession(ISession blockSession, BlockCapsule block) {
+    blockSession.commit(BlockSnapshotMeta.forBlock(
+        block.getNum(),
+        block.getBlockId().getBytes(),
+        block.getParentHash().getBytes(),
+        block.getTimeStamp()));
+  }
+
   private void switchFork(BlockCapsule newHead)
       throws ValidateSignatureException, ContractValidateException, ContractExeException,
       ValidateScheduleException, AccountResourceInsufficientException, TaposException,
@@ -1154,7 +1163,7 @@ public class Manager {
             tx.setVerified(false);
           }
           applyBlock(item.getBlk().setSwitch(true));
-          tmpSession.commit();
+          commitBlockSession(tmpSession, item.getBlk());
         } catch (AccountResourceInsufficientException
             | ValidateSignatureException
             | ContractValidateException
@@ -1192,7 +1201,7 @@ public class Manager {
               // todo  process the exception carefully later
               try (ISession tmpSession = revokingStore.buildSession()) {
                 applyBlock(khaosBlock.getBlk().setSwitch(true));
-                tmpSession.commit();
+                commitBlockSession(tmpSession, khaosBlock.getBlk());
               } catch (AccountResourceInsufficientException
                   | ValidateSignatureException
                   | ContractValidateException
@@ -1388,7 +1397,7 @@ public class Manager {
             long oldSolidNum = getDynamicPropertiesStore().getLatestSolidifiedBlockNum();
             try (ISession tmpSession = revokingStore.buildSession()) {
               applyBlock(newBlock, txs);
-              tmpSession.commit();
+              commitBlockSession(tmpSession, newBlock);
             } catch (Throwable throwable) {
               logger.error(throwable.getMessage(), throwable);
               khaosDb.removeBlk(block.getBlockId());
