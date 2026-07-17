@@ -7,7 +7,9 @@ import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.ListeningExecutorService;
 import com.google.common.util.concurrent.MoreExecutors;
+import java.io.Closeable;
 import java.io.File;
+import java.io.IOException;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -39,6 +41,7 @@ import org.tron.core.db2.archive.BlockChangeView;
 import org.tron.core.db2.archive.BlockReverseDiff;
 import org.tron.core.db2.archive.BlockReverseDiffSink;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
+import org.tron.core.db2.archive.DurableBlockReverseDiffSink;
 import org.tron.core.db2.archive.OldValueCollector;
 import org.tron.core.db2.common.DB;
 import org.tron.core.db2.common.IRevokingDB;
@@ -377,6 +380,13 @@ public class SnapshotManager implements RevokingDatabase {
     ExecutorServiceManager.shutdownAndAwaitTermination(pruneCheckpointThread, pruneName);
     flushServices.forEach((key, value) -> ExecutorServiceManager.shutdownAndAwaitTermination(value,
         "flush-service-" + key));
+    if (blockReverseDiffSink instanceof Closeable) {
+      try {
+        ((Closeable) blockReverseDiffSink).close();
+      } catch (IOException e) {
+        logger.error("Failed to close archive history sink.", e);
+      }
+    }
   }
 
   public void updateSolidity(int hops) {
@@ -455,6 +465,7 @@ public class SnapshotManager implements RevokingDatabase {
     if (shouldBeRefreshed()) {
       try {
         long start = System.currentTimeMillis();
+        Long archiveEpoch = awaitArchiveHistoryForFlush();
         if (!isV2Open()) {
           deleteCheckpoint();
         }
@@ -462,6 +473,9 @@ public class SnapshotManager implements RevokingDatabase {
 
         long checkPointEnd = System.currentTimeMillis();
         refresh();
+        if (archiveEpoch != null) {
+          ((DurableBlockReverseDiffSink) blockReverseDiffSink).releaseThrough(archiveEpoch);
+        }
         flushCount = 0;
         logger.info("Flush cost: {} ms, create checkpoint cost: {} ms, refresh cost: {} ms.",
             System.currentTimeMillis() - start,
@@ -474,6 +488,44 @@ public class SnapshotManager implements RevokingDatabase {
         throw new TronError(e, TronError.ErrCode.DB_FLUSH);
       }
     }
+  }
+
+  private Long awaitArchiveHistoryForFlush() {
+    if (oldValueCollector == null) {
+      return null;
+    }
+    if (!(blockReverseDiffSink instanceof DurableBlockReverseDiffSink)) {
+      throw new TronDBException("Archive sink cannot prove durable history before checkpoint");
+    }
+    Chainbase stateDatabase = dbs.stream()
+        .filter(db -> ArchiveStoreScope.isStateDatabase(db.getDbName()))
+        .findFirst()
+        .orElseThrow(() -> new TronDBException("Archive mode has no registered state database"));
+    Snapshot next = stateDatabase.getHead().getRoot();
+    BlockSnapshotMeta last = null;
+    for (int i = 0; i < flushCount; i++) {
+      next = next.getNext();
+      if (!Snapshot.isImpl(next)) {
+        throw new TronDBException("Archive flush range is missing a snapshot layer");
+      }
+      BlockSnapshotMeta meta = ((SnapshotImpl) next).getBlockSnapshotMeta();
+      if (meta == null) {
+        throw new TronDBException("Archive flush range contains a layer without block metadata");
+      }
+      if (last != null && meta.getEpoch() != last.getEpoch() + 1) {
+        throw new TronDBException("Archive flush range is not epoch-contiguous");
+      }
+      last = meta;
+    }
+    if (last == null) {
+      return null;
+    }
+    try {
+      ((DurableBlockReverseDiffSink) blockReverseDiffSink).awaitCommitted(last.getEpoch());
+    } catch (RuntimeException e) {
+      throw new TronDBException("Archive history durability gate failed", e);
+    }
+    return last.getEpoch();
   }
 
   public void createCheckpoint() {
