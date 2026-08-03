@@ -762,7 +762,6 @@ public class TrieImpl implements Trie<byte[]> {
 
     public Node branchNodeGetChild(int hex) {
       parse();
-      assert getType() == NodeType.BranchNode;
       Object n = children[hex];
       if (n == null && parsedRlp != null) {
         if (parsedRlp.isList(hex)) {
@@ -782,7 +781,6 @@ public class TrieImpl implements Trie<byte[]> {
 
     public Node branchNodeSetChild(int hex, Node node) {
       parse();
-      assert getType() == NodeType.BranchNode;
       children[hex] = node == null ? NULL_NODE : node;
       dirty = true;
       return this;
@@ -790,7 +788,6 @@ public class TrieImpl implements Trie<byte[]> {
 
     public byte[] branchNodeGetValue() {
       parse();
-      assert getType() == NodeType.BranchNode;
       Object n = children[16];
       if (n == null && parsedRlp != null) {
         byte[] bytes = parsedRlp.getBytes(16);
@@ -806,7 +803,6 @@ public class TrieImpl implements Trie<byte[]> {
 
     public Node branchNodeSetValue(byte[] val) {
       parse();
-      assert getType() == NodeType.BranchNode;
       children[16] = val == null ? NULL_NODE : val;
       dirty = true;
       return this;
@@ -814,7 +810,6 @@ public class TrieImpl implements Trie<byte[]> {
 
     public int branchNodeCompactIdx() {
       parse();
-      assert getType() == NodeType.BranchNode;
       int cnt = 0;
       int idx = -1;
       for (int i = 0; i < 16; i++) {
@@ -831,7 +826,6 @@ public class TrieImpl implements Trie<byte[]> {
 
     public boolean branchNodeCanCompact() {
       parse();
-      assert getType() == NodeType.BranchNode;
       int cnt = 0;
       for (int i = 0; i < 16; i++) {
         cnt += branchNodeGetChild(i) == null ? 0 : 1;
@@ -844,25 +838,21 @@ public class TrieImpl implements Trie<byte[]> {
 
     public TrieKey kvNodeGetKey() {
       parse();
-      assert getType() != NodeType.BranchNode;
       return (TrieKey) children[0];
     }
 
     public Node kvNodeGetChildNode() {
       parse();
-      assert getType() == NodeType.KVNodeNode;
       return (Node) children[1];
     }
 
     public byte[] kvNodeGetValue() {
       parse();
-      assert getType() == NodeType.KVNodeValue;
       return (byte[]) children[1];
     }
 
     public Node kvNodeSetValue(byte[] value) {
       parse();
-      assert getType() == NodeType.KVNodeValue;
       children[1] = value;
       dirty = true;
       return this;
@@ -870,13 +860,11 @@ public class TrieImpl implements Trie<byte[]> {
 
     public Object kvNodeGetValueOrNode() {
       parse();
-      assert getType() != NodeType.BranchNode;
       return children[1];
     }
 
     public Node kvNodeSetValueOrNode(Object valueOrNode) {
       parse();
-      assert getType() != NodeType.BranchNode;
       if (valueOrNode instanceof byte[] && children[1] instanceof byte[]
           && (children[1] == valueOrNode
           || Arrays.equals((byte[]) children[1], (byte[]) valueOrNode))) {
