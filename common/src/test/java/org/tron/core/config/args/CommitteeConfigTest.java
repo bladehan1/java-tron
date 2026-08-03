@@ -5,6 +5,7 @@ import static org.junit.Assert.assertEquals;
 import com.typesafe.config.Config;
 import com.typesafe.config.ConfigFactory;
 import org.junit.Test;
+import org.tron.core.exception.TronError;
 
 public class CommitteeConfigTest {
 
@@ -57,7 +58,7 @@ public class CommitteeConfigTest {
         .getDynamicEnergyThreshold());
   }
 
-  @Test(expected = IllegalArgumentException.class)
+  @Test(expected = TronError.class)
   public void testAllowOldRewardOptWithoutPrerequisites() {
     CommitteeConfig.fromConfig(withRef("committee { allowOldRewardOpt = 1 }"));
   }
