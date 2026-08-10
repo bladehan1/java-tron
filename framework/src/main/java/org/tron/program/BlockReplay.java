@@ -20,6 +20,7 @@ import org.tron.core.ChainBaseManager;
 import org.tron.core.capsule.BlockCapsule;
 import org.tron.core.config.DefaultConfig;
 import org.tron.core.config.args.Args;
+import org.tron.core.consensus.ConsensusService;
 import org.tron.core.net.TronNetDelegate;
 
 /**
@@ -92,12 +93,17 @@ public final class BlockReplay {
     try {
       context.register(DefaultConfig.class);
       context.refresh();
+      startConsensus(context);
       return replay(Paths.get(options.input), context.getBean(TronNetDelegate.class),
           context.getBean(ChainBaseManager.class), options.warmupBlocks,
           options.maxBlocks, true);
     } finally {
       context.close();
     }
+  }
+
+  static void startConsensus(TronApplicationContext context) {
+    context.getBean(ConsensusService.class).start();
   }
 
   static ReplayResult replay(Path input, TronNetDelegate tronNetDelegate,

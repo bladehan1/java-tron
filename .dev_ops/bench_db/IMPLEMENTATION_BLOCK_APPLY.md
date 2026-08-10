@@ -14,7 +14,7 @@
 | 父分支 | `feat/db_metric` |
 | 父分支 HEAD | `1c4f9ae35e docs(metrics): document db benchmark design` |
 | 网络处理 | replay 强制禁用 P2P |
-| 当前状态 | 实现与本地验收完成 |
+| 当前状态 | 首次真实 apply 暴露生命周期缺陷；代码修复完成，真实 D0 复验待执行 |
 
 用户最初指定 `feat/block_apply`。仓库贡献约定要求功能分支使用 `feature/*`，因此
 实际创建 `feature/block_apply`，并从已完成的 DB metrics 分支继续开发，使离线
@@ -124,6 +124,9 @@ java -cp framework/build/libs/FullNode.jar org.tron.program.BlockReplay [options
 - 每块后校验 D0 head；
 - 最终关闭 context 和数据库。
 
+`context.refresh()` 不会执行正常 FullNode 的 `ApplicationImpl.startup()`，因此 replay 还需
+显式启动 `ConsensusService`，并在关闭数据库前停止和等待 `RewardViCalService` 后台任务。
+
 ### 1.6 预热和计时
 
 支持：
@@ -178,6 +181,51 @@ Gradle 在测试前停止。这不是源码失败。最终按模块实际能力�
 测试最初按对象实例 verify `Manager.pushBlock`，而文件读取会创建等价但不同实例
 的 `BlockCapsule`，导致 Mockito 参数比较失败。测试改用 captor 比较 block ID，
 随后又随同步入口调整为验证 `TronNetDelegate.processBlock(block, true)`。
+
+#### 首次真实 apply 的 Consensus 初始化失败
+
+首次在真实 D0 上应用第一块时失败。代码级原因是：
+
+1. `BlockReplay.apply()` 只执行 `context.refresh()`；
+2. 随后第一块直接进入 `TronNetDelegate.processBlock()`；
+3. `Consensus` 使用的 `consensusInterface` 只会在 `ConsensusService.start()` 调用
+   `Consensus.start()` 后完成赋值；
+4. replay 没有调用该启动链路，第一块因此在共识处理阶段失败。
+
+原设计中“Spring context 已完成 Consensus 初始化”的表述不成立，现已修正。实现改为在
+`refresh()` 后、取得区块处理 Bean 和处理第一块前显式执行
+`ConsensusService.start()`。未调用完整 `Application.startup()`，避免为离线 benchmark
+启动普通 API 服务；P2P 仍由 `--p2p-disable true` 强制禁用。
+
+#### 异常退出时 RocksDB JNI SIGSEGV
+
+主流程异常后关闭 context，又暴露了独立的关闭顺序问题：
+
+```text
+旧顺序：Manager.close() -> RocksDB close -> Spring @PreDestroy -> reward thread stop
+```
+
+`RewardViCalService` 可能仍在遍历 delegation/witness/reward RocksDB，底层数据库先关闭会与
+native iterator 竞态。实际崩溃报告为：
+
+```text
+/data/blade/node_mainnet/hs_err_pid161196.log
+```
+
+修复内容：
+
+- 为 `RewardViCalService` 增加可重复调用的 `stop()`；
+- `stop()` 先设置停止标志并中断 executor，再等待线程退出；
+- witness/reward iterator 改为 try-with-resources，确保 native iterator 及时关闭；
+- 长 cycle 和 iterator 循环增加协作式停止检查；
+- `Manager.close()` 在 `chainBaseManager.shutdown()`/RocksDB 关闭前调用该 `stop()`；
+- Spring 后续再次执行 `@PreDestroy` 时保持幂等。
+
+新的关键顺序为：
+
+```text
+Consensus stop -> reward thread stop and await -> RocksDB close -> bean destroy
+```
 
 ## 2. 验收过程
 
@@ -259,8 +307,18 @@ org.tron.program.BlockReplayTest
 - 应用后 head 高度和 ID 校验；
 - D0 head ID 不匹配时在处理首块前拒绝；
 - warmup 块不计入 measured 统计。
+- replay apply 初始化阶段显式启动 `ConsensusService`。
 
-结果：4 个测试全部通过。
+结果：`BlockReplayTest` 新增 Consensus 生命周期用例后共 5 个测试，全部通过。
+
+关闭竞态另新增：
+
+```text
+org.tron.core.service.RewardViCalServiceLifecycleTest
+```
+
+测试向 reward executor 提交一个阻塞任务，再调用两次 `stop()`，验证工作线程收到 interrupt、
+`stop()` 等待 executor 完全终止且重复调用安全。该用例通过。
 
 ### 2.6 聚焦测试和 Checkstyle
 
@@ -280,6 +338,21 @@ org.tron.program.BlockReplayTest
 ```
 
 结果：`BUILD SUCCESSFUL in 1m 21s`。
+
+生命周期缺陷修复后执行：
+
+```bash
+./gradlew -g /private/tmp/java-tron-gradle-home \
+  :framework:test \
+    --tests org.tron.program.BlockReplayTest \
+    --tests org.tron.core.service.RewardViCalServiceLifecycleTest \
+  :framework:checkstyleMain \
+  :framework:checkstyleTest \
+  :framework:buildFullNodeJar
+```
+
+结果：6 个聚焦测试全部通过，Checkstyle 和 FullNode fat jar 构建通过，
+`BUILD SUCCESSFUL in 56s`。
 
 ### 2.7 Fat jar 验收
 
@@ -319,6 +392,8 @@ java -cp framework/build/libs/FullNode.jar \
 | computed block ID | 通过 | replay 校验路径 |
 | D0 head 防误用 | 通过 | mismatched-head 测试 |
 | 同步业务入口 | 通过 | processBlock(block, true) captor |
+| Consensus 启动门禁 | 通过 | replay 初始化显式调用 ConsensusService.start() |
+| reward 关闭等待 | 通过 | 阻塞任务被中断，executor terminated，stop 可重复调用 |
 | warmup/max-blocks | 通过 | 参数和统计逻辑测试 |
 | Checkstyle | 通过 | plugins/framework main/test |
 | fat jar | 通过 | 构建、jar 内容和 help 命令 |
@@ -336,10 +411,12 @@ java -cp framework/build/libs/FullNode.jar \
 - 执行 A/B、固定 peer 同步或 ABBA；
 - 测量工具文件读取与实际区块处理之外的环境开销。
 
-因此当前可以接受的结论是：
+首次真实 apply 证明原实现不能接受“真实 D0 回放闭环已经完成”的结论。完成生命周期修复后，
+当前可以接受的结论收缩为：
 
-> 固定区块文件、Toolkit 导出和 FullNode 离线 replay 的代码闭环已经实现，合成
-> 数据、临时真实 RocksDB、同步入口、D0 门禁和 fat jar 命令验收通过。
+> 固定区块文件、Toolkit 导出、同步入口和 D0 门禁已实现；Consensus 启动遗漏和 reward
+> 后台线程关闭竞态已完成代码修复及聚焦测试，但必须再次在真实 D0 副本上 apply，才能恢复
+> “真实回放闭环通过”的结论。
 
 当前不能接受的结论是：
 

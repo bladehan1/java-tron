@@ -18,11 +18,13 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.mockito.ArgumentCaptor;
+import org.tron.common.application.TronApplicationContext;
 import org.tron.common.utils.BlockFile;
 import org.tron.common.utils.Sha256Hash;
 import org.tron.core.ChainBaseManager;
 import org.tron.core.capsule.BlockCapsule;
 import org.tron.core.capsule.BlockCapsule.BlockId;
+import org.tron.core.consensus.ConsensusService;
 import org.tron.core.net.TronNetDelegate;
 
 public class BlockReplayTest {
@@ -79,6 +81,17 @@ public class BlockReplayTest {
     assertEquals(blocks[1].getBlockId(), captor.getAllValues().get(1).getBlockId());
     assertTrue(result.format().contains("mode=apply"));
     assertTrue(result.format().contains("processed=2"));
+  }
+
+  @Test
+  public void shouldStartConsensusBeforeApplyingBlocks() {
+    TronApplicationContext context = mock(TronApplicationContext.class);
+    ConsensusService consensusService = mock(ConsensusService.class);
+    when(context.getBean(ConsensusService.class)).thenReturn(consensusService);
+
+    BlockReplay.startConsensus(context);
+
+    verify(consensusService).start();
   }
 
   @Test

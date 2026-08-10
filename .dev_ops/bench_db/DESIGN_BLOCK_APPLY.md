@@ -184,8 +184,10 @@ db block export
 --p2p-disable true
 ```
 
-Spring context 完成真实 Manager、Consensus、VM 和 Store 初始化，但不启动普通节点
-服务。区块处理入口为：
+Spring context `refresh()` 完成真实 Manager、VM 和 Store Bean 初始化，但**不会启动
+Consensus**。正常 FullNode 是在 `ApplicationImpl.startup()` 中显式调用
+`ConsensusService.start()`。Replay 不启动普通 API/P2P 服务，因此必须在 `refresh()` 后、
+处理第一块前单独启动 `ConsensusService`。区块处理入口为：
 
 ```java
 tronNetDelegate.processBlock(block, true);
@@ -194,6 +196,23 @@ tronNetDelegate.processBlock(block, true);
 它保留同步区块的锁、fresh-block cache 和业务指标，然后进入
 `Manager.pushBlock`。不使用 `pushVerifiedBlock`，因为该入口会设置
 `generatedByMyself=true` 并绕过部分外部区块校验。
+
+离线应用生命周期必须保持以下顺序：
+
+```text
+context.refresh()
+  -> ConsensusService.start()
+  -> processBlock(block, true)
+  -> ConsensusService.stop()
+  -> stop and await RewardViCalService
+  -> close Manager / RocksDB
+  -> destroy Spring beans
+```
+
+`RewardViCalService` 会在 Manager 初始化时启动后台 RocksDB 遍历。退出时必须先停止并等待
+该线程，再关闭底层数据库；仅依赖 Spring `@PreDestroy` 会晚于
+`TronApplicationContext.doClose()` 中的 `Application.shutdown()`/`Manager.close()`，可能与
+RocksDB JNI 关闭发生竞态。
 
 应用门禁：
 
