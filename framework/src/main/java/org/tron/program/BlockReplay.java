@@ -8,13 +8,16 @@ import java.io.PrintStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Locale;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.support.DefaultListableBeanFactory;
 import org.tron.common.application.TronApplicationContext;
 import org.tron.common.log.LogService;
 import org.tron.common.prometheus.Metrics;
+import org.tron.common.setting.RocksDbSettings;
 import org.tron.common.utils.BlockFile;
 import org.tron.core.ChainBaseManager;
 import org.tron.core.capsule.BlockCapsule;
@@ -71,7 +74,7 @@ public final class BlockReplay {
   }
 
   private static ReplayResult verify(Options options) throws Exception {
-    Args.setParam(new String[] {"-c", options.config}, "config.conf");
+    Args.setParam(nodeArgs(options, null), "config.conf");
     return replay(Paths.get(options.input), null, null, options.warmupBlocks,
         options.maxBlocks, false);
   }
@@ -82,8 +85,7 @@ public final class BlockReplay {
       throw new IllegalArgumentException(
           "Output directory must be an existing D0 snapshot: " + outputDirectory);
     }
-    Args.setParam(new String[] {"-c", options.config, "-d", outputDirectory.toString(),
-        "--p2p-disable", "true"}, "config.conf");
+    Args.setParam(nodeArgs(options, outputDirectory), "config.conf");
     LogService.load(Args.getInstance().getLogbackPath());
     Metrics.init();
 
@@ -104,6 +106,23 @@ public final class BlockReplay {
 
   static void startConsensus(TronApplicationContext context) {
     context.getBean(ConsensusService.class).start();
+  }
+
+  private static String[] nodeArgs(Options options, Path outputDirectory) {
+    List<String> args = new ArrayList<>();
+    args.add("-c");
+    args.add(options.config);
+    if (options.rocksDbConfig != null) {
+      args.add("--rocksdb-config");
+      args.add(options.rocksDbConfig);
+    }
+    if (outputDirectory != null) {
+      args.add("-d");
+      args.add(outputDirectory.toString());
+      args.add("--p2p-disable");
+      args.add("true");
+    }
+    return args.toArray(new String[0]);
   }
 
   static ReplayResult replay(Path input, TronNetDelegate tronNetDelegate,
@@ -171,6 +190,10 @@ public final class BlockReplay {
     @Parameter(names = {"-c", "--config"}, description = "Node config file.")
     private String config = "config.conf";
 
+    @Parameter(names = "--rocksdb-config",
+        description = "RocksDB benchmark profile applied over storage.dbSettings.")
+    private String rocksDbConfig;
+
     @Parameter(names = "--apply",
         description = "Apply blocks to D0. Without this flag the command only verifies the file.")
     private boolean apply;
@@ -195,6 +218,9 @@ public final class BlockReplay {
       }
       if (config == null || config.trim().isEmpty()) {
         throw new ParameterException("--config must not be empty");
+      }
+      if (rocksDbConfig != null && !Files.isRegularFile(Paths.get(rocksDbConfig))) {
+        throw new ParameterException("RocksDB profile does not exist: " + rocksDbConfig);
       }
       if (apply && (outputDirectory == null || outputDirectory.trim().isEmpty())) {
         throw new ParameterException("--output-directory is required with --apply");
@@ -229,14 +255,17 @@ public final class BlockReplay {
     }
 
     String format() {
+      RocksDbSettings rocksDbSettings = RocksDbSettings.getSettings();
       double elapsedMs = measuredNanos / 1_000_000.0;
       double blocksPerSecond = measuredNanos == 0 ? 0.0
           : measured * 1_000_000_000.0 / measuredNanos;
       return String.format(Locale.ROOT,
-          "mode=%s range=[%d,%d] processed=%d warmup=%d measured=%d "
+          "mode=%s rocksdb_profile=%s rocksdb_experiment=%s "
+              + "range=[%d,%d] processed=%d warmup=%d measured=%d "
               + "elapsed_ms=%.3f blocks_per_second=%.3f",
-          applied ? "apply" : "verify", start, end, processed, warmup, measured,
-          elapsedMs, blocksPerSecond);
+          applied ? "apply" : "verify", rocksDbSettings.getBenchmarkProfile(),
+          rocksDbSettings.getBenchmarkMode(), start, end, processed, warmup,
+          measured, elapsedMs, blocksPerSecond);
     }
   }
 }
