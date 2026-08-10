@@ -20,6 +20,8 @@ class MetricsGauge {
     init(MetricKeys.Gauge.DB_SST_LEVEL, "tron  db  files .", "type", "db", "level");
     init(MetricKeys.Gauge.DB_MEMORY_BYTES, "tron  db  memory usage bytes .",
         "type", "db", "property");
+    init(MetricKeys.Gauge.DB_ROCKSDB_PROPERTY, "rocksdb instantaneous property value.",
+        "type", "db", "property");
     init(MetricKeys.Gauge.TX_CACHE, "tron tx cache info.", "type");
   }
 
@@ -59,4 +61,3 @@ class MetricsGauge {
   }
 
 }
-

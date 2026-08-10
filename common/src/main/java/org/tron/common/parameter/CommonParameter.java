@@ -508,6 +508,12 @@ public class CommonParameter {
   public int metricsPrometheusPort;
   @Getter
   @Setter
+  public boolean metricsPrometheusDatabaseEnable = false;
+  @Getter
+  @Setter
+  public int metricsPrometheusDatabaseStatIntervalSeconds = 30;
+  @Getter
+  @Setter
   public int agreeNodeCount;
   @Getter
   @Setter

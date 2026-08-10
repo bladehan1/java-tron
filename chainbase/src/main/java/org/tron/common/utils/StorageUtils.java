@@ -70,6 +70,9 @@ public class StorageUtils {
     }
     options.logger(message -> {
       levelDbLogger.info("{} {}", dbName, message);
+      if (!Metrics.databaseEnabled()) {
+        return;
+      }
       if (message.startsWith("Recovering")) {
         Metrics.counterInc(MetricKeys.Counter.DB_EVENT, 1, LEVELDB, dbName, "recover");
       } else if (message.startsWith("Compacting")) {

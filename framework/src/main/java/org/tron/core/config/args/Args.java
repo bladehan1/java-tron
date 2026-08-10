@@ -437,6 +437,12 @@ public class Args extends CommonParameter {
   private static void applyMetricsConfig(MetricsConfig mc) {
     PARAMETER.metricsPrometheusEnable = mc.getPrometheus().isEnable();
     PARAMETER.metricsPrometheusPort = mc.getPrometheus().getPort();
+    MetricsConfig.DatabaseConfig database = mc.getPrometheus().getDatabase();
+    PARAMETER.metricsPrometheusDatabaseEnable = database.isEnable();
+    PARAMETER.metricsPrometheusDatabaseStatIntervalSeconds =
+        database.getStatIntervalSeconds();
+    PARAMETER.rocksDBCustomSettings.withEnableStatistics(
+        PARAMETER.metricsPrometheusEnable && database.isEnable());
   }
 
   /**
@@ -1315,4 +1321,3 @@ public class Args extends CommonParameter {
     return optionGroupMap;
   }
 }
-

@@ -42,6 +42,12 @@ public class Metrics {
     return CommonParameter.getInstance().isMetricsPrometheusEnable();
   }
 
+  public static boolean databaseEnabled() {
+    CommonParameter parameter = CommonParameter.getInstance();
+    return parameter.isMetricsPrometheusEnable()
+        && parameter.isMetricsPrometheusDatabaseEnable();
+  }
+
   public static void counterInc(String key, double amt, String... labels) {
     MetricsCounter.inc(key, amt, labels);
   }
@@ -56,6 +62,13 @@ public class Metrics {
 
   public static Histogram.Timer histogramStartTimer(String key, String... labels) {
     return MetricsHistogram.startTimer(key, labels);
+  }
+
+  public static Histogram.Child databaseHistogramChild(String key, String... labels) {
+    if (!databaseEnabled()) {
+      return null;
+    }
+    return MetricsHistogram.child(key, labels);
   }
 
   public static void histogramObserve(Histogram.Timer startTimer) {

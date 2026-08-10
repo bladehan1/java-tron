@@ -22,6 +22,14 @@ public class MetricsConfig {
   public static class PrometheusConfig {
     private boolean enable = false;
     private int port = 9527;
+    private DatabaseConfig database = new DatabaseConfig();
+  }
+
+  @Getter
+  @Setter
+  public static class DatabaseConfig {
+    private boolean enable = false;
+    private int statIntervalSeconds = 30;
   }
 
   // Defaults come from reference.conf (loaded globally via Configuration.java)
@@ -31,6 +39,13 @@ public class MetricsConfig {
    */
   public static MetricsConfig fromConfig(Config config) {
     Config section = config.getConfig("node.metrics");
-    return ConfigBeanFactory.create(section, MetricsConfig.class);
+    MetricsConfig metricsConfig = ConfigBeanFactory.create(section, MetricsConfig.class);
+    int interval = metricsConfig.getPrometheus().getDatabase().getStatIntervalSeconds();
+    if (interval < 5 || interval > 3600) {
+      throw new IllegalArgumentException(
+          "node.metrics.prometheus.database.statIntervalSeconds must be between 5 and 3600, got "
+              + interval);
+    }
+    return metricsConfig;
   }
 }

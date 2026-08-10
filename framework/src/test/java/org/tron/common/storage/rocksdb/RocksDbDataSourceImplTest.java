@@ -5,6 +5,7 @@ import static org.junit.Assert.assertThrows;
 import static org.tron.common.TestConstants.TEST_CONF;
 import static org.tron.common.TestConstants.assumeLevelDbAvailable;
 
+import io.prometheus.client.CollectorRegistry;
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Path;
@@ -19,6 +20,8 @@ import org.junit.rules.ExpectedException;
 import org.junit.rules.TemporaryFolder;
 import org.rocksdb.RocksDBException;
 import org.tron.common.parameter.CommonParameter;
+import org.tron.common.prometheus.MetricKeys;
+import org.tron.common.setting.RocksDbSettings;
 import org.tron.common.storage.leveldb.LevelDbDataSourceImpl;
 import org.tron.common.utils.FileUtil;
 import org.tron.common.utils.PropUtil;
@@ -137,6 +140,40 @@ public class RocksDbDataSourceImplTest {
     dataSource.deleteDbBakPath(path);
     Assert.assertFalse(backDB.exists());
     dataSource.closeDB();
+  }
+
+  @Test
+  public void exportsRocksDbStatisticsWhenDatabaseMetricsEnabled() {
+    CommonParameter parameter = CommonParameter.getInstance();
+    boolean prometheusEnabled = parameter.isMetricsPrometheusEnable();
+    boolean databaseMetricsEnabled = parameter.isMetricsPrometheusDatabaseEnable();
+    boolean statisticsEnabled = RocksDbSettings.getSettings().isEnableStatistics();
+    RocksDbDataSourceImpl dataSource = null;
+    try {
+      parameter.setMetricsPrometheusEnable(true);
+      parameter.setMetricsPrometheusDatabaseEnable(true);
+      RocksDbSettings.getSettings().withEnableStatistics(true);
+      String database = "statistics-export";
+      dataSource = new RocksDbDataSourceImpl(Args.getInstance().getOutputDirectory(), database);
+
+      dataSource.putData(key1, value1);
+      dataSource.getData(key1);
+      dataSource.stat();
+
+      Double writes = CollectorRegistry.defaultRegistry.getSampleValue(
+          MetricKeys.Counter.DB_ROCKSDB_TICKER + "_total",
+          new String[]{"type", "db", "ticker"},
+          new String[]{"ROCKSDB", database, "number_keys_written"});
+      Assert.assertNotNull(writes);
+      Assert.assertTrue(writes >= 1);
+    } finally {
+      if (dataSource != null) {
+        dataSource.closeDB();
+      }
+      RocksDbSettings.getSettings().withEnableStatistics(statisticsEnabled);
+      parameter.setMetricsPrometheusDatabaseEnable(databaseMetricsEnabled);
+      parameter.setMetricsPrometheusEnable(prometheusEnabled);
+    }
   }
 
   private void makeExceptionDb(String dbName) {

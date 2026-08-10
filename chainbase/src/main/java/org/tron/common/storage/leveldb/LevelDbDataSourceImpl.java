@@ -51,10 +51,9 @@ import org.iq80.leveldb.WriteBatch;
 import org.iq80.leveldb.WriteOptions;
 import org.tron.common.es.ExecutorServiceManager;
 import org.tron.common.parameter.CommonParameter;
-import org.tron.common.prometheus.MetricKeys;
-import org.tron.common.prometheus.Metrics;
 import org.tron.common.storage.WriteOptionsWrapper;
 import org.tron.common.storage.metric.DbStat;
+import org.tron.common.storage.metric.DbOperationMetrics;
 import org.tron.common.utils.FileUtil;
 import org.tron.common.utils.StorageUtils;
 import org.tron.core.db.common.DbSourceInter;
@@ -80,6 +79,7 @@ public class LevelDbDataSourceImpl extends DbStat implements DbSourceInter<byte[
   private Options options;
   private WriteOptions writeOptions;
   private ReadWriteLock resetDbLock = new ReentrantReadWriteLock();
+  private DbOperationMetrics dbOperationMetrics;
 
 
   /**
@@ -93,6 +93,7 @@ public class LevelDbDataSourceImpl extends DbStat implements DbSourceInter<byte[
     ).toString();
 
     this.dataBaseName = dataBaseName;
+    this.dbOperationMetrics = DbOperationMetrics.create(LEVELDB, dataBaseName);
     this.options = StorageUtils.getOptionsByDbName(dataBaseName);
     this.writeOptions = new WriteOptions().sync(CommonParameter.getInstance()
         .getStorage().isDbSync());
@@ -221,15 +222,13 @@ public class LevelDbDataSourceImpl extends DbStat implements DbSourceInter<byte[
   public byte[] getData(byte[] key) {
     resetDbLock.readLock().lock();
     byte[] value;
-    try (Histogram.Timer timer = Metrics.histogramStartTimer(
-        MetricKeys.Histogram.DB_OPERATE_LATENCY, LEVELDB, dataBaseName, "get")) {
+    try (Histogram.Timer timer = dbOperationMetrics.startGet()) {
       value = database.get(key);
     } finally {
       resetDbLock.readLock().unlock();
     }
     if (value != null) {
-      Metrics.histogramObserve(MetricKeys.Histogram.DB_OPERATE_BYTES,
-          value.length, LEVELDB, dataBaseName, "get");
+      dbOperationMetrics.observeGetBytes(value.length);
     }
     return value;
   }
@@ -238,21 +237,18 @@ public class LevelDbDataSourceImpl extends DbStat implements DbSourceInter<byte[
   public void putData(byte[] key, byte[] value) {
     int size = value.length;
     resetDbLock.readLock().lock();
-    try (Histogram.Timer timer = Metrics.histogramStartTimer(
-        MetricKeys.Histogram.DB_OPERATE_LATENCY, LEVELDB, dataBaseName, "put")) {
+    try (Histogram.Timer timer = dbOperationMetrics.startPut()) {
       database.put(key, value, writeOptions);
     } finally {
       resetDbLock.readLock().unlock();
     }
-    Metrics.histogramObserve(MetricKeys.Histogram.DB_OPERATE_BYTES,
-        size, LEVELDB, dataBaseName, "put");
+    dbOperationMetrics.observePutBytes(size);
   }
 
   @Override
   public void deleteData(byte[] key) {
     resetDbLock.readLock().lock();
-    try (Histogram.Timer timer = Metrics.histogramStartTimer(
-        MetricKeys.Histogram.DB_OPERATE_LATENCY, LEVELDB, dataBaseName, "delete")) {
+    try (Histogram.Timer timer = dbOperationMetrics.startDelete()) {
       database.delete(key, writeOptions);
     } finally {
       resetDbLock.readLock().unlock();
@@ -444,11 +440,10 @@ public class LevelDbDataSourceImpl extends DbStat implements DbSourceInter<byte[
   }
 
   private void updateByBatch(Map<byte[], byte[]> rows, WriteOptions options) {
-    long totalBytes = Metrics.enabled()
+    long totalBytes = dbOperationMetrics.enabled()
         ? rows.values().stream().filter(v -> v != null).mapToLong(v -> v.length).sum() : 0;
     resetDbLock.readLock().lock();
-    try (Histogram.Timer timer = Metrics.histogramStartTimer(
-        MetricKeys.Histogram.DB_OPERATE_LATENCY, LEVELDB, dataBaseName, "batch")) {
+    try (Histogram.Timer timer = dbOperationMetrics.startBatch()) {
       updateByBatchInner(rows, options);
     } catch (Exception e) {
       try {
@@ -459,8 +454,7 @@ public class LevelDbDataSourceImpl extends DbStat implements DbSourceInter<byte[
     } finally {
       resetDbLock.readLock().unlock();
     }
-    Metrics.histogramObserve(MetricKeys.Histogram.DB_OPERATE_BYTES,
-        totalBytes, LEVELDB, dataBaseName, "batch");
+    dbOperationMetrics.observeBatchBytes(totalBytes);
   }
 
   @Override
