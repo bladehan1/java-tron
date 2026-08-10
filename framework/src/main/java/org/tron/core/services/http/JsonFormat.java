@@ -57,7 +57,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.tron.common.utils.ByteArray;
 import org.tron.common.utils.Commons;
 import org.tron.common.utils.StringUtil;
-import org.tron.json.JSON;
+import org.tron.core.Constant;
 import org.tron.protos.contract.BalanceContract;
 
 /**
@@ -291,6 +291,7 @@ public class JsonFormat {
     tokenizer.consume("{"); // Needs to happen when the object starts.
     while (!tokenizer.tryConsume("}")) { // Continue till the object is done
       mergeField(tokenizer, extensionRegistry, builder, selfType);
+      tokenizer.tryConsume(",");
     }
     // Test to make sure the tokenizer has reached the end of the stream.
     if (!tokenizer.atEnd()) {
@@ -556,8 +557,9 @@ public class JsonFormat {
   }
 
   /**
-   * Parse a single field from {@code tokenizer} and merge it into {@code builder}. If a ',' is
-   * detected after the field ends, the next field will be parsed automatically
+   * Parse a single field from {@code tokenizer} and merge it into {@code builder}. Exactly one
+   * field is consumed; the caller ({@code merge} / {@code handleObject}) consumes any trailing
+   * ',' and loops over the remaining fields.
    */
   protected static void mergeField(Tokenizer tokenizer,
       ExtensionRegistry extensionRegistry, Message.Builder builder,
@@ -617,6 +619,10 @@ public class JsonFormat {
 
     if (field != null) {
       tokenizer.consume(":");
+      // Match protobuf JsonFormat: a field whose value is null is treated as absent.
+      if (tokenizer.tryConsume("null")) {
+        return;
+      }
       boolean array = tokenizer.tryConsume("[");
 
       if (array) {
@@ -628,11 +634,6 @@ public class JsonFormat {
         handleValue(tokenizer, extensionRegistry, builder, field, extension, unknown, selfType);
       }
     }
-
-    if (tokenizer.tryConsume(",")) {
-      // Continue with the next field
-      mergeField(tokenizer, extensionRegistry, builder, selfType);
-    }
   }
 
   private static void handleMissingField(Tokenizer tokenizer,
@@ -642,18 +643,28 @@ public class JsonFormat {
     if ("{".equals(tokenizer.currentToken())) {
       // Message structure
       tokenizer.consume("{");
-      do {
-        tokenizer.consumeIdentifier();
-        handleMissingField(tokenizer, extensionRegistry, builder);
-      } while (tokenizer.tryConsume(","));
-      tokenizer.consume("}");
+      tokenizer.enterRecursion();
+      try {
+        do {
+          tokenizer.consumeIdentifier();
+          handleMissingField(tokenizer, extensionRegistry, builder);
+        } while (tokenizer.tryConsume(","));
+        tokenizer.consume("}");
+      } finally {
+        tokenizer.exitRecursion();
+      }
     } else if ("[".equals(tokenizer.currentToken())) {
       // Collection
       tokenizer.consume("[");
-      do {
-        handleMissingField(tokenizer, extensionRegistry, builder);
-      } while (tokenizer.tryConsume(","));
-      tokenizer.consume("]");
+      tokenizer.enterRecursion();
+      try {
+        do {
+          handleMissingField(tokenizer, extensionRegistry, builder);
+        } while (tokenizer.tryConsume(","));
+        tokenizer.consume("]");
+      } finally {
+        tokenizer.exitRecursion();
+      }
     } else { //if (!",".equals(tokenizer.currentToken)){
       // Primitive value
       if ("null".equals(tokenizer.currentToken())) {
@@ -807,20 +818,25 @@ public class JsonFormat {
     }
 
     tokenizer.consume("{");
-    String endToken = "}";
+    tokenizer.enterRecursion();
+    try {
+      String endToken = "}";
 
-    while (!tokenizer.tryConsume(endToken)) {
-      if (tokenizer.atEnd()) {
-        throw tokenizer.parseException("Expected \"" + endToken + "\".");
+      while (!tokenizer.tryConsume(endToken)) {
+        if (tokenizer.atEnd()) {
+          throw tokenizer.parseException("Expected \"" + endToken + "\".");
+        }
+        mergeField(tokenizer, extensionRegistry, subBuilder, selfType);
+        if (tokenizer.tryConsume(",")) {
+          // there are more fields in the object, so continue
+          continue;
+        }
       }
-      mergeField(tokenizer, extensionRegistry, subBuilder, selfType);
-      if (tokenizer.tryConsume(",")) {
-        // there are more fields in the object, so continue
-        continue;
-      }
+
+      return subBuilder.build();
+    } finally {
+      tokenizer.exitRecursion();
     }
-
-    return subBuilder.build();
   }
 
   /**
@@ -834,29 +850,27 @@ public class JsonFormat {
     return ByteArray.toHexString(input.toByteArray());
   }
 
-  static String escapeBytes(ByteString input, final String fliedName, boolean selfType) {
+  static String escapeBytes(ByteString input, final String fieldName, boolean selfType) {
     if (!selfType) {
       return ByteArray.toHexString(input.toByteArray());
     } else {
-      return escapeBytesSelfType(input, fliedName);
+      return escapeBytesSelfType(input, fieldName);
     }
   }
 
-  static String escapeBytesSelfType(ByteString input, final String fliedName) {
+  static String escapeBytesSelfType(ByteString input, final String fieldName) {
     //Address
-    if (HttpSelfFormatFieldName.isAddressFormat(fliedName)) {
+    if (HttpSelfFormatFieldName.isAddressFormat(fieldName)) {
       return StringUtil.encode58Check(input.toByteArray());
     }
     //Normal String
-    if (HttpSelfFormatFieldName.isNameStringFormat(fliedName)) {
-      String result = new String(input.toByteArray());
-      result = result.replaceAll("\"", "\\\\\"");
-      try {
-        JSON.parseObject("{\"key\":\"" + result + "\"}");
-        return result;
-      } catch (Exception e) {
+    if (HttpSelfFormatFieldName.isNameStringFormat(fieldName)) {
+      // Preserve arbitrary bytes losslessly as hex instead of decoding malformed UTF-8 with
+      // the platform default charset.
+      if (!input.isValidUtf8()) {
         return ByteArray.toHexString(input.toByteArray());
       }
+      return escapeNameStringText(input.toStringUtf8());
     }
     //HEX
     return ByteArray.toHexString(input.toByteArray());
@@ -886,6 +900,29 @@ public class JsonFormat {
   //
   // Some of these methods are package-private because Descriptors.java uses
   // them.
+
+  /**
+   * Escapes a valid UTF-8 name-string without exposing it to the U+FFFF sentinel used by
+   * {@link StringCharacterIterator}. Keeping this workaround on the new bytes path avoids
+   * changing the established behavior of {@link #escapeText(String)} for proto string fields.
+   */
+  private static String escapeNameStringText(String input) {
+    int index = input.indexOf(Character.MAX_VALUE);
+    if (index < 0) {
+      return escapeText(input);
+    }
+
+    StringBuilder result = new StringBuilder(input.length());
+    int start = 0;
+    while (index >= 0) {
+      result.append(escapeText(input.substring(start, index)));
+      result.append(Character.MAX_VALUE);
+      start = index + 1;
+      index = input.indexOf(Character.MAX_VALUE, start);
+    }
+    result.append(escapeText(input.substring(start)));
+    return result.toString();
+  }
 
   /**
    * Implements JSON string escaping as specified <a href="http://www.ietf.org/rfc/rfc4627.txt">here</a>.
@@ -986,6 +1023,9 @@ public class JsonFormat {
               break;
             case '\\':
               builder.append('\\');
+              break;
+            case '/':
+              builder.append('/');
               break;
             case '"':
               builder.append('\"');
@@ -1290,6 +1330,18 @@ public class JsonFormat {
     // errors *after* consuming).
     private int previousLine = 0;
     private int previousColumn = 0;
+    private int currentDepth = 0;
+
+    public void enterRecursion() throws ParseException {
+      if (currentDepth >= Constant.MAX_NESTING_DEPTH) {
+        throw parseException("Hit recursion limit.");
+      }
+      ++currentDepth;
+    }
+
+    public void exitRecursion() {
+      --currentDepth;
+    }
 
     /**
      * Construct a tokenizer that parses tokens from the given text.
@@ -1313,12 +1365,23 @@ public class JsonFormat {
         throws InvalidEscapeSequence {
       //Address base58 -> ByteString
       if (HttpSelfFormatFieldName.isAddressFormat(fliedName)) {
-        return ByteString.copyFrom(Commons.decodeFromBase58Check(input));
+        byte[] addressBytes = null;
+        try {
+          addressBytes = Commons.decodeFromBase58Check(input);
+        } catch (IllegalArgumentException e) {
+          // Base58.decode throws on illegal chars -> leave addressBytes null (treated as invalid)
+        }
+        if (addressBytes == null) {
+          // empty / wrong-length / bad-checksum / illegal chars -> all invalid addresses; throw a
+          // clear error instead of letting ByteString.copyFrom(null) throw a bare NPE.
+          throw new InvalidEscapeSequence("invalid address for field: " + fliedName);
+        }
+        return ByteString.copyFrom(addressBytes);
       }
 
       //Normal String -> ByteString
       if (HttpSelfFormatFieldName.isNameStringFormat(fliedName)) {
-        return ByteString.copyFromUtf8(input);
+        return ByteString.copyFromUtf8(unescapeText(input));
       }
 
       return unescapeBytes(input);

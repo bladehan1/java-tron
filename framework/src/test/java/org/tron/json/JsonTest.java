@@ -9,6 +9,7 @@ import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
 import com.fasterxml.jackson.core.StreamReadConstraints;
+import com.fasterxml.jackson.databind.node.NullNode;
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.util.Arrays;
@@ -93,6 +94,23 @@ public class JsonTest {
     obj = JSON.parseObject("{/* comment */\"a\":1}");
     assertNotNull(obj);
     assertEquals(1, obj.getIntValue("a"));
+    obj = JSON.parseObject("{\"a\":1} /* trailing comment */");
+    assertNotNull(obj);
+    assertEquals(1, obj.getIntValue("a"));
+  }
+
+  @Test
+  public void testTrailingNonCommentTokensRejected() {
+    assertThrows(JSONException.class,
+        () -> JSON.parseObject("{\"a\":1} {\"b\":2}"));
+    assertThrows(JSONException.class,
+        () -> JSONObject.parseObject("{\"a\":1} [2]"));
+    assertThrows(JSONException.class,
+        () -> JSON.parse("{\"a\":1} garbage"));
+    assertThrows(JSONException.class,
+        () -> JSON.parseArray("[1] [2]"));
+    assertThrows(JSONException.class,
+        () -> JSONArray.parseArray("[1] true"));
   }
 
 
@@ -156,6 +174,22 @@ public class JsonTest {
     assertNotEquals(JSON.toJSONString(arr, false), JSON.toJSONString(arr, true));
     // pretty for primitive types is just the JSON literal
     assertEquals("\"hi\"", JSON.toJSONString("hi", true));
+  }
+
+  @Test
+  public void testExplicitNullNodeSerializationIsPreserved() {
+    JSONObject parsedNull = JSON.parseObject("{\"a\":null,\"b\":1}");
+    assertTrue(parsedNull.containsKey("a"));
+    assertNull(parsedNull.get("a"));
+    assertEquals("{\"a\":null,\"b\":1}", parsedNull.toJSONString());
+
+    JSONObject explicitNull = new JSONObject().put("a", NullNode.getInstance()).put("b", 1);
+    assertTrue(explicitNull.containsKey("a"));
+    assertEquals("{\"a\":null,\"b\":1}", explicitNull.toJSONString());
+
+    explicitNull.put("a", (Object) null);
+    assertFalse(explicitNull.containsKey("a"));
+    assertEquals("{\"b\":1}", explicitNull.toJSONString());
   }
 
   @Test
