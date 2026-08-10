@@ -217,6 +217,62 @@ compaction，能够回答：
 它不能完整反映 P2P 请求、网络抖动、peer 队列、网络反压以及同步线程和网络
 线程之间的竞争，因此不能单独证明真实节点同步会获得相同比例的收益。
 
+### 固定区块文件命令
+
+构建导出和回放工具：
+
+```bash
+./gradlew :plugins:buildToolkitJar :framework:buildFullNodeJar
+```
+
+从已经停止的 D1 节点导出闭区间 `[H+1, H+N]`。`-d` 指向实际数据库目录，
+即其中直接包含 `block` 和 `block-index` 的目录：
+
+```bash
+java -jar plugins/build/libs/Toolkit.jar db block export \
+  -d /data/D1/database \
+  --start 68000001 \
+  --end 68010000 \
+  -o /data/block-files/68000001-68010000.dat
+```
+
+导出文件包含版本头、起止高度、记录数、每块的源数据库 block ID、原始
+protobuf 和 CRC32。导出时检查高度及父块连续性，默认拒绝覆盖已有文件；确实
+需要替换时显式使用 `--overwrite`。不要对正在运行的节点执行导出，跨库读取
+无法为在线 `block-index` 和 `block` 提供一致快照。
+
+修改 D0 前先做只读文件校验：
+
+```bash
+java -cp framework/build/libs/FullNode.jar org.tron.program.BlockReplay \
+  --input /data/block-files/68000001-68010000.dat \
+  --config /data/config.conf
+```
+
+从 D0 的一次性副本执行离线回放。这里 `-d` 指向节点 output directory，而不是
+其内部的 `database` 子目录：
+
+```bash
+java -cp framework/build/libs/FullNode.jar org.tron.program.BlockReplay \
+  --input /data/block-files/68000001-68010000.dat \
+  --config /data/config.conf \
+  --output-directory /data/A1 \
+  --apply \
+  --warmup-blocks 2000
+```
+
+安全和结果边界：
+
+- 不带 `--apply` 时只验证文件，不打开和修改 D0；
+- `--apply` 要求 output directory 已存在，并强制关闭 P2P；
+- 文件首块必须是 `D0 head + 1`，其 parent ID 必须等于 D0 head ID；
+- 每块通过 `TronNetDelegate.processBlock(block, true)` 进入真实同步处理路径；
+- 每次应用后校验 D0 head 高度和 block ID，失败立即停止；
+- `--max-blocks` 可用于 100～1,000 块 preflight；`--warmup-blocks` 只从时间统计
+  中排除前段区块，不跳过实际应用；
+- 输出的 `elapsed_ms` 和 `blocks_per_second` 只计逐块处理窗口，不包含 Spring、
+  数据库打开及文件预检查时间；正式 A/B 的每轮必须使用 D0 的全新副本。
+
 ## 第二层：固定数据源真实同步
 
 使用停止增长的固定 D1 作为单一 peer，让 A、B 从各自的 D0 副本同步相同区间。
