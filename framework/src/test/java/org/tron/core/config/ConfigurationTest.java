@@ -117,10 +117,28 @@ public class ConfigurationTest {
     assertEquals("cache-2g",
         config.getString("storage.dbSettings.benchmarkProfile"));
     assertEquals("E1", config.getString("storage.dbSettings.benchmarkMode"));
+    assertFalse(config.getBoolean("storage.dbSettings.useLegacyOptions"));
     assertEquals(2048, config.getInt("storage.dbSettings.blockCacheSize"));
     assertEquals(3000, config.getInt("storage.dbSettings.maxOpenFiles"));
     assertEquals(16, config.getInt("storage.dbSettings.blocksize"));
     assertTrue(config.getInt("node.listen.port") != 1);
+  }
+
+  @Test
+  public void shouldAllowProfileToSelectLegacyOptions() throws Exception {
+    Path profile = temporaryFolder.newFile("legacy-profile.conf").toPath();
+    Files.write(profile, Arrays.asList(
+        "rocksdb-profile {",
+        "  name = a1-legacy-options",
+        "  mode = E1",
+        "  settings.useLegacyOptions = true",
+        "}"), StandardCharsets.UTF_8);
+
+    Config config = Configuration.getByFileName(TestConstants.TEST_CONF, profile.toString());
+
+    assertTrue(config.getBoolean("storage.dbSettings.useLegacyOptions"));
+    assertEquals("a1-legacy-options",
+        config.getString("storage.dbSettings.benchmarkProfile"));
   }
 
   @Test(expected = IllegalArgumentException.class)

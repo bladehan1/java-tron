@@ -89,7 +89,12 @@ public class Configuration {
       throw new IllegalArgumentException("RocksDB profile mode must be E1 or E2");
     }
 
-    com.typesafe.config.Config settings = profile.getConfig("rocksdb-profile.settings")
+    com.typesafe.config.Config profileSettings = profile.getConfig("rocksdb-profile.settings");
+    if (!profileSettings.hasPath("useLegacyOptions")) {
+      profileSettings = profileSettings.withValue("useLegacyOptions",
+          ConfigValueFactory.fromAnyRef(false));
+    }
+    com.typesafe.config.Config settings = profileSettings
         .withValue("benchmarkProfile",
             ConfigValueFactory.fromAnyRef(profileName))
         .withValue("benchmarkMode",

@@ -67,6 +67,7 @@ public class StorageConfigTest {
     assertEquals(7, ds.getLevelNumber());
     assertEquals("default", ds.getBenchmarkProfile());
     assertEquals("E1", ds.getBenchmarkMode());
+    assertTrue(ds.isUseLegacyOptions());
     // compactThreads default is 0 in reference.conf, auto-expanded by postProcess()
     assertEquals(StrictMathWrapper.max(Runtime.getRuntime().availableProcessors(), 1),
         ds.getCompactThreads());
@@ -90,10 +91,12 @@ public class StorageConfigTest {
   @Test
   public void testBenchmarkSettingsOverride() {
     Config config = withRef("storage.dbSettings { benchmarkProfile = cache-2g, "
-        + "benchmarkMode = E1, blockCacheSize = 2048, writeBufferSize = 128, "
+        + "benchmarkMode = E1, useLegacyOptions = false, blockCacheSize = 2048, "
+        + "writeBufferSize = 128, "
         + "maxWriteBufferNumber = 4, minWriteBufferNumberToMerge = 2 }");
     StorageConfig.DbSettingsConfig settings = StorageConfig.fromConfig(config).getDbSettings();
     assertEquals("cache-2g", settings.getBenchmarkProfile());
+    assertFalse(settings.isUseLegacyOptions());
     assertEquals(2048, settings.getBlockCacheSize());
     assertEquals(128, settings.getWriteBufferSize());
     assertEquals(4, settings.getMaxWriteBufferNumber());
