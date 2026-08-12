@@ -91,4 +91,32 @@ public class RocksDbSettingsTest {
       RocksDbSettings.initCustomSettings(new DbSettingsConfig());
     }
   }
+
+  @Test
+  public void shouldEnableSharedCacheWithoutChangingLegacyTableOptions() {
+    DbSettingsConfig config = new DbSettingsConfig();
+    config.setBenchmarkProfile("b1-shared-cache-1g");
+    config.setUseLegacyOptions(true);
+    config.setLegacySharedBlockCache(true);
+    config.setBlockCacheSize(1024);
+
+    RocksDbSettings settings = RocksDbSettings.initCustomSettings(config);
+    try (Options options = RocksDbSettings.getOptionsByDbName("b1-first");
+        Options second = RocksDbSettings.getOptionsByDbName("b1-second")) {
+      assertTrue(settings.isUseLegacyOptions());
+      assertTrue(settings.isLegacySharedBlockCache());
+      assertTrue(options.tableFormatConfig() instanceof BlockBasedTableConfig);
+      assertTrue(second.tableFormatConfig() instanceof BlockBasedTableConfig);
+      BlockBasedTableConfig table = (BlockBasedTableConfig) options.tableFormatConfig();
+      BlockBasedTableConfig expected = new BlockBasedTableConfig();
+      assertEquals(expected.blockSize(), table.blockSize());
+      assertEquals(expected.blockRestartInterval(), table.blockRestartInterval());
+      assertEquals(expected.cacheIndexAndFilterBlocks(),
+          table.cacheIndexAndFilterBlocks());
+      assertEquals(expected.pinL0FilterAndIndexBlocksInCache(),
+          table.pinL0FilterAndIndexBlocksInCache());
+    } finally {
+      RocksDbSettings.initCustomSettings(new DbSettingsConfig());
+    }
+  }
 }

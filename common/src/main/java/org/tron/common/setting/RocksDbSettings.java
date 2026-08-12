@@ -34,6 +34,8 @@ public class RocksDbSettings {
   @Getter
   private boolean useLegacyOptions;
   @Getter
+  private boolean legacySharedBlockCache;
+  @Getter
   private int levelNumber;
   @Getter
   private int maxOpenFiles;
@@ -108,6 +110,7 @@ public class RocksDbSettings {
     RocksDbSettings defaultSettings = new RocksDbSettings();
     return defaultSettings.withBenchmarkProfile("default").withBenchmarkMode("E1")
         .withUseLegacyOptions(true)
+        .withLegacySharedBlockCache(false)
         .withLevelNumber(7).withBlockSize(64).withBlockCacheSize(1024)
         .withCacheIndexAndFilterBlocks(true).withPinL0FilterAndIndexBlocksInCache(true)
         .withBloomFilterBitsPerKey(10).withWholeKeyFiltering(true)
@@ -131,6 +134,7 @@ public class RocksDbSettings {
         .withBenchmarkProfile(settings.getBenchmarkProfile())
         .withBenchmarkMode(settings.getBenchmarkMode())
         .withUseLegacyOptions(settings.isUseLegacyOptions())
+        .withLegacySharedBlockCache(settings.isLegacySharedBlockCache())
         .withMaxOpenFiles(settings.getMaxOpenFiles())
         .withEnableStatistics(false)
         .withLevelNumber(settings.getLevelNumber())
@@ -167,13 +171,15 @@ public class RocksDbSettings {
 
   public String describe() {
     return String.format(Locale.ROOT,
-        "useLegacyOptions=%s,levels=%d,compactThreads=%d,blockSize=%d,blockCacheSize=%d,"
+        "useLegacyOptions=%s,legacySharedBlockCache=%s,levels=%d,compactThreads=%d,"
+            + "blockSize=%d,blockCacheSize=%d,"
             + "cacheIndexAndFilter=%s,pinL0=%s,bloomBits=%d,wholeKey=%s,restartInterval=%d,"
             + "writeBufferSize=%d,maxWriteBuffers=%d,minWriteBuffersToMerge=%d,flushThreads=%d,"
             + "maxBytesForLevelBase=%d,maxBytesMultiplier=%s,dynamicLevels=%s,l0Trigger=%d,"
             + "l0Slowdown=%d,l0Stop=%d,targetFileBase=%d,targetFileMultiplier=%d,"
             + "maxOpenFiles=%d,compression=%s",
-        useLegacyOptions, levelNumber, compactThreads, blockSize, blockCacheSize,
+        useLegacyOptions, legacySharedBlockCache, levelNumber, compactThreads,
+        blockSize, blockCacheSize,
         cacheIndexAndFilterBlocks,
         pinL0FilterAndIndexBlocksInCache, bloomFilterBitsPerKey, wholeKeyFiltering,
         blockRestartInterval, writeBufferSize, maxWriteBufferNumber,
@@ -201,6 +207,11 @@ public class RocksDbSettings {
 
   public RocksDbSettings withUseLegacyOptions(boolean useLegacyOptions) {
     this.useLegacyOptions = useLegacyOptions;
+    return this;
+  }
+
+  public RocksDbSettings withLegacySharedBlockCache(boolean legacySharedBlockCache) {
+    this.legacySharedBlockCache = legacySharedBlockCache;
     return this;
   }
 
@@ -411,7 +422,11 @@ public class RocksDbSettings {
     options.setLevel0FileNumCompactionTrigger(settings.getLevel0FileNumCompactionTrigger());
     options.setTargetFileSizeMultiplier(settings.getTargetFileSizeMultiplier());
     options.setTargetFileSizeBase(settings.getTargetFileSizeBase());
-    options.setTableFormatConfig(new BlockBasedTableConfig());
+    BlockBasedTableConfig tableCfg = new BlockBasedTableConfig();
+    if (settings.isLegacySharedBlockCache()) {
+      tableCfg.setBlockCache(RocksDbSettings.getCache(settings.getBlockCacheSize()));
+    }
+    options.setTableFormatConfig(tableCfg);
   }
 
   private static void applyCustomOptions(Options options, RocksDbSettings settings) {

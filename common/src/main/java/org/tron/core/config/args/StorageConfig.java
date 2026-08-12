@@ -87,6 +87,7 @@ public class StorageConfig {
     private String benchmarkProfile = "default";
     private String benchmarkMode = "E1";
     private boolean useLegacyOptions = true;
+    private boolean legacySharedBlockCache = false;
     private int levelNumber = 7;
     private int compactThreads = 0; // 0 = auto: max(availableProcessors, 1)
     private int blocksize = 16;
@@ -136,6 +137,10 @@ public class StorageConfig {
       if (blockCacheSize == 0 && cacheIndexAndFilterBlocks) {
         throw new IllegalArgumentException(
             "cacheIndexAndFilterBlocks requires a positive blockCacheSize");
+      }
+      if (legacySharedBlockCache && blockCacheSize <= 0) {
+        throw new IllegalArgumentException(
+            "legacySharedBlockCache requires a positive blockCacheSize");
       }
     }
   }
