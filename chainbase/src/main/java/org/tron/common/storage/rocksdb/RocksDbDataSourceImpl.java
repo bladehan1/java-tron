@@ -278,6 +278,7 @@ public class RocksDbDataSourceImpl extends DbStat implements DbSourceInter<byte[
     if (value != null) {
       dbOperationMetrics.observeGetBytes(value.length);
     }
+    dbOperationMetrics.observeGetOutcome(value != null);
     return value;
   }
 
@@ -613,6 +614,14 @@ public class RocksDbDataSourceImpl extends DbStat implements DbSourceInter<byte[
       TickerType.NUMBER_KEYS_WRITTEN,
       TickerType.BYTES_READ,
       TickerType.BYTES_WRITTEN,
+      TickerType.NUMBER_DB_SEEK,
+      TickerType.NUMBER_DB_NEXT,
+      TickerType.NUMBER_DB_PREV,
+      TickerType.NUMBER_DB_SEEK_FOUND,
+      TickerType.NUMBER_DB_NEXT_FOUND,
+      TickerType.NUMBER_DB_PREV_FOUND,
+      TickerType.ITER_BYTES_READ,
+      TickerType.NO_FILE_OPENS,
       TickerType.COMPACT_READ_BYTES,
       TickerType.COMPACT_WRITE_BYTES,
       TickerType.FLUSH_WRITE_BYTES,

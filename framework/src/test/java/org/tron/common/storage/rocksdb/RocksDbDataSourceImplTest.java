@@ -158,6 +158,7 @@ public class RocksDbDataSourceImplTest {
 
       dataSource.putData(key1, value1);
       dataSource.getData(key1);
+      dataSource.getData("missing-key".getBytes());
       dataSource.stat();
 
       Double writes = CollectorRegistry.defaultRegistry.getSampleValue(
@@ -166,6 +167,8 @@ public class RocksDbDataSourceImplTest {
           new String[]{"ROCKSDB", database, "number_keys_written"});
       Assert.assertNotNull(writes);
       Assert.assertTrue(writes >= 1);
+      Assert.assertEquals(1.0, getOutcome(database, "hit"), 0.0);
+      Assert.assertEquals(1.0, getOutcome(database, "miss"), 0.0);
     } finally {
       if (dataSource != null) {
         dataSource.closeDB();
@@ -174,6 +177,14 @@ public class RocksDbDataSourceImplTest {
       parameter.setMetricsPrometheusDatabaseEnable(databaseMetricsEnabled);
       parameter.setMetricsPrometheusEnable(prometheusEnabled);
     }
+  }
+
+  private double getOutcome(String database, String outcome) {
+    Double value = CollectorRegistry.defaultRegistry.getSampleValue(
+        MetricKeys.Counter.DB_GET + "_total",
+        new String[]{"type", "db", "outcome"},
+        new String[]{"ROCKSDB", database, outcome});
+    return value == null ? 0.0 : value;
   }
 
   private void makeExceptionDb(String dbName) {

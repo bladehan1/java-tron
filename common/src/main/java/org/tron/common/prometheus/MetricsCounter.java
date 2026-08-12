@@ -20,6 +20,8 @@ class MetricsCounter {
     init(MetricKeys.Counter.INTERNAL_SERVICE_FAIL, "internal Service fail.",
         "class", "method");
     init(MetricKeys.Counter.DB_EVENT, "db event .", "type", "db", "event");
+    init(MetricKeys.Counter.DB_GET, "rocksdb point get outcomes.",
+        "type", "db", "outcome");
     init(MetricKeys.Counter.DB_ROCKSDB_TICKER, "rocksdb cumulative ticker values.",
         "type", "db", "ticker");
   }
@@ -45,5 +47,10 @@ class MetricsCounter {
       }
       counter.labels(labels).inc(amt);
     }
+  }
+
+  static Counter.Child child(String key, String... labels) {
+    Counter counter = container.get(key);
+    return counter == null ? null : counter.labels(labels);
   }
 }

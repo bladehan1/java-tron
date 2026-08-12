@@ -22,6 +22,7 @@ public class MetricKeys {
     public static final String P2P_DISCONNECT = "tron:p2p_disconnect";
     public static final String INTERNAL_SERVICE_FAIL = "tron:internal_service_fail";
     public static final String DB_EVENT = "tron:db_event";
+    public static final String DB_GET = "tron:db_get";
     public static final String DB_ROCKSDB_TICKER = "tron:db_rocksdb_ticker";
 
     private Counter() {

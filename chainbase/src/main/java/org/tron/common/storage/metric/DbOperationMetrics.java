@@ -1,5 +1,6 @@
 package org.tron.common.storage.metric;
 
+import io.prometheus.client.Counter;
 import io.prometheus.client.Histogram;
 import org.tron.common.prometheus.MetricKeys;
 import org.tron.common.prometheus.Metrics;
@@ -20,6 +21,8 @@ public final class DbOperationMetrics {
   private final Histogram.Child getBytes;
   private final Histogram.Child putBytes;
   private final Histogram.Child batchBytes;
+  private final Counter.Child getHit;
+  private final Counter.Child getMiss;
 
   private DbOperationMetrics(String engine, String database) {
     getLatency = child(MetricKeys.Histogram.DB_OPERATE_LATENCY, engine, database, "get");
@@ -29,6 +32,8 @@ public final class DbOperationMetrics {
     getBytes = child(MetricKeys.Histogram.DB_OPERATE_BYTES, engine, database, "get");
     putBytes = child(MetricKeys.Histogram.DB_OPERATE_BYTES, engine, database, "put");
     batchBytes = child(MetricKeys.Histogram.DB_OPERATE_BYTES, engine, database, "batch");
+    getHit = counterChild(MetricKeys.Counter.DB_GET, engine, database, "hit");
+    getMiss = counterChild(MetricKeys.Counter.DB_GET, engine, database, "miss");
   }
 
   public static DbOperationMetrics create(String engine, String database) {
@@ -59,6 +64,13 @@ public final class DbOperationMetrics {
     observe(getBytes, bytes);
   }
 
+  public void observeGetOutcome(boolean hit) {
+    Counter.Child child = hit ? getHit : getMiss;
+    if (child != null) {
+      child.inc();
+    }
+  }
+
   public void observePutBytes(long bytes) {
     observe(putBytes, bytes);
   }
@@ -69,6 +81,11 @@ public final class DbOperationMetrics {
 
   private static Histogram.Child child(String key, String engine, String database, String op) {
     return Metrics.databaseHistogramChild(key, engine, database, op);
+  }
+
+  private static Counter.Child counterChild(String key, String engine, String database,
+      String outcome) {
+    return Metrics.databaseCounterChild(key, engine, database, outcome);
   }
 
   private static Histogram.Timer timer(Histogram.Child child) {
