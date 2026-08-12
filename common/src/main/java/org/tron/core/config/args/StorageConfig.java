@@ -95,6 +95,7 @@ public class StorageConfig {
     private boolean cacheIndexAndFilterBlocks = true;
     private boolean pinL0FilterAndIndexBlocksInCache = true;
     private int bloomFilterBitsPerKey = 10;
+    private List<String> bloomFilterDbAllowList = new ArrayList<>();
     private boolean wholeKeyFiltering = true;
     private int blockRestartInterval = 16;
     private long writeBufferSize = 64;
@@ -141,6 +142,11 @@ public class StorageConfig {
       if (legacySharedBlockCache && blockCacheSize <= 0) {
         throw new IllegalArgumentException(
             "legacySharedBlockCache requires a positive blockCacheSize");
+      }
+      if (bloomFilterDbAllowList.stream().anyMatch(
+          dbName -> dbName == null || dbName.trim().isEmpty())) {
+        throw new IllegalArgumentException(
+            "bloomFilterDbAllowList must contain non-empty database names");
       }
     }
   }

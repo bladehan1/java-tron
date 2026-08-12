@@ -2,7 +2,10 @@ package org.tron.common.setting;
 
 import static org.tron.core.Constant.ROCKSDB;
 
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
 import java.util.Locale;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
@@ -51,6 +54,8 @@ public class RocksDbSettings {
   private boolean pinL0FilterAndIndexBlocksInCache;
   @Getter
   private int bloomFilterBitsPerKey;
+  @Getter
+  private List<String> bloomFilterDbAllowList;
   @Getter
   private boolean wholeKeyFiltering;
   @Getter
@@ -113,7 +118,8 @@ public class RocksDbSettings {
         .withLegacySharedBlockCache(false)
         .withLevelNumber(7).withBlockSize(64).withBlockCacheSize(1024)
         .withCacheIndexAndFilterBlocks(true).withPinL0FilterAndIndexBlocksInCache(true)
-        .withBloomFilterBitsPerKey(10).withWholeKeyFiltering(true)
+        .withBloomFilterBitsPerKey(10).withBloomFilterDbAllowList(Collections.emptyList())
+        .withWholeKeyFiltering(true)
         .withBlockRestartInterval(16).withWriteBufferSize(64)
         .withMaxWriteBufferNumber(2).withMinWriteBufferNumberToMerge(1)
         .withMaxBackgroundFlushes(1).withCompactThreads(32)
@@ -145,6 +151,7 @@ public class RocksDbSettings {
         .withPinL0FilterAndIndexBlocksInCache(
             settings.isPinL0FilterAndIndexBlocksInCache())
         .withBloomFilterBitsPerKey(settings.getBloomFilterBitsPerKey())
+        .withBloomFilterDbAllowList(settings.getBloomFilterDbAllowList())
         .withWholeKeyFiltering(settings.isWholeKeyFiltering())
         .withBlockRestartInterval(settings.getBlockRestartInterval())
         .withWriteBufferSize(settings.getWriteBufferSize())
@@ -173,7 +180,8 @@ public class RocksDbSettings {
     return String.format(Locale.ROOT,
         "useLegacyOptions=%s,legacySharedBlockCache=%s,levels=%d,compactThreads=%d,"
             + "blockSize=%d,blockCacheSize=%d,"
-            + "cacheIndexAndFilter=%s,pinL0=%s,bloomBits=%d,wholeKey=%s,restartInterval=%d,"
+            + "cacheIndexAndFilter=%s,pinL0=%s,bloomBits=%d,bloomDbs=%s,wholeKey=%s,"
+            + "restartInterval=%d,"
             + "writeBufferSize=%d,maxWriteBuffers=%d,minWriteBuffersToMerge=%d,flushThreads=%d,"
             + "maxBytesForLevelBase=%d,maxBytesMultiplier=%s,dynamicLevels=%s,l0Trigger=%d,"
             + "l0Slowdown=%d,l0Stop=%d,targetFileBase=%d,targetFileMultiplier=%d,"
@@ -181,7 +189,8 @@ public class RocksDbSettings {
         useLegacyOptions, legacySharedBlockCache, levelNumber, compactThreads,
         blockSize, blockCacheSize,
         cacheIndexAndFilterBlocks,
-        pinL0FilterAndIndexBlocksInCache, bloomFilterBitsPerKey, wholeKeyFiltering,
+        pinL0FilterAndIndexBlocksInCache, bloomFilterBitsPerKey, bloomFilterDbAllowList,
+        wholeKeyFiltering,
         blockRestartInterval, writeBufferSize, maxWriteBufferNumber,
         minWriteBufferNumberToMerge, maxBackgroundFlushes, maxBytesForLevelBase,
         maxBytesForLevelMultiplier, levelCompactionDynamicLevelBytes,
@@ -242,6 +251,11 @@ public class RocksDbSettings {
 
   public RocksDbSettings withBloomFilterBitsPerKey(int bloomFilterBitsPerKey) {
     this.bloomFilterBitsPerKey = bloomFilterBitsPerKey;
+    return this;
+  }
+
+  public RocksDbSettings withBloomFilterDbAllowList(List<String> dbNames) {
+    this.bloomFilterDbAllowList = Collections.unmodifiableList(new ArrayList<>(dbNames));
     return this;
   }
 
@@ -384,7 +398,7 @@ public class RocksDbSettings {
       options.setStatsDumpPeriodSec(0);
     }
     if (settings.isUseLegacyOptions()) {
-      applyLegacyOptions(options, settings);
+      applyLegacyOptions(options, settings, dbName);
     } else {
       applyCustomOptions(options, settings);
     }
@@ -410,7 +424,8 @@ public class RocksDbSettings {
     return options;
   }
 
-  private static void applyLegacyOptions(Options options, RocksDbSettings settings) {
+  private static void applyLegacyOptions(Options options, RocksDbSettings settings,
+      String dbName) {
     options.setCreateIfMissing(true);
     options.setIncreaseParallelism(1);
     options.setLevelCompactionDynamicLevelBytes(true);
@@ -426,7 +441,15 @@ public class RocksDbSettings {
     if (settings.isLegacySharedBlockCache()) {
       tableCfg.setBlockCache(RocksDbSettings.getCache(settings.getBlockCacheSize()));
     }
+    if (settings.shouldEnableBloomFilter(dbName)) {
+      tableCfg.setWholeKeyFiltering(settings.isWholeKeyFiltering());
+      tableCfg.setFilter(new BloomFilter(settings.getBloomFilterBitsPerKey(), false));
+    }
     options.setTableFormatConfig(tableCfg);
+  }
+
+  boolean shouldEnableBloomFilter(String dbName) {
+    return bloomFilterBitsPerKey > 0 && bloomFilterDbAllowList.contains(dbName);
   }
 
   private static void applyCustomOptions(Options options, RocksDbSettings settings) {

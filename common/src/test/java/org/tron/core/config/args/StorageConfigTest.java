@@ -76,6 +76,7 @@ public class StorageConfigTest {
     assertTrue(ds.isCacheIndexAndFilterBlocks());
     assertTrue(ds.isPinL0FilterAndIndexBlocksInCache());
     assertEquals(10, ds.getBloomFilterBitsPerKey());
+    assertTrue(ds.getBloomFilterDbAllowList().isEmpty());
     assertEquals(64, ds.getWriteBufferSize());
     assertEquals(2, ds.getMaxWriteBufferNumber());
     assertEquals(1, ds.getMinWriteBufferNumberToMerge());
@@ -101,6 +102,14 @@ public class StorageConfigTest {
     assertEquals(128, settings.getWriteBufferSize());
     assertEquals(4, settings.getMaxWriteBufferNumber());
     assertEquals(2, settings.getMinWriteBufferNumberToMerge());
+  }
+
+  @Test
+  public void testBloomFilterDbAllowListOverride() {
+    Config config = withRef(
+        "storage.dbSettings.bloomFilterDbAllowList = [account-asset, delegated-resource]");
+    assertEquals(java.util.Arrays.asList("account-asset", "delegated-resource"),
+        StorageConfig.fromConfig(config).getDbSettings().getBloomFilterDbAllowList());
   }
 
   @Test(expected = IllegalArgumentException.class)

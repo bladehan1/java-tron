@@ -3,6 +3,7 @@ package org.tron.common.setting;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
+import java.util.Collections;
 import org.junit.Test;
 import org.rocksdb.BlockBasedTableConfig;
 import org.rocksdb.CompressionType;
@@ -115,6 +116,24 @@ public class RocksDbSettingsTest {
           table.cacheIndexAndFilterBlocks());
       assertEquals(expected.pinL0FilterAndIndexBlocksInCache(),
           table.pinL0FilterAndIndexBlocksInCache());
+    } finally {
+      RocksDbSettings.initCustomSettings(new DbSettingsConfig());
+    }
+  }
+
+  @Test
+  public void shouldEnableLegacyBloomFilterOnlyForAllowedDatabase() {
+    DbSettingsConfig config = new DbSettingsConfig();
+    config.setBenchmarkProfile("account-asset-bloom");
+    config.setUseLegacyOptions(true);
+    config.setBloomFilterBitsPerKey(10);
+    config.setBloomFilterDbAllowList(Collections.singletonList("account-asset"));
+
+    RocksDbSettings.initCustomSettings(config);
+    try {
+      RocksDbSettings settings = RocksDbSettings.getSettings();
+      assertTrue(settings.shouldEnableBloomFilter("account-asset"));
+      assertTrue(!settings.shouldEnableBloomFilter("delegated-resource"));
     } finally {
       RocksDbSettings.initCustomSettings(new DbSettingsConfig());
     }
