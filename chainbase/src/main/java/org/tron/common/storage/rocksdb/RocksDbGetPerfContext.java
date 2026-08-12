@@ -3,7 +3,7 @@ package org.tron.common.storage.rocksdb;
 import io.prometheus.client.Counter;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.ThreadLocalRandom;
 import lombok.extern.slf4j.Slf4j;
 import org.rocksdb.RocksDB;
 import org.rocksdb.RocksDBException;
@@ -25,7 +25,6 @@ final class RocksDbGetPerfContext {
 
   private final RocksDB database;
   private final int sampleOneIn;
-  private final AtomicLong sequence = new AtomicLong();
   private final Counter.Child[] counters;
 
   private RocksDbGetPerfContext(RocksDB database, String databaseName, int sampleOneIn) {
@@ -52,7 +51,7 @@ final class RocksDbGetPerfContext {
   }
 
   byte[] get(byte[] key) throws RocksDBException {
-    if (sequence.incrementAndGet() % sampleOneIn != 0) {
+    if (ThreadLocalRandom.current().nextInt(sampleOneIn) != 0) {
       return database.get(key);
     }
 
