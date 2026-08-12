@@ -2,6 +2,7 @@ package org.tron.common.prometheus;
 
 import io.prometheus.client.Collector;
 import io.prometheus.client.CollectorRegistry;
+import io.prometheus.client.Counter;
 import io.prometheus.client.Histogram;
 import io.prometheus.client.exporter.HTTPServer;
 import io.prometheus.client.hotspot.DefaultExports;
@@ -50,6 +51,13 @@ public class Metrics {
 
   public static void counterInc(String key, double amt, String... labels) {
     MetricsCounter.inc(key, amt, labels);
+  }
+
+  public static Counter.Child databaseCounterChild(String key, String... labels) {
+    if (!databaseEnabled()) {
+      return null;
+    }
+    return MetricsCounter.child(key, labels);
   }
 
   public static void gaugeInc(String key, double amt, String... labels) {
