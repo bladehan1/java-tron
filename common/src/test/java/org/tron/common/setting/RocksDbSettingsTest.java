@@ -138,4 +138,20 @@ public class RocksDbSettingsTest {
       RocksDbSettings.initCustomSettings(new DbSettingsConfig());
     }
   }
+
+  @Test
+  public void shouldEnablePerfContextOnlyForAllowedDatabase() {
+    DbSettingsConfig config = new DbSettingsConfig();
+    config.setPerfContextSampleOneIn(100);
+    config.setPerfContextDbAllowList(Collections.singletonList("storage-row"));
+
+    RocksDbSettings settings = RocksDbSettings.initCustomSettings(config);
+    try {
+      assertEquals(100, settings.getPerfContextSampleOneIn());
+      assertTrue(settings.shouldSamplePerfContext("storage-row"));
+      assertTrue(!settings.shouldSamplePerfContext("account"));
+    } finally {
+      RocksDbSettings.initCustomSettings(new DbSettingsConfig());
+    }
+  }
 }

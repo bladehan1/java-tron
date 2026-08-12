@@ -112,6 +112,22 @@ public class StorageConfigTest {
         StorageConfig.fromConfig(config).getDbSettings().getBloomFilterDbAllowList());
   }
 
+  @Test
+  public void testPerfContextSamplingOverride() {
+    Config config = withRef("storage.dbSettings { perfContextSampleOneIn = 100, "
+        + "perfContextDbAllowList = [account-asset, storage-row] }");
+    StorageConfig.DbSettingsConfig settings = StorageConfig.fromConfig(config).getDbSettings();
+    assertEquals(100, settings.getPerfContextSampleOneIn());
+    assertEquals(java.util.Arrays.asList("account-asset", "storage-row"),
+        settings.getPerfContextDbAllowList());
+  }
+
+  @Test(expected = IllegalArgumentException.class)
+  public void testPerfContextAllowListRequiresSampling() {
+    StorageConfig.fromConfig(withRef(
+        "storage.dbSettings.perfContextDbAllowList = [account-asset]"));
+  }
+
   @Test(expected = IllegalArgumentException.class)
   public void testPinL0RequiresIndexAndFilterCache() {
     StorageConfig.fromConfig(withRef(

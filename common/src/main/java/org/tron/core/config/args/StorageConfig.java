@@ -96,6 +96,8 @@ public class StorageConfig {
     private boolean pinL0FilterAndIndexBlocksInCache = true;
     private int bloomFilterBitsPerKey = 10;
     private List<String> bloomFilterDbAllowList = new ArrayList<>();
+    private int perfContextSampleOneIn = 0;
+    private List<String> perfContextDbAllowList = new ArrayList<>();
     private boolean wholeKeyFiltering = true;
     private int blockRestartInterval = 16;
     private long writeBufferSize = 64;
@@ -147,6 +149,18 @@ public class StorageConfig {
           dbName -> dbName == null || dbName.trim().isEmpty())) {
         throw new IllegalArgumentException(
             "bloomFilterDbAllowList must contain non-empty database names");
+      }
+      if (perfContextSampleOneIn < 0) {
+        throw new IllegalArgumentException("perfContextSampleOneIn must not be negative");
+      }
+      if (perfContextDbAllowList.stream().anyMatch(
+          dbName -> dbName == null || dbName.trim().isEmpty())) {
+        throw new IllegalArgumentException(
+            "perfContextDbAllowList must contain non-empty database names");
+      }
+      if (!perfContextDbAllowList.isEmpty() && perfContextSampleOneIn == 0) {
+        throw new IllegalArgumentException(
+            "perfContextSampleOneIn must be positive when databases are allowed");
       }
     }
   }

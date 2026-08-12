@@ -63,6 +63,7 @@ public class RocksDbDataSourceImpl extends DbStat implements DbSourceInter<byte[
   private Options options;
   private Statistics statistics;
   private DbOperationMetrics dbOperationMetrics;
+  private RocksDbGetPerfContext getPerfContext;
   private final Map<TickerType, Long> tickerSnapshots = new EnumMap<>(TickerType.class);
 
   public RocksDbDataSourceImpl(String parentPath, String name) {
@@ -218,6 +219,7 @@ public class RocksDbDataSourceImpl extends DbStat implements DbSourceInter<byte[
           this.options = RocksDbSettings.getOptionsByDbName(dataBaseName);
           tickerSnapshots.clear();
           database = RocksDB.open(this.options, dbPath.toString());
+          getPerfContext = RocksDbGetPerfContext.create(database, dataBaseName);
           statistics = this.options.statistics();
         } catch (RocksDBException e) {
           if (Objects.equals(e.getStatus().getCode(), Status.Code.Corruption)) {
@@ -269,7 +271,7 @@ public class RocksDbDataSourceImpl extends DbStat implements DbSourceInter<byte[
     try (Histogram.Timer timer = dbOperationMetrics.startGet()) {
       throwIfNotAlive();
       checkArgNotNull(key, "key");
-      value = database.get(key);
+      value = getPerfContext == null ? database.get(key) : getPerfContext.get(key);
     } catch (RocksDBException e) {
       throw new RuntimeException(dataBaseName, e);
     } finally {
