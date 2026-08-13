@@ -119,6 +119,7 @@ public final class RocksDbRebuild {
           .invoke(options, force);
       optionsClass.getMethod("setExclusiveManualCompaction", boolean.class)
           .invoke(options, true);
+      optionsClass.getMethod("setMaxSubcompactions", int.class).invoke(options, 8);
       Method compactRange = target.getDatabase().getClass().getMethod("compactRange",
           Class.forName("org.rocksdb.ColumnFamilyHandle"), byte[].class, byte[].class,
           optionsClass);
