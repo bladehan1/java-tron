@@ -14,7 +14,9 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import org.rocksdb.ReadOptions;
+import org.rocksdb.RocksDB;
 import org.rocksdb.RocksIterator;
+import org.tron.common.setting.RocksDbSettings;
 import org.tron.common.storage.rocksdb.RocksDbDataSourceImpl;
 import org.tron.core.config.args.Args;
 
@@ -66,15 +68,16 @@ public final class RocksDbRebuild {
   }
 
   private static long rebuild(Options options) throws Exception {
-    RocksDbDataSourceImpl source = new RocksDbDataSourceImpl(
-        options.sourceDirectory, options.database);
     RocksDbDataSourceImpl target = new RocksDbDataSourceImpl(
         options.targetDirectory, options.database);
     long entries = 0;
     Map<byte[], byte[]> batch = new LinkedHashMap<>(BATCH_SIZE);
-    try {
-      for (Map.Entry<byte[], byte[]> entry : source) {
-        batch.put(entry.getKey(), entry.getValue());
+    try (org.rocksdb.Options sourceOptions = RocksDbSettings.getOptionsByDbName(options.database);
+        RocksDB source = RocksDB.openReadOnly(sourceOptions, options.sourcePath().toString());
+        ReadOptions readOptions = new ReadOptions().setFillCache(false);
+        RocksIterator iterator = source.newIterator(readOptions)) {
+      for (iterator.seekToFirst(); iterator.isValid(); iterator.next()) {
+        batch.put(iterator.key(), iterator.value());
         entries++;
         if (batch.size() == BATCH_SIZE) {
           target.updateByBatch(batch);
@@ -84,26 +87,24 @@ public final class RocksDbRebuild {
       if (!batch.isEmpty()) {
         target.updateByBatch(batch);
       }
+      iterator.status();
       target.getDatabase().compactRange();
       verifySameContent(source, target, entries);
       return entries;
     } finally {
       target.closeDB();
-      source.closeDB();
     }
   }
 
   private static long compactExisting(Options options) throws Exception {
-    RocksDbDataSourceImpl source = new RocksDbDataSourceImpl(
-        options.sourceDirectory, options.database);
     RocksDbDataSourceImpl target = new RocksDbDataSourceImpl(
         options.targetDirectory, options.database);
-    try {
+    try (org.rocksdb.Options sourceOptions = RocksDbSettings.getOptionsByDbName(options.database);
+        RocksDB source = RocksDB.openReadOnly(sourceOptions, options.sourcePath().toString())) {
       forceCompactBottommost(target);
       return verifySameContent(source, target, -1);
     } finally {
       target.closeDB();
-      source.closeDB();
     }
   }
 
@@ -130,12 +131,12 @@ public final class RocksDbRebuild {
     }
   }
 
-  private static long verifySameContent(RocksDbDataSourceImpl source,
+  private static long verifySameContent(RocksDB source,
       RocksDbDataSourceImpl target, long expectedEntries) throws Exception {
     long compared = 0;
     try (ReadOptions sourceOptions = new ReadOptions().setFillCache(false);
         ReadOptions targetOptions = new ReadOptions().setFillCache(false);
-        RocksIterator sourceIterator = source.getDatabase().newIterator(sourceOptions);
+        RocksIterator sourceIterator = source.newIterator(sourceOptions);
         RocksIterator targetIterator = target.getDatabase().newIterator(targetOptions)) {
       sourceIterator.seekToFirst();
       targetIterator.seekToFirst();
@@ -219,6 +220,10 @@ public final class RocksDbRebuild {
         args.add(rocksDbConfig);
       }
       return args.toArray(new String[0]);
+    }
+
+    private Path sourcePath() {
+      return Paths.get(sourceDirectory, database).toAbsolutePath().normalize();
     }
   }
 }
