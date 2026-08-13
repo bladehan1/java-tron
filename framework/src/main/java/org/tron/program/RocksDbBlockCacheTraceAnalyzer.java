@@ -25,10 +25,19 @@ public final class RocksDbBlockCacheTraceAnalyzer {
   public static void main(String[] args) throws Exception {
     Arguments options = new Arguments();
     JCommander.newBuilder().addObject(options).build().parse(args);
-    analyze(Paths.get(options.input), Paths.get(options.output));
+    analyze(Paths.get(options.input), Paths.get(options.output), options.startTimestampUs,
+        options.endTimestampUs);
   }
 
   static void analyze(Path input, Path output) throws Exception {
+    analyze(input, output, 0, Long.MAX_VALUE);
+  }
+
+  static void analyze(Path input, Path output, long startTimestampUs, long endTimestampUs)
+      throws Exception {
+    if (startTimestampUs < 0 || endTimestampUs <= startTimestampUs) {
+      throw new IllegalArgumentException("Invalid trace timestamp range");
+    }
     Files.createDirectories(output);
     Map<EventKey, Aggregate> events = new HashMap<>();
     Map<GetKey, GetAggregate> gets = new HashMap<>();
@@ -36,7 +45,7 @@ public final class RocksDbBlockCacheTraceAnalyzer {
       List<Path> files = new ArrayList<>();
       paths.filter(p -> p.toString().endsWith(".csv")).sorted().forEach(files::add);
       for (Path path : files) {
-        read(path, events, gets);
+        read(path, events, gets, startTimestampUs, endTimestampUs);
       }
     }
     writeEvents(output.resolve("block-access.csv"), events);
@@ -44,7 +53,7 @@ public final class RocksDbBlockCacheTraceAnalyzer {
   }
 
   private static void read(Path path, Map<EventKey, Aggregate> events,
-      Map<GetKey, GetAggregate> gets) throws Exception {
+      Map<GetKey, GetAggregate> gets, long startTimestampUs, long endTimestampUs) throws Exception {
     String db = path.getFileName().toString().replaceFirst("\\.csv$", "");
     try (BufferedReader reader = Files.newBufferedReader(path, StandardCharsets.UTF_8)) {
       reader.readLine();
@@ -53,6 +62,10 @@ public final class RocksDbBlockCacheTraceAnalyzer {
         String[] values = splitCsv(line);
         if (values.length != 12) {
           throw new IllegalArgumentException("Invalid trace row in " + path + ": " + line);
+        }
+        long timestampUs = Long.parseUnsignedLong(values[0]);
+        if (timestampUs < startTimestampUs || timestampUs >= endTimestampUs) {
+          continue;
         }
         long getId = Long.parseUnsignedLong(values[1]);
         int level = Integer.parseInt(values[2]);
@@ -249,5 +262,9 @@ public final class RocksDbBlockCacheTraceAnalyzer {
     private String input;
     @Parameter(names = "--output", required = true)
     private String output;
+    @Parameter(names = "--start-timestamp-us")
+    private long startTimestampUs;
+    @Parameter(names = "--end-timestamp-us")
+    private long endTimestampUs = Long.MAX_VALUE;
   }
 }

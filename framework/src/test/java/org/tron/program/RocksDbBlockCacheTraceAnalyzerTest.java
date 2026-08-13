@@ -30,4 +30,19 @@ public class RocksDbBlockCacheTraceAnalyzerTest {
     assertTrue(blocks.contains("account,1,get,data,miss,1,4096"));
     assertTrue(blocks.contains("account,2,compaction,data,miss,1,8192"));
   }
+
+  @Test
+  public void filtersByHalfOpenTimestampRange() throws Exception {
+    Path input = temporaryFolder.newFolder("range-input").toPath();
+    Path output = temporaryFolder.newFolder("range-output").toPath();
+    Files.write(input.resolve("account.csv"), ("timestamp_us,get_id,level,sst_file,caller,"
+        + "block_type,cache_hit,no_insert,key_exists,block_size,cf_id,cf_name\n"
+        + "9,41,1,10,1,9,0,0,0,4096,0,default\n"
+        + "10,42,2,11,1,9,0,0,1,4096,0,default\n"
+        + "20,43,3,12,1,9,0,0,1,4096,0,default\n").getBytes(StandardCharsets.UTF_8));
+    RocksDbBlockCacheTraceAnalyzer.analyze(input, output, 10, 20);
+    String gets = new String(Files.readAllBytes(output.resolve("get-path.csv")),
+        StandardCharsets.UTF_8);
+    assertTrue(gets.contains("account,1,1,0,1,1,0"));
+  }
 }

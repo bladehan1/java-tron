@@ -35,8 +35,9 @@ final class RocksDbBlockCacheTrace implements AutoCloseable {
     Path outputDirectory = Paths.get(settings.getBlockCacheTraceOutputDirectory())
         .toAbsolutePath().normalize();
     databasePath = databasePath.toAbsolutePath().normalize();
-    if (outputDirectory.startsWith(databasePath)) {
-      throw new IllegalArgumentException("Block cache trace output must be outside database: "
+    Path databaseRoot = databasePath.getParent();
+    if (databaseRoot == null || outputDirectory.startsWith(databaseRoot)) {
+      throw new IllegalArgumentException("Block cache trace output must be outside database root: "
           + outputDirectory);
     }
     try {
