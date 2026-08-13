@@ -17,9 +17,13 @@ JAVA_HOME=/path/to/jdk cmake --build build
 ldd -r build/libjava_tron_rocksdb_trace.so
 ```
 
-`ldd -r` must not report unresolved RocksDB symbols. The bridge calls
-`DB::StartBlockCacheTrace` and `DB::EndBlockCacheTrace` through the public virtual interface; it
-does not link a second RocksDB engine into the JVM.
+`ldd -r` must not report unresolved RocksDB symbols. The bridge resolves the version-specific
+`DBImpl::StartBlockCacheTrace` and `DBImpl::EndBlockCacheTrace` symbols from the already loaded
+rocksdbjni library; it does not link a second RocksDB engine into the JVM.
+
+The Maven ARM rocksdbjni artifact uses the legacy libstdc++ string ABI. CMake therefore fixes
+`_GLIBCXX_USE_CXX11_ABI=0`; changing it corrupts `BlockCacheTraceRecord` field offsets even when
+the RocksDB source tag matches.
 
 Example configuration:
 

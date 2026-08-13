@@ -24,6 +24,7 @@ endif()
 
 add_library(java_tron_rocksdb_trace SHARED rocksdb_trace_bridge.cc)
 target_compile_features(java_tron_rocksdb_trace PRIVATE cxx_std_17)
+target_compile_definitions(java_tron_rocksdb_trace PRIVATE _GLIBCXX_USE_CXX11_ABI=0)
 target_include_directories(java_tron_rocksdb_trace PRIVATE
   ${JAVA_INCLUDE_DIR}
   ${JAVA_PLATFORM_INCLUDE_DIR}
