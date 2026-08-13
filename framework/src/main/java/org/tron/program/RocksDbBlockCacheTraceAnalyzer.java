@@ -50,6 +50,7 @@ public final class RocksDbBlockCacheTraceAnalyzer {
     }
     writeEvents(output.resolve("block-access.csv"), events);
     writeGets(output.resolve("get-path.csv"), gets);
+    writeGetLevels(output.resolve("get-level.csv"), gets);
   }
 
   private static void read(Path path, Map<EventKey, Aggregate> events,
@@ -79,7 +80,7 @@ public final class RocksDbBlockCacheTraceAnalyzer {
         events.computeIfAbsent(eventKey, ignored -> new Aggregate()).add(blockSize);
         if (getId != 0 && caller == 1) {
           gets.computeIfAbsent(new GetKey(db, getId), ignored -> new GetAggregate())
-              .add(level, blockType, cacheHit, keyExists);
+              .add(level, blockType, cacheHit, keyExists, blockSize);
         }
       }
     }
@@ -121,19 +122,41 @@ public final class RocksDbBlockCacheTraceAnalyzer {
     Map<String, long[]> summary = new LinkedHashMap<>();
     values.entrySet().stream().sorted(Map.Entry.comparingByKey()).forEach(entry -> {
       GetAggregate get = entry.getValue();
-      long[] counts = summary.computeIfAbsent(entry.getKey().db, ignored -> new long[6]);
+      long[] counts = summary.computeIfAbsent(entry.getKey().db, ignored -> new long[10]);
       counts[0]++;
       counts[1] += get.dataCandidates;
       counts[2] += get.found ? get.candidateMisses : 0;
       counts[3] += get.found ? 1 : 0;
       counts[4] += get.dataCacheMisses;
       counts[5] += get.found ? 0 : get.candidateMisses;
+      counts[6] += get.avoidableCandidates();
+      counts[7] += get.avoidableCacheMisses();
+      counts[8] += get.found ? get.candidateCacheMisses : 0;
+      counts[9] += get.found ? 0 : get.candidateCacheMisses;
     });
     try (BufferedWriter writer = Files.newBufferedWriter(path, StandardCharsets.UTF_8)) {
       writer.write("db,sampled_gets,data_candidates,upper_misses,trace_found_gets,"
-          + "data_cache_misses,final_miss_candidates\n");
+          + "data_cache_misses,final_miss_candidates,avoidable_candidates,"
+          + "avoidable_cache_misses,upper_cache_misses,final_cache_misses\n");
       summary.forEach((db, count) -> write(writer, db + "," + count[0] + "," + count[1]
-          + "," + count[2] + "," + count[3] + "," + count[4] + "," + count[5]));
+          + "," + count[2] + "," + count[3] + "," + count[4] + "," + count[5]
+          + "," + count[6] + "," + count[7] + "," + count[8] + "," + count[9]));
+    }
+  }
+
+  private static void writeGetLevels(Path path, Map<GetKey, GetAggregate> values)
+      throws Exception {
+    Map<GetLevelKey, Aggregate> summary = new HashMap<>();
+    values.forEach((getKey, get) -> get.candidates.forEach(candidate -> {
+      String outcome = candidate.keyExists ? "found" : get.found ? "upper_miss" : "final_miss";
+      GetLevelKey key = new GetLevelKey(getKey.db, candidate.level, outcome,
+          candidate.cacheHit ? "hit" : "miss");
+      summary.computeIfAbsent(key, ignored -> new Aggregate()).add(candidate.blockSize);
+    }));
+    try (BufferedWriter writer = Files.newBufferedWriter(path, StandardCharsets.UTF_8)) {
+      writer.write("db,level,path_outcome,cache_result,accesses,bytes\n");
+      summary.entrySet().stream().sorted(Map.Entry.comparingByKey()).forEach(entry -> write(writer,
+          entry.getKey().csv() + "," + entry.getValue().count + "," + entry.getValue().bytes));
     }
   }
 
@@ -183,14 +206,17 @@ public final class RocksDbBlockCacheTraceAnalyzer {
   private static final class GetAggregate {
     private int dataCandidates;
     private int candidateMisses;
+    private int candidateCacheMisses;
     private int dataCacheMisses;
     private boolean found;
+    private final List<GetCandidate> candidates = new ArrayList<>();
 
-    void add(int level, int blockType, boolean cacheHit, boolean keyExists) {
+    void add(int level, int blockType, boolean cacheHit, boolean keyExists, long blockSize) {
       if (blockType != 9) {
         return;
       }
       dataCandidates++;
+      candidates.add(new GetCandidate(level, cacheHit, keyExists, blockSize));
       if (!cacheHit) {
         dataCacheMisses++;
       }
@@ -198,7 +224,32 @@ public final class RocksDbBlockCacheTraceAnalyzer {
         found = true;
       } else {
         candidateMisses++;
+        if (!cacheHit) {
+          candidateCacheMisses++;
+        }
       }
+    }
+
+    int avoidableCandidates() {
+      return candidateMisses;
+    }
+
+    int avoidableCacheMisses() {
+      return candidateCacheMisses;
+    }
+  }
+
+  private static final class GetCandidate {
+    private final int level;
+    private final boolean cacheHit;
+    private final boolean keyExists;
+    private final long blockSize;
+
+    GetCandidate(int level, boolean cacheHit, boolean keyExists, long blockSize) {
+      this.level = level;
+      this.cacheHit = cacheHit;
+      this.keyExists = keyExists;
+      this.blockSize = blockSize;
     }
   }
 
@@ -254,6 +305,36 @@ public final class RocksDbBlockCacheTraceAnalyzer {
 
     public int hashCode() {
       return 31 * db.hashCode() + Long.hashCode(id);
+    }
+  }
+
+  private static final class GetLevelKey implements Comparable<GetLevelKey> {
+    private final String db;
+    private final int level;
+    private final String outcome;
+    private final String cacheResult;
+
+    GetLevelKey(String db, int level, String outcome, String cacheResult) {
+      this.db = db;
+      this.level = level;
+      this.outcome = outcome;
+      this.cacheResult = cacheResult;
+    }
+
+    String csv() {
+      return db + "," + level + "," + outcome + "," + cacheResult;
+    }
+
+    public int compareTo(GetLevelKey other) {
+      return csv().compareTo(other.csv());
+    }
+
+    public boolean equals(Object other) {
+      return other instanceof GetLevelKey && compareTo((GetLevelKey) other) == 0;
+    }
+
+    public int hashCode() {
+      return csv().hashCode();
     }
   }
 

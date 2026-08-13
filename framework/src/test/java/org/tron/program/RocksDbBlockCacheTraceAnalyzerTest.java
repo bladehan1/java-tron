@@ -24,11 +24,15 @@ public class RocksDbBlockCacheTraceAnalyzerTest {
     RocksDbBlockCacheTraceAnalyzer.analyze(input, output);
     String gets = new String(Files.readAllBytes(output.resolve("get-path.csv")),
         StandardCharsets.UTF_8);
-    assertTrue(gets.contains("account,1,2,1,1,1,0"));
+    assertTrue(gets.contains("account,1,2,1,1,1,0,1,1,1,0"));
     String blocks = new String(Files.readAllBytes(output.resolve("block-access.csv")),
         StandardCharsets.UTF_8);
     assertTrue(blocks.contains("account,1,get,data,miss,1,4096"));
     assertTrue(blocks.contains("account,2,compaction,data,miss,1,8192"));
+    String levels = new String(Files.readAllBytes(output.resolve("get-level.csv")),
+        StandardCharsets.UTF_8);
+    assertTrue(levels.contains("account,1,upper_miss,miss,1,4096"));
+    assertTrue(levels.contains("account,3,found,hit,1,4096"));
   }
 
   @Test
@@ -43,6 +47,6 @@ public class RocksDbBlockCacheTraceAnalyzerTest {
     RocksDbBlockCacheTraceAnalyzer.analyze(input, output, 10, 20);
     String gets = new String(Files.readAllBytes(output.resolve("get-path.csv")),
         StandardCharsets.UTF_8);
-    assertTrue(gets.contains("account,1,1,0,1,1,0"));
+    assertTrue(gets.contains("account,1,1,0,1,1,0,0,0,0,0"));
   }
 }
