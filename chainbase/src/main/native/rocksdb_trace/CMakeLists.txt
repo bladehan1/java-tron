@@ -30,5 +30,6 @@ target_include_directories(java_tron_rocksdb_trace PRIVATE
   ${ROCKSDB_SOURCE_DIR}/include)
 target_compile_options(java_tron_rocksdb_trace PRIVATE -Wall -Wextra -Werror)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  target_link_libraries(java_tron_rocksdb_trace PRIVATE dl)
   target_link_options(java_tron_rocksdb_trace PRIVATE -Wl,-Bsymbolic)
 endif()

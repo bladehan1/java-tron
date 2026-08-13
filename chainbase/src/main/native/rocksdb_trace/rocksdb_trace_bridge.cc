@@ -1,4 +1,6 @@
 #include <jni.h>
+#include <dlfcn.h>
+#include <link.h>
 
 #include <cstdint>
 #include <cstring>
@@ -46,6 +48,57 @@ std::string Status::ToString() const {
 namespace {
 
 constexpr uint64_t kReservedGetId = 0;
+
+using StartBlockCacheTrace = rocksdb::Status (*)(
+    void*, const rocksdb::BlockCacheTraceOptions&,
+    std::unique_ptr<rocksdb::BlockCacheTraceWriter>&&);
+using EndBlockCacheTrace = rocksdb::Status (*)(void*);
+
+struct RocksDbTraceFunctions {
+  StartBlockCacheTrace start = nullptr;
+  EndBlockCacheTrace end = nullptr;
+  std::string error;
+};
+
+int FindRocksDbJni(struct dl_phdr_info* info, size_t, void* data) {
+  if (info->dlpi_name != nullptr
+      && std::strstr(info->dlpi_name, "librocksdbjni") != nullptr) {
+    *static_cast<std::string*>(data) = info->dlpi_name;
+    return 1;
+  }
+  return 0;
+}
+
+RocksDbTraceFunctions ResolveTraceFunctions() {
+  RocksDbTraceFunctions functions;
+  std::string path;
+  dl_iterate_phdr(FindRocksDbJni, &path);
+  if (path.empty()) {
+    functions.error = "loaded rocksdbjni library was not found";
+    return functions;
+  }
+  void* handle = dlopen(path.c_str(), RTLD_NOW | RTLD_NOLOAD);
+  if (handle == nullptr) {
+    functions.error = std::string("unable to inspect rocksdbjni: ") + dlerror();
+    return functions;
+  }
+  // Resolve the version-specific DBImpl methods. The public DB vtable layout can differ when
+  // rocksdbjni and this bridge are compiled with different RocksDB feature macros.
+  functions.start = reinterpret_cast<StartBlockCacheTrace>(dlsym(
+      handle,
+      "_ZN7rocksdb6DBImpl20StartBlockCacheTraceERKNS_22BlockCacheTraceOptionsEOSt10unique_ptrINS_21BlockCacheTraceWriterESt14default_deleteIS5_EE"));
+  functions.end = reinterpret_cast<EndBlockCacheTrace>(
+      dlsym(handle, "_ZN7rocksdb6DBImpl18EndBlockCacheTraceEv"));
+  if (functions.start == nullptr || functions.end == nullptr) {
+    functions.error = "RocksDB 9.7 DBImpl block-cache trace symbols were not found";
+  }
+  return functions;
+}
+
+const RocksDbTraceFunctions& TraceFunctions() {
+  static const RocksDbTraceFunctions functions = ResolveTraceFunctions();
+  return functions;
+}
 
 uint64_t Mix(uint64_t value) {
   value ^= value >> 30;
@@ -160,10 +213,14 @@ Java_org_tron_common_storage_rocksdb_RocksDbBlockCacheTrace_startTrace(
   if (!writer->IsOpen()) {
     return Error(env, "unable to open trace output");
   }
-  auto* database = reinterpret_cast<rocksdb::DB*>(database_handle);
+  const RocksDbTraceFunctions& functions = TraceFunctions();
+  if (!functions.error.empty()) {
+    return Error(env, functions.error);
+  }
   rocksdb::BlockCacheTraceOptions options;
   options.sampling_frequency = 1;
-  rocksdb::Status status = database->StartBlockCacheTrace(options, std::move(writer));
+  rocksdb::Status status = functions.start(
+      reinterpret_cast<void*>(database_handle), options, std::move(writer));
   return status.ok() ? nullptr : Error(env, status.ToString());
 }
 
@@ -173,7 +230,10 @@ Java_org_tron_common_storage_rocksdb_RocksDbBlockCacheTrace_endTrace(
   if (database_handle == 0) {
     return Error(env, "invalid RocksDB handle");
   }
-  auto* database = reinterpret_cast<rocksdb::DB*>(database_handle);
-  rocksdb::Status status = database->EndBlockCacheTrace();
+  const RocksDbTraceFunctions& functions = TraceFunctions();
+  if (!functions.error.empty()) {
+    return Error(env, functions.error);
+  }
+  rocksdb::Status status = functions.end(reinterpret_cast<void*>(database_handle));
   return status.ok() ? nullptr : Error(env, status.ToString());
 }
