@@ -154,4 +154,20 @@ public class RocksDbSettingsTest {
       RocksDbSettings.initCustomSettings(new DbSettingsConfig());
     }
   }
+
+  @Test
+  public void shouldEnableBlockCacheTraceForAllOrAllowedDatabase() {
+    DbSettingsConfig config = new DbSettingsConfig();
+    config.setBlockCacheTraceSampleOneIn(100);
+    config.setBlockCacheTraceDbAllowList(Collections.singletonList("*"));
+    config.setBlockCacheTraceOutputDirectory("/tmp/trace");
+    config.setBlockCacheTraceNativeLibrary("/tmp/libtrace.so");
+    RocksDbSettings settings = RocksDbSettings.initCustomSettings(config);
+    try {
+      assertTrue(settings.shouldTraceBlockCache("account"));
+      assertTrue(settings.shouldTraceBlockCache("storage-row"));
+    } finally {
+      RocksDbSettings.initCustomSettings(new DbSettingsConfig());
+    }
+  }
 }

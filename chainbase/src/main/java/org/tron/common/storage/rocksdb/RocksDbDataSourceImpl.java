@@ -64,6 +64,7 @@ public class RocksDbDataSourceImpl extends DbStat implements DbSourceInter<byte[
   private Statistics statistics;
   private DbOperationMetrics dbOperationMetrics;
   private RocksDbGetPerfContext getPerfContext;
+  private RocksDbBlockCacheTrace blockCacheTrace;
   private final Map<TickerType, Long> tickerSnapshots = new EnumMap<>(TickerType.class);
 
   public RocksDbDataSourceImpl(String parentPath, String name) {
@@ -91,6 +92,14 @@ public class RocksDbDataSourceImpl extends DbStat implements DbSourceInter<byte[
     try {
       if (!isAlive()) {
         return;
+      }
+      if (blockCacheTrace != null) {
+        try {
+          blockCacheTrace.close();
+        } catch (RuntimeException e) {
+          logger.error("Failed to close block cache trace for {}", dataBaseName, e);
+        }
+        blockCacheTrace = null;
       }
       database.close();
       if (this.statistics != null) {
@@ -220,6 +229,13 @@ public class RocksDbDataSourceImpl extends DbStat implements DbSourceInter<byte[
           tickerSnapshots.clear();
           database = RocksDB.open(this.options, dbPath.toString());
           getPerfContext = RocksDbGetPerfContext.create(database, dataBaseName);
+          try {
+            blockCacheTrace = RocksDbBlockCacheTrace.create(database, dataBaseName, dbPath);
+          } catch (RuntimeException e) {
+            database.close();
+            database = null;
+            throw e;
+          }
           statistics = this.options.statistics();
         } catch (RocksDBException e) {
           if (Objects.equals(e.getStatus().getCode(), Status.Code.Corruption)) {

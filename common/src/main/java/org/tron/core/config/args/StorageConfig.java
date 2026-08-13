@@ -98,6 +98,11 @@ public class StorageConfig {
     private List<String> bloomFilterDbAllowList = new ArrayList<>();
     private int perfContextSampleOneIn = 0;
     private List<String> perfContextDbAllowList = new ArrayList<>();
+    private int blockCacheTraceSampleOneIn = 0;
+    private List<String> blockCacheTraceDbAllowList = new ArrayList<>();
+    private String blockCacheTraceOutputDirectory = "";
+    private long blockCacheTraceMaxBytesPerDb = 536870912L;
+    private String blockCacheTraceNativeLibrary = "";
     private boolean wholeKeyFiltering = true;
     private int blockRestartInterval = 16;
     private long writeBufferSize = 64;
@@ -161,6 +166,21 @@ public class StorageConfig {
       if (!perfContextDbAllowList.isEmpty() && perfContextSampleOneIn == 0) {
         throw new IllegalArgumentException(
             "perfContextSampleOneIn must be positive when databases are allowed");
+      }
+      if (blockCacheTraceSampleOneIn < 0 || blockCacheTraceMaxBytesPerDb <= 0) {
+        throw new IllegalArgumentException("Invalid RocksDB block cache trace settings");
+      }
+      if (blockCacheTraceDbAllowList.stream().anyMatch(
+          dbName -> dbName == null || dbName.trim().isEmpty())) {
+        throw new IllegalArgumentException(
+            "blockCacheTraceDbAllowList must contain non-empty database names");
+      }
+      if (!blockCacheTraceDbAllowList.isEmpty()
+          && (blockCacheTraceSampleOneIn == 0
+          || blockCacheTraceOutputDirectory.trim().isEmpty()
+          || blockCacheTraceNativeLibrary.trim().isEmpty())) {
+        throw new IllegalArgumentException("Enabled RocksDB block cache trace requires a positive "
+            + "sample rate, output directory, and native library");
       }
     }
   }

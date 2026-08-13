@@ -128,6 +128,23 @@ public class StorageConfigTest {
         "storage.dbSettings.perfContextDbAllowList = [account-asset]"));
   }
 
+  @Test
+  public void testBlockCacheTraceAllDatabasesOverride() {
+    Config config = withRef("storage.dbSettings { blockCacheTraceSampleOneIn = 100, "
+        + "blockCacheTraceDbAllowList = [\"*\"], blockCacheTraceOutputDirectory = \"/tmp/t\", "
+        + "blockCacheTraceNativeLibrary = \"/tmp/libtrace.so\" }");
+    StorageConfig.DbSettingsConfig settings = StorageConfig.fromConfig(config).getDbSettings();
+    assertEquals(100, settings.getBlockCacheTraceSampleOneIn());
+    assertEquals(java.util.Collections.singletonList("*"),
+        settings.getBlockCacheTraceDbAllowList());
+  }
+
+  @Test(expected = IllegalArgumentException.class)
+  public void testBlockCacheTraceAllowListRequiresCompleteConfiguration() {
+    StorageConfig.fromConfig(withRef(
+        "storage.dbSettings.blockCacheTraceDbAllowList = [account]"));
+  }
+
   @Test(expected = IllegalArgumentException.class)
   public void testPinL0RequiresIndexAndFilterCache() {
     StorageConfig.fromConfig(withRef(
