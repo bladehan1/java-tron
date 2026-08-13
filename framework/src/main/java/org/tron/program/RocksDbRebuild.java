@@ -4,6 +4,7 @@ import com.beust.jcommander.JCommander;
 import com.beust.jcommander.Parameter;
 import com.beust.jcommander.ParameterException;
 import java.io.PrintStream;
+import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -47,7 +48,7 @@ public final class RocksDbRebuild {
       options.validate();
       Args.setParam(options.nodeArgs(), "config.conf");
       long start = System.nanoTime();
-      long entries = rebuild(options);
+      long entries = options.compactExisting ? compactExisting(options) : rebuild(options);
       double elapsedSeconds = (System.nanoTime() - start) / 1_000_000_000.0;
       output.printf("rebuilt database=%s entries=%d elapsed_seconds=%.3f%n",
           options.database, entries, elapsedSeconds);
@@ -92,7 +93,43 @@ public final class RocksDbRebuild {
     }
   }
 
-  private static void verifySameContent(RocksDbDataSourceImpl source,
+  private static long compactExisting(Options options) throws Exception {
+    RocksDbDataSourceImpl source = new RocksDbDataSourceImpl(
+        options.sourceDirectory, options.database);
+    RocksDbDataSourceImpl target = new RocksDbDataSourceImpl(
+        options.targetDirectory, options.database);
+    try {
+      forceCompactBottommost(target);
+      return verifySameContent(source, target, -1);
+    } finally {
+      target.closeDB();
+      source.closeDB();
+    }
+  }
+
+  @SuppressWarnings({"rawtypes", "unchecked"})
+  private static void forceCompactBottommost(RocksDbDataSourceImpl target) throws Exception {
+    Class<?> optionsClass = Class.forName("org.rocksdb.CompactRangeOptions");
+    Class<? extends Enum> bottommostClass = (Class<? extends Enum>) Class.forName(
+        "org.rocksdb.CompactRangeOptions$BottommostLevelCompaction");
+    Object options = optionsClass.getConstructor().newInstance();
+    Object force = Enum.valueOf(bottommostClass, "kForce");
+    try {
+      optionsClass.getMethod("setBottommostLevelCompaction", bottommostClass)
+          .invoke(options, force);
+      optionsClass.getMethod("setExclusiveManualCompaction", boolean.class)
+          .invoke(options, true);
+      Method compactRange = target.getDatabase().getClass().getMethod("compactRange",
+          Class.forName("org.rocksdb.ColumnFamilyHandle"), byte[].class, byte[].class,
+          optionsClass);
+      compactRange.invoke(target.getDatabase(), target.getDatabase().getDefaultColumnFamily(),
+          null, null, options);
+    } finally {
+      ((AutoCloseable) options).close();
+    }
+  }
+
+  private static long verifySameContent(RocksDbDataSourceImpl source,
       RocksDbDataSourceImpl target, long expectedEntries) throws Exception {
     long compared = 0;
     try (ReadOptions sourceOptions = new ReadOptions().setFillCache(false);
@@ -112,10 +149,12 @@ public final class RocksDbRebuild {
       }
       sourceIterator.status();
       targetIterator.status();
-      if (sourceIterator.isValid() || targetIterator.isValid() || compared != expectedEntries) {
+      if (sourceIterator.isValid() || targetIterator.isValid()
+          || (expectedEntries >= 0 && compared != expectedEntries)) {
         throw new IllegalStateException("Rebuilt entry count differs: copied=" + expectedEntries
             + ", compared=" + compared);
       }
+      return compared;
     }
   }
 
@@ -130,6 +169,10 @@ public final class RocksDbRebuild {
 
     @Parameter(names = "--database", description = "Database name to rebuild.")
     private String database;
+
+    @Parameter(names = "--compact-existing",
+        description = "Force-compact an existing target copy, including bottommost SST files.")
+    private boolean compactExisting;
 
     @Parameter(names = {"-c", "--config"}, description = "Node config file.")
     private String config = "config.conf";
@@ -152,7 +195,10 @@ public final class RocksDbRebuild {
       if (!Files.isRegularFile(source.resolve("CURRENT"))) {
         throw new ParameterException("Existing RocksDB source is required: " + source);
       }
-      if (Files.exists(target)) {
+      if (compactExisting && !Files.isRegularFile(target.resolve("CURRENT"))) {
+        throw new ParameterException("Existing RocksDB target is required: " + target);
+      }
+      if (!compactExisting && Files.exists(target)) {
         throw new ParameterException("Target database must not exist: " + target);
       }
     }
