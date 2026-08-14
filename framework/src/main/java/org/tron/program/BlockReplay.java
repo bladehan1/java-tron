@@ -21,6 +21,7 @@ import org.tron.core.capsule.BlockCapsule;
 import org.tron.core.config.DefaultConfig;
 import org.tron.core.config.args.Args;
 import org.tron.core.consensus.ConsensusService;
+import org.tron.core.db.RevokingDatabase;
 import org.tron.core.net.TronNetDelegate;
 
 /**
@@ -94,9 +95,11 @@ public final class BlockReplay {
       context.register(DefaultConfig.class);
       context.refresh();
       startConsensus(context);
-      return replay(Paths.get(options.input), context.getBean(TronNetDelegate.class),
+      ReplayResult result = replay(Paths.get(options.input), context.getBean(TronNetDelegate.class),
           context.getBean(ChainBaseManager.class), options.warmupBlocks,
           options.maxBlocks, true);
+      flushPending(context);
+      return result;
     } finally {
       context.close();
     }
@@ -104,6 +107,10 @@ public final class BlockReplay {
 
   static void startConsensus(TronApplicationContext context) {
     context.getBean(ConsensusService.class).start();
+  }
+
+  static void flushPending(TronApplicationContext context) {
+    context.getBean(RevokingDatabase.class).flushPending();
   }
 
   static ReplayResult replay(Path input, TronNetDelegate tronNetDelegate,

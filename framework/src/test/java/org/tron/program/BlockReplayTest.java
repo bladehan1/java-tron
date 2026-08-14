@@ -25,6 +25,7 @@ import org.tron.core.ChainBaseManager;
 import org.tron.core.capsule.BlockCapsule;
 import org.tron.core.capsule.BlockCapsule.BlockId;
 import org.tron.core.consensus.ConsensusService;
+import org.tron.core.db.RevokingDatabase;
 import org.tron.core.net.TronNetDelegate;
 
 public class BlockReplayTest {
@@ -92,6 +93,17 @@ public class BlockReplayTest {
     BlockReplay.startConsensus(context);
 
     verify(consensusService).start();
+  }
+
+  @Test
+  public void shouldFlushPendingSnapshotsAfterSuccessfulReplay() {
+    TronApplicationContext context = mock(TronApplicationContext.class);
+    RevokingDatabase revokingDatabase = mock(RevokingDatabase.class);
+    when(context.getBean(RevokingDatabase.class)).thenReturn(revokingDatabase);
+
+    BlockReplay.flushPending(context);
+
+    verify(revokingDatabase).flushPending();
   }
 
   @Test
