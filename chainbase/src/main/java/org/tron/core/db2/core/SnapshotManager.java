@@ -326,11 +326,20 @@ public class SnapshotManager implements RevokingDatabase {
   }
 
   public void flush() {
-    if (unChecked) {
+    flush(false);
+  }
+
+  @Override
+  public void flushPending() {
+    flush(true);
+  }
+
+  private synchronized void flush(boolean force) {
+    if (unChecked || (force && flushCount == 0)) {
       return;
     }
 
-    if (shouldBeRefreshed()) {
+    if (force || shouldBeRefreshed()) {
       try {
         long start = System.currentTimeMillis();
         if (!isV2Open()) {
