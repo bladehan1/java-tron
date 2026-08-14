@@ -10,6 +10,7 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.Collections;
 import org.junit.AfterClass;
 import org.junit.Assert;
 import org.junit.BeforeClass;
@@ -174,6 +175,36 @@ public class RocksDbDataSourceImplTest {
         dataSource.closeDB();
       }
       RocksDbSettings.getSettings().withEnableStatistics(statisticsEnabled);
+      parameter.setMetricsPrometheusDatabaseEnable(databaseMetricsEnabled);
+      parameter.setMetricsPrometheusEnable(prometheusEnabled);
+    }
+  }
+
+  @Test
+  public void skipsPerfContextSamplingWhenLegacyJniDoesNotExposeIt() {
+    CommonParameter parameter = CommonParameter.getInstance();
+    boolean prometheusEnabled = parameter.isMetricsPrometheusEnable();
+    boolean databaseMetricsEnabled = parameter.isMetricsPrometheusDatabaseEnable();
+    RocksDbSettings settings = RocksDbSettings.getSettings();
+    int sampleOneIn = settings.getPerfContextSampleOneIn();
+    java.util.List<String> allowList = settings.getPerfContextDbAllowList();
+    RocksDbDataSourceImpl dataSource = null;
+    try {
+      parameter.setMetricsPrometheusEnable(true);
+      parameter.setMetricsPrometheusDatabaseEnable(true);
+      settings.withPerfContextSampleOneIn(1)
+          .withPerfContextDbAllowList(Collections.singletonList("legacy-perf-context"));
+      dataSource = new RocksDbDataSourceImpl(
+          Args.getInstance().getOutputDirectory(), "legacy-perf-context");
+
+      dataSource.putData(key1, value1);
+      Assert.assertArrayEquals(value1, dataSource.getData(key1));
+    } finally {
+      if (dataSource != null) {
+        dataSource.closeDB();
+      }
+      settings.withPerfContextSampleOneIn(sampleOneIn)
+          .withPerfContextDbAllowList(allowList);
       parameter.setMetricsPrometheusDatabaseEnable(databaseMetricsEnabled);
       parameter.setMetricsPrometheusEnable(prometheusEnabled);
     }

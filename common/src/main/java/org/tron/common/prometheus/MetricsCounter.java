@@ -22,6 +22,8 @@ class MetricsCounter {
     init(MetricKeys.Counter.DB_EVENT, "db event .", "type", "db", "event");
     init(MetricKeys.Counter.DB_GET, "rocksdb point get outcomes.",
         "type", "db", "outcome");
+    init(MetricKeys.Counter.DB_GET_PERF, "sampled rocksdb point get perf context values.",
+        "type", "db", "metric");
     init(MetricKeys.Counter.DB_ROCKSDB_TICKER, "rocksdb cumulative ticker values.",
         "type", "db", "ticker");
   }

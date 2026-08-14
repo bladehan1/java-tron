@@ -57,6 +57,20 @@ public class RocksDbSettings {
   @Getter
   private List<String> bloomFilterDbAllowList;
   @Getter
+  private int perfContextSampleOneIn;
+  @Getter
+  private List<String> perfContextDbAllowList;
+  @Getter
+  private int blockCacheTraceSampleOneIn;
+  @Getter
+  private List<String> blockCacheTraceDbAllowList;
+  @Getter
+  private String blockCacheTraceOutputDirectory;
+  @Getter
+  private long blockCacheTraceMaxBytesPerDb;
+  @Getter
+  private String blockCacheTraceNativeLibrary;
+  @Getter
   private boolean wholeKeyFiltering;
   @Getter
   private int blockRestartInterval;
@@ -119,6 +133,11 @@ public class RocksDbSettings {
         .withLevelNumber(7).withBlockSize(64).withBlockCacheSize(1024)
         .withCacheIndexAndFilterBlocks(true).withPinL0FilterAndIndexBlocksInCache(true)
         .withBloomFilterBitsPerKey(10).withBloomFilterDbAllowList(Collections.emptyList())
+        .withPerfContextSampleOneIn(0).withPerfContextDbAllowList(Collections.emptyList())
+        .withBlockCacheTraceSampleOneIn(0)
+        .withBlockCacheTraceDbAllowList(Collections.emptyList())
+        .withBlockCacheTraceOutputDirectory("").withBlockCacheTraceMaxBytesPerDb(536870912L)
+        .withBlockCacheTraceNativeLibrary("")
         .withWholeKeyFiltering(true)
         .withBlockRestartInterval(16).withWriteBufferSize(64)
         .withMaxWriteBufferNumber(2).withMinWriteBufferNumberToMerge(1)
@@ -152,6 +171,13 @@ public class RocksDbSettings {
             settings.isPinL0FilterAndIndexBlocksInCache())
         .withBloomFilterBitsPerKey(settings.getBloomFilterBitsPerKey())
         .withBloomFilterDbAllowList(settings.getBloomFilterDbAllowList())
+        .withPerfContextSampleOneIn(settings.getPerfContextSampleOneIn())
+        .withPerfContextDbAllowList(settings.getPerfContextDbAllowList())
+        .withBlockCacheTraceSampleOneIn(settings.getBlockCacheTraceSampleOneIn())
+        .withBlockCacheTraceDbAllowList(settings.getBlockCacheTraceDbAllowList())
+        .withBlockCacheTraceOutputDirectory(settings.getBlockCacheTraceOutputDirectory())
+        .withBlockCacheTraceMaxBytesPerDb(settings.getBlockCacheTraceMaxBytesPerDb())
+        .withBlockCacheTraceNativeLibrary(settings.getBlockCacheTraceNativeLibrary())
         .withWholeKeyFiltering(settings.isWholeKeyFiltering())
         .withBlockRestartInterval(settings.getBlockRestartInterval())
         .withWriteBufferSize(settings.getWriteBufferSize())
@@ -180,7 +206,9 @@ public class RocksDbSettings {
     return String.format(Locale.ROOT,
         "useLegacyOptions=%s,legacySharedBlockCache=%s,levels=%d,compactThreads=%d,"
             + "blockSize=%d,blockCacheSize=%d,"
-            + "cacheIndexAndFilter=%s,pinL0=%s,bloomBits=%d,bloomDbs=%s,wholeKey=%s,"
+            + "cacheIndexAndFilter=%s,pinL0=%s,bloomBits=%d,bloomDbs=%s,"
+            + "perfSampleOneIn=%d,perfDbs=%s,traceSampleOneIn=%d,traceDbs=%s,"
+            + "traceDir=%s,traceMaxBytes=%d,wholeKey=%s,"
             + "restartInterval=%d,"
             + "writeBufferSize=%d,maxWriteBuffers=%d,minWriteBuffersToMerge=%d,flushThreads=%d,"
             + "maxBytesForLevelBase=%d,maxBytesMultiplier=%s,dynamicLevels=%s,l0Trigger=%d,"
@@ -190,6 +218,9 @@ public class RocksDbSettings {
         blockSize, blockCacheSize,
         cacheIndexAndFilterBlocks,
         pinL0FilterAndIndexBlocksInCache, bloomFilterBitsPerKey, bloomFilterDbAllowList,
+        perfContextSampleOneIn, perfContextDbAllowList,
+        blockCacheTraceSampleOneIn, blockCacheTraceDbAllowList,
+        blockCacheTraceOutputDirectory, blockCacheTraceMaxBytesPerDb,
         wholeKeyFiltering,
         blockRestartInterval, writeBufferSize, maxWriteBufferNumber,
         minWriteBufferNumberToMerge, maxBackgroundFlushes, maxBytesForLevelBase,
@@ -256,6 +287,41 @@ public class RocksDbSettings {
 
   public RocksDbSettings withBloomFilterDbAllowList(List<String> dbNames) {
     this.bloomFilterDbAllowList = Collections.unmodifiableList(new ArrayList<>(dbNames));
+    return this;
+  }
+
+  public RocksDbSettings withPerfContextSampleOneIn(int sampleOneIn) {
+    this.perfContextSampleOneIn = sampleOneIn;
+    return this;
+  }
+
+  public RocksDbSettings withPerfContextDbAllowList(List<String> dbNames) {
+    this.perfContextDbAllowList = Collections.unmodifiableList(new ArrayList<>(dbNames));
+    return this;
+  }
+
+  public RocksDbSettings withBlockCacheTraceSampleOneIn(int sampleOneIn) {
+    this.blockCacheTraceSampleOneIn = sampleOneIn;
+    return this;
+  }
+
+  public RocksDbSettings withBlockCacheTraceDbAllowList(List<String> dbNames) {
+    this.blockCacheTraceDbAllowList = Collections.unmodifiableList(new ArrayList<>(dbNames));
+    return this;
+  }
+
+  public RocksDbSettings withBlockCacheTraceOutputDirectory(String directory) {
+    this.blockCacheTraceOutputDirectory = directory;
+    return this;
+  }
+
+  public RocksDbSettings withBlockCacheTraceMaxBytesPerDb(long maxBytes) {
+    this.blockCacheTraceMaxBytesPerDb = maxBytes;
+    return this;
+  }
+
+  public RocksDbSettings withBlockCacheTraceNativeLibrary(String library) {
+    this.blockCacheTraceNativeLibrary = library;
     return this;
   }
 
@@ -450,6 +516,17 @@ public class RocksDbSettings {
 
   boolean shouldEnableBloomFilter(String dbName) {
     return bloomFilterBitsPerKey > 0 && bloomFilterDbAllowList.contains(dbName);
+  }
+
+  public boolean shouldSamplePerfContext(String dbName) {
+    return perfContextSampleOneIn > 0 && perfContextDbAllowList.contains(dbName);
+  }
+
+  public boolean shouldTraceBlockCache(String dbName) {
+    return blockCacheTraceSampleOneIn > 0
+        && (blockCacheTraceDbAllowList.contains("*")
+        || blockCacheTraceDbAllowList.contains("all")
+        || blockCacheTraceDbAllowList.contains(dbName));
   }
 
   private static void applyCustomOptions(Options options, RocksDbSettings settings,

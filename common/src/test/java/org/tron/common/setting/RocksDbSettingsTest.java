@@ -153,4 +153,36 @@ public class RocksDbSettingsTest {
     field.setAccessible(true);
     return field.get(table);
   }
+
+  @Test
+  public void shouldEnablePerfContextOnlyForAllowedDatabase() {
+    DbSettingsConfig config = new DbSettingsConfig();
+    config.setPerfContextSampleOneIn(100);
+    config.setPerfContextDbAllowList(Collections.singletonList("storage-row"));
+
+    RocksDbSettings settings = RocksDbSettings.initCustomSettings(config);
+    try {
+      assertEquals(100, settings.getPerfContextSampleOneIn());
+      assertTrue(settings.shouldSamplePerfContext("storage-row"));
+      assertTrue(!settings.shouldSamplePerfContext("account"));
+    } finally {
+      RocksDbSettings.initCustomSettings(new DbSettingsConfig());
+    }
+  }
+
+  @Test
+  public void shouldEnableBlockCacheTraceForAllOrAllowedDatabase() {
+    DbSettingsConfig config = new DbSettingsConfig();
+    config.setBlockCacheTraceSampleOneIn(100);
+    config.setBlockCacheTraceDbAllowList(Collections.singletonList("*"));
+    config.setBlockCacheTraceOutputDirectory("/tmp/trace");
+    config.setBlockCacheTraceNativeLibrary("/tmp/libtrace.so");
+    RocksDbSettings settings = RocksDbSettings.initCustomSettings(config);
+    try {
+      assertTrue(settings.shouldTraceBlockCache("account"));
+      assertTrue(settings.shouldTraceBlockCache("storage-row"));
+    } finally {
+      RocksDbSettings.initCustomSettings(new DbSettingsConfig());
+    }
+  }
 }
