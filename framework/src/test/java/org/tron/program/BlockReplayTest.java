@@ -13,17 +13,21 @@ import static org.mockito.Mockito.when;
 import com.google.protobuf.ByteString;
 import java.io.ByteArrayOutputStream;
 import java.io.PrintStream;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.mockito.ArgumentCaptor;
 import org.tron.common.application.TronApplicationContext;
+import org.tron.common.setting.RocksDbSettings;
 import org.tron.common.utils.BlockFile;
 import org.tron.common.utils.Sha256Hash;
 import org.tron.core.ChainBaseManager;
 import org.tron.core.capsule.BlockCapsule;
 import org.tron.core.capsule.BlockCapsule.BlockId;
+import org.tron.core.config.args.StorageConfig.DbSettingsConfig;
 import org.tron.core.consensus.ConsensusService;
 import org.tron.core.db.RevokingDatabase;
 import org.tron.core.net.TronNetDelegate;
@@ -60,6 +64,29 @@ public class BlockReplayTest {
     assertEquals(error.toString(), 0, exitCode);
     assertTrue(output.toString().contains("mode=verify"));
     assertTrue(output.toString().contains("processed=2"));
+  }
+
+  @Test
+  public void shouldApplyRocksDbProfileThroughCommandLine() throws Exception {
+    BlockId parent = new BlockId(Sha256Hash.ZERO_HASH, 9);
+    Path input = write(blocks(parent, 10, 1));
+    Path profile = temporaryFolder.getRoot().toPath().resolve("profile.conf");
+    Files.write(profile, ("rocksdb-profile { name = replay-profile, mode = E1, "
+        + "settings.blockCacheSize = 1024 }").getBytes(StandardCharsets.UTF_8));
+    ByteArrayOutputStream output = new ByteArrayOutputStream();
+    ByteArrayOutputStream error = new ByteArrayOutputStream();
+
+    try {
+      int exitCode = BlockReplay.execute(new String[] {"--input", input.toString(),
+          "--rocksdb-config", profile.toString()},
+          new PrintStream(output), new PrintStream(error));
+
+      assertEquals(error.toString(), 0, exitCode);
+      assertTrue(output.toString().contains("rocksdb_profile=replay-profile"));
+      assertTrue(output.toString().contains("rocksdb_experiment=E1"));
+    } finally {
+      RocksDbSettings.initCustomSettings(new DbSettingsConfig());
+    }
   }
 
   @Test

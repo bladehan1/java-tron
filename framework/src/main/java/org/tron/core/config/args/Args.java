@@ -163,7 +163,7 @@ public class Args extends CommonParameter {
     // Resolve config file path
     configFilePath = StringUtils.isNoneBlank(cmd.shellConfFileName)
         ? cmd.shellConfFileName : confFileName;
-    Config config = Configuration.getByFileName(configFilePath);
+    Config config = Configuration.getByFileName(configFilePath, cmd.rocksDbConfigFileName);
 
     // 2. Config overrides defaults (event config bean is read here but not yet applied)
     applyConfigParams(config);
@@ -226,12 +226,7 @@ public class Args extends CommonParameter {
 
     // RocksDB settings
     StorageConfig.DbSettingsConfig dbs = sc.getDbSettings();
-    PARAMETER.rocksDBCustomSettings = RocksDbSettings
-        .initCustomSettings(dbs.getLevelNumber(), dbs.getCompactThreads(),
-            dbs.getBlocksize(), dbs.getMaxBytesForLevelBase(),
-            dbs.getMaxBytesForLevelMultiplier(), dbs.getLevel0FileNumCompactionTrigger(),
-            dbs.getTargetFileSizeBase(), dbs.getTargetFileSizeMultiplier(),
-            dbs.getMaxOpenFiles());
+    PARAMETER.rocksDBCustomSettings = RocksDbSettings.initCustomSettings(dbs);
     RocksDbSettings.loggingSettings();
 
     // Dynamic nested objects use StorageConfig's raw storage sub-tree
@@ -1299,7 +1294,7 @@ public class Args extends CommonParameter {
   private static Map<String, String[]> getOptionGroup() {
     String[] tronOption = new String[] {"version", "help", "shellConfFileName", "logbackPath",
         "eventSubscribe", "solidityNode", "keystoreFactory"};
-    String[] dbOption = new String[] {"outputDirectory"};
+    String[] dbOption = new String[] {"outputDirectory", "rocksDbConfigFileName"};
     String[] witnessOption = new String[] {"witness", "privateKey"};
     String[] vmOption = new String[] {"debug"};
 

@@ -21,6 +21,7 @@ package org.tron.core.config;
 import static org.apache.commons.lang3.StringUtils.isBlank;
 
 import com.typesafe.config.ConfigFactory;
+import com.typesafe.config.ConfigValueFactory;
 import java.io.File;
 import lombok.extern.slf4j.Slf4j;
 
@@ -46,6 +47,63 @@ public class Configuration {
     return config;
   }
 
+  /**
+   * Load the node config and apply a restricted RocksDB benchmark profile.
+   *
+   * <p>The profile may only provide {@code rocksdb-profile.settings}. Those values override
+   * {@code storage.dbSettings}; all other node settings continue to come from the base config.
+   * This keeps benchmark profiles reusable without allowing an experiment file to accidentally
+   * change network, witness, or output-directory settings.</p>
+   *
+   * @param confFileName base node config
+   * @param rocksDbProfileFile optional RocksDB profile file
+   * @return merged config
+   */
+  public static com.typesafe.config.Config getByFileName(
+      final String confFileName, final String rocksDbProfileFile) {
+    com.typesafe.config.Config base = getByFileName(confFileName);
+    if (isBlank(rocksDbProfileFile)) {
+      return base;
+    }
+
+    File profileFile = new File(rocksDbProfileFile);
+    if (!profileFile.isFile()) {
+      throw new IllegalArgumentException(
+          "RocksDB profile path is required! No Such file " + rocksDbProfileFile);
+    }
+    com.typesafe.config.Config profile = ConfigFactory.parseFile(profileFile).resolve();
+    if (!profile.hasPath("rocksdb-profile.name")
+        || !profile.hasPath("rocksdb-profile.mode")
+        || !profile.hasPath("rocksdb-profile.settings")) {
+      throw new IllegalArgumentException(
+          "RocksDB profile must define rocksdb-profile.name, mode, and settings");
+    }
+
+    String profileName = profile.getString("rocksdb-profile.name");
+    String profileMode = profile.getString("rocksdb-profile.mode");
+    if (!profileName.matches("[A-Za-z0-9._-]+")) {
+      throw new IllegalArgumentException(
+          "RocksDB profile name may only contain letters, digits, dot, underscore, or dash");
+    }
+    if (!"E1".equals(profileMode) && !"E2".equals(profileMode)) {
+      throw new IllegalArgumentException("RocksDB profile mode must be E1 or E2");
+    }
+
+    com.typesafe.config.Config profileSettings = profile.getConfig("rocksdb-profile.settings");
+    if (!profileSettings.hasPath("useLegacyOptions")) {
+      profileSettings = profileSettings.withValue("useLegacyOptions",
+          ConfigValueFactory.fromAnyRef(false));
+    }
+    com.typesafe.config.Config settings = profileSettings
+        .withValue("benchmarkProfile",
+            ConfigValueFactory.fromAnyRef(profileName))
+        .withValue("benchmarkMode",
+            ConfigValueFactory.fromAnyRef(profileMode))
+        .withFallback(base.getConfig("storage.dbSettings"));
+    config = base.withValue("storage.dbSettings", settings.root()).resolve();
+    return config;
+  }
+
   private static void resolveConfigFile(String fileName, File confFile) {
     if (confFile.exists()) {
       config = ConfigFactory.parseFile(confFile)
@@ -59,4 +117,3 @@ public class Configuration {
     }
   }
 }
-

@@ -26,11 +26,17 @@ import static org.tron.core.Constant.ADD_PRE_FIX_STRING_MAINNET;
 import com.typesafe.config.Config;
 import java.lang.reflect.Field;
 import java.net.URL;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Arrays;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.bouncycastle.util.encoders.Hex;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
 import org.tron.common.TestConstants;
 import org.tron.common.crypto.ECKey;
 import org.tron.common.utils.ByteArray;
@@ -38,6 +44,9 @@ import org.tron.core.Wallet;
 
 @Slf4j
 public class ConfigurationTest {
+
+  @Rule
+  public final TemporaryFolder temporaryFolder = new TemporaryFolder();
 
   @Before
   public void resetSingleton()
@@ -90,5 +99,66 @@ public class ConfigurationTest {
     assertTrue(config.hasPath("storage"));
     assertTrue(config.hasPath("seed.node"));
     assertTrue(config.hasPath("genesis.block"));
+  }
+
+  @Test
+  public void shouldMergeOnlyRocksDbProfileSettings() throws Exception {
+    Path profile = temporaryFolder.newFile("cache-profile.conf").toPath();
+    Files.write(profile, Arrays.asList(
+        "rocksdb-profile {",
+        "  name = cache-2g",
+        "  mode = E1",
+        "  settings { blockCacheSize = 2048, maxOpenFiles = 3000 }",
+        "}",
+        "node.listen.port = 1"), StandardCharsets.UTF_8);
+
+    Config config = Configuration.getByFileName(TestConstants.TEST_CONF, profile.toString());
+
+    assertEquals("cache-2g",
+        config.getString("storage.dbSettings.benchmarkProfile"));
+    assertEquals("E1", config.getString("storage.dbSettings.benchmarkMode"));
+    assertFalse(config.getBoolean("storage.dbSettings.useLegacyOptions"));
+    assertEquals(2048, config.getInt("storage.dbSettings.blockCacheSize"));
+    assertEquals(3000, config.getInt("storage.dbSettings.maxOpenFiles"));
+    assertEquals(16, config.getInt("storage.dbSettings.blocksize"));
+    assertTrue(config.getInt("node.listen.port") != 1);
+  }
+
+  @Test
+  public void shouldAllowProfileToSelectLegacyOptions() throws Exception {
+    Path profile = temporaryFolder.newFile("legacy-profile.conf").toPath();
+    Files.write(profile, Arrays.asList(
+        "rocksdb-profile {",
+        "  name = a1-legacy-options",
+        "  mode = E1",
+        "  settings.useLegacyOptions = true",
+        "}"), StandardCharsets.UTF_8);
+
+    Config config = Configuration.getByFileName(TestConstants.TEST_CONF, profile.toString());
+
+    assertTrue(config.getBoolean("storage.dbSettings.useLegacyOptions"));
+    assertEquals("a1-legacy-options",
+        config.getString("storage.dbSettings.benchmarkProfile"));
+  }
+
+  @Test(expected = IllegalArgumentException.class)
+  public void shouldRejectIncompleteRocksDbProfile() throws Exception {
+    Path profile = temporaryFolder.newFile("incomplete-profile.conf").toPath();
+    Files.write(profile, Arrays.asList(
+        "rocksdb-profile.name = incomplete",
+        "rocksdb-profile.settings.blockCacheSize = 2048"), StandardCharsets.UTF_8);
+
+    Configuration.getByFileName(TestConstants.TEST_CONF, profile.toString());
+  }
+
+  @Test(expected = IllegalArgumentException.class)
+  public void shouldRejectUnknownRocksDbExperimentMode() throws Exception {
+    Path profile = temporaryFolder.newFile("unknown-mode.conf").toPath();
+    Files.write(profile, Arrays.asList(
+        "rocksdb-profile.name = candidate",
+        "rocksdb-profile.mode = E3",
+        "rocksdb-profile.settings.blockCacheSize = 2048"), StandardCharsets.UTF_8);
+
+    Configuration.getByFileName(TestConstants.TEST_CONF, profile.toString());
   }
 }

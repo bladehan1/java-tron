@@ -22,6 +22,10 @@ public class CLIParameter {
   @Parameter(names = {"-c", "--config"}, description = "Config file (default:config.conf)")
   public String shellConfFileName;
 
+  @Parameter(names = "--rocksdb-config",
+      description = "RocksDB benchmark profile applied over storage.dbSettings")
+  public String rocksDbConfigFileName;
+
   @Parameter(names = {"-d", "--output-directory"}, description = "Data directory for the "
       + "databases (default:output-directory)")
   public String outputDirectory;

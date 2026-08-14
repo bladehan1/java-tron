@@ -2,11 +2,16 @@ package org.tron.common.setting;
 
 import static org.tron.core.Constant.ROCKSDB;
 
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+import java.util.Locale;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.rocksdb.BlockBasedTableConfig;
 import org.rocksdb.BloomFilter;
+import org.rocksdb.CompressionType;
 import org.rocksdb.ComparatorOptions;
 import org.rocksdb.InfoLogLevel;
 import org.rocksdb.LRUCache;
@@ -18,12 +23,21 @@ import org.rocksdb.StatsLevel;
 import org.slf4j.LoggerFactory;
 import org.tron.common.utils.MarketOrderPriceComparatorForRocksDB;
 import org.tron.core.Constant;
+import org.tron.core.config.args.StorageConfig.DbSettingsConfig;
 
 @Slf4j
 public class RocksDbSettings {
 
   private static RocksDbSettings rocksDbSettings;
 
+  @Getter
+  private String benchmarkProfile;
+  @Getter
+  private String benchmarkMode;
+  @Getter
+  private boolean useLegacyOptions;
+  @Getter
+  private boolean legacySharedBlockCache;
   @Getter
   private int levelNumber;
   @Getter
@@ -33,23 +47,54 @@ public class RocksDbSettings {
   @Getter
   private long blockSize;
   @Getter
+  private long blockCacheSize;
+  @Getter
+  private boolean cacheIndexAndFilterBlocks;
+  @Getter
+  private boolean pinL0FilterAndIndexBlocksInCache;
+  @Getter
+  private int bloomFilterBitsPerKey;
+  @Getter
+  private List<String> bloomFilterDbAllowList;
+  @Getter
+  private boolean wholeKeyFiltering;
+  @Getter
+  private int blockRestartInterval;
+  @Getter
+  private long writeBufferSize;
+  @Getter
+  private int maxWriteBufferNumber;
+  @Getter
+  private int minWriteBufferNumberToMerge;
+  @Getter
+  private int maxBackgroundFlushes;
+  @Getter
   private long maxBytesForLevelBase;
   @Getter
   private double maxBytesForLevelMultiplier;
   @Getter
+  private boolean levelCompactionDynamicLevelBytes;
+  @Getter
   private int level0FileNumCompactionTrigger;
+  @Getter
+  private int level0SlowdownWritesTrigger;
+  @Getter
+  private int level0StopWritesTrigger;
   @Getter
   private long targetFileSizeBase;
   @Getter
   private int targetFileSizeMultiplier;
   @Getter
   private boolean enableStatistics;
+  @Getter
+  private CompressionType compressionType;
 
   static {
     RocksDB.loadLibrary();
   }
 
-  private static final LRUCache cache = new LRUCache(1 * 1024 * 1024 * 1024L);
+  private static LRUCache cache;
+  private static long cacheSize;
 
   private static final String[] CI_ENVIRONMENT_VARIABLES = {
       "CI",
@@ -68,51 +113,114 @@ public class RocksDbSettings {
 
   public static RocksDbSettings getDefaultSettings() {
     RocksDbSettings defaultSettings = new RocksDbSettings();
-    return defaultSettings.withLevelNumber(7).withBlockSize(64).withCompactThreads(32)
+    return defaultSettings.withBenchmarkProfile("default").withBenchmarkMode("E1")
+        .withUseLegacyOptions(true)
+        .withLegacySharedBlockCache(false)
+        .withLevelNumber(7).withBlockSize(64).withBlockCacheSize(1024)
+        .withCacheIndexAndFilterBlocks(true).withPinL0FilterAndIndexBlocksInCache(true)
+        .withBloomFilterBitsPerKey(10).withBloomFilterDbAllowList(Collections.emptyList())
+        .withWholeKeyFiltering(true)
+        .withBlockRestartInterval(16).withWriteBufferSize(64)
+        .withMaxWriteBufferNumber(2).withMinWriteBufferNumberToMerge(1)
+        .withMaxBackgroundFlushes(1).withCompactThreads(32)
         .withTargetFileSizeBase(256).withMaxBytesForLevelMultiplier(10)
-        .withTargetFileSizeMultiplier(1)
-        .withMaxBytesForLevelBase(256).withMaxOpenFiles(5000).withEnableStatistics(false);
+        .withTargetFileSizeMultiplier(1).withMaxBytesForLevelBase(256)
+        .withLevelCompactionDynamicLevelBytes(true).withLevel0FileNumCompactionTrigger(2)
+        .withLevel0SlowdownWritesTrigger(20).withLevel0StopWritesTrigger(36)
+        .withMaxOpenFiles(5000).withCompressionType("SNAPPY_COMPRESSION")
+        .withEnableStatistics(false);
   }
 
   public static RocksDbSettings getSettings() {
     return rocksDbSettings == null ? getDefaultSettings() : rocksDbSettings;
   }
 
-  public static RocksDbSettings initCustomSettings(int levelNumber, int compactThreads,
-      int blockSize, long maxBytesForLevelBase,
-      double maxBytesForLevelMultiplier, int level0FileNumCompactionTrigger,
-      long targetFileSizeBase,
-      int targetFileSizeMultiplier, int maxOpenFiles) {
+  public static RocksDbSettings initCustomSettings(DbSettingsConfig settings) {
     rocksDbSettings = new RocksDbSettings()
-        .withMaxOpenFiles(maxOpenFiles)
+        .withBenchmarkProfile(settings.getBenchmarkProfile())
+        .withBenchmarkMode(settings.getBenchmarkMode())
+        .withUseLegacyOptions(settings.isUseLegacyOptions())
+        .withLegacySharedBlockCache(settings.isLegacySharedBlockCache())
+        .withMaxOpenFiles(settings.getMaxOpenFiles())
         .withEnableStatistics(false)
-        .withLevelNumber(levelNumber)
-        .withCompactThreads(compactThreads)
-        .withBlockSize(blockSize)
-        .withMaxBytesForLevelBase(maxBytesForLevelBase)
-        .withMaxBytesForLevelMultiplier(maxBytesForLevelMultiplier)
-        .withLevel0FileNumCompactionTrigger(level0FileNumCompactionTrigger)
-        .withTargetFileSizeBase(targetFileSizeBase)
-        .withTargetFileSizeMultiplier(targetFileSizeMultiplier);
+        .withLevelNumber(settings.getLevelNumber())
+        .withCompactThreads(settings.getCompactThreads())
+        .withBlockSize(settings.getBlocksize())
+        .withBlockCacheSize(settings.getBlockCacheSize())
+        .withCacheIndexAndFilterBlocks(settings.isCacheIndexAndFilterBlocks())
+        .withPinL0FilterAndIndexBlocksInCache(
+            settings.isPinL0FilterAndIndexBlocksInCache())
+        .withBloomFilterBitsPerKey(settings.getBloomFilterBitsPerKey())
+        .withBloomFilterDbAllowList(settings.getBloomFilterDbAllowList())
+        .withWholeKeyFiltering(settings.isWholeKeyFiltering())
+        .withBlockRestartInterval(settings.getBlockRestartInterval())
+        .withWriteBufferSize(settings.getWriteBufferSize())
+        .withMaxWriteBufferNumber(settings.getMaxWriteBufferNumber())
+        .withMinWriteBufferNumberToMerge(settings.getMinWriteBufferNumberToMerge())
+        .withMaxBackgroundFlushes(settings.getMaxBackgroundFlushes())
+        .withMaxBytesForLevelBase(settings.getMaxBytesForLevelBase())
+        .withMaxBytesForLevelMultiplier(settings.getMaxBytesForLevelMultiplier())
+        .withLevelCompactionDynamicLevelBytes(settings.isLevelCompactionDynamicLevelBytes())
+        .withLevel0FileNumCompactionTrigger(settings.getLevel0FileNumCompactionTrigger())
+        .withLevel0SlowdownWritesTrigger(settings.getLevel0SlowdownWritesTrigger())
+        .withLevel0StopWritesTrigger(settings.getLevel0StopWritesTrigger())
+        .withTargetFileSizeBase(settings.getTargetFileSizeBase())
+        .withTargetFileSizeMultiplier(settings.getTargetFileSizeMultiplier())
+        .withCompressionType(settings.getCompressionType());
     return rocksDbSettings;
   }
 
   public static void loggingSettings() {
-    logger.info(
-        "level number: {}, CompactThreads: {}, Blocksize:{}, maxBytesForLevelBase: {},"
-            + " withMaxBytesForLevelMultiplier: {}, level0FileNumCompactionTrigger: {}, "
-            + "withTargetFileSizeBase: {}, withTargetFileSizeMultiplier: {}, maxOpenFiles: {}",
-        rocksDbSettings.getLevelNumber(),
-        rocksDbSettings.getCompactThreads(), rocksDbSettings.getBlockSize(),
-        rocksDbSettings.getMaxBytesForLevelBase(),
-        rocksDbSettings.getMaxBytesForLevelMultiplier(),
-        rocksDbSettings.getLevel0FileNumCompactionTrigger(),
-        rocksDbSettings.getTargetFileSizeBase(), rocksDbSettings.getTargetFileSizeMultiplier(),
-        rocksDbSettings.getMaxOpenFiles());
+    logger.info("RocksDB benchmark profile: {}, mode: {}, settings: {}",
+        rocksDbSettings.getBenchmarkProfile(), rocksDbSettings.getBenchmarkMode(),
+        rocksDbSettings.describe());
+  }
+
+  public String describe() {
+    return String.format(Locale.ROOT,
+        "useLegacyOptions=%s,legacySharedBlockCache=%s,levels=%d,compactThreads=%d,"
+            + "blockSize=%d,blockCacheSize=%d,"
+            + "cacheIndexAndFilter=%s,pinL0=%s,bloomBits=%d,bloomDbs=%s,wholeKey=%s,"
+            + "restartInterval=%d,"
+            + "writeBufferSize=%d,maxWriteBuffers=%d,minWriteBuffersToMerge=%d,flushThreads=%d,"
+            + "maxBytesForLevelBase=%d,maxBytesMultiplier=%s,dynamicLevels=%s,l0Trigger=%d,"
+            + "l0Slowdown=%d,l0Stop=%d,targetFileBase=%d,targetFileMultiplier=%d,"
+            + "maxOpenFiles=%d,compression=%s",
+        useLegacyOptions, legacySharedBlockCache, levelNumber, compactThreads,
+        blockSize, blockCacheSize,
+        cacheIndexAndFilterBlocks,
+        pinL0FilterAndIndexBlocksInCache, bloomFilterBitsPerKey, bloomFilterDbAllowList,
+        wholeKeyFiltering,
+        blockRestartInterval, writeBufferSize, maxWriteBufferNumber,
+        minWriteBufferNumberToMerge, maxBackgroundFlushes, maxBytesForLevelBase,
+        maxBytesForLevelMultiplier, levelCompactionDynamicLevelBytes,
+        level0FileNumCompactionTrigger, level0SlowdownWritesTrigger,
+        level0StopWritesTrigger, targetFileSizeBase, targetFileSizeMultiplier,
+        maxOpenFiles, compressionType);
   }
 
   public RocksDbSettings withMaxOpenFiles(int maxOpenFiles) {
     this.maxOpenFiles = maxOpenFiles;
+    return this;
+  }
+
+  public RocksDbSettings withBenchmarkProfile(String benchmarkProfile) {
+    this.benchmarkProfile = benchmarkProfile;
+    return this;
+  }
+
+  public RocksDbSettings withBenchmarkMode(String benchmarkMode) {
+    this.benchmarkMode = benchmarkMode;
+    return this;
+  }
+
+  public RocksDbSettings withUseLegacyOptions(boolean useLegacyOptions) {
+    this.useLegacyOptions = useLegacyOptions;
+    return this;
+  }
+
+  public RocksDbSettings withLegacySharedBlockCache(boolean legacySharedBlockCache) {
+    this.legacySharedBlockCache = legacySharedBlockCache;
     return this;
   }
 
@@ -126,6 +234,61 @@ public class RocksDbSettings {
     return this;
   }
 
+  public RocksDbSettings withBlockCacheSize(long blockCacheSize) {
+    this.blockCacheSize = blockCacheSize * 1024 * 1024;
+    return this;
+  }
+
+  public RocksDbSettings withCacheIndexAndFilterBlocks(boolean enabled) {
+    this.cacheIndexAndFilterBlocks = enabled;
+    return this;
+  }
+
+  public RocksDbSettings withPinL0FilterAndIndexBlocksInCache(boolean enabled) {
+    this.pinL0FilterAndIndexBlocksInCache = enabled;
+    return this;
+  }
+
+  public RocksDbSettings withBloomFilterBitsPerKey(int bloomFilterBitsPerKey) {
+    this.bloomFilterBitsPerKey = bloomFilterBitsPerKey;
+    return this;
+  }
+
+  public RocksDbSettings withBloomFilterDbAllowList(List<String> dbNames) {
+    this.bloomFilterDbAllowList = Collections.unmodifiableList(new ArrayList<>(dbNames));
+    return this;
+  }
+
+  public RocksDbSettings withWholeKeyFiltering(boolean wholeKeyFiltering) {
+    this.wholeKeyFiltering = wholeKeyFiltering;
+    return this;
+  }
+
+  public RocksDbSettings withBlockRestartInterval(int blockRestartInterval) {
+    this.blockRestartInterval = blockRestartInterval;
+    return this;
+  }
+
+  public RocksDbSettings withWriteBufferSize(long writeBufferSize) {
+    this.writeBufferSize = writeBufferSize * 1024 * 1024;
+    return this;
+  }
+
+  public RocksDbSettings withMaxWriteBufferNumber(int maxWriteBufferNumber) {
+    this.maxWriteBufferNumber = maxWriteBufferNumber;
+    return this;
+  }
+
+  public RocksDbSettings withMinWriteBufferNumberToMerge(int value) {
+    this.minWriteBufferNumberToMerge = value;
+    return this;
+  }
+
+  public RocksDbSettings withMaxBackgroundFlushes(int maxBackgroundFlushes) {
+    this.maxBackgroundFlushes = maxBackgroundFlushes;
+    return this;
+  }
+
   public RocksDbSettings withMaxBytesForLevelBase(long maxBytesForLevelBase) {
     this.maxBytesForLevelBase = maxBytesForLevelBase * 1024 * 1024;
     return this;
@@ -136,8 +299,23 @@ public class RocksDbSettings {
     return this;
   }
 
+  public RocksDbSettings withLevelCompactionDynamicLevelBytes(boolean enabled) {
+    this.levelCompactionDynamicLevelBytes = enabled;
+    return this;
+  }
+
   public RocksDbSettings withLevel0FileNumCompactionTrigger(int level0FileNumCompactionTrigger) {
     this.level0FileNumCompactionTrigger = level0FileNumCompactionTrigger;
+    return this;
+  }
+
+  public RocksDbSettings withLevel0SlowdownWritesTrigger(int value) {
+    this.level0SlowdownWritesTrigger = value;
+    return this;
+  }
+
+  public RocksDbSettings withLevel0StopWritesTrigger(int value) {
+    this.level0StopWritesTrigger = value;
     return this;
   }
 
@@ -160,7 +338,25 @@ public class RocksDbSettings {
     this.targetFileSizeMultiplier = targetFileSizeMultiplier;
     return this;
   }
-  public static LRUCache getCache() {
+
+  public RocksDbSettings withCompressionType(String compressionType) {
+    try {
+      this.compressionType = CompressionType.valueOf(compressionType);
+    } catch (IllegalArgumentException e) {
+      throw new IllegalArgumentException("Unsupported RocksDB compressionType: "
+          + compressionType, e);
+    }
+    return this;
+  }
+
+  private static synchronized LRUCache getCache(long requestedSize) {
+    if (cache == null) {
+      cache = new LRUCache(requestedSize);
+      cacheSize = requestedSize;
+    } else if (cacheSize != requestedSize) {
+      throw new IllegalStateException("RocksDB blockCacheSize changed in the same JVM; "
+          + "restart the process between benchmark profiles");
+    }
     return cache;
   }
 
@@ -201,34 +397,17 @@ public class RocksDbSettings {
       // Prometheus polls selected tickers; avoid a second periodic dump to the RocksDB log.
       options.setStatsDumpPeriodSec(0);
     }
-    options.setCreateIfMissing(true);
-    options.setIncreaseParallelism(1);
-    options.setLevelCompactionDynamicLevelBytes(true);
-    options.setMaxOpenFiles(settings.getMaxOpenFiles());
-
-    // general options supported user config
-    options.setNumLevels(settings.getLevelNumber());
-    options.setMaxBytesForLevelMultiplier(settings.getMaxBytesForLevelMultiplier());
-    options.setMaxBytesForLevelBase(settings.getMaxBytesForLevelBase());
-    options.setMaxBackgroundCompactions(settings.getCompactThreads());
-    options.setLevel0FileNumCompactionTrigger(settings.getLevel0FileNumCompactionTrigger());
-    options.setTargetFileSizeMultiplier(settings.getTargetFileSizeMultiplier());
-    options.setTargetFileSizeBase(settings.getTargetFileSizeBase());
-
-    // table options
-    final BlockBasedTableConfig tableCfg;
-    options.setTableFormatConfig(tableCfg = new BlockBasedTableConfig());
-    tableCfg.setBlockSize(settings.getBlockSize());
-    tableCfg.setBlockCache(RocksDbSettings.getCache());
-    tableCfg.setCacheIndexAndFilterBlocks(true);
-    tableCfg.setPinL0FilterAndIndexBlocksInCache(true);
-    tableCfg.setFilter(new BloomFilter(10, false));
+    if (settings.isUseLegacyOptions()) {
+      applyLegacyOptions(options, settings, dbName);
+    } else {
+      applyCustomOptions(options, settings, dbName);
+    }
     if (Constant.MARKET_PAIR_PRICE_TO_ORDER.equals(dbName)) {
       ComparatorOptions comparatorOptions = new ComparatorOptions();
       options.setComparator(new MarketOrderPriceComparatorForRocksDB(comparatorOptions));
     }
 
-    if (isRunningInCI()) {
+    if (isRunningInCI() && "default".equals(settings.getBenchmarkProfile())) {
       options.optimizeForSmallDb();
       // Disable fallocate calls  to avoid issues with disk space
       options.setAllowFAllocate(false);
@@ -243,6 +422,74 @@ public class RocksDbSettings {
     }
 
     return options;
+  }
+
+  private static void applyLegacyOptions(Options options, RocksDbSettings settings,
+      String dbName) {
+    options.setCreateIfMissing(true);
+    options.setIncreaseParallelism(1);
+    options.setLevelCompactionDynamicLevelBytes(true);
+    options.setMaxOpenFiles(settings.getMaxOpenFiles());
+    options.setNumLevels(settings.getLevelNumber());
+    options.setMaxBytesForLevelMultiplier(settings.getMaxBytesForLevelMultiplier());
+    options.setMaxBytesForLevelBase(settings.getMaxBytesForLevelBase());
+    options.setMaxBackgroundCompactions(settings.getCompactThreads());
+    options.setLevel0FileNumCompactionTrigger(settings.getLevel0FileNumCompactionTrigger());
+    options.setTargetFileSizeMultiplier(settings.getTargetFileSizeMultiplier());
+    options.setTargetFileSizeBase(settings.getTargetFileSizeBase());
+    BlockBasedTableConfig tableCfg = new BlockBasedTableConfig();
+    if (settings.isLegacySharedBlockCache()) {
+      tableCfg.setBlockCache(RocksDbSettings.getCache(settings.getBlockCacheSize()));
+    }
+    if (settings.shouldEnableBloomFilter(dbName)) {
+      tableCfg.setWholeKeyFiltering(settings.isWholeKeyFiltering());
+      tableCfg.setFilter(new BloomFilter(settings.getBloomFilterBitsPerKey(), false));
+    }
+    options.setTableFormatConfig(tableCfg);
+  }
+
+  boolean shouldEnableBloomFilter(String dbName) {
+    return bloomFilterBitsPerKey > 0 && bloomFilterDbAllowList.contains(dbName);
+  }
+
+  private static void applyCustomOptions(Options options, RocksDbSettings settings,
+      String dbName) {
+    options.setCreateIfMissing(true);
+    options.setIncreaseParallelism(1);
+    options.setLevelCompactionDynamicLevelBytes(
+        settings.isLevelCompactionDynamicLevelBytes());
+    options.setMaxOpenFiles(settings.getMaxOpenFiles());
+    options.setNumLevels(settings.getLevelNumber());
+    options.setMaxBytesForLevelMultiplier(settings.getMaxBytesForLevelMultiplier());
+    options.setMaxBytesForLevelBase(settings.getMaxBytesForLevelBase());
+    options.setMaxBackgroundCompactions(settings.getCompactThreads());
+    options.setMaxBackgroundFlushes(settings.getMaxBackgroundFlushes());
+    options.setWriteBufferSize(settings.getWriteBufferSize());
+    options.setMaxWriteBufferNumber(settings.getMaxWriteBufferNumber());
+    options.setMinWriteBufferNumberToMerge(settings.getMinWriteBufferNumberToMerge());
+    options.setLevel0FileNumCompactionTrigger(settings.getLevel0FileNumCompactionTrigger());
+    options.setLevel0SlowdownWritesTrigger(settings.getLevel0SlowdownWritesTrigger());
+    options.setLevel0StopWritesTrigger(settings.getLevel0StopWritesTrigger());
+    options.setTargetFileSizeMultiplier(settings.getTargetFileSizeMultiplier());
+    options.setTargetFileSizeBase(settings.getTargetFileSizeBase());
+    options.setCompressionType(settings.getCompressionType());
+
+    BlockBasedTableConfig tableCfg = new BlockBasedTableConfig();
+    tableCfg.setBlockSize(settings.getBlockSize());
+    tableCfg.setBlockRestartInterval(settings.getBlockRestartInterval());
+    tableCfg.setWholeKeyFiltering(settings.isWholeKeyFiltering());
+    if (settings.getBlockCacheSize() == 0) {
+      tableCfg.setNoBlockCache(true);
+    } else {
+      tableCfg.setBlockCache(RocksDbSettings.getCache(settings.getBlockCacheSize()));
+      tableCfg.setCacheIndexAndFilterBlocks(settings.isCacheIndexAndFilterBlocks());
+      tableCfg.setPinL0FilterAndIndexBlocksInCache(
+          settings.isPinL0FilterAndIndexBlocksInCache());
+    }
+    if (settings.shouldEnableBloomFilter(dbName)) {
+      tableCfg.setFilter(new BloomFilter(settings.getBloomFilterBitsPerKey(), false));
+    }
+    options.setTableFormatConfig(tableCfg);
   }
 
   private static boolean isRunningInCI() {

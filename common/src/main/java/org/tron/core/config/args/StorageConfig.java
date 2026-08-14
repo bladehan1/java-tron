@@ -84,20 +84,69 @@ public class StorageConfig {
   @Setter
   public static class DbSettingsConfig {
 
+    private String benchmarkProfile = "default";
+    private String benchmarkMode = "E1";
+    private boolean useLegacyOptions = true;
+    private boolean legacySharedBlockCache = false;
     private int levelNumber = 7;
     private int compactThreads = 0; // 0 = auto: max(availableProcessors, 1)
     private int blocksize = 16;
+    private long blockCacheSize = 1024;
+    private boolean cacheIndexAndFilterBlocks = true;
+    private boolean pinL0FilterAndIndexBlocksInCache = true;
+    private int bloomFilterBitsPerKey = 10;
+    private List<String> bloomFilterDbAllowList = new ArrayList<>();
+    private boolean wholeKeyFiltering = true;
+    private int blockRestartInterval = 16;
+    private long writeBufferSize = 64;
+    private int maxWriteBufferNumber = 2;
+    private int minWriteBufferNumberToMerge = 1;
+    private int maxBackgroundFlushes = 1;
     private long maxBytesForLevelBase = 256;
     private double maxBytesForLevelMultiplier = 10;
+    private boolean levelCompactionDynamicLevelBytes = true;
     private int level0FileNumCompactionTrigger = 2;
+    private int level0SlowdownWritesTrigger = 20;
+    private int level0StopWritesTrigger = 36;
     private long targetFileSizeBase = 64;
     private int targetFileSizeMultiplier = 1;
     private int maxOpenFiles = 5000;
+    private String compressionType = "SNAPPY_COMPRESSION";
 
     // Expand 0 → auto-detected processor count. Mirrors develop Args.java:1609-1611.
     void postProcess() {
       if (compactThreads == 0) {
         compactThreads = StrictMathWrapper.max(Runtime.getRuntime().availableProcessors(), 1);
+      }
+      if (blocksize <= 0 || blockCacheSize < 0 || bloomFilterBitsPerKey < 0
+          || blockRestartInterval <= 0 || writeBufferSize <= 0) {
+        throw new IllegalArgumentException("RocksDB size settings must be positive");
+      }
+      if (maxWriteBufferNumber < 2 || minWriteBufferNumberToMerge < 1
+          || minWriteBufferNumberToMerge > maxWriteBufferNumber) {
+        throw new IllegalArgumentException("Invalid RocksDB write buffer settings");
+      }
+      if (maxBackgroundFlushes < 1 || level0FileNumCompactionTrigger < 1
+          || level0SlowdownWritesTrigger < level0FileNumCompactionTrigger
+          || level0StopWritesTrigger < level0SlowdownWritesTrigger) {
+        throw new IllegalArgumentException("Invalid RocksDB background or L0 settings");
+      }
+      if (pinL0FilterAndIndexBlocksInCache && !cacheIndexAndFilterBlocks) {
+        throw new IllegalArgumentException(
+            "pinL0FilterAndIndexBlocksInCache requires cacheIndexAndFilterBlocks");
+      }
+      if (blockCacheSize == 0 && cacheIndexAndFilterBlocks) {
+        throw new IllegalArgumentException(
+            "cacheIndexAndFilterBlocks requires a positive blockCacheSize");
+      }
+      if (legacySharedBlockCache && blockCacheSize <= 0) {
+        throw new IllegalArgumentException(
+            "legacySharedBlockCache requires a positive blockCacheSize");
+      }
+      if (bloomFilterDbAllowList.stream().anyMatch(
+          dbName -> dbName == null || dbName.trim().isEmpty())) {
+        throw new IllegalArgumentException(
+            "bloomFilterDbAllowList must contain non-empty database names");
       }
     }
   }

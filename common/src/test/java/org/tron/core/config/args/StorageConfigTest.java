@@ -65,16 +65,57 @@ public class StorageConfigTest {
     StorageConfig sc = StorageConfig.fromConfig(empty);
     StorageConfig.DbSettingsConfig ds = sc.getDbSettings();
     assertEquals(7, ds.getLevelNumber());
+    assertEquals("default", ds.getBenchmarkProfile());
+    assertEquals("E1", ds.getBenchmarkMode());
+    assertTrue(ds.isUseLegacyOptions());
     // compactThreads default is 0 in reference.conf, auto-expanded by postProcess()
     assertEquals(StrictMathWrapper.max(Runtime.getRuntime().availableProcessors(), 1),
         ds.getCompactThreads());
     assertEquals(16, ds.getBlocksize());
+    assertEquals(1024, ds.getBlockCacheSize());
+    assertTrue(ds.isCacheIndexAndFilterBlocks());
+    assertTrue(ds.isPinL0FilterAndIndexBlocksInCache());
+    assertEquals(10, ds.getBloomFilterBitsPerKey());
+    assertTrue(ds.getBloomFilterDbAllowList().isEmpty());
+    assertEquals(64, ds.getWriteBufferSize());
+    assertEquals(2, ds.getMaxWriteBufferNumber());
+    assertEquals(1, ds.getMinWriteBufferNumberToMerge());
     assertEquals(256, ds.getMaxBytesForLevelBase());
     assertEquals(10, ds.getMaxBytesForLevelMultiplier(), 0.01);
     assertEquals(2, ds.getLevel0FileNumCompactionTrigger());
     assertEquals(64, ds.getTargetFileSizeBase());
     assertEquals(1, ds.getTargetFileSizeMultiplier());
     assertEquals(5000, ds.getMaxOpenFiles());
+    assertEquals("SNAPPY_COMPRESSION", ds.getCompressionType());
+  }
+
+  @Test
+  public void testBenchmarkSettingsOverride() {
+    Config config = withRef("storage.dbSettings { benchmarkProfile = cache-2g, "
+        + "benchmarkMode = E1, useLegacyOptions = false, blockCacheSize = 2048, "
+        + "writeBufferSize = 128, "
+        + "maxWriteBufferNumber = 4, minWriteBufferNumberToMerge = 2 }");
+    StorageConfig.DbSettingsConfig settings = StorageConfig.fromConfig(config).getDbSettings();
+    assertEquals("cache-2g", settings.getBenchmarkProfile());
+    assertFalse(settings.isUseLegacyOptions());
+    assertEquals(2048, settings.getBlockCacheSize());
+    assertEquals(128, settings.getWriteBufferSize());
+    assertEquals(4, settings.getMaxWriteBufferNumber());
+    assertEquals(2, settings.getMinWriteBufferNumberToMerge());
+  }
+
+  @Test
+  public void testBloomFilterDbAllowListOverride() {
+    Config config = withRef(
+        "storage.dbSettings.bloomFilterDbAllowList = [account-asset, delegated-resource]");
+    assertEquals(java.util.Arrays.asList("account-asset", "delegated-resource"),
+        StorageConfig.fromConfig(config).getDbSettings().getBloomFilterDbAllowList());
+  }
+
+  @Test(expected = IllegalArgumentException.class)
+  public void testPinL0RequiresIndexAndFilterCache() {
+    StorageConfig.fromConfig(withRef(
+        "storage.dbSettings.cacheIndexAndFilterBlocks = false"));
   }
 
   @Test
