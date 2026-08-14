@@ -96,6 +96,34 @@ public class SnapshotManagerTest extends BaseMethodTest {
   }
 
   @Test
+  public synchronized void testFlushPendingBelowBatchThreshold() {
+    while (revokingDatabase.size() != 0) {
+      revokingDatabase.pop();
+    }
+
+    revokingDatabase.setUnChecked(false);
+    revokingDatabase.setMaxSize(5);
+    revokingDatabase.setMaxFlushCount(20);
+    ProtoCapsuleTest key = new ProtoCapsuleTest("flush-pending".getBytes());
+    for (int i = 1; i <= 12; i++) {
+      try (ISession session = revokingDatabase.buildSession()) {
+        tronDatabase.put(key.getData(), new ProtoCapsuleTest(("value" + i).getBytes()));
+        session.commit();
+      }
+    }
+
+    Assert.assertFalse(revokingDatabase.shouldBeRefreshed());
+    revokingDatabase.setMaxFlushCount(1);
+    Assert.assertTrue(revokingDatabase.shouldBeRefreshed());
+    revokingDatabase.setMaxFlushCount(20);
+
+    revokingDatabase.flushPending();
+
+    revokingDatabase.setMaxFlushCount(1);
+    Assert.assertFalse(revokingDatabase.shouldBeRefreshed());
+  }
+
+  @Test
   public void testCheckError() {
     SnapshotManager manager = spy(new SnapshotManager(""));
     when(manager.getCheckpointList()).thenReturn(Arrays.asList("check1", "check2"));
