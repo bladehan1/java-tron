@@ -2745,6 +2745,7 @@ public class Manager {
     EventPluginLoader.getInstance().stopPlugin();
     stopFilterProcessThread();
     stopValidateSignThread();
+    rewardViCalService.stop();
     chainBaseManager.shutdown();
     revokingStore.shutdown();
     session.reset();
