@@ -19,6 +19,9 @@ class MetricsCounter {
     init(MetricKeys.Counter.P2P_DISCONNECT, "tron p2p disconnect .", "type");
     init(MetricKeys.Counter.INTERNAL_SERVICE_FAIL, "internal Service fail.",
         "class", "method");
+    init(MetricKeys.Counter.DB_EVENT, "db event .", "type", "db", "event");
+    init(MetricKeys.Counter.DB_ROCKSDB_TICKER, "rocksdb cumulative ticker values.",
+        "type", "db", "ticker");
   }
 
   private MetricsCounter() {
@@ -44,4 +47,3 @@ class MetricsCounter {
     }
   }
 }
-

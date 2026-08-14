@@ -14,6 +14,7 @@ import org.rocksdb.Logger;
 import org.rocksdb.Options;
 import org.rocksdb.RocksDB;
 import org.rocksdb.Statistics;
+import org.rocksdb.StatsLevel;
 import org.slf4j.LoggerFactory;
 import org.tron.common.utils.MarketOrderPriceComparatorForRocksDB;
 import org.tron.core.Constant;
@@ -193,8 +194,12 @@ public class RocksDbSettings {
 
     // general options
     if (settings.isEnableStatistics()) {
-      options.setStatistics(new Statistics());
-      options.setStatsDumpPeriodSec(60);
+      try (Statistics statistics = new Statistics()) {
+        statistics.setStatsLevel(StatsLevel.EXCEPT_DETAILED_TIMERS);
+        options.setStatistics(statistics);
+      }
+      // Prometheus polls selected tickers; avoid a second periodic dump to the RocksDB log.
+      options.setStatsDumpPeriodSec(0);
     }
     options.setCreateIfMissing(true);
     options.setIncreaseParallelism(1);

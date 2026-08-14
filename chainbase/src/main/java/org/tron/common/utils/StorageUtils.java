@@ -8,6 +8,8 @@ import org.apache.commons.lang3.StringUtils;
 import org.iq80.leveldb.Options;
 import org.slf4j.LoggerFactory;
 import org.tron.common.parameter.CommonParameter;
+import org.tron.common.prometheus.MetricKeys;
+import org.tron.common.prometheus.Metrics;
 import org.tron.core.Constant;
 
 
@@ -66,7 +68,21 @@ public class StorageUtils {
     if (Constant.MARKET_PAIR_PRICE_TO_ORDER.equals(dbName)) {
       options.comparator(new MarketOrderPriceComparatorForLevelDB());
     }
-    options.logger(message -> levelDbLogger.info("{} {}", dbName, message));
+    options.logger(message -> {
+      levelDbLogger.info("{} {}", dbName, message);
+      if (!Metrics.databaseEnabled()) {
+        return;
+      }
+      if (message.startsWith("Recovering")) {
+        Metrics.counterInc(MetricKeys.Counter.DB_EVENT, 1, LEVELDB, dbName, "recover");
+      } else if (message.startsWith("Compacting")) {
+        Metrics.counterInc(MetricKeys.Counter.DB_EVENT, 1, LEVELDB, dbName, "compact");
+      } else if (message.startsWith("Delete")) {
+        Metrics.counterInc(MetricKeys.Counter.DB_EVENT, 1, LEVELDB, dbName, "delete");
+      } else if (message.startsWith("Generated")) {
+        Metrics.counterInc(MetricKeys.Counter.DB_EVENT, 1, LEVELDB, dbName, "create");
+      }
+    });
     return options;
   }
 }

@@ -57,3 +57,6 @@ Wallet
 
 /framework/propPath
 .cache
+
+# Local development and benchmark operations records
+/.dev_ops/

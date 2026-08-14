@@ -5,6 +5,7 @@ import java.util.concurrent.TimeUnit;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 import org.tron.common.es.ExecutorServiceManager;
+import org.tron.common.parameter.CommonParameter;
 import org.tron.common.prometheus.Metrics;
 import org.tron.core.db.common.DbSourceInter;
 import org.tron.core.db2.common.DB;
@@ -17,20 +18,24 @@ public class DbStatService {
       ExecutorServiceManager.newSingleThreadScheduledExecutor(esName);
 
   public  void register(DB<byte[], byte[]> db) {
-    if (Metrics.enabled()) {
-      statExecutor.scheduleWithFixedDelay(db::stat, 0, 6, TimeUnit.HOURS);
+    if (Metrics.databaseEnabled()) {
+      statExecutor.scheduleWithFixedDelay(db::stat, 0, statIntervalSeconds(), TimeUnit.SECONDS);
     }
   }
 
   public  void register(DbSourceInter<byte[]> db) {
-    if (Metrics.enabled()) {
-      statExecutor.scheduleWithFixedDelay(db::stat, 0, 6, TimeUnit.HOURS);
+    if (Metrics.databaseEnabled()) {
+      statExecutor.scheduleWithFixedDelay(db::stat, 0, statIntervalSeconds(), TimeUnit.SECONDS);
     }
   }
 
   public void shutdown() {
-    if (Metrics.enabled()) {
+    if (Metrics.databaseEnabled()) {
       ExecutorServiceManager.shutdownAndAwaitTermination(statExecutor, esName);
     }
+  }
+
+  private int statIntervalSeconds() {
+    return CommonParameter.getInstance().getMetricsPrometheusDatabaseStatIntervalSeconds();
   }
 }

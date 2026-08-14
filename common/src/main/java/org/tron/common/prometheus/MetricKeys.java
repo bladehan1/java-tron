@@ -21,6 +21,8 @@ public class MetricKeys {
     public static final String P2P_ERROR = "tron:p2p_error";
     public static final String P2P_DISCONNECT = "tron:p2p_disconnect";
     public static final String INTERNAL_SERVICE_FAIL = "tron:internal_service_fail";
+    public static final String DB_EVENT = "tron:db_event";
+    public static final String DB_ROCKSDB_TICKER = "tron:db_rocksdb_ticker";
 
     private Counter() {
       throw new IllegalStateException("Counter");
@@ -35,6 +37,8 @@ public class MetricKeys {
     public static final String PEERS = "tron:peers";
     public static final String DB_SIZE_BYTES = "tron:db_size_bytes";
     public static final String DB_SST_LEVEL = "tron:db_sst_level";
+    public static final String DB_MEMORY_BYTES = "tron:db_memory_bytes";
+    public static final String DB_ROCKSDB_PROPERTY = "tron:db_rocksdb_property";
     public static final String MANAGER_QUEUE = "tron:manager_queue_size";
     public static final String TX_CACHE = "tron:tx_cache";
 
@@ -67,6 +71,8 @@ public class MetricKeys {
     public static final String BLOCK_FETCH_LATENCY = "tron:block_fetch_latency_seconds";
     public static final String BLOCK_RECEIVE_DELAY = "tron:block_receive_delay_seconds";
     public static final String BLOCK_TRANSACTION_COUNT = "tron:block_transaction_count";
+    public static final String DB_OPERATE_LATENCY = "tron:db_operate_latency_seconds";
+    public static final String DB_OPERATE_BYTES = "tron:db_operate_bytes";
 
     private Histogram() {
       throw new IllegalStateException("Histogram");

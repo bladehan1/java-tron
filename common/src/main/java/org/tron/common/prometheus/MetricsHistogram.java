@@ -53,6 +53,23 @@ public class MetricsHistogram {
         "Distribution of transaction counts per block.",
         new double[]{0, 20, 50, 80, 100, 120, 140, 160, 180, 200, 230, 260, 300, 500, 2000, 5000, 10000},
         MetricLabels.Histogram.MINER);
+
+    double[] dbBuckets = new double[]{
+        0.000001, 0.000002, 0.000003, 0.000004, 0.000005, 0.000006,
+        0.000007, 0.000008, 0.000009, 0.00001, 0.00002, 0.00003,
+        0.00004, 0.00005, 0.00006, 0.00007, 0.00008, 0.00009,
+        0.0001, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05,
+        0.1, 0.5, 1.0};
+    init(MetricKeys.Histogram.DB_OPERATE_LATENCY, "db operate latency .", dbBuckets,
+        "type", "db", "op");
+
+    // 1B, 2B, 4B … 1MB, 2MB — 22 buckets covering expected range
+    double[] dbBytesBuckets = new double[]{
+        1, 2, 4, 8, 16, 32, 64, 128, 256, 512,
+        1024, 2048, 4096, 8192, 16384, 32768, 65536,
+        131072, 262144, 524288, 1048576, 2097152};
+    init(MetricKeys.Histogram.DB_OPERATE_BYTES, "db operate data size in bytes.", dbBytesBuckets,
+        "type", "db", "op");
   }
 
   private MetricsHistogram() {
@@ -90,6 +107,15 @@ public class MetricsHistogram {
     return null;
   }
 
+  static Histogram.Child child(String key, String... labels) {
+    Histogram histogram = container.get(key);
+    if (histogram == null) {
+      logger.info("{} not exist", key);
+      return null;
+    }
+    return histogram.labels(labels);
+  }
+
   static void observeDuration(Histogram.Timer startTimer) {
     if (startTimer != null) {
       startTimer.observeDuration();
@@ -109,4 +135,3 @@ public class MetricsHistogram {
   }
 
 }
-

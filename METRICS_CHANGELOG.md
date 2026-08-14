@@ -17,6 +17,37 @@ This file tracks Prometheus metric additions, changes, and removals in java-tron
 
 - `tron:sr_set_change` (Counter, labels `action`, `witness`) — incremented once per witness whenever the active SR set rotates at a maintenance boundary. `action` is one of `add` / `remove`. Cardinality grows with the number of distinct witnesses that have ever entered or left the active set, not with the active set size at any given moment. ([#6624](https://github.com/tronprotocol/java-tron/pull/6624))
 
+#### DB
+
+DB metrics are separately opt-in because per-operation latency histograms and RocksDB Statistics
+change the measured workload. Enable them only for a controlled observation window:
+
+```hocon
+node.metrics.prometheus {
+  enable = true
+  database {
+    enable = true
+    statIntervalSeconds = 30
+  }
+}
+```
+
+`statIntervalSeconds` accepts 5–3600 seconds. Keep the same DB-metric setting and interval across
+all variants in an A/B run, and run an additional metrics-off/metrics-on control before treating
+the numbers as representative of an uninstrumented node.
+
+- `tron:db_operate_latency_seconds` (Histogram, labels `type`, `db`, `op`) — latency of a single database operation. `type` is the storage engine (`LEVELDB` or `ROCKSDB`); `op` is one of `get` / `put` / `delete` / `batch`. Buckets are microsecond-resolution from `1µs`, densified in the 1–100µs range where in-memory hits land, and extend through `1s` so stalls above the previous 10ms ceiling remain distinguishable. Label children are bound once per database rather than resolved on every operation.
+
+- `tron:db_operate_bytes` (Histogram, labels `type`, `db`, `op`) — payload size in bytes per database operation. `type` is the storage engine; `op` is one of `get` / `put` / `batch` (`get` observes the returned value length and is skipped when the key is absent; `batch` observes the total value bytes in the write batch). Buckets are powers of two spanning `1B–2MB` (22 steps).
+
+- `tron:db_event` (Counter, labels `type`, `db`, `event`) — count of LevelDB internal events, captured from the LevelDB logger callback. `type` is always `LEVELDB`; `event` is one of `recover` / `compact` / `delete` / `create`. RocksDB does not emit this counter.
+
+- `tron:db_memory_bytes` (Gauge, labels `type`, `db`, `property`) — approximate RocksDB memory usage in bytes, sampled on the configured DB-stat interval. `type` is always `ROCKSDB`; `property` is one of `rocksdb.block-cache-usage` (block cache memory), `rocksdb.cur-size-all-mem-tables` (active and unflushed immutable memtable size), or `rocksdb.estimate-table-readers-mem` (index and filter block memory). LevelDB does not emit this gauge. Do not sum per-DB block-cache values until shared-cache semantics have been verified for the deployed RocksDB JNI version.
+
+- `tron:db_rocksdb_property` (Gauge, labels `type`, `db`, `property`) — instantaneous RocksDB pressure properties, including pending compaction bytes, running compactions/flushes, delayed write rate, write-stop state, immutable memtables, pending flush/compaction, and background errors. Property availability can differ between the amd64 and aarch64 RocksDB JNI versions; unsupported properties are skipped.
+
+- `tron:db_rocksdb_ticker_total` (Counter, labels `type`, `db`, `ticker`) — selected cumulative RocksDB Statistics deltas for block-cache data/index/filter hits and misses, Bloom usefulness, memtable/level hits, logical bytes read/written, flush/compaction bytes, and stall microseconds. Statistics use `EXCEPT_DETAILED_TIMERS`; A/B variants must use the same setting. These counters describe RocksDB internals and complement, rather than replace, OS disk-byte/IOPS/await metrics.
+
 **Pre-4.8.2 Baseline**
 
 Snapshot of metrics emitted prior to this changelog. Per-version provenance is not tracked here; consult `git log` on [`common/src/main/java/org/tron/common/prometheus/`](common/src/main/java/org/tron/common/prometheus/) for exact origin of each metric.
