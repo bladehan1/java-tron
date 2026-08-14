@@ -4,6 +4,7 @@ import com.beust.jcommander.JCommander;
 import com.beust.jcommander.Parameter;
 import com.beust.jcommander.ParameterException;
 import java.io.PrintStream;
+import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -13,7 +14,9 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import org.rocksdb.ReadOptions;
+import org.rocksdb.RocksDB;
 import org.rocksdb.RocksIterator;
+import org.tron.common.setting.RocksDbSettings;
 import org.tron.common.storage.rocksdb.RocksDbDataSourceImpl;
 import org.tron.core.config.args.Args;
 
@@ -47,7 +50,7 @@ public final class RocksDbRebuild {
       options.validate();
       Args.setParam(options.nodeArgs(), "config.conf");
       long start = System.nanoTime();
-      long entries = rebuild(options);
+      long entries = options.compactExisting ? compactExisting(options) : rebuild(options);
       double elapsedSeconds = (System.nanoTime() - start) / 1_000_000_000.0;
       output.printf("rebuilt database=%s entries=%d elapsed_seconds=%.3f%n",
           options.database, entries, elapsedSeconds);
@@ -65,15 +68,16 @@ public final class RocksDbRebuild {
   }
 
   private static long rebuild(Options options) throws Exception {
-    RocksDbDataSourceImpl source = new RocksDbDataSourceImpl(
-        options.sourceDirectory, options.database);
     RocksDbDataSourceImpl target = new RocksDbDataSourceImpl(
         options.targetDirectory, options.database);
     long entries = 0;
     Map<byte[], byte[]> batch = new LinkedHashMap<>(BATCH_SIZE);
-    try {
-      for (Map.Entry<byte[], byte[]> entry : source) {
-        batch.put(entry.getKey(), entry.getValue());
+    try (org.rocksdb.Options sourceOptions = RocksDbSettings.getOptionsByDbName(options.database);
+        RocksDB source = RocksDB.openReadOnly(sourceOptions, options.sourcePath().toString());
+        ReadOptions readOptions = new ReadOptions().setFillCache(false);
+        RocksIterator iterator = source.newIterator(readOptions)) {
+      for (iterator.seekToFirst(); iterator.isValid(); iterator.next()) {
+        batch.put(iterator.key(), iterator.value());
         entries++;
         if (batch.size() == BATCH_SIZE) {
           target.updateByBatch(batch);
@@ -83,21 +87,56 @@ public final class RocksDbRebuild {
       if (!batch.isEmpty()) {
         target.updateByBatch(batch);
       }
+      iterator.status();
       target.getDatabase().compactRange();
       verifySameContent(source, target, entries);
       return entries;
     } finally {
       target.closeDB();
-      source.closeDB();
     }
   }
 
-  private static void verifySameContent(RocksDbDataSourceImpl source,
+  private static long compactExisting(Options options) throws Exception {
+    RocksDbDataSourceImpl target = new RocksDbDataSourceImpl(
+        options.targetDirectory, options.database);
+    try (org.rocksdb.Options sourceOptions = RocksDbSettings.getOptionsByDbName(options.database);
+        RocksDB source = RocksDB.openReadOnly(sourceOptions, options.sourcePath().toString())) {
+      forceCompactBottommost(target);
+      return verifySameContent(source, target, -1);
+    } finally {
+      target.closeDB();
+    }
+  }
+
+  @SuppressWarnings({"rawtypes", "unchecked"})
+  private static void forceCompactBottommost(RocksDbDataSourceImpl target) throws Exception {
+    Class<?> optionsClass = Class.forName("org.rocksdb.CompactRangeOptions");
+    Class<? extends Enum> bottommostClass = (Class<? extends Enum>) Class.forName(
+        "org.rocksdb.CompactRangeOptions$BottommostLevelCompaction");
+    Object options = optionsClass.getConstructor().newInstance();
+    Object force = Enum.valueOf(bottommostClass, "kForce");
+    try {
+      optionsClass.getMethod("setBottommostLevelCompaction", bottommostClass)
+          .invoke(options, force);
+      optionsClass.getMethod("setExclusiveManualCompaction", boolean.class)
+          .invoke(options, true);
+      optionsClass.getMethod("setMaxSubcompactions", int.class).invoke(options, 8);
+      Method compactRange = target.getDatabase().getClass().getMethod("compactRange",
+          Class.forName("org.rocksdb.ColumnFamilyHandle"), byte[].class, byte[].class,
+          optionsClass);
+      compactRange.invoke(target.getDatabase(), target.getDatabase().getDefaultColumnFamily(),
+          null, null, options);
+    } finally {
+      ((AutoCloseable) options).close();
+    }
+  }
+
+  private static long verifySameContent(RocksDB source,
       RocksDbDataSourceImpl target, long expectedEntries) throws Exception {
     long compared = 0;
     try (ReadOptions sourceOptions = new ReadOptions().setFillCache(false);
         ReadOptions targetOptions = new ReadOptions().setFillCache(false);
-        RocksIterator sourceIterator = source.getDatabase().newIterator(sourceOptions);
+        RocksIterator sourceIterator = source.newIterator(sourceOptions);
         RocksIterator targetIterator = target.getDatabase().newIterator(targetOptions)) {
       sourceIterator.seekToFirst();
       targetIterator.seekToFirst();
@@ -112,10 +151,12 @@ public final class RocksDbRebuild {
       }
       sourceIterator.status();
       targetIterator.status();
-      if (sourceIterator.isValid() || targetIterator.isValid() || compared != expectedEntries) {
+      if (sourceIterator.isValid() || targetIterator.isValid()
+          || (expectedEntries >= 0 && compared != expectedEntries)) {
         throw new IllegalStateException("Rebuilt entry count differs: copied=" + expectedEntries
             + ", compared=" + compared);
       }
+      return compared;
     }
   }
 
@@ -130,6 +171,10 @@ public final class RocksDbRebuild {
 
     @Parameter(names = "--database", description = "Database name to rebuild.")
     private String database;
+
+    @Parameter(names = "--compact-existing",
+        description = "Force-compact an existing target copy, including bottommost SST files.")
+    private boolean compactExisting;
 
     @Parameter(names = {"-c", "--config"}, description = "Node config file.")
     private String config = "config.conf";
@@ -152,7 +197,10 @@ public final class RocksDbRebuild {
       if (!Files.isRegularFile(source.resolve("CURRENT"))) {
         throw new ParameterException("Existing RocksDB source is required: " + source);
       }
-      if (Files.exists(target)) {
+      if (compactExisting && !Files.isRegularFile(target.resolve("CURRENT"))) {
+        throw new ParameterException("Existing RocksDB target is required: " + target);
+      }
+      if (!compactExisting && Files.exists(target)) {
         throw new ParameterException("Target database must not exist: " + target);
       }
     }
@@ -172,6 +220,10 @@ public final class RocksDbRebuild {
         args.add(rocksDbConfig);
       }
       return args.toArray(new String[0]);
+    }
+
+    private Path sourcePath() {
+      return Paths.get(sourceDirectory, database).toAbsolutePath().normalize();
     }
   }
 }
