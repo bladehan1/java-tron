@@ -12,7 +12,6 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 
@@ -47,9 +46,8 @@ public final class HistorySegmentStore implements Closeable {
     if (scanResult.getInvalidTail() != null) {
       throw new IllegalStateException("History has an invalid tail which must be truncated first");
     }
-    if (!scanResult.getRecords().isEmpty()) {
-      validateContinuity(scanResult.getRecords().get(scanResult.getRecords().size() - 1)
-          .getDiff().getMeta(), diff.getMeta());
+    if (scanResult.getHead() != null) {
+      validateContinuity(scanResult.getHead().getDiff().getMeta(), diff.getMeta());
     }
     byte[] record = codec.encode(diff);
     long offset = appendChannel.size();
@@ -60,9 +58,8 @@ public final class HistorySegmentStore implements Closeable {
     appendChannel.position(offset);
     writeFully(appendChannel, ByteBuffer.wrap(record));
     HistoryLocation location = location(appendSegmentId, offset, record);
-    List<ScannedRecord> records = new ArrayList<>(scanResult.getRecords());
-    records.add(new ScannedRecord(diff, location));
-    scanResult = new ScanResult(records, null);
+    scanResult = new ScanResult(scanResult.getRecordCount() + 1,
+        new ScannedRecord(diff, location), null);
     return location;
   }
 
@@ -129,7 +126,8 @@ public final class HistorySegmentStore implements Closeable {
   }
 
   private ScanResult scan() throws IOException {
-    List<ScannedRecord> records = new ArrayList<>();
+    long recordCount = 0;
+    ScannedRecord head = null;
     InvalidTail invalidTail = null;
     BlockSnapshotMeta previous = null;
     List<Path> segments = listSegments();
@@ -137,7 +135,7 @@ public final class HistorySegmentStore implements Closeable {
     for (Path segment : segments) {
       int segmentId = parseSegmentId(segment);
       if (segmentId != expectedSegmentId) {
-        return new ScanResult(records, new InvalidTail(segmentId, 0,
+        return new ScanResult(recordCount, head, new InvalidTail(segmentId, 0,
             "non-contiguous segment id"));
       }
       expectedSegmentId++;
@@ -176,7 +174,8 @@ public final class HistorySegmentStore implements Closeable {
             break;
           }
           HistoryLocation location = location(segmentId, offset, record);
-          records.add(new ScannedRecord(diff, location));
+          head = new ScannedRecord(diff, location);
+          recordCount++;
           previous = diff.getMeta();
           offset += recordLength;
         }
@@ -185,7 +184,7 @@ public final class HistorySegmentStore implements Closeable {
         break;
       }
     }
-    return new ScanResult(records, invalidTail);
+    return new ScanResult(recordCount, head, invalidTail);
   }
 
   private void validateContinuity(BlockSnapshotMeta previous, BlockSnapshotMeta current) {
@@ -355,16 +354,22 @@ public final class HistorySegmentStore implements Closeable {
   }
 
   public static final class ScanResult {
-    private final List<ScannedRecord> records;
+    private final long recordCount;
+    private final ScannedRecord head;
     private final InvalidTail invalidTail;
 
-    private ScanResult(List<ScannedRecord> records, InvalidTail invalidTail) {
-      this.records = Collections.unmodifiableList(new ArrayList<>(records));
+    private ScanResult(long recordCount, ScannedRecord head, InvalidTail invalidTail) {
+      this.recordCount = recordCount;
+      this.head = head;
       this.invalidTail = invalidTail;
     }
 
-    public List<ScannedRecord> getRecords() {
-      return records;
+    public long getRecordCount() {
+      return recordCount;
+    }
+
+    public ScannedRecord getHead() {
+      return head;
     }
 
     public InvalidTail getInvalidTail() {

@@ -27,6 +27,7 @@ public class StorageConfig {
   private BalanceConfig balance = new BalanceConfig();
   private CheckpointConfig checkpoint = new CheckpointConfig();
   private SnapshotConfig snapshot = new SnapshotConfig();
+  private StateArchiveConfig stateArchive = new StateArchiveConfig();
   private TxCacheConfig txCache = new TxCacheConfig();
   // ConfigBeanFactory requires all bean fields present per item, so we parse manually.
   @Setter(lombok.AccessLevel.NONE)
@@ -143,6 +144,34 @@ public class StorageConfig {
 
   @Getter
   @Setter
+  public static class StateArchiveConfig {
+
+    private boolean enabled = false;
+    private String directory = "state-archive";
+    private long maxSegmentSize = 1073741824L;
+    private int queueCapacity = 256;
+
+    void postProcess() {
+      if (directory == null || directory.trim().isEmpty()) {
+        throw new IllegalArgumentException("stateArchive.directory must not be empty");
+      }
+      if (maxSegmentSize <= BlockHistoryLimits.MIN_SEGMENT_SIZE) {
+        throw new IllegalArgumentException(
+            "stateArchive.maxSegmentSize must be greater than 64 MiB");
+      }
+      if (queueCapacity <= 0 || queueCapacity > 65536) {
+        throw new IllegalArgumentException(
+            "stateArchive.queueCapacity must be in [1, 65536]");
+      }
+    }
+  }
+
+  private static final class BlockHistoryLimits {
+    private static final long MIN_SEGMENT_SIZE = 64L * 1024 * 1024;
+  }
+
+  @Getter
+  @Setter
   public static class TxCacheConfig {
 
     private int estimatedTransactions = 1000;
@@ -184,6 +213,7 @@ public class StorageConfig {
 
     sc.dbSettings.postProcess();
     sc.snapshot.postProcess();
+    sc.stateArchive.postProcess();
     sc.txCache.postProcess();
     return sc;
   }

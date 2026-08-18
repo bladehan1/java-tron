@@ -1,10 +1,12 @@
 package org.tron.core.db2.archive;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
+import com.google.protobuf.ByteString;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -18,6 +20,7 @@ import org.junit.rules.TemporaryFolder;
 import org.tron.core.db2.archive.ArchiveHistoryWriter.Stage;
 import org.tron.core.db2.archive.BlockReverseDiff.DbGroup;
 import org.tron.core.db2.archive.BlockReverseDiff.Entry;
+import org.tron.protos.Protocol.Account;
 
 public class ArchiveHistoryWriterTest {
 
@@ -109,18 +112,79 @@ public class ArchiveHistoryWriterTest {
   }
 
   @Test
-  public void ignoresUncommittedTemporaryMarkerFiles() throws Exception {
-    Path archive = temporaryFolder.newFolder("temporary-marker").toPath();
-    Files.createDirectories(archive.resolve("commits"));
-    Files.write(archive.resolve("commits").resolve(".tmp-interrupted"), new byte[]{1, 2, 3});
+  public void persistsAccountSeekIndexAndRecoversItAcrossRestart() throws Exception {
+    Path archive = temporaryFolder.newFolder("account-index").toPath();
+    byte[] address = new byte[21];
+    address[0] = 0x41;
+    address[20] = 7;
+    BlockReverseDiff created = accountDiff(1, address, OldValue.absent());
+    BlockReverseDiff changed = accountDiff(2, address,
+        OldValue.present(account(address, 10)));
+    BlockReverseDiff unchanged = new BlockReverseDiff(new BlockSnapshotMeta(
+        3, 3, hash(3), hash(2), 9_000), Collections.emptyList());
+    byte[] committedAccount = account(address, 20);
+
     try (ArchiveHistoryWriter writer = new ArchiveHistoryWriter(archive, 4096, databases())) {
-      assertNull(writer.committedHead());
-      assertThrows(IllegalArgumentException.class, () -> writer.readCommitted(1));
+      writer.acceptAll(Arrays.asList(created, changed, unchanged));
+      assertFalse(writer.readAccountAt(0, address, committedAccount).isPresent());
+      assertEquals(10, Account.parseFrom(
+          writer.readAccountAt(1, address, committedAccount).getValue()).getBalance());
+      assertEquals(20, Account.parseFrom(
+          writer.readAccountAt(2, address, committedAccount).getValue()).getBalance());
+    }
+
+    try (ArchiveHistoryWriter reopened = new ArchiveHistoryWriter(archive, 4096, databases())) {
+      assertEquals(20, Account.parseFrom(
+          reopened.readAccountAt(2, address, committedAccount).getValue()).getBalance());
+      try (java.util.stream.Stream<Path> files = Files.list(archive.resolve("commits"))) {
+        assertEquals(1, files.count());
+      }
     }
   }
 
   @Test
-  public void markerDirectorySyncFailurePreservesBodyAndIndexAsUncertain() throws Exception {
+  public void truncatesIncompleteCommitLogTailOnRestart() throws Exception {
+    Path archive = temporaryFolder.newFolder("temporary-marker").toPath();
+    try (ArchiveHistoryWriter writer = new ArchiveHistoryWriter(archive, 4096, databases())) {
+      writer.accept(diff(1));
+    }
+    Files.write(archive.resolve("commits").resolve("commit.log"), new byte[]{1, 2, 3},
+        java.nio.file.StandardOpenOption.APPEND);
+    try (ArchiveHistoryWriter writer = new ArchiveHistoryWriter(archive, 4096, databases())) {
+      assertEquals(1, writer.committedHead().getMeta().getEpoch());
+      assertEquals(diff(1).getMeta(), writer.readCommitted(1).getMeta());
+    }
+  }
+
+  @Test
+  public void persistsBatchedPrefixWithoutPerBlockFilesAndResumes() throws Exception {
+    Path archive = temporaryFolder.newFolder("batched-prefix").toPath();
+    try (ArchiveHistoryWriter writer = new ArchiveHistoryWriter(archive, 4096, databases())) {
+      for (int start = 1; start <= 1_000; start += 100) {
+        List<BlockReverseDiff> batch = new ArrayList<>(100);
+        for (int number = start; number < start + 100; number++) {
+          batch.add(diff(number));
+        }
+        writer.acceptAll(batch);
+      }
+      assertEquals(1_000, writer.committedHead().getMeta().getEpoch());
+    }
+
+    try (java.util.stream.Stream<Path> commits = Files.list(archive.resolve("commits"));
+        java.util.stream.Stream<Path> segments = Files.list(archive.resolve("history"))) {
+      assertEquals(1, commits.count());
+      assertTrue(segments.count() < 1_000);
+    }
+    try (ArchiveHistoryWriter reopened = new ArchiveHistoryWriter(archive, 4096, databases())) {
+      assertEquals(1_000, reopened.committedHead().getMeta().getEpoch());
+      assertEquals(diff(500).getMeta(), reopened.readCommitted(500).getMeta());
+      reopened.accept(diff(1_001));
+      assertEquals(1_001, reopened.committedHead().getMeta().getEpoch());
+    }
+  }
+
+  @Test
+  public void commitLogForceBoundaryFailurePreservesRecordAsUncertain() throws Exception {
     Path archive = temporaryFolder.newFolder("uncertain-marker").toPath();
     HistoryCommitMarker marker = new HistoryCommitMarker(diff(1).getMeta(), 0,
         new HistoryLocation(0, 0, 100, 17, new byte[32]),
@@ -134,11 +198,7 @@ public class ArchiveHistoryWriterTest {
       assertThrows(java.io.IOException.class, () -> commits.commit(marker));
       assertNull(commits.head());
       assertTrue(commits.mayContain(1));
-      try (java.util.stream.Stream<Path> paths = Files.list(archive.resolve("commits"))) {
-        assertEquals(1, paths
-            .filter(path -> path.getFileName().toString().endsWith(".commit"))
-            .count());
-      }
+      assertTrue(Files.size(archive.resolve("commits").resolve("commit.log")) > 0);
       assertThrows(IllegalStateException.class,
           () -> commits.removeHead(marker.getMeta()));
     }
@@ -153,6 +213,17 @@ public class ArchiveHistoryWriterTest {
         hash(number - 1), number * 3_000L), Collections.singletonList(
         new DbGroup("account", Collections.singletonList(
             new Entry(bytes("key-" + number), OldValue.present(bytes("value-" + number)))))));
+  }
+
+  private static BlockReverseDiff accountDiff(int number, byte[] address, OldValue oldValue) {
+    return new BlockReverseDiff(new BlockSnapshotMeta(number, number, hash(number),
+        hash(number - 1), number * 3_000L), Collections.singletonList(
+        new DbGroup("account", Collections.singletonList(new Entry(address, oldValue)))));
+  }
+
+  private static byte[] account(byte[] address, long balance) {
+    return Account.newBuilder().setAddress(ByteString.copyFrom(address)).setBalance(balance)
+        .build().toByteArray();
   }
 
   private static byte[] hash(int suffix) {

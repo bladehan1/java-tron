@@ -19,6 +19,7 @@ public final class HistoryCommitMarkerCodec {
   private static final int MAGIC = 0x54415243; // TARC
   private static final short VERSION = 1;
   private static final int MAX_MARKER_LENGTH = 1024 * 1024;
+  static final int HEADER_LENGTH = 12;
 
   public byte[] encode(HistoryCommitMarker marker) {
     try {
@@ -124,6 +125,22 @@ public final class HistoryCommitMarkerCodec {
     } catch (IOException e) {
       throw new IllegalArgumentException("Invalid history commit marker", e);
     }
+  }
+
+  /** Returns the complete marker length described by its fixed prefix. */
+  public int recordLength(byte[] prefix) {
+    if (prefix == null || prefix.length < HEADER_LENGTH) {
+      throw new IllegalArgumentException("History commit marker prefix is truncated");
+    }
+    ByteBuffer buffer = ByteBuffer.wrap(prefix);
+    if (buffer.getInt() != MAGIC || buffer.getShort() != VERSION || buffer.getShort() != 0) {
+      throw new IllegalArgumentException("Unsupported history commit marker header");
+    }
+    int length = buffer.getInt();
+    if (length < HEADER_LENGTH + Integer.BYTES || length > MAX_MARKER_LENGTH) {
+      throw new IllegalArgumentException("History commit marker length is invalid");
+    }
+    return length;
   }
 
   private static void writeBytes(DataOutputStream output, byte[] value) throws IOException {

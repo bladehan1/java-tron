@@ -6,6 +6,7 @@ import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Set;
@@ -35,6 +36,24 @@ public class AsyncArchiveHistorySinkTest {
       sink.revert(diff(2).getMeta());
       assertEquals(1, writer.committedHead().getMeta().getEpoch());
       sink.releaseThrough(1);
+    }
+  }
+
+  @Test
+  public void persistsOneFlushRangeAsOneDurabilityBatch() throws Exception {
+    Path archive = temporaryFolder.newFolder("async-batch").toPath();
+    java.util.List<Stage> stages = new ArrayList<>();
+    ArchiveHistoryWriter writer = new ArchiveHistoryWriter(archive, 4096, databases(),
+        (stage, meta) -> stages.add(stage));
+    try (AsyncArchiveHistorySink sink = new AsyncArchiveHistorySink(writer, 2)) {
+      sink.acceptAll(Arrays.asList(diff(1), diff(2), diff(3)));
+      sink.awaitCommitted(3);
+      assertEquals(3, writer.committedHead().getMeta().getEpoch());
+      assertEquals(3, stages.stream().filter(stage -> stage == Stage.APPEND_BODY).count());
+      assertEquals(3, stages.stream().filter(stage -> stage == Stage.APPEND_INDEX).count());
+      assertEquals(1, stages.stream().filter(stage -> stage == Stage.SYNC_BODY).count());
+      assertEquals(1, stages.stream().filter(stage -> stage == Stage.SYNC_INDEX).count());
+      assertEquals(3, stages.stream().filter(stage -> stage == Stage.COMMIT_MARKER).count());
     }
   }
 

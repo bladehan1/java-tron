@@ -4432,6 +4432,30 @@ public class Wallet {
     return builder.build();
   }
 
+  /** Experimental state-archive balance query used for trace-oracle validation. */
+  public BalanceContract.AccountBalanceResponse getAccountBalanceFromStateArchive(
+      BalanceContract.AccountBalanceRequest request)
+      throws ItemNotFoundException, BadItemException {
+    BalanceContract.AccountIdentifier accountIdentifier = request.getAccountIdentifier();
+    checkAccountIdentifier(accountIdentifier);
+    BlockBalanceTrace.BlockIdentifier blockIdentifier = request.getBlockIdentifier();
+    checkBlockIdentifier(blockIdentifier);
+    BlockId blockId = chainBaseManager.getBlockIndexStore().get(blockIdentifier.getNumber());
+    if (!blockId.getByteString().equals(blockIdentifier.getHash())) {
+      throw new IllegalArgumentException("number and hash do not match");
+    }
+    org.tron.core.db2.archive.HistoricalAccountBalanceReader.Result result =
+        dbManager.getArchiveAccountBalance(blockIdentifier.getNumber(),
+            accountIdentifier.getAddress().toByteArray());
+    if (!result.isPresent()) {
+      throw new ItemNotFoundException("Account is absent at the requested block");
+    }
+    return BalanceContract.AccountBalanceResponse.newBuilder()
+        .setBlockIdentifier(blockIdentifier)
+        .setBalance(result.getBalance())
+        .build();
+  }
+
   public BalanceContract.BlockBalanceTrace getBlockBalance(
       BlockBalanceTrace.BlockIdentifier request) throws ItemNotFoundException, BadItemException {
     checkBlockIdentifier(request);
