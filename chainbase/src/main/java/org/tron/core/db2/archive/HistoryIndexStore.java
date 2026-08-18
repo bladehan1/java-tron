@@ -11,7 +11,6 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.List;
 
 /** Append-only authoritative {@code state_history.idx}. */
@@ -42,9 +41,8 @@ public final class HistoryIndexStore implements Closeable {
     if (scanResult.getInvalidTailOffset() != null) {
       throw new IllegalStateException("History index has an invalid tail");
     }
-    if (!scanResult.getRecords().isEmpty()) {
-      validateContinuity(scanResult.getRecords().get(scanResult.getRecords().size() - 1)
-          .getRecord().getMeta(), record.getMeta());
+    if (scanResult.getHead() != null) {
+      validateContinuity(scanResult.getHead().getRecord().getMeta(), record.getMeta());
     }
     byte[] encoded = codec.encode(record);
     long offset = channel.size();
@@ -52,9 +50,8 @@ public final class HistoryIndexStore implements Closeable {
     writeFully(channel, ByteBuffer.wrap(encoded));
     HistoryIndexLocation location = new HistoryIndexLocation(offset, encoded.length,
         sha256(encoded));
-    List<ScannedIndexRecord> records = new ArrayList<>(scanResult.getRecords());
-    records.add(new ScannedIndexRecord(record, location));
-    scanResult = new ScanResult(records, null, null);
+    scanResult = new ScanResult(scanResult.getRecordCount() + 1,
+        new ScannedIndexRecord(record, location), null, null);
     return location;
   }
 
@@ -105,7 +102,8 @@ public final class HistoryIndexStore implements Closeable {
   }
 
   private ScanResult scan() throws IOException {
-    List<ScannedIndexRecord> records = new ArrayList<>();
+    long recordCount = 0;
+    ScannedIndexRecord head = null;
     Long invalidOffset = null;
     String invalidReason = null;
     long offset = 0;
@@ -148,11 +146,12 @@ public final class HistoryIndexStore implements Closeable {
       }
       HistoryIndexLocation location = new HistoryIndexLocation(offset, recordLength,
           sha256(encoded));
-      records.add(new ScannedIndexRecord(record, location));
+      head = new ScannedIndexRecord(record, location);
+      recordCount++;
       previous = record.getMeta();
       offset += recordLength;
     }
-    return new ScanResult(records, invalidOffset, invalidReason);
+    return new ScanResult(recordCount, head, invalidOffset, invalidReason);
   }
 
   private void validateContinuity(BlockSnapshotMeta previous, BlockSnapshotMeta current) {
@@ -212,19 +211,25 @@ public final class HistoryIndexStore implements Closeable {
   }
 
   public static final class ScanResult {
-    private final List<ScannedIndexRecord> records;
+    private final long recordCount;
+    private final ScannedIndexRecord head;
     private final Long invalidTailOffset;
     private final String invalidReason;
 
-    private ScanResult(List<ScannedIndexRecord> records, Long invalidTailOffset,
+    private ScanResult(long recordCount, ScannedIndexRecord head, Long invalidTailOffset,
         String invalidReason) {
-      this.records = Collections.unmodifiableList(new ArrayList<>(records));
+      this.recordCount = recordCount;
+      this.head = head;
       this.invalidTailOffset = invalidTailOffset;
       this.invalidReason = invalidReason;
     }
 
-    public List<ScannedIndexRecord> getRecords() {
-      return records;
+    public long getRecordCount() {
+      return recordCount;
+    }
+
+    public ScannedIndexRecord getHead() {
+      return head;
     }
 
     public Long getInvalidTailOffset() {

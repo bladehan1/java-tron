@@ -49,8 +49,8 @@ public class HistoryIndexStoreTest {
 
     try (HistoryIndexStore reopened = new HistoryIndexStore(archive, new HistoryIndexCodec())) {
       assertNull(reopened.getScanResult().getInvalidTailOffset());
-      assertEquals(1, reopened.getScanResult().getRecords().size());
-      assertArrayEquals(indexLocation.getDigest(), reopened.getScanResult().getRecords().get(0)
+      assertEquals(1, reopened.getScanResult().getRecordCount());
+      assertArrayEquals(indexLocation.getDigest(), reopened.getScanResult().getHead()
           .getLocation().getDigest());
     }
   }
@@ -83,7 +83,7 @@ public class HistoryIndexStoreTest {
               new HistoryLocation(0, 0, 1, 0, new byte[32]))));
       index.truncateInvalidTail();
       assertNull(index.getScanResult().getInvalidTailOffset());
-      assertEquals(0, index.getScanResult().getRecords().size());
+      assertEquals(0, index.getScanResult().getRecordCount());
     }
   }
 

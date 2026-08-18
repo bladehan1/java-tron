@@ -17,7 +17,6 @@ public final class ArchiveStoreScope {
       "account-index",
       "account",
       "account-asset",
-      "accountTrie",
       "asset-issue",
       "asset-issue-v2",
       "code",
@@ -43,6 +42,7 @@ public final class ArchiveStoreScope {
 
   private static final Set<String> NON_STATE_DATABASES = immutableSet(
       "account-trace",
+      "accountTrie",
       "balance-trace",
       "block",
       "block-index",

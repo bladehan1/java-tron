@@ -9,8 +9,6 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
-import org.tron.core.db2.archive.HistoryIndexStore.ScannedIndexRecord;
-import org.tron.core.db2.archive.HistorySegmentStore.ScannedRecord;
 
 /**
  * Ordered history body/index/marker writer. A marker is the only reader-visible commit boundary.
@@ -20,6 +18,8 @@ public final class ArchiveHistoryWriter implements DurableBlockReverseDiffSink, 
   private final HistorySegmentStore bodies;
   private final HistoryIndexStore index;
   private final HistoryCommitStore commits;
+  private final AccountChangeIndex accountIndex;
+  private final ArchiveBaseManifest manifest;
   private final List<String> participatingDatabases;
   private final DurabilityHook hook;
 
@@ -30,37 +30,74 @@ public final class ArchiveHistoryWriter implements DurableBlockReverseDiffSink, 
 
   ArchiveHistoryWriter(Path archiveDirectory, long maxSegmentSize,
       Set<String> participatingDatabases, DurabilityHook hook) throws IOException {
+    this.participatingDatabases = new ArrayList<>(participatingDatabases);
+    this.participatingDatabases.sort(String::compareTo);
+    this.manifest = new ArchiveBaseManifest(archiveDirectory, this.participatingDatabases);
     this.bodies = new HistorySegmentStore(archiveDirectory, new BlockHistoryCodec(),
         maxSegmentSize);
     this.index = new HistoryIndexStore(archiveDirectory, new HistoryIndexCodec());
     this.commits = new HistoryCommitStore(archiveDirectory, new HistoryCommitMarkerCodec());
-    this.participatingDatabases = new ArrayList<>(participatingDatabases);
-    this.participatingDatabases.sort(String::compareTo);
     this.hook = hook;
     recoverPreparedSuffix();
+    if (commits.head() != null) {
+      manifest.ensureBase(commits.get(commits.firstEpoch()).getMeta());
+    }
+    this.accountIndex = new AccountChangeIndex(archiveDirectory.resolve("account-change-index"));
+    catchUpAccountIndex();
   }
 
   @Override
   public synchronized void accept(BlockReverseDiff diff) {
+    acceptAll(java.util.Collections.singletonList(diff));
+  }
+
+  @Override
+  public synchronized void acceptAll(List<BlockReverseDiff> diffs) {
+    if (diffs.isEmpty()) {
+      return;
+    }
+    if (commits.head() == null) {
+      try {
+        manifest.ensureBase(diffs.get(0).getMeta());
+      } catch (IOException failure) {
+        throw new ArchivePersistenceException("Failed to establish archive base manifest", failure);
+      }
+    }
+    BlockSnapshotMeta previous = commits.head() == null ? null : commits.head().getMeta();
+    for (BlockReverseDiff diff : diffs) {
+      validateNext(previous, diff.getMeta());
+      previous = diff.getMeta();
+    }
     try {
-      validateNext(diff.getMeta());
-      hook.before(Stage.APPEND_BODY, diff.getMeta());
-      HistoryLocation bodyLocation = bodies.append(diff);
-      hook.before(Stage.APPEND_INDEX, diff.getMeta());
-      HistoryIndexRecord indexRecord = HistoryIndexRecord.from(diff, bodyLocation);
-      HistoryIndexLocation indexLocation = index.append(indexRecord);
-      hook.before(Stage.SYNC_BODY, diff.getMeta());
+      List<HistoryLocation> bodyLocations = new ArrayList<>(diffs.size());
+      List<HistoryIndexLocation> indexLocations = new ArrayList<>(diffs.size());
+      for (BlockReverseDiff diff : diffs) {
+        hook.before(Stage.APPEND_BODY, diff.getMeta());
+        HistoryLocation bodyLocation = bodies.append(diff);
+        bodyLocations.add(bodyLocation);
+        hook.before(Stage.APPEND_INDEX, diff.getMeta());
+        indexLocations.add(index.append(HistoryIndexRecord.from(diff, bodyLocation)));
+      }
+      BlockSnapshotMeta lastMeta = diffs.get(diffs.size() - 1).getMeta();
+      hook.before(Stage.SYNC_BODY, lastMeta);
       bodies.sync();
-      hook.before(Stage.SYNC_INDEX, diff.getMeta());
+      hook.before(Stage.SYNC_INDEX, lastMeta);
       index.sync();
-      hook.before(Stage.COMMIT_MARKER, diff.getMeta());
       HistoryCommitMarker head = commits.head();
-      long previousEpoch = head == null ? diff.getMeta().getEpoch() - 1
+      long previousEpoch = head == null ? diffs.get(0).getMeta().getEpoch() - 1
           : head.getMeta().getEpoch();
-      commits.commit(new HistoryCommitMarker(diff.getMeta(), previousEpoch, bodyLocation,
-          indexLocation, batchId(), participatingDatabases));
+      List<HistoryCommitMarker> markers = new ArrayList<>(diffs.size());
+      for (int i = 0; i < diffs.size(); i++) {
+        BlockReverseDiff diff = diffs.get(i);
+        hook.before(Stage.COMMIT_MARKER, diff.getMeta());
+        markers.add(new HistoryCommitMarker(diff.getMeta(), previousEpoch,
+            bodyLocations.get(i), indexLocations.get(i), batchId(), participatingDatabases));
+        previousEpoch = diff.getMeta().getEpoch();
+      }
+      commits.commitAll(markers);
+      accountIndex.apply(diffs);
     } catch (IOException | RuntimeException e) {
-      handleWriteFailure(diff.getMeta(), e);
+      handleWriteFailure(diffs.get(diffs.size() - 1).getMeta(), e);
     }
   }
 
@@ -69,15 +106,18 @@ public final class ArchiveHistoryWriter implements DurableBlockReverseDiffSink, 
     try {
       HistoryCommitMarker head = commits.head();
       if (head != null && head.getMeta().equals(meta)) {
+        BlockReverseDiff reverted = readCommitted(meta.getEpoch());
+        HistoryCommitMarker previous = commits.get(meta.getEpoch() - 1);
+        accountIndex.revert(reverted, previous == null ? null : previous.getMeta());
         commits.removeHead(meta);
-        HistoryCommitMarker previous = commits.head();
+        previous = commits.head();
         index.truncateAfter(previous == null ? null : previous.getIndexLocation());
         bodies.truncateAfter(previous == null ? null : previous.getHistoryLocation());
         return;
       }
 
-      ScannedRecord bodyHead = last(bodies.getScanResult().getRecords());
-      ScannedIndexRecord indexHead = last(index.getScanResult().getRecords());
+      HistorySegmentStore.ScannedRecord bodyHead = bodies.getScanResult().getHead();
+      HistoryIndexStore.ScannedIndexRecord indexHead = index.getScanResult().getHead();
       if (bodyHead != null && bodyHead.getDiff().getMeta().equals(meta)) {
         HistoryCommitMarker committed = commits.head();
         index.truncateAfter(committed == null ? null : committed.getIndexLocation());
@@ -128,12 +168,38 @@ public final class ArchiveHistoryWriter implements DurableBlockReverseDiffSink, 
     }
   }
 
-  private void validateNext(BlockSnapshotMeta meta) {
+  public synchronized OldValue readAccountAt(long targetBlock, byte[] address,
+      byte[] accountAtCommittedHead) {
     HistoryCommitMarker head = commits.head();
     if (head == null) {
+      throw new IllegalStateException("State archive has no committed history");
+    }
+    long base = commits.firstEpoch() - 1;
+    if (targetBlock < base || targetBlock > head.getMeta().getEpoch()) {
+      throw new IllegalArgumentException("Account query is outside archive coverage");
+    }
+    try {
+      java.util.OptionalLong changed = accountIndex.firstChangeAfter(address, targetBlock,
+          head.getMeta().getEpoch());
+      if (!changed.isPresent()) {
+        return OldValue.fromNullable(accountAtCommittedHead);
+      }
+      BlockReverseDiff diff = readCommitted(changed.getAsLong());
+      return findOldValue(diff, HistoricalAccountBalanceReader.ACCOUNT_DATABASE, address);
+    } catch (IOException failure) {
+      throw new ArchivePersistenceException("Failed to query historical account", failure);
+    }
+  }
+
+  public synchronized BlockSnapshotMeta committedHeadMeta() {
+    HistoryCommitMarker marker = commits.head();
+    return marker == null ? null : marker.getMeta();
+  }
+
+  private void validateNext(BlockSnapshotMeta previous, BlockSnapshotMeta meta) {
+    if (previous == null) {
       return;
     }
-    BlockSnapshotMeta previous = head.getMeta();
     if (meta.getEpoch() != previous.getEpoch() + 1
         || meta.getBlockNumber() != previous.getBlockNumber() + 1
         || !Arrays.equals(meta.getParentHash(), previous.getBlockHash())) {
@@ -159,41 +225,80 @@ public final class ArchiveHistoryWriter implements DurableBlockReverseDiffSink, 
   private void recoverPreparedSuffix() throws IOException {
     HistorySegmentStore.ScanResult bodyScan = bodies.getScanResult();
     HistoryIndexStore.ScanResult indexScan = index.getScanResult();
-    int committedCount = commits.getMarkers().size();
-    if (bodyScan.getRecords().size() < committedCount
-        || indexScan.getRecords().size() < committedCount) {
+    long committedCount = commits.size();
+    if (bodyScan.getRecordCount() < committedCount
+        || indexScan.getRecordCount() < committedCount) {
       throw new ArchivePersistenceException("Committed marker references missing body/index data");
-    }
-    for (int i = 0; i < committedCount; i++) {
-      HistoryCommitMarker marker = commits.getMarkers().get(i);
-      ScannedRecord bodyRecord = bodyScan.getRecords().get(i);
-      ScannedIndexRecord indexRecord = indexScan.getRecords().get(i);
-      if (!marker.getMeta().equals(bodyRecord.getDiff().getMeta())
-          || !marker.getMeta().equals(indexRecord.getRecord().getMeta())) {
-        throw new ArchivePersistenceException("Committed history metadata does not align");
-      }
-      validateMarkerReferences(marker, indexRecord.getRecord());
-      if (!same(marker.getHistoryLocation(), bodyRecord.getLocation())
-          || !same(marker.getIndexLocation(), indexRecord.getLocation())) {
-        throw new ArchivePersistenceException("Commit marker location/digest mismatch");
-      }
     }
 
     if (bodyScan.getInvalidTail() != null) {
-      if (bodyScan.getRecords().size() < committedCount) {
+      if (bodyScan.getRecordCount() < committedCount) {
         throw new ArchivePersistenceException("Committed history body is corrupt");
       }
       bodies.truncateInvalidTail();
     }
     if (indexScan.getInvalidTailOffset() != null) {
-      if (indexScan.getRecords().size() < committedCount) {
+      if (indexScan.getRecordCount() < committedCount) {
         throw new ArchivePersistenceException("Committed history index is corrupt");
       }
       index.truncateInvalidTail();
     }
     HistoryCommitMarker head = commits.head();
+    if (head != null) {
+      HistoryIndexRecord indexRecord = index.read(head.getIndexLocation());
+      validateMarkerReferences(head, indexRecord);
+      BlockReverseDiff body = bodies.read(head.getHistoryLocation());
+      if (!head.getMeta().equals(body.getMeta())) {
+        throw new ArchivePersistenceException("Commit head does not match history body metadata");
+      }
+    }
     index.truncateAfter(head == null ? null : head.getIndexLocation());
     bodies.truncateAfter(head == null ? null : head.getHistoryLocation());
+  }
+
+  private void catchUpAccountIndex() throws IOException {
+    HistoryCommitMarker head = commits.head();
+    if (head == null) {
+      return;
+    }
+    long indexed = accountIndex.getIndexedThrough();
+    long first = commits.firstEpoch();
+    if (indexed >= 0) {
+      HistoryCommitMarker indexedMarker = commits.get(indexed);
+      if (indexedMarker == null || !accountIndex.headMatches(indexedMarker.getMeta())) {
+        throw new ArchivePersistenceException(
+            "Account index head differs from committed history");
+      }
+    }
+    if (indexed >= head.getMeta().getEpoch()) {
+      if (indexed > head.getMeta().getEpoch()) {
+        throw new ArchivePersistenceException("Account index is ahead of committed history");
+      }
+      return;
+    }
+    long next = indexed < 0 ? first : indexed + 1;
+    List<BlockReverseDiff> batch = new ArrayList<>(1024);
+    for (long epoch = next; epoch <= head.getMeta().getEpoch(); epoch++) {
+      batch.add(readCommitted(epoch));
+      if (batch.size() == 1024 || epoch == head.getMeta().getEpoch()) {
+        accountIndex.apply(batch);
+        batch.clear();
+      }
+    }
+  }
+
+  private static OldValue findOldValue(BlockReverseDiff diff, String dbName, byte[] rawKey) {
+    for (BlockReverseDiff.DbGroup group : diff.getGroups()) {
+      if (!dbName.equals(group.getDbName())) {
+        continue;
+      }
+      for (BlockReverseDiff.Entry entry : group.getEntries()) {
+        if (Arrays.equals(rawKey, entry.getKey())) {
+          return entry.getOldValue();
+        }
+      }
+    }
+    throw new ArchivePersistenceException("Account index references a missing history key");
   }
 
   private void validateMarkerReferences(HistoryCommitMarker marker,
@@ -224,10 +329,6 @@ public final class ArchiveHistoryWriter implements DurableBlockReverseDiffSink, 
         .putLong(uuid.getLeastSignificantBits()).array();
   }
 
-  private static <T> T last(List<T> values) {
-    return values.isEmpty() ? null : values.get(values.size() - 1);
-  }
-
   @Override
   public synchronized void close() throws IOException {
     IOException failure = null;
@@ -235,6 +336,15 @@ public final class ArchiveHistoryWriter implements DurableBlockReverseDiffSink, 
       index.close();
     } catch (IOException e) {
       failure = e;
+    }
+    try {
+      accountIndex.close();
+    } catch (IOException e) {
+      if (failure == null) {
+        failure = e;
+      } else {
+        failure.addSuppressed(e);
+      }
     }
     try {
       bodies.close();

@@ -18,6 +18,7 @@ import com.google.protobuf.ByteString;
 import java.util.AbstractMap;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -28,10 +29,12 @@ import java.util.Random;
 import java.util.Set;
 import org.junit.Test;
 import org.tron.common.BaseMethodTest;
+import org.tron.core.db.common.DbSourceInter;
 import org.tron.core.db2.ISession;
 import org.tron.core.db2.archive.BlockReverseDiff.DbGroup;
 import org.tron.core.db2.archive.BlockReverseDiff.Entry;
 import org.tron.core.db2.common.DB;
+import org.tron.core.db2.common.Flusher;
 import org.tron.core.db2.common.WrappedByteArray;
 import org.tron.core.db2.core.Chainbase;
 import org.tron.core.db2.core.SnapshotImpl;
@@ -60,8 +63,8 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
     Chainbase database = new Chainbase(new SnapshotRoot(memoryDb));
     manager.add(database);
     manager.enable();
-    List<BlockReverseDiff> captured = new ArrayList<>();
-    manager.installArchiveCollector(new SnapshotOldValueCollector(), captured::add);
+    BlockReverseDiffSink sink = mock(BlockReverseDiffSink.class);
+    manager.installArchiveCollector(new SnapshotOldValueCollector(), sink);
 
     byte[] hash = new byte[32];
     hash[31] = 1;
@@ -83,8 +86,8 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
       block.commit(meta);
     }
 
-    assertEquals(1, captured.size());
-    BlockReverseDiff diff = captured.get(0);
+    BlockReverseDiff diff = prepared(database);
+    verify(sink, never()).accept(any(BlockReverseDiff.class));
     assertEquals(meta, diff.getMeta());
     assertEquals(meta, ((SnapshotImpl) database.getHead()).getBlockSnapshotMeta());
     assertEquals(1, diff.getGroups().size());
@@ -102,6 +105,41 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
   }
 
   @Test
+  public void preservesStorageRowPhysicalKeyWithoutLogicalProjection() {
+    MemoryDb memoryDb = new MemoryDb("storage-row");
+    byte[] addressHash = new byte[32];
+    byte[] slotPart = new byte[32];
+    for (int i = 0; i < 32; i++) {
+      addressHash[i] = (byte) i;
+      slotPart[i] = (byte) (0x80 + i);
+    }
+    byte[] physicalKey = new byte[32];
+    System.arraycopy(addressHash, 0, physicalKey, 0, 16);
+    System.arraycopy(slotPart, 16, physicalKey, 16, 16);
+    memoryDb.put(physicalKey, bytes("old-word"));
+
+    SnapshotManager manager = new SnapshotManager("");
+    Chainbase database = new Chainbase(new SnapshotRoot(memoryDb));
+    manager.add(database);
+    manager.enable();
+    manager.installArchiveCollector(new SnapshotOldValueCollector(), diff -> { });
+
+    try (ISession block = manager.buildSession()) {
+      database.put(physicalKey, bytes("new-word"));
+      block.commit(BlockSnapshotMeta.forBlock(1, hash(1), hash(0), 1L));
+    }
+
+    BlockReverseDiff diff = prepared(database);
+    assertEquals(1, diff.getGroups().size());
+    DbGroup group = diff.getGroups().get(0);
+    assertEquals("storage-row", group.getDbName());
+    assertEquals(1, group.getEntries().size());
+    assertArrayEquals(physicalKey, group.getEntries().get(0).getKey());
+    assertArrayEquals(bytes("old-word"), group.getEntries().get(0).getOldValue().getValue());
+    manager.shutdown();
+  }
+
+  @Test
   public void preservesPresentEmptyAndEmitsNoopBlockMetadata() {
     MemoryDb memoryDb = new MemoryDb("abi");
     byte[] key = bytes("key");
@@ -110,22 +148,21 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
     Chainbase database = new Chainbase(new SnapshotRoot(memoryDb));
     manager.add(database);
     manager.enable();
-    List<BlockReverseDiff> captured = new ArrayList<>();
-    manager.installArchiveCollector(new SnapshotOldValueCollector(), captured::add);
+    manager.installArchiveCollector(new SnapshotOldValueCollector(), diff -> { });
 
     try (ISession block = manager.buildSession()) {
       database.put(key, bytes("value"));
       block.commit(BlockSnapshotMeta.forBlock(1, hash(1), hash(0), 1L));
     }
-    assertTrue(find(captured.get(0).getGroups().get(0), key).getOldValue().isPresent());
+    BlockReverseDiff first = prepared(database);
+    assertTrue(find(first.getGroups().get(0), key).getOldValue().isPresent());
     assertEquals(0,
-        find(captured.get(0).getGroups().get(0), key).getOldValue().getValue().length);
+        find(first.getGroups().get(0), key).getOldValue().getValue().length);
 
     try (ISession block = manager.buildSession()) {
       block.commit(BlockSnapshotMeta.forBlock(2, hash(2), hash(1), 2L));
     }
-    assertEquals(2, captured.size());
-    assertTrue(captured.get(1).getGroups().isEmpty());
+    assertTrue(prepared(database).getGroups().isEmpty());
     manager.shutdown();
   }
 
@@ -160,8 +197,7 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
     Chainbase database = new Chainbase(new SnapshotRoot(memoryDb));
     manager.add(database);
     manager.enable();
-    List<BlockReverseDiff> captured = new ArrayList<>();
-    manager.installArchiveCollector(new SnapshotOldValueCollector(), captured::add);
+    manager.installArchiveCollector(new SnapshotOldValueCollector(), diff -> { });
 
     Random random = new Random(0x5a17L);
     Map<String, byte[]> reference = new HashMap<>();
@@ -190,7 +226,7 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
             hash(blockNumber - 1), blockNumber));
       }
 
-      BlockReverseDiff diff = captured.get(captured.size() - 1);
+      BlockReverseDiff diff = prepared(database);
       Map<String, OldValue> actual = new HashMap<>();
       if (!diff.getGroups().isEmpty()) {
         diff.getGroups().get(0).getEntries().forEach(entry -> actual.put(
@@ -238,17 +274,17 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
     Chainbase database = new Chainbase(new SnapshotRoot(memoryDb));
     manager.add(database);
     manager.enable();
-    List<BlockReverseDiff> captured = new ArrayList<>();
     AccountAssetArchiveProjector projector = new AccountAssetArchiveProjector(assetStore,
         () -> true);
-    manager.installArchiveCollector(new SnapshotOldValueCollector(projector), captured::add);
+    manager.installArchiveCollector(new SnapshotOldValueCollector(projector), diff -> { });
 
     try (ISession block = manager.buildSession()) {
       database.put(address, postAccount.toByteArray());
       block.commit(BlockSnapshotMeta.forBlock(1, hash(1), hash(0), 1L));
     }
 
-    DbGroup accountGroup = captured.get(0).getGroups().stream()
+    BlockReverseDiff diff = prepared(database);
+    DbGroup accountGroup = diff.getGroups().stream()
         .filter(group -> "account".equals(group.getDbName()))
         .findFirst().orElseThrow(AssertionError::new);
     Account archivedAccount;
@@ -260,7 +296,7 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
     assertFalse(archivedAccount.getAssetOptimized());
     assertEquals(100L, archivedAccount.getAssetV2Map().get("1000001").longValue());
 
-    DbGroup assetGroup = captured.get(0).getGroups().stream()
+    DbGroup assetGroup = diff.getGroups().stream()
         .filter(group -> "account-asset".equals(group.getDbName()))
         .findFirst().orElseThrow(AssertionError::new);
     Entry assetEntry = find(assetGroup, Bytes.concat(address, token));
@@ -290,18 +326,18 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
     Chainbase database = new Chainbase(new SnapshotRoot(memoryDb));
     manager.add(database);
     manager.enable();
-    List<BlockReverseDiff> captured = new ArrayList<>();
     manager.installArchiveCollector(new SnapshotOldValueCollector(
-        new AccountAssetArchiveProjector(assetStore, () -> true)), captured::add);
+        new AccountAssetArchiveProjector(assetStore, () -> true)), diff -> { });
 
     try (ISession block = manager.buildSession()) {
       database.put(address, postAccount.toByteArray());
       block.commit(BlockSnapshotMeta.forBlock(1, hash(1), hash(0), 1L));
     }
 
-    assertFalse(captured.get(0).getGroups().stream()
+    BlockReverseDiff diff = prepared(database);
+    assertFalse(diff.getGroups().stream()
         .anyMatch(group -> "account".equals(group.getDbName())));
-    DbGroup assetGroup = captured.get(0).getGroups().stream()
+    DbGroup assetGroup = diff.getGroups().stream()
         .filter(group -> "account-asset".equals(group.getDbName()))
         .findFirst().orElseThrow(AssertionError::new);
     assertArrayEquals(Longs.toByteArray(100L),
@@ -325,15 +361,104 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
       database.put(bytes("key"), bytes("value"));
       block.commit(BlockSnapshotMeta.forBlock(1, hash(1), hash(0), 1L));
     }
-    java.lang.reflect.Field flushCount = SnapshotManager.class.getDeclaredField("flushCount");
-    flushCount.setAccessible(true);
-    flushCount.setInt(manager, 1);
+    setFlushCount(manager, 1);
     doThrow(new ArchivePersistenceException("injected"))
         .when(sink).awaitCommitted(1L);
 
     assertThrows(TronError.class, manager::flush);
+    verify(sink).accept(prepared(database));
     verify(sink).awaitCommitted(1L);
     verify(checkpoint, never()).updateByBatch(any(Map.class));
+    manager.shutdown();
+  }
+
+  @Test
+  public void fastPopDiscardsPreparedPayloadWithoutRevertingDurableHistory() {
+    MemoryDb memoryDb = new MemoryDb("abi");
+    SnapshotManager manager = new SnapshotManager("");
+    Chainbase database = new Chainbase(new SnapshotRoot(memoryDb));
+    manager.add(database);
+    manager.enable();
+    BlockReverseDiffSink sink = mock(BlockReverseDiffSink.class);
+    manager.installArchiveCollector(new SnapshotOldValueCollector(), sink);
+
+    BlockSnapshotMeta meta = BlockSnapshotMeta.forBlock(1, hash(1), hash(0), 1L);
+    try (ISession block = manager.buildSession()) {
+      database.put(bytes("key"), bytes("value"));
+      block.commit(meta);
+    }
+
+    assertEquals(meta, prepared(database).getMeta());
+    manager.fastPop();
+
+    assertEquals(0, manager.size());
+    assertTrue(database.getHead() instanceof SnapshotRoot);
+    verify(sink, never()).accept(any(BlockReverseDiff.class));
+    verify(sink, never()).revert(any(BlockSnapshotMeta.class));
+    manager.shutdown();
+  }
+
+  @Test
+  public void collectorFailureLeavesSessionOwnedSoCloseRevokesLayer() {
+    MemoryDb memoryDb = new MemoryDb("abi");
+    SnapshotManager manager = new SnapshotManager("");
+    Chainbase database = new Chainbase(new SnapshotRoot(memoryDb));
+    manager.add(database);
+    manager.enable();
+    OldValueCollector collector = mock(OldValueCollector.class);
+    BlockReverseDiffSink sink = mock(BlockReverseDiffSink.class);
+    when(collector.collect(any(BlockChangeView.class)))
+        .thenThrow(new IllegalStateException("injected collector failure"));
+    manager.installArchiveCollector(collector, sink);
+
+    assertThrows(IllegalStateException.class, () -> {
+      try (ISession block = manager.buildSession()) {
+        database.put(bytes("key"), bytes("value"));
+        block.commit(BlockSnapshotMeta.forBlock(1, hash(1), hash(0), 1L));
+      }
+    });
+
+    assertEquals(0, manager.getActiveSession());
+    assertEquals(0, manager.size());
+    assertTrue(database.getHead() instanceof SnapshotRoot);
+    verify(sink, never()).accept(any(BlockReverseDiff.class));
+    manager.shutdown();
+  }
+
+  @Test
+  public void flushPublishesOnlyTheNonRevertibleRange() throws Exception {
+    MemoryDb memoryDb = new MemoryDb("abi");
+    SnapshotManager manager = new SnapshotManager("");
+    Chainbase database = new Chainbase(new SnapshotRoot(memoryDb));
+    manager.add(database);
+    manager.enable();
+    manager.setUnChecked(false);
+    CheckTmpStore checkpoint = mock(CheckTmpStore.class);
+    DbSourceInter<byte[]> checkpointDb = mock(DbSourceInter.class);
+    when(checkpointDb.iterator()).thenReturn(Collections.emptyIterator());
+    when(checkpoint.getDbSource()).thenReturn(checkpointDb);
+    manager.setCheckTmpStore(checkpoint);
+    DurableBlockReverseDiffSink sink = mock(DurableBlockReverseDiffSink.class);
+    manager.installArchiveCollector(new SnapshotOldValueCollector(), sink);
+
+    try (ISession block = manager.buildSession()) {
+      database.put(bytes("key-1"), bytes("value-1"));
+      block.commit(BlockSnapshotMeta.forBlock(1, hash(1), hash(0), 1L));
+    }
+    BlockReverseDiff first = prepared(database);
+    try (ISession block = manager.buildSession()) {
+      database.put(bytes("key-2"), bytes("value-2"));
+      block.commit(BlockSnapshotMeta.forBlock(2, hash(2), hash(1), 2L));
+    }
+    BlockReverseDiff second = prepared(database);
+    setFlushCount(manager, 1);
+
+    manager.flush();
+
+    verify(sink).accept(first);
+    verify(sink, never()).accept(second);
+    verify(sink).awaitCommitted(1L);
+    verify(sink).releaseThrough(1L);
     manager.shutdown();
   }
 
@@ -342,6 +467,16 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
         .filter(entry -> Arrays.equals(entry.getKey(), key))
         .findFirst()
         .orElseThrow(AssertionError::new);
+  }
+
+  private static BlockReverseDiff prepared(Chainbase database) {
+    return ((SnapshotImpl) database.getHead()).getPreparedArchiveBlock();
+  }
+
+  private static void setFlushCount(SnapshotManager manager, int count) throws Exception {
+    java.lang.reflect.Field flushCount = SnapshotManager.class.getDeclaredField("flushCount");
+    flushCount.setAccessible(true);
+    flushCount.setInt(manager, count);
   }
 
   private static boolean contains(DbGroup group, byte[] key) {
@@ -385,7 +520,7 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
     return copy;
   }
 
-  private static final class MemoryDb implements DB<byte[], byte[]> {
+  private static final class MemoryDb implements DB<byte[], byte[]>, Flusher {
     private final String name;
     private final Map<WrappedByteArray, byte[]> values = new LinkedHashMap<>();
 
@@ -429,6 +564,22 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
 
     @Override
     public void close() {
+      values.clear();
+    }
+
+    @Override
+    public void flush(Map<WrappedByteArray, WrappedByteArray> batch) {
+      batch.forEach((key, value) -> {
+        if (value == null || value.getBytes() == null) {
+          values.remove(key);
+        } else {
+          values.put(WrappedByteArray.copyOf(key.getBytes()), value.getBytes());
+        }
+      });
+    }
+
+    @Override
+    public void reset() {
       values.clear();
     }
 
