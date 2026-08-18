@@ -3,6 +3,12 @@ package org.tron.program;
 import com.beust.jcommander.JCommander;
 import com.beust.jcommander.Parameter;
 import com.beust.jcommander.ParameterException;
+import com.fasterxml.jackson.core.JsonFactory;
+import com.fasterxml.jackson.core.StreamReadConstraints;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.json.JsonMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
@@ -22,8 +28,6 @@ import org.tron.common.utils.ByteArray;
 import org.tron.core.capsule.BlockCapsule;
 import org.tron.core.capsule.TransactionCapsule;
 import org.tron.core.services.http.JsonFormat;
-import org.tron.json.JSONArray;
-import org.tron.json.JSONObject;
 import org.tron.protos.Protocol.Block;
 import org.tron.protos.Protocol.BlockHeader;
 import org.tron.protos.Protocol.Transaction;
@@ -32,6 +36,12 @@ import org.tron.protos.Protocol.Transaction;
 public final class HttpBlockExport {
 
   static final int MAX_CHUNK_SIZE = 100;
+  private static final long MAX_RESPONSE_CHARS = 256L * 1024 * 1024;
+  private static final ObjectMapper HTTP_MAPPER = JsonMapper.builder(
+      JsonFactory.builder().streamReadConstraints(StreamReadConstraints.builder()
+          .maxNestingDepth(1000)
+          .maxTokenCount(10_000_000L)
+          .build()).build()).build();
 
   private HttpBlockExport() {
   }
@@ -139,7 +149,7 @@ public final class HttpBlockExport {
       }
     }
     throw new IOException("Failed to download blocks [" + start + ", " + end + "] after "
-        + options.retries + " attempts", lastFailure);
+        + options.retries + " attempts: " + lastFailure.getMessage(), lastFailure);
   }
 
   private static String request(Options options, long start, long end) throws IOException {
@@ -172,30 +182,34 @@ public final class HttpBlockExport {
   }
 
   static List<BlockFile.Record> parseResponse(String response) throws IOException {
-    JSONObject root = JSONObject.parseObject(response);
-    JSONArray blocks = root.getJSONArray("block");
-    if (blocks == null) {
+    JsonNode root = HTTP_MAPPER.readTree(response);
+    JsonNode blocks = root == null ? null : root.get("block");
+    if (blocks == null || !blocks.isArray()) {
       throw new IOException("HTTP response does not contain a block array: "
           + abbreviate(response));
     }
     List<BlockFile.Record> records = new ArrayList<>(blocks.size());
     for (int i = 0; i < blocks.size(); i++) {
-      JSONObject source = blocks.getJSONObject(i);
-      String expectedBlockId = source.getString("blockID");
-      JSONObject headerJson = source.getJSONObject("block_header");
-      if (expectedBlockId == null || headerJson == null) {
+      JsonNode source = blocks.get(i);
+      JsonNode blockIdJson = source.get("blockID");
+      JsonNode headerJson = source.get("block_header");
+      if (blockIdJson == null || !blockIdJson.isTextual() || headerJson == null
+          || !headerJson.isObject()) {
         throw new IOException("Block response is missing blockID or block_header");
       }
+      String expectedBlockId = blockIdJson.asText();
       BlockHeader.Builder header = BlockHeader.newBuilder();
-      JsonFormat.merge(headerJson.toJSONString(), header, false);
+      JsonFormat.merge(headerJson.toString(), header, false);
       Block.Builder block = Block.newBuilder().setBlockHeader(header);
-      JSONArray transactions = source.getJSONArray("transactions");
-      if (transactions != null) {
+      JsonNode transactions = source.get("transactions");
+      if (transactions != null && transactions.isArray()) {
         for (int transactionIndex = 0; transactionIndex < transactions.size();
             transactionIndex++) {
-          JSONObject transactionJson = transactions.getJSONObject(transactionIndex);
+          JsonNode transactionJson = transactions.get(transactionIndex);
           Transaction transaction = parseTransaction(transactionJson, transactionIndex);
-          String expectedTransactionId = transactionJson.getString("txID");
+          JsonNode transactionIdJson = transactionJson.get("txID");
+          String expectedTransactionId = transactionIdJson == null ? null
+              : transactionIdJson.asText();
           if (expectedTransactionId != null && !expectedTransactionId.equalsIgnoreCase(
               ByteArray.toHexString(new TransactionCapsule(transaction).getTransactionId()
                   .getBytes()))) {
@@ -218,20 +232,21 @@ public final class HttpBlockExport {
     return records;
   }
 
-  private static Transaction parseTransaction(JSONObject source, int index) throws IOException {
-    String rawDataHex = source.getString("raw_data_hex");
-    if (rawDataHex == null) {
+  private static Transaction parseTransaction(JsonNode source, int index) throws IOException {
+    JsonNode rawDataHexJson = source.get("raw_data_hex");
+    if (rawDataHexJson == null || !rawDataHexJson.isTextual()) {
       throw new IOException("Transaction " + index + " does not contain raw_data_hex");
     }
     try {
+      String rawDataHex = rawDataHexJson.asText();
       Transaction.raw raw = Transaction.raw.parseFrom(ByteArray.fromHexString(rawDataHex));
-      JSONObject envelope = JSONObject.parseObject(source.toJSONString());
+      ObjectNode envelope = (ObjectNode) source.deepCopy();
       envelope.remove("txID");
       envelope.remove("raw_data");
       envelope.remove("raw_data_hex");
       envelope.remove("visible");
       Transaction.Builder transaction = Transaction.newBuilder();
-      JsonFormat.merge(envelope.toJSONString(), transaction, false);
+      JsonFormat.merge(envelope.toString(), transaction, false);
       return transaction.setRawData(raw).build();
     } catch (RuntimeException e) {
       throw new IOException("Cannot parse transaction " + index, e);
@@ -249,6 +264,9 @@ public final class HttpBlockExport {
       int read;
       while ((read = reader.read(buffer)) != -1) {
         result.append(buffer, 0, read);
+        if (result.length() > MAX_RESPONSE_CHARS) {
+          throw new IOException("HTTP response exceeds " + MAX_RESPONSE_CHARS + " characters");
+        }
       }
     }
     return result.toString();
