@@ -4,137 +4,248 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
-import java.nio.file.AtomicMoveNotSupportedException;
-import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Comparator;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
-import java.util.UUID;
 
-/** Atomic, directory-synced history visibility markers. */
+/**
+ * Append-only, checksummed commit log with constant resident state.
+ *
+ * <p>All records in one generation have the same descriptor participant set and therefore the
+ * same encoded length. Contiguous epochs can be addressed directly without retaining one object
+ * or creating one directory entry per block.
+ */
 public final class HistoryCommitStore implements Closeable {
 
-  private static final String SUFFIX = ".commit";
+  private static final String FILE_NAME = "commit.log";
 
   private final Path directory;
+  private final Path logPath;
   private final HistoryCommitMarkerCodec codec;
-  private final DirectorySync directorySync;
-  private final List<HistoryCommitMarker> markers;
-  private final Map<Long, HistoryCommitMarker> markersByEpoch = new HashMap<>();
-  private HistoryCommitMarker uncertainMarker;
+  private final FileChannel channel;
+  private final DirectorySync postForceHook;
+  private HistoryCommitMarker head;
+  private long uncertainFrom = -1;
+  private long uncertainThrough = -1;
+  private long firstEpoch = -1;
+  private long recordCount;
+  private int recordLength;
 
   public HistoryCommitStore(Path archiveDirectory, HistoryCommitMarkerCodec codec)
       throws IOException {
-    this(archiveDirectory, codec, HistorySegmentStore::syncDirectory);
+    this(archiveDirectory, codec, ignored -> { });
   }
 
   HistoryCommitStore(Path archiveDirectory, HistoryCommitMarkerCodec codec,
-      DirectorySync directorySync) throws IOException {
+      DirectorySync postForceHook) throws IOException {
     this.directory = archiveDirectory.resolve("commits");
+    this.logPath = directory.resolve(FILE_NAME);
     this.codec = codec;
-    this.directorySync = directorySync;
+    this.postForceHook = postForceHook;
     Files.createDirectories(directory);
-    markers = scan();
-    markers.forEach(marker -> markersByEpoch.put(marker.getMeta().getEpoch(), marker));
+    boolean created = !Files.exists(logPath);
+    this.channel = FileChannel.open(logPath, StandardOpenOption.CREATE, StandardOpenOption.READ,
+        StandardOpenOption.WRITE);
+    if (created) {
+      HistorySegmentStore.syncDirectory(directory);
+    }
+    scanAndRepairTruncatedTail();
+    channel.position(channel.size());
   }
 
   public synchronized void commit(HistoryCommitMarker marker) throws IOException {
-    if (uncertainMarker != null) {
-      throw new IllegalStateException("A previous commit marker has uncertain durability");
-    }
-    validateNext(head(), marker);
-    byte[] encoded = codec.encode(marker);
-    Path target = markerPath(marker.getMeta().getEpoch());
-    if (Files.exists(target)) {
-      byte[] existing = Files.readAllBytes(target);
-      if (Arrays.equals(existing, encoded)) {
-        return;
-      }
-      throw new IllegalStateException("Conflicting history commit marker for epoch "
-          + marker.getMeta().getEpoch());
-    }
+    commitAll(java.util.Collections.singletonList(marker));
+  }
 
-    Path temporary = directory.resolve(".tmp-" + marker.getMeta().getEpoch() + '-'
-        + UUID.randomUUID());
-    try (FileChannel channel = FileChannel.open(temporary, StandardOpenOption.CREATE_NEW,
-        StandardOpenOption.WRITE)) {
+  public synchronized void commitAll(List<HistoryCommitMarker> batch) throws IOException {
+    if (batch.isEmpty()) {
+      return;
+    }
+    if (uncertainFrom >= 0) {
+      throw new IllegalStateException("A previous commit record has uncertain durability");
+    }
+    HistoryCommitMarker previous = head;
+    List<byte[]> encodedBatch = new ArrayList<>(batch.size());
+    int expectedLength = recordLength;
+    for (HistoryCommitMarker marker : batch) {
+      validateNext(previous, marker);
+      byte[] encoded = codec.encode(marker);
+      if (expectedLength != 0 && encoded.length != expectedLength) {
+        throw new IllegalArgumentException(
+            "Commit record length changed inside one archive generation");
+      }
+      expectedLength = encoded.length;
+      encodedBatch.add(encoded);
+      previous = marker;
+    }
+    long offset = channel.size();
+    channel.position(offset);
+    for (byte[] encoded : encodedBatch) {
       writeFully(channel, ByteBuffer.wrap(encoded));
-      channel.force(true);
     }
+    uncertainFrom = batch.get(0).getMeta().getEpoch();
+    uncertainThrough = batch.get(batch.size() - 1).getMeta().getEpoch();
     try {
-      Files.move(temporary, target, StandardCopyOption.ATOMIC_MOVE);
-    } catch (AtomicMoveNotSupportedException e) {
-      Files.deleteIfExists(temporary);
-      throw new IOException("Atomic commit-marker move is not supported", e);
+      channel.force(true);
+      postForceHook.sync(directory);
+    } catch (IOException failure) {
+      throw failure;
     }
-    uncertainMarker = marker;
-    directorySync.sync(directory);
-    markers.add(marker);
-    markersByEpoch.put(marker.getMeta().getEpoch(), marker);
-    uncertainMarker = null;
+    if (recordCount == 0) {
+      firstEpoch = batch.get(0).getMeta().getEpoch();
+      recordLength = expectedLength;
+    }
+    recordCount += batch.size();
+    head = batch.get(batch.size() - 1);
+    uncertainFrom = -1;
+    uncertainThrough = -1;
   }
 
   public synchronized void removeHead(BlockSnapshotMeta expected) throws IOException {
-    if (uncertainMarker != null) {
-      throw new IllegalStateException("Cannot revert a commit marker with uncertain durability");
+    if (uncertainFrom >= 0) {
+      throw new IllegalStateException("Cannot revert a commit record with uncertain durability");
     }
-    HistoryCommitMarker head = head();
     if (head == null || !head.getMeta().equals(expected)) {
       throw new IllegalStateException("Only the committed history head can be reverted");
     }
-    Files.delete(markerPath(expected.getEpoch()));
-    directorySync.sync(directory);
-    markers.remove(markers.size() - 1);
-    markersByEpoch.remove(expected.getEpoch());
+    long newCount = recordCount - 1;
+    channel.truncate(newCount * (long) recordLength);
+    channel.force(true);
+    recordCount = newCount;
+    if (newCount == 0) {
+      head = null;
+      firstEpoch = -1;
+      recordLength = 0;
+    } else {
+      head = readOrdinal(newCount - 1);
+    }
+    channel.position(channel.size());
   }
 
   public synchronized HistoryCommitMarker head() {
-    return markers.isEmpty() ? null : markers.get(markers.size() - 1);
+    return head;
   }
 
+  public synchronized long size() {
+    return recordCount;
+  }
+
+  public synchronized long firstEpoch() {
+    return firstEpoch;
+  }
+
+  /** Materializes the committed prefix. Do not use this method in the scale ingestion path. */
   public synchronized List<HistoryCommitMarker> getMarkers() {
-    return new ArrayList<>(markers);
+    if (recordCount > Integer.MAX_VALUE) {
+      throw new IllegalStateException("Commit prefix is too large to materialize");
+    }
+    List<HistoryCommitMarker> markers = new ArrayList<>((int) recordCount);
+    try {
+      for (long ordinal = 0; ordinal < recordCount; ordinal++) {
+        markers.add(readOrdinal(ordinal));
+      }
+      return markers;
+    } catch (IOException failure) {
+      throw new ArchivePersistenceException("Failed to materialize commit prefix", failure);
+    }
   }
 
   public synchronized HistoryCommitMarker get(long epoch) {
-    return markersByEpoch.get(epoch);
+    if (recordCount == 0 || epoch < firstEpoch || epoch - firstEpoch >= recordCount) {
+      return null;
+    }
+    try {
+      return readOrdinal(epoch - firstEpoch);
+    } catch (IOException failure) {
+      throw new ArchivePersistenceException("Failed to read history commit epoch " + epoch,
+          failure);
+    }
   }
 
   public synchronized boolean mayContain(long epoch) {
-    return markersByEpoch.containsKey(epoch)
-        || (uncertainMarker != null && uncertainMarker.getMeta().getEpoch() == epoch);
+    return get(epoch) != null
+        || (uncertainFrom >= 0 && epoch >= uncertainFrom && epoch <= uncertainThrough);
   }
 
-  private List<HistoryCommitMarker> scan() throws IOException {
-    List<Path> paths = new ArrayList<>();
-    try (DirectoryStream<Path> stream = Files.newDirectoryStream(directory, "*" + SUFFIX)) {
-      for (Path path : stream) {
-        paths.add(path);
-      }
-    }
-    paths.sort(Comparator.comparingLong(HistoryCommitStore::parseEpoch));
-    List<HistoryCommitMarker> decoded = new ArrayList<>();
+  Path getLogPath() {
+    return logPath;
+  }
+
+  private void scanAndRepairTruncatedTail() throws IOException {
+    long offset = 0;
     HistoryCommitMarker previous = null;
-    for (Path path : paths) {
-      HistoryCommitMarker marker = codec.decode(Files.readAllBytes(path));
-      if (parseEpoch(path) != marker.getMeta().getEpoch()) {
-        throw new IllegalStateException("Commit marker filename/epoch mismatch: " + path);
+    int expectedLength = 0;
+    long count = 0;
+    long size = channel.size();
+    while (offset < size) {
+      long remaining = size - offset;
+      if (remaining < HistoryCommitMarkerCodec.HEADER_LENGTH) {
+        truncateTail(offset);
+        size = offset;
+        break;
       }
-      validateNext(previous, marker);
-      decoded.add(marker);
+      byte[] prefix = read(offset, HistoryCommitMarkerCodec.HEADER_LENGTH);
+      int length;
+      try {
+        length = codec.recordLength(prefix);
+      } catch (IllegalArgumentException invalidHeader) {
+        throw new ArchivePersistenceException(
+            "Committed history log contains an invalid record header at " + offset,
+            invalidHeader);
+      }
+      if (length > remaining) {
+        truncateTail(offset);
+        size = offset;
+        break;
+      }
+      if (expectedLength != 0 && length != expectedLength) {
+        throw new ArchivePersistenceException(
+            "Commit record length changes inside one archive generation");
+      }
+      HistoryCommitMarker marker;
+      try {
+        marker = codec.decode(read(offset, length));
+        validateNext(previous, marker);
+      } catch (IllegalArgumentException invalidRecord) {
+        throw new ArchivePersistenceException(
+            "Committed history log contains an invalid record at " + offset, invalidRecord);
+      }
+      if (count == 0) {
+        firstEpoch = marker.getMeta().getEpoch();
+        expectedLength = length;
+      }
       previous = marker;
+      count++;
+      offset += length;
     }
-    return decoded;
+    recordLength = expectedLength;
+    recordCount = count;
+    head = previous;
   }
 
-  private void validateNext(HistoryCommitMarker previous, HistoryCommitMarker current) {
+  private void truncateTail(long offset) throws IOException {
+    channel.truncate(offset);
+    channel.force(true);
+  }
+
+  private HistoryCommitMarker readOrdinal(long ordinal) throws IOException {
+    if (ordinal < 0 || ordinal >= recordCount) {
+      throw new IllegalArgumentException("Commit ordinal is outside the committed prefix");
+    }
+    return codec.decode(read(ordinal * (long) recordLength, recordLength));
+  }
+
+  private byte[] read(long offset, int length) throws IOException {
+    ByteBuffer buffer = ByteBuffer.allocate(length);
+    channel.position(offset);
+    readFully(channel, buffer);
+    return buffer.array();
+  }
+
+  private static void validateNext(HistoryCommitMarker previous,
+      HistoryCommitMarker current) {
     if (previous == null) {
       if (current.getPreviousEpoch() >= current.getMeta().getEpoch()) {
         throw new IllegalArgumentException("Invalid base commit marker previous epoch");
@@ -144,36 +255,32 @@ public final class HistoryCommitStore implements Closeable {
     if (current.getMeta().getEpoch() != previous.getMeta().getEpoch() + 1
         || current.getPreviousEpoch() != previous.getMeta().getEpoch()
         || current.getMeta().getBlockNumber() != previous.getMeta().getBlockNumber() + 1
-        || !Arrays.equals(current.getMeta().getParentHash(),
+        || !java.util.Arrays.equals(current.getMeta().getParentHash(),
         previous.getMeta().getBlockHash())) {
       throw new IllegalArgumentException("Non-contiguous history commit marker");
     }
   }
 
-  private Path markerPath(long epoch) {
-    return directory.resolve(String.format("%020d%s", epoch, SUFFIX));
-  }
-
-  private static long parseEpoch(Path path) {
-    String name = path.getFileName().toString();
-    try {
-      return Long.parseLong(name.substring(0, name.length() - SUFFIX.length()));
-    } catch (RuntimeException e) {
-      throw new IllegalArgumentException("Invalid history commit marker name: " + name, e);
+  private static void writeFully(FileChannel target, ByteBuffer buffer) throws IOException {
+    while (buffer.hasRemaining()) {
+      target.write(buffer);
     }
   }
 
-  private static void writeFully(FileChannel channel, ByteBuffer buffer) throws IOException {
+  private static void readFully(FileChannel source, ByteBuffer buffer) throws IOException {
     while (buffer.hasRemaining()) {
-      channel.write(buffer);
+      if (source.read(buffer) < 0) {
+        throw new IOException("Unexpected end of history commit log");
+      }
     }
   }
 
   @Override
-  public void close() {
-    // Marker files do not keep open resources.
+  public synchronized void close() throws IOException {
+    channel.close();
   }
 
+  @FunctionalInterface
   interface DirectorySync {
     void sync(Path directory) throws IOException;
   }

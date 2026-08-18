@@ -38,24 +38,37 @@ public final class AsyncArchiveHistorySink implements DurableBlockReverseDiffSin
 
   @Override
   public void accept(BlockReverseDiff diff) {
-    WorkItem item = new WorkItem(diff);
+    acceptAll(java.util.Collections.singletonList(diff));
+  }
+
+  @Override
+  public void acceptAll(List<BlockReverseDiff> diffs) {
+    if (diffs.isEmpty()) {
+      return;
+    }
+    WorkItem item = new WorkItem(diffs);
     synchronized (submitted) {
       ensureOperational();
-      if (acceptedHead != null) {
-        validateContinuity(acceptedHead, diff.getMeta());
+      BlockSnapshotMeta previous = acceptedHead;
+      for (BlockReverseDiff diff : item.diffs) {
+        if (previous != null) {
+          validateContinuity(previous, diff.getMeta());
+        }
+        if (submitted.containsKey(diff.getMeta().getEpoch())) {
+          throw new ArchivePersistenceException("Duplicate submitted archive epoch");
+        }
+        previous = diff.getMeta();
       }
-      if (submitted.put(diff.getMeta().getEpoch(), item) != null) {
-        throw new ArchivePersistenceException("Duplicate submitted archive epoch");
-      }
-      acceptedHead = diff.getMeta();
+      item.diffs.forEach(diff -> submitted.put(diff.getMeta().getEpoch(), item));
+      acceptedHead = item.lastMeta();
     }
     try {
       queue.put(item);
     } catch (InterruptedException e) {
       synchronized (submitted) {
-        submitted.remove(diff.getMeta().getEpoch());
+        removeSubmitted(item);
         WorkItem previous = lastSubmitted();
-        acceptedHead = previous == null ? committedMeta() : previous.diff.getMeta();
+        acceptedHead = previous == null ? committedMeta() : previous.lastMeta();
       }
       Thread.currentThread().interrupt();
       throw new ArchivePersistenceException("Interrupted by archive queue backpressure", e);
@@ -68,13 +81,13 @@ public final class AsyncArchiveHistorySink implements DurableBlockReverseDiffSin
     synchronized (submitted) {
       ensureOperational();
       item = lastSubmitted();
-      if (item == null || !item.diff.getMeta().equals(meta)) {
+      if (item == null || item.diffs.size() != 1 || !item.lastMeta().equals(meta)) {
         throw new ArchivePersistenceException("Archive reorg must remove the submitted head");
       }
       if (queue.remove(item)) {
-        submitted.remove(meta.getEpoch());
+        removeSubmitted(item);
         WorkItem previous = lastSubmitted();
-        acceptedHead = previous == null ? committedMeta() : previous.diff.getMeta();
+        acceptedHead = previous == null ? committedMeta() : previous.lastMeta();
         item.completion.cancel(false);
         return;
       }
@@ -82,9 +95,9 @@ public final class AsyncArchiveHistorySink implements DurableBlockReverseDiffSin
     await(item);
     writer.revert(meta);
     synchronized (submitted) {
-      submitted.remove(meta.getEpoch());
+      removeSubmitted(item);
       WorkItem previous = lastSubmitted();
-      acceptedHead = previous == null ? committedMeta() : previous.diff.getMeta();
+      acceptedHead = previous == null ? committedMeta() : previous.lastMeta();
     }
   }
 
@@ -94,7 +107,7 @@ public final class AsyncArchiveHistorySink implements DurableBlockReverseDiffSin
     synchronized (submitted) {
       ensureOperational();
       submitted.forEach((candidate, item) -> {
-        if (candidate <= epoch) {
+        if (candidate <= epoch && !required.contains(item)) {
           required.add(item);
         }
       });
@@ -132,7 +145,7 @@ public final class AsyncArchiveHistorySink implements DurableBlockReverseDiffSin
         return;
       }
       try {
-        writer.accept(item.diff);
+        writer.acceptAll(item.diffs);
         item.completion.complete(null);
       } catch (Throwable failure) {
         fatalFailure = failure;
@@ -181,6 +194,10 @@ public final class AsyncArchiveHistorySink implements DurableBlockReverseDiffSin
     return last;
   }
 
+  private void removeSubmitted(WorkItem item) {
+    item.diffs.forEach(diff -> submitted.remove(diff.getMeta().getEpoch()));
+  }
+
   private BlockSnapshotMeta committedMeta() {
     HistoryCommitMarker marker = writer.committedHead();
     return marker == null ? null : marker.getMeta();
@@ -220,22 +237,26 @@ public final class AsyncArchiveHistorySink implements DurableBlockReverseDiffSin
   }
 
   private static final class WorkItem {
-    private final BlockReverseDiff diff;
+    private final List<BlockReverseDiff> diffs;
     private final boolean poison;
     private final CompletableFuture<Void> completion = new CompletableFuture<>();
 
-    private WorkItem(BlockReverseDiff diff) {
-      this.diff = diff;
+    private WorkItem(List<BlockReverseDiff> diffs) {
+      this.diffs = java.util.Collections.unmodifiableList(new ArrayList<>(diffs));
       this.poison = false;
     }
 
     private WorkItem() {
-      this.diff = null;
+      this.diffs = java.util.Collections.emptyList();
       this.poison = true;
     }
 
     private static WorkItem poison() {
       return new WorkItem();
+    }
+
+    private BlockSnapshotMeta lastMeta() {
+      return diffs.get(diffs.size() - 1).getMeta();
     }
   }
 }

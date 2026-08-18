@@ -95,6 +95,8 @@ public class SnapshotManager implements RevokingDatabase {
 
   private OldValueCollector oldValueCollector;
   private BlockReverseDiffSink blockReverseDiffSink;
+  @Getter
+  private volatile long archiveReadableEpoch = -1;
 
   public SnapshotManager(String checkpointPath) {
   }
@@ -247,12 +249,13 @@ public class SnapshotManager implements RevokingDatabase {
         throw new IllegalStateException(
             "Cannot bind block metadata to non-SnapshotImpl head: " + db.getDbName());
       }
-      ((SnapshotImpl) head).setBlockSnapshotMeta(meta);
     }
 
     BlockReverseDiff reverseDiff = null;
     if (oldValueCollector != null) {
-      reverseDiff = oldValueCollector.collect(BlockChangeView.capture(meta, dbs));
+      reverseDiff = Objects.requireNonNull(
+          oldValueCollector.collect(BlockChangeView.capture(meta, dbs)),
+          "archive collector returned null");
     }
 
     dbs.forEach(db -> {
@@ -261,8 +264,11 @@ public class SnapshotManager implements RevokingDatabase {
       }
     });
 
-    if (reverseDiff != null) {
-      blockReverseDiffSink.accept(reverseDiff);
+    // All fallible work is complete. From here the prepared payload is owned by the block layer;
+    // fastPop/reorg can discard it without touching durable archive state.
+    for (Chainbase db : dbs) {
+      ((SnapshotImpl) db.getHead()).attachArchiveBlock(meta,
+          ArchiveStoreScope.isStateDatabase(db.getDbName()) ? reverseDiff : null);
     }
     --activeSession;
   }
@@ -306,6 +312,10 @@ public class SnapshotManager implements RevokingDatabase {
     blockReverseDiffSink = Objects.requireNonNull(sink, "sink");
   }
 
+  public void markArchiveReadableThrough(long epoch) {
+    archiveReadableEpoch = epoch;
+  }
+
   public synchronized void pop() {
     if (activeSession != 0) {
       throw new RevokingStoreIllegalStateException(
@@ -315,28 +325,6 @@ public class SnapshotManager implements RevokingDatabase {
     if (size <= 0) {
       throw new RevokingStoreIllegalStateException(
           String.format("there is not snapshot to be popped, current: %d", size));
-    }
-
-    if (blockReverseDiffSink != null) {
-      BlockSnapshotMeta meta = null;
-      for (Chainbase db : dbs) {
-        if (!ArchiveStoreScope.isStateDatabase(db.getDbName())) {
-          continue;
-        }
-        Snapshot head = db.getHead();
-        if (Snapshot.isImpl(head)) {
-          BlockSnapshotMeta candidate = ((SnapshotImpl) head).getBlockSnapshotMeta();
-          if (candidate != null && meta != null && !meta.equals(candidate)) {
-            throw new IllegalStateException("Mismatched block metadata while reverting snapshots");
-          }
-          if (candidate != null) {
-            meta = candidate;
-          }
-        }
-      }
-      if (meta != null) {
-        blockReverseDiffSink.revert(meta);
-      }
     }
 
     disabled = true;
@@ -465,7 +453,7 @@ public class SnapshotManager implements RevokingDatabase {
     if (shouldBeRefreshed()) {
       try {
         long start = System.currentTimeMillis();
-        Long archiveEpoch = awaitArchiveHistoryForFlush();
+        Long archiveEpoch = publishArchiveHistoryForFlush();
         if (!isV2Open()) {
           deleteCheckpoint();
         }
@@ -474,6 +462,7 @@ public class SnapshotManager implements RevokingDatabase {
         long checkPointEnd = System.currentTimeMillis();
         refresh();
         if (archiveEpoch != null) {
+          archiveReadableEpoch = archiveEpoch;
           ((DurableBlockReverseDiffSink) blockReverseDiffSink).releaseThrough(archiveEpoch);
         }
         flushCount = 0;
@@ -490,7 +479,7 @@ public class SnapshotManager implements RevokingDatabase {
     }
   }
 
-  private Long awaitArchiveHistoryForFlush() {
+  private Long publishArchiveHistoryForFlush() {
     if (oldValueCollector == null) {
       return null;
     }
@@ -502,6 +491,7 @@ public class SnapshotManager implements RevokingDatabase {
         .findFirst()
         .orElseThrow(() -> new TronDBException("Archive mode has no registered state database"));
     Snapshot next = stateDatabase.getHead().getRoot();
+    List<BlockReverseDiff> prepared = new ArrayList<>(flushCount);
     BlockSnapshotMeta last = null;
     for (int i = 0; i < flushCount; i++) {
       next = next.getNext();
@@ -515,13 +505,22 @@ public class SnapshotManager implements RevokingDatabase {
       if (last != null && meta.getEpoch() != last.getEpoch() + 1) {
         throw new TronDBException("Archive flush range is not epoch-contiguous");
       }
+      BlockReverseDiff reverseDiff = ((SnapshotImpl) next).getPreparedArchiveBlock();
+      if (reverseDiff == null || !meta.equals(reverseDiff.getMeta())) {
+        throw new TronDBException(
+            "Archive flush range contains a layer without its matching prepared payload");
+      }
+      prepared.add(reverseDiff);
       last = meta;
     }
     if (last == null) {
       return null;
     }
     try {
-      ((DurableBlockReverseDiffSink) blockReverseDiffSink).awaitCommitted(last.getEpoch());
+      DurableBlockReverseDiffSink durableSink =
+          (DurableBlockReverseDiffSink) blockReverseDiffSink;
+      durableSink.acceptAll(prepared);
+      durableSink.awaitCommitted(last.getEpoch());
     } catch (RuntimeException e) {
       throw new TronDBException("Archive history durability gate failed", e);
     }

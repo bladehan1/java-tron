@@ -34,14 +34,14 @@ public class HistorySegmentStoreTest {
       store.sync();
       assertEquals(0, first.getSegmentId());
       assertEquals(1, second.getSegmentId());
-      assertEquals(2, store.getScanResult().getRecords().size());
+      assertEquals(2, store.getScanResult().getRecordCount());
       assertEquals(2, store.read(second).getMeta().getBlockNumber());
     }
 
     try (HistorySegmentStore reopened = new HistorySegmentStore(archive, codec, 250)) {
       assertNull(reopened.getScanResult().getInvalidTail());
-      assertEquals(2, reopened.getScanResult().getRecords().size());
-      assertArrayEquals(second.getBodyDigest(), reopened.getScanResult().getRecords().get(1)
+      assertEquals(2, reopened.getScanResult().getRecordCount());
+      assertArrayEquals(second.getBodyDigest(), reopened.getScanResult().getHead()
           .getLocation().getBodyDigest());
     }
   }
@@ -66,7 +66,7 @@ public class HistorySegmentStoreTest {
       assertNull(store.getScanResult().getInvalidTail());
       store.append(diff(2, bytes("two")));
       store.sync();
-      assertEquals(2, store.getScanResult().getRecords().size());
+      assertEquals(2, store.getScanResult().getRecordCount());
     }
   }
 

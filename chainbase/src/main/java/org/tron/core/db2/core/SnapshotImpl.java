@@ -12,7 +12,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import lombok.Getter;
-import lombok.Setter;
+import org.tron.core.db2.archive.BlockReverseDiff;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
 import org.tron.core.db2.common.HashDB;
 import org.tron.core.db2.common.Key;
@@ -26,8 +26,10 @@ public class SnapshotImpl extends AbstractSnapshot<Key, Value> {
   protected Snapshot root;
 
   @Getter
-  @Setter
   private BlockSnapshotMeta blockSnapshotMeta;
+
+  @Getter
+  private BlockReverseDiff preparedArchiveBlock;
 
   SnapshotImpl(Snapshot snapshot) {
     root = snapshot.getRoot();
@@ -40,6 +42,17 @@ public class SnapshotImpl extends AbstractSnapshot<Key, Value> {
     if (isOptimized &&  root == previous) {
       Streams.stream(root.iterator()).forEach( e -> put(e.getKey(),e.getValue()));
     }
+  }
+
+  /**
+   * Publishes the immutable block identity and optional archive payload on this layer.
+   *
+   * <p>The caller performs all validation and materialization first, so this method is the
+   * non-throwing ownership-transfer point for a successfully committed block session.
+   */
+  void attachArchiveBlock(BlockSnapshotMeta meta, BlockReverseDiff reverseDiff) {
+    blockSnapshotMeta = meta;
+    preparedArchiveBlock = reverseDiff;
   }
 
   @Override

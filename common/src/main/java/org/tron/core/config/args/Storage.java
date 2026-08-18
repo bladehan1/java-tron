@@ -85,6 +85,22 @@ public class Storage {
   @Setter
   private boolean checkpointSync;
 
+  @Getter
+  @Setter
+  private boolean stateArchiveEnabled;
+
+  @Getter
+  @Setter
+  private String stateArchiveDirectory;
+
+  @Getter
+  @Setter
+  private long stateArchiveMaxSegmentSize;
+
+  @Getter
+  @Setter
+  private int stateArchiveQueueCapacity;
+
   private Options defaultDbOptions;
 
   @Getter

@@ -57,6 +57,28 @@ public class StorageConfigTest {
   }
 
   @Test
+  public void testStateArchiveDefaultsAndOverrides() {
+    StorageConfig defaults = StorageConfig.fromConfig(withRef());
+    assertFalse(defaults.getStateArchive().isEnabled());
+    assertEquals("state-archive", defaults.getStateArchive().getDirectory());
+    assertEquals(1073741824L, defaults.getStateArchive().getMaxSegmentSize());
+    assertEquals(256, defaults.getStateArchive().getQueueCapacity());
+
+    StorageConfig configured = StorageConfig.fromConfig(withRef(
+        "storage.stateArchive { enabled = true, directory = archive-test, "
+            + "maxSegmentSize = 134217728, queueCapacity = 8 }"));
+    assertTrue(configured.getStateArchive().isEnabled());
+    assertEquals("archive-test", configured.getStateArchive().getDirectory());
+    assertEquals(134217728L, configured.getStateArchive().getMaxSegmentSize());
+    assertEquals(8, configured.getStateArchive().getQueueCapacity());
+  }
+
+  @Test(expected = IllegalArgumentException.class)
+  public void testStateArchiveRejectsSmallSegments() {
+    StorageConfig.fromConfig(withRef("storage.stateArchive.maxSegmentSize = 1024"));
+  }
+
+  @Test
   public void testDbSettingsDefaults() {
     // These defaults must match develop's Args.initRocksDbSettings() fallbacks so that
     // nodes with minimal configs retain the same RocksDB tuning. See

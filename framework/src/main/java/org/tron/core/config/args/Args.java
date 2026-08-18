@@ -217,6 +217,10 @@ public class Args extends CommonParameter {
     // contractParse is set in applyConfigParams alongside event config, not here
     PARAMETER.storage.setCheckpointVersion(sc.getCheckpoint().getVersion());
     PARAMETER.storage.setCheckpointSync(sc.getCheckpoint().isSync());
+    PARAMETER.storage.setStateArchiveEnabled(sc.getStateArchive().isEnabled());
+    PARAMETER.storage.setStateArchiveDirectory(sc.getStateArchive().getDirectory());
+    PARAMETER.storage.setStateArchiveMaxSegmentSize(sc.getStateArchive().getMaxSegmentSize());
+    PARAMETER.storage.setStateArchiveQueueCapacity(sc.getStateArchive().getQueueCapacity());
 
     // estimatedTransactions / maxFlushCount clamping & validation run inside
     // TxCacheConfig.postProcess / SnapshotConfig.postProcess during bean load.
@@ -1315,4 +1319,3 @@ public class Args extends CommonParameter {
     return optionGroupMap;
   }
 }
-

@@ -15,6 +15,8 @@ import com.google.common.collect.Lists;
 import com.google.common.primitives.Longs;
 import com.google.protobuf.ByteString;
 import io.prometheus.client.Histogram;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -113,7 +115,13 @@ import org.tron.core.db.api.EnergyPriceHistoryLoader;
 import org.tron.core.db.api.MigrateTurkishKeyHelper;
 import org.tron.core.db.api.MoveAbiHelper;
 import org.tron.core.db2.ISession;
+import org.tron.core.db2.archive.AccountAssetArchiveProjector;
+import org.tron.core.db2.archive.ArchiveHistoryWriter;
+import org.tron.core.db2.archive.ArchiveStoreScope;
+import org.tron.core.db2.archive.AsyncArchiveHistorySink;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
+import org.tron.core.db2.archive.HistoricalAccountBalanceReader;
+import org.tron.core.db2.archive.SnapshotOldValueCollector;
 import org.tron.core.db2.core.Chainbase;
 import org.tron.core.db2.core.SnapshotManager;
 import org.tron.core.exception.AccountResourceInsufficientException;
@@ -188,6 +196,8 @@ public class Manager {
   private static final int SLEEP_TIME_OUT = 50;
   private static final int TX_ID_CACHE_SIZE = 100_000;
   private static final int SLEEP_FOR_WAIT_LOCK = 10;
+  @Getter
+  private ArchiveHistoryWriter archiveHistoryWriter;
   private static final int NO_BLOCK_WAITING_LOCK = 0;
   private final int shieldedTransInPendingMaxCounts =
       Args.getInstance().getShieldedTransInPendingMaxCounts();
@@ -566,6 +576,8 @@ public class Manager {
     // init liteFullNode
     initLiteNode();
 
+    initStateArchive();
+
     long headNum = chainBaseManager.getDynamicPropertiesStore().getLatestBlockHeaderNumber();
     logger.info("Current headNum is: {}.", headNum);
     boolean isLite = chainBaseManager.isLiteNode();
@@ -605,6 +617,70 @@ public class Manager {
     }
 
     maxFlushCount = CommonParameter.getInstance().getStorage().getMaxFlushCount();
+  }
+
+  private void initStateArchive() {
+    org.tron.core.config.args.Storage storage = Args.getInstance().getStorage();
+    if (!storage.isStateArchiveEnabled()) {
+      return;
+    }
+    if (!(revokingStore instanceof SnapshotManager)) {
+      throw new IllegalStateException("State archive requires SnapshotManager");
+    }
+    Path archiveDirectory = Paths.get(Args.getInstance().getOutputDirectory(),
+        storage.getStateArchiveDirectory()).normalize();
+    try {
+      ArchiveHistoryWriter writer = new ArchiveHistoryWriter(archiveDirectory,
+          storage.getStateArchiveMaxSegmentSize(), ArchiveStoreScope.getStateDatabases());
+      BlockSnapshotMeta archiveHead = writer.committedHeadMeta();
+      if (archiveHead != null
+          && (archiveHead.getBlockNumber()
+          != getDynamicPropertiesStore().getLatestBlockHeaderNumber()
+          || !Arrays.equals(archiveHead.getBlockHash(),
+          getDynamicPropertiesStore().getLatestBlockHeaderHash().getBytes()))) {
+        writer.close();
+        throw new IllegalStateException(
+            "State archive committed head differs from the persisted state root");
+      }
+      AsyncArchiveHistorySink sink = new AsyncArchiveHistorySink(writer,
+          storage.getStateArchiveQueueCapacity());
+      AccountAssetArchiveProjector projector = new AccountAssetArchiveProjector(
+          chainBaseManager.getAccountAssetStore(),
+          () -> getDynamicPropertiesStore().supportAllowAccountAssetOptimization());
+      ((SnapshotManager) revokingStore).installArchiveCollector(
+          new SnapshotOldValueCollector(projector), sink);
+      archiveHistoryWriter = writer;
+      if (archiveHead != null) {
+        ((SnapshotManager) revokingStore).markArchiveReadableThrough(archiveHead.getEpoch());
+      }
+      logger.info("Experimental state archive enabled: directory={}, maxSegmentSize={}, queue={}",
+          archiveDirectory, storage.getStateArchiveMaxSegmentSize(),
+          storage.getStateArchiveQueueCapacity());
+    } catch (java.io.IOException failure) {
+      throw new IllegalStateException("Failed to initialize experimental state archive", failure);
+    }
+  }
+
+  public HistoricalAccountBalanceReader.Result getArchiveAccountBalance(long blockNumber,
+      byte[] address) throws ItemNotFoundException, BadItemException {
+    ArchiveHistoryWriter writer = archiveHistoryWriter;
+    if (writer == null) {
+      throw new IllegalStateException("Experimental state archive is disabled");
+    }
+    BlockSnapshotMeta archiveHead = writer.committedHeadMeta();
+    if (archiveHead == null
+        || ((SnapshotManager) revokingStore).getArchiveReadableEpoch() != archiveHead.getEpoch()) {
+      throw new IllegalStateException("State archive has no readable committed root");
+    }
+    AccountCapsule rootAccount;
+    try {
+      rootAccount = chainBaseManager.getAccountStore().getFromRoot(address);
+    } catch (ItemNotFoundException missing) {
+      rootAccount = null;
+    }
+    org.tron.core.db2.archive.OldValue value = writer.readAccountAt(blockNumber, address,
+        rootAccount == null ? null : rootAccount.getData());
+    return HistoricalAccountBalanceReader.decode(blockNumber, address, value);
   }
 
   /**
