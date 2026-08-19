@@ -28,9 +28,15 @@ public final class HistorySegmentStore implements Closeable {
   private FileChannel appendChannel;
   private int appendSegmentId;
   private ScanResult scanResult;
+  private long startupScannedRecords;
 
   public HistorySegmentStore(Path archiveDirectory, BlockHistoryCodec codec, long maxSegmentSize)
       throws IOException {
+    this(archiveDirectory, codec, maxSegmentSize, null);
+  }
+
+  HistorySegmentStore(Path archiveDirectory, BlockHistoryCodec codec, long maxSegmentSize,
+      ArchiveRestartCheckpoint checkpoint) throws IOException {
     if (maxSegmentSize <= 0) {
       throw new IllegalArgumentException("maxSegmentSize must be positive");
     }
@@ -38,7 +44,7 @@ public final class HistorySegmentStore implements Closeable {
     this.codec = codec;
     this.maxSegmentSize = maxSegmentSize;
     Files.createDirectories(directory);
-    scanResult = scan();
+    scanResult = scan(checkpoint);
     openAppendChannel();
   }
 
@@ -94,7 +100,7 @@ public final class HistorySegmentStore implements Closeable {
   }
 
   public synchronized ScanResult rescan() throws IOException {
-    scanResult = scan();
+    scanResult = scan(null);
     return scanResult;
   }
 
@@ -106,12 +112,17 @@ public final class HistorySegmentStore implements Closeable {
     }
     closeAppendChannel();
     truncateFrom(tail.getSegmentId(), tail.getOffset());
-    scanResult = scan();
+    scanResult = scan(null);
     openAppendChannel();
   }
 
   /** Truncates all records after {@code last}; null means remove every body record. */
   public synchronized void truncateAfter(HistoryLocation last) throws IOException {
+    truncateAfter(last, -1);
+  }
+
+  synchronized void truncateAfter(HistoryLocation last, long knownRecordCount)
+      throws IOException {
     closeAppendChannel();
     if (last == null) {
       for (Path segment : listSegments()) {
@@ -121,26 +132,58 @@ public final class HistorySegmentStore implements Closeable {
       truncateFrom(last.getSegmentId(), last.endOffset());
     }
     syncDirectory(directory);
-    scanResult = scan();
+    if (last != null && knownRecordCount >= 0) {
+      BlockReverseDiff diff = read(last);
+      scanResult = new ScanResult(knownRecordCount, new ScannedRecord(diff, last), null);
+    } else if (last == null && knownRecordCount == 0) {
+      scanResult = new ScanResult(0, null, null);
+    } else if (scanResult.getHead() == null || last == null
+        || last.endOffset() != scanResult.getHead().getLocation().endOffset()
+        || last.getSegmentId() != scanResult.getHead().getLocation().getSegmentId()) {
+      scanResult = scan(null);
+    }
     openAppendChannel();
   }
 
-  private ScanResult scan() throws IOException {
+  long getStartupScannedRecords() {
+    return startupScannedRecords;
+  }
+
+  private ScanResult scan(ArchiveRestartCheckpoint checkpoint) throws IOException {
     long recordCount = 0;
     ScannedRecord head = null;
     InvalidTail invalidTail = null;
     BlockSnapshotMeta previous = null;
     List<Path> segments = listSegments();
-    int expectedSegmentId = segments.isEmpty() ? 0 : parseSegmentId(segments.get(0));
+    int startSegmentId = segments.isEmpty() ? 0 : parseSegmentId(segments.get(0));
+    long startOffset = 0;
+    if (checkpoint != null) {
+      HistoryCommitMarker marker = checkpoint.getMarker();
+      BlockReverseDiff diff = read(marker.getHistoryLocation());
+      startupScannedRecords++;
+      if (!marker.getMeta().equals(diff.getMeta())) {
+        throw new ArchivePersistenceException(
+            "Restart checkpoint does not match the history body");
+      }
+      recordCount = checkpoint.getRecordCount();
+      head = new ScannedRecord(diff, marker.getHistoryLocation());
+      previous = diff.getMeta();
+      startSegmentId = marker.getHistoryLocation().getSegmentId();
+      startOffset = marker.getHistoryLocation().endOffset();
+    }
+    int expectedSegmentId = startSegmentId;
     for (Path segment : segments) {
       int segmentId = parseSegmentId(segment);
+      if (segmentId < startSegmentId) {
+        continue;
+      }
       if (segmentId != expectedSegmentId) {
         return new ScanResult(recordCount, head, new InvalidTail(segmentId, 0,
             "non-contiguous segment id"));
       }
       expectedSegmentId++;
       try (FileChannel channel = FileChannel.open(segment, StandardOpenOption.READ)) {
-        long offset = 0;
+        long offset = segmentId == startSegmentId ? startOffset : 0;
         while (offset < channel.size()) {
           long remaining = channel.size() - offset;
           if (remaining < BlockHistoryCodec.HEADER_LENGTH) {
@@ -176,6 +219,7 @@ public final class HistorySegmentStore implements Closeable {
           HistoryLocation location = location(segmentId, offset, record);
           head = new ScannedRecord(diff, location);
           recordCount++;
+          startupScannedRecords++;
           previous = diff.getMeta();
           offset += recordLength;
         }
