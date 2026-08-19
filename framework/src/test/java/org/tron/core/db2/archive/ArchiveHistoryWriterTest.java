@@ -177,9 +177,141 @@ public class ArchiveHistoryWriterTest {
     }
     try (ArchiveHistoryWriter reopened = new ArchiveHistoryWriter(archive, 4096, databases())) {
       assertEquals(1_000, reopened.committedHead().getMeta().getEpoch());
+      assertEquals(3, reopened.getStartupScannedRecords());
       assertEquals(diff(500).getMeta(), reopened.readCommitted(500).getMeta());
       reopened.accept(diff(1_001));
       assertEquals(1_001, reopened.committedHead().getMeta().getEpoch());
+    }
+  }
+
+  @Test
+  public void scansOnlyTailAfterAStaleRestartCheckpoint() throws Exception {
+    Path archive = temporaryFolder.newFolder("stale-checkpoint").toPath();
+    byte[] checkpointAtOne;
+    try (ArchiveHistoryWriter writer = new ArchiveHistoryWriter(archive, 4096, databases())) {
+      writer.accept(diff(1));
+      checkpointAtOne = Files.readAllBytes(archive.resolve("restart.checkpoint"));
+      writer.accept(diff(2));
+    }
+    Files.write(archive.resolve("restart.checkpoint"), checkpointAtOne);
+
+    try (ArchiveHistoryWriter reopened = new ArchiveHistoryWriter(archive, 4096, databases())) {
+      assertEquals(2, reopened.committedHead().getMeta().getEpoch());
+      assertEquals(6, reopened.getStartupScannedRecords());
+      assertEquals(diff(2).getMeta(), reopened.readCommitted(2).getMeta());
+    }
+  }
+
+  @Test
+  public void truncatesInvalidBodyAndIndexTailWithoutRescanningPrefix() throws Exception {
+    Path archive = temporaryFolder.newFolder("invalid-data-tail").toPath();
+    try (ArchiveHistoryWriter writer = new ArchiveHistoryWriter(archive, 4096, databases())) {
+      List<BlockReverseDiff> batch = new ArrayList<>(1_000);
+      for (int number = 1; number <= 1_000; number++) {
+        batch.add(diff(number));
+      }
+      writer.acceptAll(batch);
+    }
+    Path lastSegment;
+    try (java.util.stream.Stream<Path> segments = Files.list(archive.resolve("history"))) {
+      lastSegment = segments.sorted().reduce((left, right) -> right)
+          .orElseThrow(AssertionError::new);
+    }
+    Files.write(lastSegment, new byte[]{1, 2, 3},
+        java.nio.file.StandardOpenOption.APPEND);
+    Files.write(archive.resolve("state_history.idx"), new byte[]{1, 2, 3},
+        java.nio.file.StandardOpenOption.APPEND);
+
+    try (ArchiveHistoryWriter reopened = new ArchiveHistoryWriter(archive, 4096, databases())) {
+      assertEquals(1_000, reopened.committedHead().getMeta().getEpoch());
+      assertEquals(3, reopened.getStartupScannedRecords());
+      reopened.accept(diff(1_001));
+      assertEquals(1_001, reopened.committedHead().getMeta().getEpoch());
+    }
+  }
+
+  @Test
+  public void boundsPreparedTailAcrossAnOversizedFlushFailure() throws Exception {
+    Path archive = temporaryFolder.newFolder("bounded-large-flush").toPath();
+    List<BlockReverseDiff> batch = new ArrayList<>(1_500);
+    for (int number = 1; number <= 1_500; number++) {
+      batch.add(diff(number));
+    }
+    ArchiveHistoryWriter.DurabilityHook failSecondChunk = (stage, meta) -> {
+      if (stage == Stage.APPEND_BODY && meta.getEpoch() == 1_025) {
+        throw new java.io.IOException("injected second chunk failure");
+      }
+    };
+    try (ArchiveHistoryWriter writer = new ArchiveHistoryWriter(archive, 4096, databases(),
+        failSecondChunk)) {
+      assertThrows(ArchivePersistenceException.class, () -> writer.acceptAll(batch));
+      assertEquals(1_024, writer.committedHead().getMeta().getEpoch());
+    }
+
+    try (ArchiveHistoryWriter reopened = new ArchiveHistoryWriter(archive, 4096, databases())) {
+      assertEquals(1_024, reopened.committedHead().getMeta().getEpoch());
+      assertEquals(3, reopened.getStartupScannedRecords());
+    }
+  }
+
+  @Test
+  public void failsClosedOnCorruptRestartCheckpoint() throws Exception {
+    Path archive = temporaryFolder.newFolder("corrupt-checkpoint").toPath();
+    try (ArchiveHistoryWriter writer = new ArchiveHistoryWriter(archive, 4096, databases())) {
+      writer.accept(diff(1));
+    }
+    Path checkpoint = archive.resolve("restart.checkpoint");
+    byte[] encoded = Files.readAllBytes(checkpoint);
+    encoded[encoded.length - 1] ^= 1;
+    Files.write(checkpoint, encoded);
+
+    assertThrows(ArchivePersistenceException.class,
+        () -> new ArchiveHistoryWriter(archive, 4096, databases()));
+  }
+
+  @Test
+  public void completesPreparedTruncationBeforeLoadingRestartCheckpoint() throws Exception {
+    Path archive = temporaryFolder.newFolder("writer-truncation-recovery").toPath();
+    initializeHistory(archive, 3);
+    prepareTruncation(archive, 2);
+
+    try (ArchiveHistoryWriter reopened = new ArchiveHistoryWriter(
+        archive, 4096, databases())) {
+      assertEquals(2, reopened.committedHead().getMeta().getEpoch());
+      assertEquals(diff(2).getMeta(), reopened.readCommitted(2).getMeta());
+      assertFalse(Files.exists(archive.resolve("truncation.intent")));
+      assertEquals(3, reopened.getStartupScannedRecords());
+    }
+  }
+
+  @Test
+  public void failsClosedWhenDerivedAccountIndexIsAheadAfterRecovery() throws Exception {
+    Path archive = temporaryFolder.newFolder("writer-index-ahead").toPath();
+    try (ArchiveHistoryWriter writer = new ArchiveHistoryWriter(archive, 4096, databases())) {
+      writer.acceptAll(Arrays.asList(diff(1), diff(2), diff(3)));
+    }
+    prepareTruncation(archive, 2);
+
+    assertThrows(ArchivePersistenceException.class,
+        () -> new ArchiveHistoryWriter(archive, 4096, databases()));
+    ArchiveRestartCheckpoint checkpoint = ArchiveRestartCheckpoint.load(archive,
+        new HistoryCommitMarkerCodec());
+    assertEquals(2, checkpoint.getMarker().getMeta().getEpoch());
+    assertFalse(Files.exists(archive.resolve("truncation.intent")));
+  }
+
+  @Test
+  public void buildsPersistentServingGenerationFromCommittedWriterPrefix() throws Exception {
+    Path archive = temporaryFolder.newFolder("writer-serving-generation").toPath();
+    byte[] key = bytes("key-1");
+    try (ArchiveHistoryWriter writer = new ArchiveHistoryWriter(archive, 4096, databases())) {
+      writer.acceptAll(Arrays.asList(diff(1), diff(2)));
+      try (PersistentServingKeyIndexGeneration generation = writer.buildServingGeneration(
+          archive.resolve("serving-shadow"), "generation-2")) {
+        assertEquals(2, generation.getIndexedThrough());
+        assertEquals(1, generation.firstChangeAfter("account", key, 0, 2).getAsLong());
+        assertFalse(generation.firstChangeAfter("properties", key, 0, 2).isPresent());
+      }
     }
   }
 
@@ -206,6 +338,42 @@ public class ArchiveHistoryWriterTest {
 
   private static Set<String> databases() {
     return new java.util.LinkedHashSet<>(Arrays.asList("account", "properties"));
+  }
+
+  private static void initializeHistory(Path archive, int lastEpoch) throws Exception {
+    try (HistorySegmentStore bodies = new HistorySegmentStore(
+        archive, new BlockHistoryCodec(), 4096);
+        HistoryIndexStore index = new HistoryIndexStore(archive, new HistoryIndexCodec());
+        HistoryCommitStore commits = new HistoryCommitStore(
+            archive, new HistoryCommitMarkerCodec())) {
+      List<HistoryCommitMarker> markers = new ArrayList<>();
+      for (int epoch = 1; epoch <= lastEpoch; epoch++) {
+        BlockReverseDiff diff = diff(epoch);
+        HistoryLocation body = bodies.append(diff);
+        HistoryIndexLocation indexLocation = index.append(HistoryIndexRecord.from(diff, body));
+        markers.add(new HistoryCommitMarker(diff.getMeta(), epoch - 1L, body, indexLocation,
+            new byte[16], new ArrayList<>(databases())));
+      }
+      bodies.sync();
+      index.sync();
+      commits.commitAll(markers);
+      ArchiveRestartCheckpoint.persist(archive, commits.firstEpoch(), commits.size(),
+          commits.getRecordLength(), commits.head(), new HistoryCommitMarkerCodec());
+    }
+  }
+
+  private static void prepareTruncation(Path archive, long targetEpoch) throws Exception {
+    ArchiveRestartCheckpoint checkpoint = ArchiveRestartCheckpoint.load(archive,
+        new HistoryCommitMarkerCodec());
+    try (HistorySegmentStore bodies = new HistorySegmentStore(
+        archive, new BlockHistoryCodec(), 4096, checkpoint);
+        HistoryIndexStore index = new HistoryIndexStore(
+            archive, new HistoryIndexCodec(), checkpoint);
+        HistoryCommitStore commits = new HistoryCommitStore(
+            archive, new HistoryCommitMarkerCodec(), checkpoint)) {
+      ArchiveTruncationIntent.prepare(archive, commits, index, bodies, targetEpoch,
+          new HistoryCommitMarkerCodec());
+    }
   }
 
   private static BlockReverseDiff diff(int number) {

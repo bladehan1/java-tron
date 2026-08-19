@@ -21,8 +21,14 @@ public final class HistoryIndexStore implements Closeable {
   private final HistoryIndexCodec codec;
   private final FileChannel channel;
   private ScanResult scanResult;
+  private long startupScannedRecords;
 
   public HistoryIndexStore(Path archiveDirectory, HistoryIndexCodec codec) throws IOException {
+    this(archiveDirectory, codec, null);
+  }
+
+  HistoryIndexStore(Path archiveDirectory, HistoryIndexCodec codec,
+      ArchiveRestartCheckpoint checkpoint) throws IOException {
     this.archiveDirectory = archiveDirectory;
     this.indexPath = archiveDirectory.resolve("state_history.idx");
     this.codec = codec;
@@ -33,7 +39,7 @@ public final class HistoryIndexStore implements Closeable {
     if (created) {
       HistorySegmentStore.syncDirectory(archiveDirectory);
     }
-    scanResult = scan();
+    scanResult = scan(checkpoint);
     channel.position(channel.size());
   }
 
@@ -79,7 +85,7 @@ public final class HistoryIndexStore implements Closeable {
   }
 
   public synchronized ScanResult rescan() throws IOException {
-    scanResult = scan();
+    scanResult = scan(null);
     return scanResult;
   }
 
@@ -89,25 +95,57 @@ public final class HistoryIndexStore implements Closeable {
     }
     channel.truncate(scanResult.getInvalidTailOffset());
     channel.force(true);
-    scanResult = scan();
+    scanResult = scan(null);
     channel.position(channel.size());
   }
 
   public synchronized void truncateAfter(HistoryIndexLocation last) throws IOException {
+    truncateAfter(last, -1);
+  }
+
+  synchronized void truncateAfter(HistoryIndexLocation last, long knownRecordCount)
+      throws IOException {
     long length = last == null ? 0 : last.endOffset();
     channel.truncate(length);
     channel.force(true);
-    scanResult = scan();
+    if (last != null && knownRecordCount >= 0) {
+      HistoryIndexRecord record = read(last);
+      scanResult = new ScanResult(knownRecordCount,
+          new ScannedIndexRecord(record, last), null, null);
+    } else if (last == null && knownRecordCount == 0) {
+      scanResult = new ScanResult(0, null, null, null);
+    } else if (scanResult.getHead() == null || last == null
+        || last.endOffset() != scanResult.getHead().getLocation().endOffset()) {
+      scanResult = scan(null);
+    }
     channel.position(channel.size());
   }
 
-  private ScanResult scan() throws IOException {
+  long getStartupScannedRecords() {
+    return startupScannedRecords;
+  }
+
+  private ScanResult scan(ArchiveRestartCheckpoint checkpoint) throws IOException {
     long recordCount = 0;
     ScannedIndexRecord head = null;
     Long invalidOffset = null;
     String invalidReason = null;
     long offset = 0;
     BlockSnapshotMeta previous = null;
+    if (checkpoint != null) {
+      HistoryCommitMarker marker = checkpoint.getMarker();
+      HistoryIndexLocation location = marker.getIndexLocation();
+      HistoryIndexRecord record = read(location);
+      startupScannedRecords++;
+      if (!marker.getMeta().equals(record.getMeta())) {
+        throw new ArchivePersistenceException(
+            "Restart checkpoint does not match the history index");
+      }
+      recordCount = checkpoint.getRecordCount();
+      head = new ScannedIndexRecord(record, location);
+      previous = record.getMeta();
+      offset = location.endOffset();
+    }
     while (offset < channel.size()) {
       long remaining = channel.size() - offset;
       if (remaining < 12) {
@@ -148,6 +186,7 @@ public final class HistoryIndexStore implements Closeable {
           sha256(encoded));
       head = new ScannedIndexRecord(record, location);
       recordCount++;
+      startupScannedRecords++;
       previous = record.getMeta();
       offset += recordLength;
     }

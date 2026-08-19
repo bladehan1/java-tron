@@ -21,7 +21,7 @@ import java.util.OptionalLong;
  * <p>This class deliberately defines no persistent page encoding. A production LSM backend can
  * preserve this exact-key, committed-prefix and coverage contract after H1 format approval.
  */
-public final class ServingKeyIndexGeneration {
+public final class ServingKeyIndexGeneration implements ServingKeyIndex {
 
   private final String generationId;
   private final long indexedFrom;

@@ -21,7 +21,7 @@ public final class HistoricalRangeOverlay {
   }
 
   public static List<Entry> materialize(String dbName, long targetBlock, long upperBound,
-      KeyRange range, List<Entry> pinnedLatest, ServingKeyIndexGeneration index,
+      KeyRange range, List<Entry> pinnedLatest, ServingKeyIndex index,
       HistoricalValueReader history, Limits limits) throws IOException {
     Objects.requireNonNull(dbName, "dbName");
     Objects.requireNonNull(range, "range");
