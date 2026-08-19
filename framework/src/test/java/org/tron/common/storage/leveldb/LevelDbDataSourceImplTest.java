@@ -18,7 +18,9 @@
 
 package org.tron.common.storage.leveldb;
 
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
@@ -29,9 +31,15 @@ import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.stream.Collectors;
 import org.junit.AfterClass;
 import org.junit.Assert;
@@ -51,6 +59,8 @@ import org.tron.common.utils.PropUtil;
 import org.tron.common.utils.ReflectUtils;
 import org.tron.common.utils.StorageUtils;
 import org.tron.core.config.args.Args;
+import org.tron.core.db2.archive.LatestStateGenerationAdapter.SnapshotCapableStore;
+import org.tron.core.db2.archive.LatestStateGenerationAdapter.StoreSnapshot;
 import org.tron.core.exception.TronError;
 
 /**
@@ -188,5 +198,120 @@ public class LevelDbDataSourceImplTest {
       dbAppender.stop();
       dbLogger.detachAppender(dbAppender);
     }
+  }
+
+  @Test
+  public void nativeSnapshotKeepsOldValueAfterLiveWrite() throws Exception {
+    LevelDbDataSourceImpl dataSource = new LevelDbDataSourceImpl(
+        Args.getInstance().getOutputDirectory(), "nativeSnapshotKeepsOldValue");
+    dataSource.putData(key1, value1);
+    try (LevelDbDataSourceImpl.PinnedSnapshot snapshot = dataSource.pinSnapshot()) {
+      dataSource.putData(key1, "replacement".getBytes());
+      assertArrayEquals(value1, snapshot.get(key1));
+      assertEquals(dataSource.getSnapshotSourceIdentity(), snapshot.getSourceIdentity());
+    }
+    dataSource.closeDB();
+  }
+
+  @Test
+  public void levelDbWrapperExposesSnapshotCapability() throws Exception {
+    LevelDbDataSourceImpl dataSource = new LevelDbDataSourceImpl(
+        Args.getInstance().getOutputDirectory(), "wrapperSnapshotCapability");
+    org.tron.core.db2.common.LevelDB wrapper = new org.tron.core.db2.common.LevelDB(dataSource);
+    wrapper.put(key1, value1);
+    assertTrue(wrapper instanceof SnapshotCapableStore);
+    try (StoreSnapshot snapshot = wrapper.pin(1, new byte[32])) {
+      wrapper.put(key1, "20000".getBytes());
+      assertArrayEquals(value1, snapshot.get(key1));
+      assertEquals(wrapper.getSourceIdentity(), snapshot.getSourceIdentity());
+    } finally {
+      wrapper.close();
+    }
+  }
+
+  @Test
+  public void closeWaitsForCrossThreadSnapshotRelease() throws Exception {
+    LevelDbDataSourceImpl dataSource = new LevelDbDataSourceImpl(
+        Args.getInstance().getOutputDirectory(), "closeWaitsForSnapshot");
+    LevelDbDataSourceImpl.PinnedSnapshot snapshot = dataSource.pinSnapshot();
+    ExecutorService executor = Executors.newFixedThreadPool(2);
+    CountDownLatch closeStarted = new CountDownLatch(1);
+    try {
+      Future<?> close = executor.submit(() -> {
+        closeStarted.countDown();
+        dataSource.closeDB();
+      });
+      assertTrue(closeStarted.await(5, TimeUnit.SECONDS));
+      assertThrows(TimeoutException.class, () -> close.get(100, TimeUnit.MILLISECONDS));
+      executor.submit(() -> {
+        snapshot.close();
+        return null;
+      }).get(5, TimeUnit.SECONDS);
+      close.get(5, TimeUnit.SECONDS);
+    } finally {
+      snapshot.close();
+      executor.shutdownNow();
+      dataSource.closeDB();
+    }
+  }
+
+  @Test
+  public void resetWaitsForPinAndChangesEngineSourceIdentity() throws Exception {
+    LevelDbDataSourceImpl dataSource = new LevelDbDataSourceImpl(
+        Args.getInstance().getOutputDirectory(), "resetWaitsForSnapshot");
+    String originalIdentity = dataSource.getSnapshotSourceIdentity();
+    LevelDbDataSourceImpl.PinnedSnapshot snapshot = dataSource.pinSnapshot();
+    ExecutorService executor = Executors.newSingleThreadExecutor();
+    CountDownLatch resetStarted = new CountDownLatch(1);
+    try {
+      Future<?> reset = executor.submit(() -> {
+        resetStarted.countDown();
+        dataSource.resetDb();
+      });
+      assertTrue(resetStarted.await(5, TimeUnit.SECONDS));
+      assertThrows(TimeoutException.class, () -> reset.get(100, TimeUnit.MILLISECONDS));
+      snapshot.close();
+      reset.get(5, TimeUnit.SECONDS);
+      assertNotEquals(originalIdentity, dataSource.getSnapshotSourceIdentity());
+      assertThrows(IllegalStateException.class, () -> snapshot.get(key1));
+    } finally {
+      snapshot.close();
+      executor.shutdownNow();
+      dataSource.closeDB();
+    }
+  }
+
+  @Test
+  public void sourceIdentityPersistsAcrossProcessStyleReopen() {
+    String name = "sourceIdentityPersistsAcrossReopen";
+    LevelDbDataSourceImpl first = new LevelDbDataSourceImpl(
+        Args.getInstance().getOutputDirectory(), name);
+    String identity = first.getSnapshotSourceIdentity();
+    first.closeDB();
+
+    LevelDbDataSourceImpl reopened = new LevelDbDataSourceImpl(
+        Args.getInstance().getOutputDirectory(), name);
+    try {
+      assertEquals(identity, reopened.getSnapshotSourceIdentity());
+    } finally {
+      reopened.closeDB();
+    }
+  }
+
+  @Test
+  public void corruptSourceIdentityFailsBeforeDatabaseReopen() throws IOException {
+    String name = "corruptSourceIdentityFailsClosed";
+    LevelDbDataSourceImpl first = new LevelDbDataSourceImpl(
+        Args.getInstance().getOutputDirectory(), name);
+    Path identityPath = first.getDbPath().resolve(".archive-engine.identity");
+    first.closeDB();
+
+    byte[] corrupted = Files.readAllBytes(identityPath);
+    corrupted[corrupted.length - 1] ^= 1;
+    Files.write(identityPath, corrupted);
+
+    assertThrows(TronError.class, () -> new LevelDbDataSourceImpl(
+        Args.getInstance().getOutputDirectory(), name));
+    assertArrayEquals(corrupted, Files.readAllBytes(identityPath));
   }
 }
