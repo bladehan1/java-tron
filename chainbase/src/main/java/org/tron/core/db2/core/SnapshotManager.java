@@ -37,6 +37,7 @@ import org.tron.core.db.RevokingDatabase;
 import org.tron.core.db.TronDatabase;
 import org.tron.core.db2.ISession;
 import org.tron.core.db2.archive.ArchiveStoreScope;
+import org.tron.core.db2.archive.ArchiveStateBarrier.ArchiveStateAction;
 import org.tron.core.db2.archive.BlockChangeView;
 import org.tron.core.db2.archive.BlockReverseDiff;
 import org.tron.core.db2.archive.BlockReverseDiffSink;
@@ -181,7 +182,7 @@ public class SnapshotManager implements RevokingDatabase {
     --size;
   }
 
-  public void merge() {
+  public synchronized void merge() {
     if (activeSession <= 0) {
       throw new RevokingStoreIllegalStateException(activeSession);
     }
@@ -310,6 +311,11 @@ public class SnapshotManager implements RevokingDatabase {
     ArchiveStoreScope.validate(dbs);
     oldValueCollector = Objects.requireNonNull(collector, "collector");
     blockReverseDiffSink = Objects.requireNonNull(sink, "sink");
+  }
+
+  /** Runs latest-state snapshot acquisition inside the canonical apply/flush monitor. */
+  public synchronized void withArchiveStateBarrier(ArchiveStateAction action) throws IOException {
+    Objects.requireNonNull(action, "action").run();
   }
 
   public void markArchiveReadableThrough(long epoch) {
