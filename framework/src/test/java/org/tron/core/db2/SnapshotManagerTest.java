@@ -6,9 +6,16 @@ import static org.mockito.Mockito.when;
 import com.google.common.collect.Maps;
 import com.google.common.primitives.Longs;
 import com.google.protobuf.ByteString;
+import java.io.IOException;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.stream.Collectors;
 import lombok.extern.slf4j.Slf4j;
 import org.junit.Assert;
@@ -139,5 +146,108 @@ public class SnapshotManagerTest extends BaseMethodTest {
     when(manager.shouldBeRefreshed()).thenReturn(true);
     TronError thrown = Assert.assertThrows(TronError.class, manager::flush);
     Assert.assertEquals(TronError.ErrCode.DB_FLUSH, thrown.getErrCode());
+  }
+
+  @Test
+  public void archiveStateBarrierBlocksSessionAdvanceAndFlush() throws Exception {
+    SnapshotManager manager = new SnapshotManager("");
+    manager.enable();
+    ExecutorService executor = Executors.newFixedThreadPool(3);
+    CountDownLatch entered = new CountDownLatch(1);
+    CountDownLatch release = new CountDownLatch(1);
+    ISession acquired = null;
+    try {
+      Future<?> barrier = executor.submit(() -> {
+        manager.withArchiveStateBarrier(() -> {
+          entered.countDown();
+          try {
+            if (!release.await(5, TimeUnit.SECONDS)) {
+              throw new IOException("Timed out waiting to release archive state barrier");
+            }
+          } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new IOException("Interrupted inside archive state barrier", interrupted);
+          }
+        });
+        return null;
+      });
+      Assert.assertTrue(entered.await(5, TimeUnit.SECONDS));
+
+      Future<ISession> session = executor.submit(() -> manager.buildSession());
+      Future<?> flush = executor.submit(manager::flush);
+      Assert.assertThrows(TimeoutException.class,
+          () -> session.get(100, TimeUnit.MILLISECONDS));
+      Assert.assertThrows(TimeoutException.class,
+          () -> flush.get(100, TimeUnit.MILLISECONDS));
+
+      release.countDown();
+      barrier.get(5, TimeUnit.SECONDS);
+      acquired = session.get(5, TimeUnit.SECONDS);
+      flush.get(5, TimeUnit.SECONDS);
+    } finally {
+      release.countDown();
+      if (acquired != null) {
+        acquired.close();
+      }
+      executor.shutdownNow();
+    }
+  }
+
+  @Test
+  public void archiveStateBarrierReleasesMonitorAfterFailure() throws Exception {
+    SnapshotManager manager = new SnapshotManager("");
+    manager.enable();
+
+    IOException failure = Assert.assertThrows(IOException.class,
+        () -> manager.withArchiveStateBarrier(() -> {
+          throw new IOException("injected barrier failure");
+        }));
+    Assert.assertEquals("injected barrier failure", failure.getMessage());
+    try (ISession ignored = manager.buildSession()) {
+      Assert.assertEquals(1, manager.size());
+    }
+    Assert.assertEquals(0, manager.size());
+  }
+
+  @Test
+  public void archiveStateBarrierBlocksNestedSessionMerge() throws Exception {
+    SnapshotManager manager = new SnapshotManager("");
+    manager.enable();
+    ISession parent = manager.buildSession();
+    ISession child = manager.buildSession();
+    ExecutorService executor = Executors.newFixedThreadPool(2);
+    CountDownLatch entered = new CountDownLatch(1);
+    CountDownLatch release = new CountDownLatch(1);
+    try {
+      Future<?> barrier = executor.submit(() -> {
+        manager.withArchiveStateBarrier(() -> {
+          entered.countDown();
+          try {
+            if (!release.await(5, TimeUnit.SECONDS)) {
+              throw new IOException("Timed out waiting to release archive state barrier");
+            }
+          } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new IOException("Interrupted inside archive state barrier", interrupted);
+          }
+        });
+        return null;
+      });
+      Assert.assertTrue(entered.await(5, TimeUnit.SECONDS));
+      Future<?> merge = executor.submit(child::merge);
+      Assert.assertThrows(TimeoutException.class,
+          () -> merge.get(100, TimeUnit.MILLISECONDS));
+
+      release.countDown();
+      barrier.get(5, TimeUnit.SECONDS);
+      merge.get(5, TimeUnit.SECONDS);
+      Assert.assertEquals(1, manager.size());
+    } finally {
+      release.countDown();
+      child.close();
+      parent.close();
+      executor.shutdownNow();
+    }
+    Assert.assertEquals(0, manager.size());
   }
 }

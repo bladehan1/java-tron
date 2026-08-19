@@ -18,6 +18,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.concurrent.locks.StampedLock;
 import java.util.stream.Collectors;
 import lombok.NoArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -27,11 +28,13 @@ import org.rocksdb.ReadOptions;
 import org.rocksdb.RocksDB;
 import org.rocksdb.RocksDBException;
 import org.rocksdb.RocksIterator;
+import org.rocksdb.Snapshot;
 import org.rocksdb.Status;
 import org.rocksdb.WriteBatch;
 import org.rocksdb.WriteOptions;
 import org.tron.common.error.TronDBException;
 import org.tron.common.setting.RocksDbSettings;
+import org.tron.common.storage.EngineSourceIdentityFile;
 import org.tron.common.storage.WriteOptionsWrapper;
 import org.tron.common.storage.metric.DbStat;
 import org.tron.common.utils.FileUtil;
@@ -52,7 +55,9 @@ public class RocksDbDataSourceImpl extends DbStat implements DbSourceInter<byte[
   private volatile boolean alive;
   private String parentPath;
   private ReadWriteLock resetDbLock = new ReentrantReadWriteLock();
+  private final StampedLock snapshotLifecycleLock = new StampedLock();
   private Options options;
+  private volatile String snapshotSourceIdentity;
 
   public RocksDbDataSourceImpl(String parentPath, String name) {
     this.dataBaseName = name;
@@ -74,7 +79,37 @@ public class RocksDbDataSourceImpl extends DbStat implements DbSourceInter<byte[
 
   @Override
   public void closeDB() {
-    resetDbLock.writeLock().lock();
+    long lifecycleStamp = snapshotLifecycleLock.writeLock();
+    try {
+      resetDbLock.writeLock().lock();
+      try {
+        closeDbUnderLifecycleLock();
+      } finally {
+        resetDbLock.writeLock().unlock();
+      }
+    } finally {
+      snapshotLifecycleLock.unlockWrite(lifecycleStamp);
+    }
+  }
+
+  @Override
+  public void resetDb() {
+    long lifecycleStamp = snapshotLifecycleLock.writeLock();
+    try {
+      resetDbLock.writeLock().lock();
+      try {
+        closeDbUnderLifecycleLock();
+        FileUtil.recursiveDelete(getDbPath().toString());
+        initDB();
+      } finally {
+        resetDbLock.writeLock().unlock();
+      }
+    } finally {
+      snapshotLifecycleLock.unlockWrite(lifecycleStamp);
+    }
+  }
+
+  private void closeDbUnderLifecycleLock() {
     try {
       if (!isAlive()) {
         return;
@@ -86,20 +121,6 @@ public class RocksDbDataSourceImpl extends DbStat implements DbSourceInter<byte[
       alive = false;
     } catch (Exception e) {
       logger.error("Failed to find the dbStore file on the closeDB: {}.", dataBaseName, e);
-    } finally {
-      resetDbLock.writeLock().unlock();
-    }
-  }
-
-  @Override
-  public void resetDb() {
-    resetDbLock.writeLock().lock();
-    try {
-      closeDB();
-      FileUtil.recursiveDelete(getDbPath().toString());
-      initDB();
-    } finally {
-      resetDbLock.writeLock().unlock();
     }
   }
 
@@ -198,6 +219,8 @@ public class RocksDbDataSourceImpl extends DbStat implements DbSourceInter<byte[
         try {
           DbSourceInter.checkOrInitEngine(getEngine(), dbPath.toString(),
               TronError.ErrCode.ROCKSDB_INIT);
+          snapshotSourceIdentity = EngineSourceIdentityFile.loadOrCreate(dbPath, "ROCKSDB",
+              dataBaseName);
           this.options = RocksDbSettings.getOptionsByDbName(dataBaseName);
           database = RocksDB.open(this.options, dbPath.toString());
         } catch (RocksDBException e) {
@@ -436,6 +459,104 @@ public class RocksDbDataSourceImpl extends DbStat implements DbSourceInter<byte[
     throwIfNotAlive();
     try (Checkpoint cp = Checkpoint.create(database)) {
       cp.createCheckpoint(dir + this.getDBName());
+    }
+  }
+
+  /** Pins a native point-read snapshot and prevents close/reset until the lease is released. */
+  public PinnedSnapshot pinSnapshot() {
+    long lifecycleStamp = snapshotLifecycleLock.readLock();
+    resetDbLock.readLock().lock();
+    RocksDB pinnedDatabase = null;
+    Snapshot snapshot = null;
+    try {
+      throwIfNotAlive();
+      pinnedDatabase = database;
+      snapshot = pinnedDatabase.getSnapshot();
+      if (snapshot == null) {
+        throw new TronDBException("Failed to pin RocksDB snapshot: " + dataBaseName);
+      }
+      ReadOptions readOptions = new ReadOptions().setFillCache(false).setSnapshot(snapshot);
+      return new PinnedSnapshot(pinnedDatabase, snapshot, readOptions, lifecycleStamp,
+          snapshotSourceIdentity);
+    } catch (RuntimeException failure) {
+      if (pinnedDatabase != null && snapshot != null) {
+        try {
+          pinnedDatabase.releaseSnapshot(snapshot);
+        } catch (RuntimeException closeFailure) {
+          failure.addSuppressed(closeFailure);
+        }
+      }
+      snapshotLifecycleLock.unlockRead(lifecycleStamp);
+      throw failure;
+    } finally {
+      resetDbLock.readLock().unlock();
+    }
+  }
+
+  public String getSnapshotSourceIdentity() {
+    return snapshotSourceIdentity;
+  }
+
+  /** Cross-thread-closeable native snapshot lease. */
+  public final class PinnedSnapshot implements AutoCloseable {
+    private final RocksDB pinnedDatabase;
+    private final Snapshot snapshot;
+    private final ReadOptions readOptions;
+    private final long lifecycleStamp;
+    private final String sourceIdentity;
+    private boolean closed;
+
+    private PinnedSnapshot(RocksDB pinnedDatabase, Snapshot snapshot, ReadOptions readOptions,
+        long lifecycleStamp, String sourceIdentity) {
+      this.pinnedDatabase = pinnedDatabase;
+      this.snapshot = snapshot;
+      this.readOptions = readOptions;
+      this.lifecycleStamp = lifecycleStamp;
+      this.sourceIdentity = sourceIdentity;
+    }
+
+    public synchronized byte[] get(byte[] key) {
+      if (closed) {
+        throw new IllegalStateException("RocksDB snapshot lease is closed");
+      }
+      checkArgNotNull(key, "key");
+      try {
+        return pinnedDatabase.get(readOptions, key);
+      } catch (RocksDBException e) {
+        throw new RuntimeException(dataBaseName, e);
+      }
+    }
+
+    public String getSourceIdentity() {
+      return sourceIdentity;
+    }
+
+    @Override
+    public synchronized void close() {
+      if (closed) {
+        return;
+      }
+      closed = true;
+      RuntimeException failure = null;
+      try {
+        readOptions.close();
+      } catch (RuntimeException closeFailure) {
+        failure = closeFailure;
+      }
+      try {
+        pinnedDatabase.releaseSnapshot(snapshot);
+      } catch (RuntimeException closeFailure) {
+        if (failure == null) {
+          failure = closeFailure;
+        } else {
+          failure.addSuppressed(closeFailure);
+        }
+      } finally {
+        snapshotLifecycleLock.unlockRead(lifecycleStamp);
+      }
+      if (failure != null) {
+        throw failure;
+      }
     }
   }
 
