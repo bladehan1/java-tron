@@ -366,7 +366,7 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
         .when(sink).awaitCommitted(1L);
 
     assertThrows(TronError.class, manager::flush);
-    verify(sink).accept(prepared(database));
+    verify(sink).acceptAll(Collections.singletonList(prepared(database)));
     verify(sink).awaitCommitted(1L);
     verify(checkpoint, never()).updateByBatch(any(Map.class));
     manager.shutdown();
@@ -455,8 +455,8 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
 
     manager.flush();
 
-    verify(sink).accept(first);
-    verify(sink, never()).accept(second);
+    verify(sink).acceptAll(Collections.singletonList(first));
+    verify(sink, never()).acceptAll(Collections.singletonList(second));
     verify(sink).awaitCommitted(1L);
     verify(sink).releaseThrough(1L);
     manager.shutdown();

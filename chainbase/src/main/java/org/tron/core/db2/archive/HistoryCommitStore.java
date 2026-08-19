@@ -32,14 +32,25 @@ public final class HistoryCommitStore implements Closeable {
   private long firstEpoch = -1;
   private long recordCount;
   private int recordLength;
+  private long startupScannedRecords;
 
   public HistoryCommitStore(Path archiveDirectory, HistoryCommitMarkerCodec codec)
       throws IOException {
-    this(archiveDirectory, codec, ignored -> { });
+    this(archiveDirectory, codec, null, ignored -> { });
   }
 
   HistoryCommitStore(Path archiveDirectory, HistoryCommitMarkerCodec codec,
       DirectorySync postForceHook) throws IOException {
+    this(archiveDirectory, codec, null, postForceHook);
+  }
+
+  HistoryCommitStore(Path archiveDirectory, HistoryCommitMarkerCodec codec,
+      ArchiveRestartCheckpoint checkpoint) throws IOException {
+    this(archiveDirectory, codec, checkpoint, ignored -> { });
+  }
+
+  HistoryCommitStore(Path archiveDirectory, HistoryCommitMarkerCodec codec,
+      ArchiveRestartCheckpoint checkpoint, DirectorySync postForceHook) throws IOException {
     this.directory = archiveDirectory.resolve("commits");
     this.logPath = directory.resolve(FILE_NAME);
     this.codec = codec;
@@ -51,7 +62,7 @@ public final class HistoryCommitStore implements Closeable {
     if (created) {
       HistorySegmentStore.syncDirectory(directory);
     }
-    scanAndRepairTruncatedTail();
+    scanAndRepairTruncatedTail(checkpoint);
     channel.position(channel.size());
   }
 
@@ -124,6 +135,27 @@ public final class HistoryCommitStore implements Closeable {
     channel.position(channel.size());
   }
 
+  /** Durably removes every committed marker after {@code lastEpoch}. */
+  public synchronized void truncateAfter(long lastEpoch) throws IOException {
+    if (uncertainFrom >= 0) {
+      throw new IllegalStateException("Cannot truncate commit records with uncertain durability");
+    }
+    HistoryCommitMarker last = get(lastEpoch);
+    if (last == null) {
+      throw new IllegalArgumentException("Commit truncation target is outside the committed prefix");
+    }
+    long newCount = lastEpoch - firstEpoch + 1;
+    if (newCount == recordCount) {
+      return;
+    }
+    channel.truncate(newCount * (long) recordLength);
+    channel.force(true);
+    postForceHook.sync(directory);
+    recordCount = newCount;
+    head = last;
+    channel.position(channel.size());
+  }
+
   public synchronized HistoryCommitMarker head() {
     return head;
   }
@@ -173,12 +205,39 @@ public final class HistoryCommitStore implements Closeable {
     return logPath;
   }
 
-  private void scanAndRepairTruncatedTail() throws IOException {
+  int getRecordLength() {
+    return recordLength;
+  }
+
+  long getStartupScannedRecords() {
+    return startupScannedRecords;
+  }
+
+  private void scanAndRepairTruncatedTail(ArchiveRestartCheckpoint checkpoint)
+      throws IOException {
     long offset = 0;
     HistoryCommitMarker previous = null;
     int expectedLength = 0;
     long count = 0;
     long size = channel.size();
+    if (checkpoint != null) {
+      expectedLength = checkpoint.getCommitRecordLength();
+      count = checkpoint.getRecordCount();
+      firstEpoch = checkpoint.getFirstEpoch();
+      long checkpointOffset = (count - 1) * (long) expectedLength;
+      if (checkpointOffset < 0 || checkpointOffset + expectedLength > size) {
+        throw new ArchivePersistenceException(
+            "Restart checkpoint is outside the committed history log");
+      }
+      byte[] checkpointRecord = read(checkpointOffset, expectedLength);
+      startupScannedRecords++;
+      if (!java.util.Arrays.equals(checkpointRecord, checkpoint.getEncodedMarker())) {
+        throw new ArchivePersistenceException(
+            "Restart checkpoint does not match the committed history log");
+      }
+      previous = codec.decode(checkpointRecord);
+      offset = checkpointOffset + expectedLength;
+    }
     while (offset < size) {
       long remaining = size - offset;
       if (remaining < HistoryCommitMarkerCodec.HEADER_LENGTH) {
@@ -218,6 +277,7 @@ public final class HistoryCommitStore implements Closeable {
       }
       previous = marker;
       count++;
+      startupScannedRecords++;
       offset += length;
     }
     recordLength = expectedLength;

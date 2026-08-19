@@ -16,13 +16,13 @@ public final class ArchiveReadSnapshot implements Closeable {
   private final long targetBlock;
   private final long pinnedBlock;
   private final byte[] pinnedHash;
-  private final ServingKeyIndexGeneration serving;
+  private final ServingKeyIndex serving;
   private final PinnedLatestState latest;
   private final PinnedHistory history;
   private boolean closed;
 
   private ArchiveReadSnapshot(long targetBlock, long pinnedBlock, byte[] pinnedHash,
-      ServingKeyIndexGeneration serving, PinnedLatestState latest, PinnedHistory history) {
+      ServingKeyIndex serving, PinnedLatestState latest, PinnedHistory history) {
     if (targetBlock > pinnedBlock) {
       throw new IllegalArgumentException("Target block must not exceed pinned block");
     }
@@ -37,15 +37,57 @@ public final class ArchiveReadSnapshot implements Closeable {
 
   /** Takes ownership of already pinned resources, including on identity-validation failure. */
   public static ArchiveReadSnapshot pin(long targetBlock, long pinnedBlock, byte[] pinnedHash,
-      ServingKeyIndexGeneration serving, PinnedLatestState latest, PinnedHistory history)
+      ServingKeyIndex serving, PinnedLatestState latest, PinnedHistory history)
       throws IOException {
     try {
       return new ArchiveReadSnapshot(targetBlock, pinnedBlock, pinnedHash, serving, latest,
           history);
     } catch (RuntimeException failure) {
-      closeAfterFailedPin(history, latest, failure);
+      closeAfterFailedPin(serving, history, latest, failure);
       throw failure;
     }
+  }
+
+  /** Pins catalog, authoritative history, and latest-engine resources as one request unit. */
+  public static ArchiveReadSnapshot pin(long targetBlock,
+      PersistentServingKeyIndexCatalog catalog, ArchiveProgressEnvelope readerVisible,
+      PinnedHistoryFactory historyFactory, PinnedLatestStateFactory latestFactory)
+      throws IOException {
+    Objects.requireNonNull(catalog, "catalog");
+    Objects.requireNonNull(historyFactory, "historyFactory");
+    Objects.requireNonNull(latestFactory, "latestFactory");
+    PersistentServingKeyIndexGeneration serving = catalog.pin(readerVisible);
+    PinnedHistory history;
+    try {
+      history = historyFactory.pin(serving);
+    } catch (IOException | RuntimeException failure) {
+      serving.close();
+      throw failure;
+    }
+    PinnedLatestState latest;
+    try {
+      latest = latestFactory.pin(serving);
+    } catch (IOException | RuntimeException failure) {
+      try {
+        history.close();
+      } catch (IOException closeFailure) {
+        failure.addSuppressed(closeFailure);
+      }
+      serving.close();
+      throw failure;
+    }
+    return pin(targetBlock, serving.getIndexedThrough(), serving.getHeadHash(), serving, latest,
+        history);
+  }
+
+  /** Pins persistent commit/index/segment handles plus one caller-owned latest engine snapshot. */
+  public static ArchiveReadSnapshot pin(long targetBlock,
+      PersistentServingKeyIndexCatalog catalog, ArchiveProgressEnvelope readerVisible,
+      java.nio.file.Path archiveDirectory, long maxSegmentSize,
+      PinnedLatestStateFactory latestFactory) throws IOException {
+    return pin(targetBlock, catalog, readerVisible,
+        serving -> PersistentCommittedHistoryReader.open(
+            archiveDirectory, maxSegmentSize, serving), latestFactory);
   }
 
   public synchronized OldValue get(String dbName, byte[] physicalRawKey) throws IOException {
@@ -108,6 +150,15 @@ public final class ArchiveReadSnapshot implements Closeable {
         failure.addSuppressed(e);
       }
     }
+    try {
+      serving.close();
+    } catch (IOException e) {
+      if (failure == null) {
+        failure = e;
+      } else {
+        failure.addSuppressed(e);
+      }
+    }
     if (failure != null) {
       throw failure;
     }
@@ -142,8 +193,8 @@ public final class ArchiveReadSnapshot implements Closeable {
     return Arrays.copyOf(hash, hash.length);
   }
 
-  private static void closeAfterFailedPin(PinnedHistory history, PinnedLatestState latest,
-      RuntimeException failure) throws IOException {
+  private static void closeAfterFailedPin(ServingKeyIndex serving, PinnedHistory history,
+      PinnedLatestState latest, RuntimeException failure) throws IOException {
     IOException closeFailure = null;
     if (history != null) {
       try {
@@ -163,6 +214,17 @@ public final class ArchiveReadSnapshot implements Closeable {
         }
       }
     }
+    if (serving != null) {
+      try {
+        serving.close();
+      } catch (IOException e) {
+        if (closeFailure == null) {
+          closeFailure = e;
+        } else {
+          closeFailure.addSuppressed(e);
+        }
+      }
+    }
     if (closeFailure != null) {
       failure.addSuppressed(closeFailure);
     }
@@ -172,6 +234,11 @@ public final class ArchiveReadSnapshot implements Closeable {
     long getBlockNumber();
 
     byte[] getBlockHash();
+
+    /** Empty means the legacy/in-memory prototype is not bound to engine source identities. */
+    default byte[] getSourceIdentityDigest() {
+      return new byte[0];
+    }
 
     OldValue get(String dbName, byte[] physicalRawKey) throws IOException;
 
@@ -190,5 +257,15 @@ public final class ArchiveReadSnapshot implements Closeable {
 
     OldValue read(String dbName, byte[] physicalRawKey, long firstChangeBlock)
         throws IOException;
+  }
+
+  @FunctionalInterface
+  public interface PinnedHistoryFactory {
+    PinnedHistory pin(PersistentServingKeyIndexGeneration serving) throws IOException;
+  }
+
+  @FunctionalInterface
+  public interface PinnedLatestStateFactory {
+    PinnedLatestState pin(PersistentServingKeyIndexGeneration serving) throws IOException;
   }
 }
