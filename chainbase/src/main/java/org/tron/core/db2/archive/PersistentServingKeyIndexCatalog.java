@@ -317,6 +317,7 @@ public final class PersistentServingKeyIndexCatalog implements Closeable {
       ArchiveProgressEnvelope readerVisible) {
     Objects.requireNonNull(readerVisible, "readerVisible");
     if (readerVisible.getKind() != ArchiveProgressEnvelope.Kind.READER_VISIBLE
+        || !readerVisible.getScopeIdentity().equals(generation.getScopeIdentity())
         || !readerVisible.getParticipants().equals(generation.getParticipatingDatabases())
         || generation.getIndexedThrough() > readerVisible.getEpoch()
         || generation.getIndexedThrough() == readerVisible.getEpoch()

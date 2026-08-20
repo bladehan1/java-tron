@@ -87,6 +87,8 @@ public final class ServingKeyIndexGeneration implements ServingKeyIndex {
     List<String> participatingDatabases = expectedParticipatingDatabases == null ? null
         : sortedParticipants(expectedParticipatingDatabases);
     if (participatingDatabases != null) {
+      updateStringDigest(sourceDigest,
+          ArchiveParticipantDescriptor.scopeIdentity(participatingDatabases));
       updateParticipantDigest(sourceDigest, participatingDatabases);
     }
 
@@ -103,6 +105,8 @@ public final class ServingKeyIndexGeneration implements ServingKeyIndex {
       if (participatingDatabases == null) {
         participatingDatabases = marker.getDatabases();
         validateParticipantSet(participatingDatabases);
+        updateStringDigest(sourceDigest,
+            ArchiveParticipantDescriptor.scopeIdentity(participatingDatabases));
         updateParticipantDigest(sourceDigest, participatingDatabases);
       } else if (!participatingDatabases.equals(marker.getDatabases())) {
         throw new IllegalArgumentException(
@@ -347,6 +351,12 @@ public final class ServingKeyIndexGeneration implements ServingKeyIndex {
       updateLong(digest, encoded.length);
       digest.update(encoded);
     }
+  }
+
+  private static void updateStringDigest(MessageDigest digest, String value) {
+    byte[] encoded = value.getBytes(StandardCharsets.UTF_8);
+    updateLong(digest, encoded.length);
+    digest.update(encoded);
   }
 
   private static void validateParticipantSet(List<String> databases) {
