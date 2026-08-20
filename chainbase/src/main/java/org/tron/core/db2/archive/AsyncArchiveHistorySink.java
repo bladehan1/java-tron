@@ -116,6 +116,12 @@ public final class AsyncArchiveHistorySink implements DurableBlockReverseDiffSin
     ensureOperational();
   }
 
+  @Override
+  public DurableHistoryMarkerRangeReceipt createMarkerRangeReceipt(int maxMarkers) {
+    ensureOperational();
+    return new DurableHistoryMarkerRangeReceipt(writer, maxMarkers);
+  }
+
   /** Releases completed queue bookkeeping after the corresponding disk epoch is durable. */
   @Override
   public void releaseThrough(long epoch) {

@@ -153,6 +153,11 @@ public final class ArchiveHistoryWriter implements DurableBlockReverseDiffSink, 
   }
 
   @Override
+  public DurableHistoryMarkerRangeReceipt createMarkerRangeReceipt(int maxMarkers) {
+    return new DurableHistoryMarkerRangeReceipt(this, maxMarkers);
+  }
+
+  @Override
   public void releaseThrough(long epoch) {
     // The synchronous writer has no queue bookkeeping to release.
   }
