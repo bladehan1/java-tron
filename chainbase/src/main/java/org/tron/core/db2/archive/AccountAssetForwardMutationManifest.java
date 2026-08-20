@@ -10,22 +10,28 @@ import java.util.TreeSet;
 import org.tron.core.db2.archive.AccountAssetForwardProjector.AssetMutation;
 import org.tron.core.db2.archive.AccountAssetForwardProjector.Projection;
 import org.tron.core.db2.archive.BlockChangeView.PostValue;
+import org.tron.core.db2.archive.P66AccountAssetCodec.Phase;
 
 /** Immutable one-shot account projection input bound to one exact committed target. */
 public final class AccountAssetForwardMutationManifest implements AccountAssetForwardProjector {
 
   private final byte[] encodedTarget;
+  private final String formatId;
+  private final Phase targetPhase;
   private final TreeMap<Key, Entry> entries = new TreeMap<>();
   private final TreeSet<Key> consumed = new TreeSet<>();
   private boolean begun;
   private boolean completed;
 
-  public AccountAssetForwardMutationManifest(HistoryCommitMarker target, List<Entry> entries) {
+  public AccountAssetForwardMutationManifest(HistoryCommitMarker target, Phase targetPhase,
+      List<Entry> entries) {
     HistoryCommitMarker expectedTarget = Objects.requireNonNull(target, "target");
     if (!expectedTarget.getDatabases().equals(sortedParticipants())) {
       throw new IllegalArgumentException("Manifest target must cover exact VERSIONED_STATE set");
     }
     encodedTarget = new HistoryCommitMarkerCodec().encode(expectedTarget);
+    formatId = P66AccountAssetCodec.FORMAT_ID;
+    this.targetPhase = Objects.requireNonNull(targetPhase, "targetPhase");
     for (Entry entry : Objects.requireNonNull(entries, "entries")) {
       if (entry == null) {
         throw new IllegalArgumentException("Manifest contains null entry");
@@ -35,6 +41,14 @@ public final class AccountAssetForwardMutationManifest implements AccountAssetFo
         throw new IllegalArgumentException("Duplicate manifest account physical key");
       }
     }
+  }
+
+  String getFormatId() {
+    return formatId;
+  }
+
+  Phase getTargetPhase() {
+    return targetPhase;
   }
 
   @Override

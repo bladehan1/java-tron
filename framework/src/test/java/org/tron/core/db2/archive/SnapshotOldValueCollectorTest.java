@@ -39,6 +39,7 @@ import org.tron.core.db2.archive.AccountAssetForwardProjector.AssetMutation;
 import org.tron.core.db2.archive.AccountAssetPreparedBlockPayloadOwner.FrozenBatch;
 import org.tron.core.db2.archive.BlockReverseDiff.DbGroup;
 import org.tron.core.db2.archive.BlockReverseDiff.Entry;
+import org.tron.core.db2.archive.P66AccountAssetCodec.Phase;
 import org.tron.core.db2.common.DB;
 import org.tron.core.db2.common.Flusher;
 import org.tron.core.db2.common.WrappedByteArray;
@@ -1174,7 +1175,7 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
         throw new ArchivePersistenceException("Prepared block projection target mismatch");
       }
       return new ArchiveBlockForwardPayload(target, view,
-          new AccountAssetForwardMutationManifest(target, Collections.emptyList()));
+          new AccountAssetForwardMutationManifest(target, Phase.P66_ON, Collections.emptyList()));
     });
     return projection;
   }

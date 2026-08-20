@@ -20,6 +20,7 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.tron.core.db2.archive.ArchiveProgressEnvelope.Kind;
+import org.tron.core.db2.archive.P66AccountAssetCodec.Phase;
 
 public class ArchiveParticipantRecoveryStorageTest {
 
@@ -118,7 +119,8 @@ public class ArchiveParticipantRecoveryStorageTest {
     mutations.put("account", mutation("account", 2, 2));
     mutations.put("account-asset", mutation("account-asset", 2, 2));
     ArchiveTargetMutationPlan plan = new ArchiveTargetMutationPlan(
-        global(Kind.APPLY_CHECKPOINT, marker), mutations);
+        global(Kind.APPLY_CHECKPOINT, marker), P66AccountAssetCodec.FORMAT_ID,
+        Phase.P66_ON, mutations);
     new ArchiveTargetMutationPlanFile(checkpointPath).store(plan);
     return plan;
   }
@@ -131,7 +133,8 @@ public class ArchiveParticipantRecoveryStorageTest {
     mutations.put("account-asset", Collections.singletonList(
         ArchiveParticipantMutation.put(bytes("replayed"), bytes("substituted-asset"))));
     new ArchiveTargetMutationPlanFile(checkpointPath).store(new ArchiveTargetMutationPlan(
-        global(Kind.APPLY_CHECKPOINT, marker), mutations));
+        global(Kind.APPLY_CHECKPOINT, marker), P66AccountAssetCodec.FORMAT_ID,
+        Phase.P66_ON, mutations));
   }
 
   private static void assertRecoveryFails(Path archive, Path checkpointPath,

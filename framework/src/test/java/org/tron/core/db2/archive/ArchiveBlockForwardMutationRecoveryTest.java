@@ -24,6 +24,7 @@ import org.tron.common.BaseMethodTest;
 import org.tron.core.db2.ISession;
 import org.tron.core.db2.archive.ArchiveProgressEnvelope.Kind;
 import org.tron.core.db2.archive.ArchiveTargetApplyCoordinator.Stage;
+import org.tron.core.db2.archive.P66AccountAssetCodec.Phase;
 import org.tron.core.db2.common.DB;
 import org.tron.core.db2.common.Flusher;
 import org.tron.core.db2.common.WrappedByteArray;
@@ -91,8 +92,8 @@ public class ArchiveBlockForwardMutationRecoveryTest extends BaseMethodTest {
       ArchiveParticipantMutationBatch batch;
       try (ViewFixture viewFixture = new ViewFixture()) {
         ArchiveBlockForwardMutationCapture capture = new ArchiveBlockForwardMutationCapture(
-            target.getMeta(), new ArchiveBlockForwardMutationLimits(
-                10, 10, 1024, 1024, 1024 * 1024));
+            target.getMeta(), Phase.P66_ON,
+            new ArchiveBlockForwardMutationLimits(10, 10, 1024, 1024, 1024 * 1024));
         capture.recordAccount(target.getMeta(), accountKey,
             BlockChangeView.PostValue.present(rawAccount),
             BlockChangeView.PostValue.present(canonicalAccount));
@@ -370,8 +371,8 @@ public class ArchiveBlockForwardMutationRecoveryTest extends BaseMethodTest {
       byte[] assetValue, boolean deleteAsset, byte[] proposalKey, byte[] proposalValue) {
     try (ViewFixture viewFixture = new ViewFixture()) {
       ArchiveBlockForwardMutationCapture capture = new ArchiveBlockForwardMutationCapture(
-          target.getMeta(), new ArchiveBlockForwardMutationLimits(
-              10, 10, 1024, 1024, 1024 * 1024));
+          target.getMeta(), Phase.P66_ON,
+          new ArchiveBlockForwardMutationLimits(10, 10, 1024, 1024, 1024 * 1024));
       capture.recordAccount(target.getMeta(), accountKey,
           BlockChangeView.PostValue.present(rawAccount),
           BlockChangeView.PostValue.present(canonicalAccount));
@@ -392,7 +393,8 @@ public class ArchiveBlockForwardMutationRecoveryTest extends BaseMethodTest {
   private static ArchiveParticipantMutationBatch captureEmpty(HistoryCommitMarker target) {
     try (ViewFixture viewFixture = new ViewFixture()) {
       ArchiveBlockForwardMutationCapture capture = new ArchiveBlockForwardMutationCapture(
-          target.getMeta(), new ArchiveBlockForwardMutationLimits(0, 0, 0, 0, 0));
+          target.getMeta(), Phase.P66_ON,
+          new ArchiveBlockForwardMutationLimits(0, 0, 0, 0, 0));
       BlockChangeView view = viewFixture.capture(target.getMeta(), databases -> { });
       capture.attach(view);
       return capture.seal(target);

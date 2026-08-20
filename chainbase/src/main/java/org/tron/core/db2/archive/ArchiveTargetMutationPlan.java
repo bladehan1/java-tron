@@ -7,17 +7,26 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.TreeMap;
+import org.tron.core.db2.archive.P66AccountAssetCodec.Phase;
 import org.tron.core.db2.archive.ArchiveProgressEnvelope.Kind;
 
 /** Immutable target H identity plus exact per-participant business mutations. */
 final class ArchiveTargetMutationPlan {
 
   private final ArchiveProgressEnvelope target;
+  private final String accountAssetFormatId;
+  private final Phase targetPhase;
   private final Map<String, List<ArchiveParticipantMutation>> mutations;
 
-  ArchiveTargetMutationPlan(ArchiveProgressEnvelope target,
-      Map<String, ? extends List<ArchiveParticipantMutation>> mutations) {
+  ArchiveTargetMutationPlan(ArchiveProgressEnvelope target, String accountAssetFormatId,
+      Phase targetPhase, Map<String, ? extends List<ArchiveParticipantMutation>> mutations) {
     this.target = Objects.requireNonNull(target, "target");
+    this.accountAssetFormatId = Objects.requireNonNull(accountAssetFormatId,
+        "accountAssetFormatId");
+    if (accountAssetFormatId.isEmpty()) {
+      throw new IllegalArgumentException("AccountAsset transition format must not be empty");
+    }
+    this.targetPhase = Objects.requireNonNull(targetPhase, "targetPhase");
     if (target.getKind() != Kind.APPLY_CHECKPOINT || target.getParticipant() != null) {
       throw new IllegalArgumentException("Mutation plan target must be a global checkpoint");
     }
@@ -54,6 +63,14 @@ final class ArchiveTargetMutationPlan {
 
   ArchiveProgressEnvelope getTarget() {
     return target;
+  }
+
+  String getAccountAssetFormatId() {
+    return accountAssetFormatId;
+  }
+
+  Phase getTargetPhase() {
+    return targetPhase;
   }
 
   List<ArchiveParticipantMutation> getMutations(String participant) {

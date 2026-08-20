@@ -8,6 +8,7 @@ import org.tron.core.db2.archive.AccountAssetBlockProjectionBridge.TargetAssetOp
 import org.tron.core.db2.archive.BlockChangeView.Change;
 import org.tron.core.db2.archive.BlockChangeView.DatabaseChanges;
 import org.tron.core.db2.archive.BlockChangeView.PostValue;
+import org.tron.core.db2.archive.P66AccountAssetCodec.Phase;
 
 /** Resolves proposal-66 activation from the target block's exact properties post view. */
 public final class AccountAssetTargetActivationResolver {
@@ -39,6 +40,7 @@ public final class AccountAssetTargetActivationResolver {
       throw new ArchivePersistenceException("Missing properties block view");
     }
 
+    byte[] previous = properties.getPrevious(PROPOSAL_66_PHYSICAL_KEY);
     byte[] value = null;
     boolean changed = false;
     for (Change change : properties.getChanges()) {
@@ -55,9 +57,16 @@ public final class AccountAssetTargetActivationResolver {
       }
     }
     if (!changed) {
-      value = properties.getPrevious(PROPOSAL_66_PHYSICAL_KEY);
+      value = previous;
     }
-    return TargetAssetOptimization.forTarget(expectedTarget, decode(value));
+    boolean previousEnabled = decode(previous);
+    boolean targetEnabled = decode(value);
+    if (previousEnabled && !targetEnabled) {
+      throw new ArchivePersistenceException("Proposal-66 property must not regress");
+    }
+    Phase phase = !targetEnabled ? Phase.P66_OFF
+        : previousEnabled ? Phase.P66_ON : Phase.P66_ACTIVATION;
+    return TargetAssetOptimization.forTarget(expectedTarget, phase);
   }
 
   static byte[] proposal66PhysicalKey() {
