@@ -5,6 +5,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
+import static org.junit.Assert.assertTrue;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -272,6 +273,98 @@ public class ArchiveBlockForwardMutationRecoveryTest extends BaseMethodTest {
     }
   }
 
+  @Test
+  public void emptyCaptureTargetAdvancesProgressWithoutChangingBusinessData() throws Exception {
+    Path archive = temporaryFolder.newFolder("empty-capture-recovery").toPath();
+    List<HistoryCommitMarker> markers = initializeHistory(archive, 2);
+    HistoryCommitMarker initial = markers.get(0);
+    HistoryCommitMarker firstTarget = markers.get(1);
+    HistoryCommitMarker emptyTarget = markers.get(2);
+    Path checkpointPath = archive.resolve("progress/checkpoint.progress");
+    Path readerPath = archive.resolve("progress/reader.progress");
+    ArchiveProgressEnvelopeCodec progressCodec = new ArchiveProgressEnvelopeCodec();
+    new ArchiveProgressFile(checkpointPath, progressCodec).store(global(Kind.APPLY_CHECKPOINT,
+        initial));
+    new ArchiveProgressFile(readerPath, progressCodec).store(global(Kind.READER_VISIBLE, initial));
+
+    byte[] accountKey = bytes(2, 1);
+    byte[] assetKey = append(accountKey, 4);
+    byte[] proposalKey = bytes(2, 6);
+    byte[] accountValue = bytes(3, 11);
+    byte[] assetValue = bytes(3, 12);
+    byte[] proposalValue = bytes(3, 13);
+
+    try (ParticipantFixture participants = new ParticipantFixture(archive, initial)) {
+      ArchiveParticipantMutationBatch firstBatch = capture(firstTarget, accountKey,
+          bytes(3, 10), accountValue, assetKey, assetValue, false,
+          proposalKey, proposalValue);
+      try (HistoryCommitStore history = new HistoryCommitStore(
+          archive, new HistoryCommitMarkerCodec())) {
+        new ArchiveTargetApplyCoordinator(history, checkpointPath, participants.engines,
+            readerPath, PARTICIPANTS, action -> action.run()).apply(firstBatch, () -> { });
+      }
+      byte[] firstDigest = new ArchiveProgressFile(checkpointPath, progressCodec)
+          .load().getMutationPlanDigest();
+
+      ArchiveParticipantMutationBatch emptyBatch = captureEmpty(emptyTarget);
+      assertTrue(emptyBatch.getMutations().isEmpty());
+      assertEquals(PARTICIPANTS, emptyBatch.getParticipants());
+      try (HistoryCommitStore history = new HistoryCommitStore(
+          archive, new HistoryCommitMarkerCodec())) {
+        ArchiveTargetApplyCoordinator coordinator = new ArchiveTargetApplyCoordinator(history,
+            checkpointPath, participants.engines, readerPath, PARTICIPANTS,
+            action -> action.run(),
+            (stage, participant) -> failAfterEmptyCheckpoint(stage), temporary -> { });
+        assertThrows(IOException.class, () -> coordinator.apply(emptyBatch, () -> { }));
+      }
+
+      for (String participant : PARTICIPANTS) {
+        assertEquals(2, participants.counted.get(participant).getApplyCount());
+      }
+      assertArrayEquals(accountValue, participants.account.get(accountKey));
+      assertArrayEquals(assetValue, participants.accountAsset.get(assetKey));
+      assertArrayEquals(proposalValue,
+          participants.memory.get("proposal").get(proposalKey));
+
+      AtomicInteger refreshes = new AtomicInteger();
+      try (ArchiveParticipantRecoveryStorage recovery =
+          new ArchiveParticipantRecoveryStorage(archive, 4096, checkpointPath,
+              participants.engines, readerPath, PARTICIPANTS, action -> action.run(),
+              refreshes::incrementAndGet)) {
+        new ArchiveRecoveryExecutor(recovery).recover();
+      }
+
+      for (String participant : PARTICIPANTS) {
+        assertEquals(3, participants.counted.get(participant).getApplyCount());
+      }
+      assertEquals(1, refreshes.get());
+      assertArrayEquals(accountValue, participants.account.get(accountKey));
+      assertArrayEquals(assetValue, participants.accountAsset.get(assetKey));
+      assertArrayEquals(proposalValue,
+          participants.memory.get("proposal").get(proposalKey));
+
+      ArchiveProgressEnvelope checkpoint =
+          new ArchiveProgressFile(checkpointPath, progressCodec).load();
+      ArchiveProgressEnvelope reader =
+          new ArchiveProgressFile(readerPath, progressCodec).load();
+      byte[] emptyDigest = checkpoint.getMutationPlanDigest();
+      assertFalse(Arrays.equals(firstDigest, emptyDigest));
+      for (String participant : PARTICIPANTS) {
+        assertArrayEquals(emptyDigest,
+            participants.engines.get(participant).loadProgress().getMutationPlanDigest());
+      }
+      assertArrayEquals(emptyDigest, reader.getMutationPlanDigest());
+      assertEquals(emptyTarget.getMeta().getEpoch(), reader.getEpoch());
+      assertFalse(Files.exists(new ArchiveTargetMutationPlanFile(checkpointPath).getPath()));
+
+      try (ArchiveParticipantRecoveryStorage fixed =
+          new ArchiveParticipantRecoveryStorage(archive, 4096, checkpointPath,
+              participants.engines, readerPath, PARTICIPANTS)) {
+        assertEquals(0, new ArchiveRecoveryExecutor(fixed).recover().getActions().size());
+      }
+    }
+  }
+
   private static ArchiveParticipantMutationBatch capture(HistoryCommitMarker target,
       byte[] accountKey, byte[] rawAccount, byte[] canonicalAccount, byte[] assetKey,
       byte[] assetValue, boolean deleteAsset, byte[] proposalKey, byte[] proposalValue) {
@@ -296,10 +389,26 @@ public class ArchiveBlockForwardMutationRecoveryTest extends BaseMethodTest {
     }
   }
 
+  private static ArchiveParticipantMutationBatch captureEmpty(HistoryCommitMarker target) {
+    try (ViewFixture viewFixture = new ViewFixture()) {
+      ArchiveBlockForwardMutationCapture capture = new ArchiveBlockForwardMutationCapture(
+          target.getMeta(), new ArchiveBlockForwardMutationLimits(0, 0, 0, 0, 0));
+      BlockChangeView view = viewFixture.capture(target.getMeta(), databases -> { });
+      capture.attach(view);
+      return capture.seal(target);
+    }
+  }
+
   private static void failAfter(Stage stage, String participant, String failureParticipant)
       throws IOException {
     if (stage == Stage.AFTER_PARTICIPANT && failureParticipant.equals(participant)) {
       throw new IOException("injected during second target");
+    }
+  }
+
+  private static void failAfterEmptyCheckpoint(Stage stage) throws IOException {
+    if (stage == Stage.AFTER_CHECKPOINT) {
+      throw new IOException("injected after empty checkpoint");
     }
   }
 
