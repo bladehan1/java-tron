@@ -14,7 +14,6 @@ import java.util.List;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
-import org.tron.core.db2.archive.LevelDbArchiveParticipant.Mutation;
 import org.tron.core.db2.archive.LevelDbArchiveParticipant.Stage;
 
 public class LevelDbArchiveParticipantTest {
@@ -31,14 +30,16 @@ public class LevelDbArchiveParticipantTest {
       Path directory = temporaryFolder.newFolder("native-" + failedStage).toPath();
       try (LevelDbArchiveParticipant participant = new LevelDbArchiveParticipant(
           directory, "account", PARTICIPANTS)) {
-        participant.apply(Collections.singletonList(Mutation.put(bytes("key"), bytes("old"))),
+        participant.apply(Collections.singletonList(
+            ArchiveParticipantMutation.put(bytes("key"), bytes("old"))),
             progress(1));
       }
 
       try (LevelDbArchiveParticipant failing = new LevelDbArchiveParticipant(
           directory, "account", PARTICIPANTS, stage -> failAt(failedStage, stage))) {
         assertThrows(IOException.class, () -> failing.apply(
-            Collections.singletonList(Mutation.put(bytes("key"), bytes("new"))), progress(2)));
+            Collections.singletonList(
+                ArchiveParticipantMutation.put(bytes("key"), bytes("new"))), progress(2)));
       }
 
       try (LevelDbArchiveParticipant reopened = new LevelDbArchiveParticipant(
@@ -56,9 +57,11 @@ public class LevelDbArchiveParticipantTest {
     Path directory = temporaryFolder.newFolder("native-delete").toPath();
     try (LevelDbArchiveParticipant participant = new LevelDbArchiveParticipant(
         directory, "account", PARTICIPANTS)) {
-      participant.apply(Collections.singletonList(Mutation.put(bytes("key"), bytes("value"))),
+      participant.apply(Collections.singletonList(
+          ArchiveParticipantMutation.put(bytes("key"), bytes("value"))),
           progress(1));
-      participant.apply(Collections.singletonList(Mutation.delete(bytes("key"))), progress(2));
+      participant.apply(Collections.singletonList(
+          ArchiveParticipantMutation.delete(bytes("key"))), progress(2));
       assertNull(participant.get(bytes("key")));
       assertEquals(2, participant.loadProgress().getEpoch());
     }
@@ -69,13 +72,15 @@ public class LevelDbArchiveParticipantTest {
     Path directory = temporaryFolder.newFolder("native-reset").toPath();
     try (LevelDbArchiveParticipant participant = new LevelDbArchiveParticipant(
         directory, "account", PARTICIPANTS)) {
-      participant.apply(Collections.singletonList(Mutation.put(bytes("key"), bytes("old"))),
+      participant.apply(Collections.singletonList(
+          ArchiveParticipantMutation.put(bytes("key"), bytes("old"))),
           progress(1));
       participant.reset();
       assertNull(participant.get(bytes("key")));
       assertThrows(ArchivePersistenceException.class, participant::loadProgress);
 
-      participant.apply(Collections.singletonList(Mutation.put(bytes("key"), bytes("new"))),
+      participant.apply(Collections.singletonList(
+          ArchiveParticipantMutation.put(bytes("key"), bytes("new"))),
           progress(2));
     }
 
@@ -95,7 +100,8 @@ public class LevelDbArchiveParticipantTest {
           ArchiveProgressEnvelope.Kind.PARTICIPANT_PROGRESS, "account-asset", 1,
           bytes(32, 1), bytes(16, 2), bytes(32, 3), PARTICIPANTS);
       assertThrows(IllegalArgumentException.class, () -> participant.apply(
-          Collections.singletonList(Mutation.put(bytes("key"), bytes("value"))), wrong));
+          Collections.singletonList(
+              ArchiveParticipantMutation.put(bytes("key"), bytes("value"))), wrong));
       assertNull(participant.get(bytes("key")));
       assertThrows(ArchivePersistenceException.class, participant::loadProgress);
     }

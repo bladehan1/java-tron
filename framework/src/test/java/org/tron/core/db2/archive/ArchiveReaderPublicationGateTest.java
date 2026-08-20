@@ -1,5 +1,6 @@
 package org.tron.core.db2.archive;
 
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
@@ -44,11 +45,11 @@ public class ArchiveReaderPublicationGateTest {
       CountDownLatch entered = new CountDownLatch(1);
       CountDownLatch release = new CountDownLatch(1);
       AtomicBoolean paused = new AtomicBoolean();
-      Map<String, ProgressSource> sources = fixture.sources();
+      Map<String, ArchiveParticipantProgressSource> sources = fixture.sources();
       String first = fixture.participants.get(0);
-      ProgressSource original = sources.get(first);
+      ArchiveParticipantProgressSource original = sources.get(first);
       sources.put(first, () -> {
-        ArchiveProgressEnvelope loaded = original.load();
+        ArchiveProgressEnvelope loaded = original.loadProgress();
         if (paused.compareAndSet(false, true)) {
           entered.countDown();
           try {
@@ -112,7 +113,7 @@ public class ArchiveReaderPublicationGateTest {
     }
 
     try (Fixture absentLevelDb = fixture()) {
-      Map<String, ProgressSource> sources = absentLevelDb.sources();
+      Map<String, ArchiveParticipantProgressSource> sources = absentLevelDb.sources();
       sources.put("account", () -> null);
       ArchiveReaderPublicationGate gate = new ArchiveReaderPublicationGate(absentLevelDb.history,
           absentLevelDb.checkpointSource(), sources, absentLevelDb.readerPath,
@@ -125,12 +126,12 @@ public class ArchiveReaderPublicationGateTest {
   @Test
   public void secondScanDriftAndRegressionPreserveCurrentReader() throws Exception {
     try (Fixture drift = fixture()) {
-      Map<String, ProgressSource> sources = drift.sources();
+      Map<String, ArchiveParticipantProgressSource> sources = drift.sources();
       String participant = drift.participants.get(0);
-      ProgressSource stable = sources.get(participant);
+      ArchiveParticipantProgressSource stable = sources.get(participant);
       AtomicInteger reads = new AtomicInteger();
       sources.put(participant, () -> reads.getAndIncrement() == 0
-          ? stable.load() : drift.envelope(Kind.PARTICIPANT_PROGRESS, participant, 0));
+          ? stable.loadProgress() : drift.envelope(Kind.PARTICIPANT_PROGRESS, participant, 0));
       ArchiveReaderPublicationGate gate = new ArchiveReaderPublicationGate(drift.history,
           drift.checkpointSource(), sources, drift.readerPath, drift.participants,
           action -> action.run());
@@ -160,6 +161,26 @@ public class ArchiveReaderPublicationGateTest {
 
       fixture.fileGate().publish(1);
       assertEquals(1, fixture.reader().getEpoch());
+    }
+  }
+
+  @Test
+  public void inheritsExactPlanDigestAndRejectsParticipantMismatch() throws Exception {
+    byte[] digest = bytes(32, 77);
+    try (Fixture inherited = fixture()) {
+      inherited.writeAuthorities(1, digest);
+      inherited.fileGate().publish(1);
+      assertArrayEquals(digest, inherited.reader().getMutationPlanDigest());
+    }
+
+    try (Fixture mismatch = fixture()) {
+      mismatch.writeAuthorities(1, digest);
+      String participant = mismatch.participants.get(0);
+      mismatch.store(mismatch.participantPaths.get(participant),
+          mismatch.envelope(Kind.PARTICIPANT_PROGRESS, participant, 1, bytes(32, 78)));
+      assertThrows(ArchivePersistenceException.class,
+          () -> mismatch.fileGate().publish(1));
+      assertEquals(0, mismatch.reader().getEpoch());
     }
   }
 
@@ -199,18 +220,24 @@ public class ArchiveReaderPublicationGateTest {
       return () -> new ArchiveProgressFile(checkpointPath, codec).load();
     }
 
-    private Map<String, ProgressSource> sources() {
-      Map<String, ProgressSource> sources = new TreeMap<>();
+    private Map<String, ArchiveParticipantProgressSource> sources() {
+      Map<String, ArchiveParticipantProgressSource> sources = new TreeMap<>();
       participantPaths.forEach((participant, path) -> sources.put(participant,
           () -> new ArchiveProgressFile(path, codec).load()));
       return sources;
     }
 
     private void writeAuthorities(int epoch) throws IOException {
-      store(checkpointPath, envelope(Kind.APPLY_CHECKPOINT, null, epoch));
+      writeAuthorities(epoch, null);
+    }
+
+    private void writeAuthorities(int epoch, byte[] mutationPlanDigest) throws IOException {
+      store(checkpointPath,
+          envelope(Kind.APPLY_CHECKPOINT, null, epoch, mutationPlanDigest));
       for (Map.Entry<String, Path> entry : participantPaths.entrySet()) {
         store(entry.getValue(),
-            envelope(Kind.PARTICIPANT_PROGRESS, entry.getKey(), epoch));
+            envelope(Kind.PARTICIPANT_PROGRESS, entry.getKey(), epoch,
+                mutationPlanDigest));
       }
     }
 
@@ -219,10 +246,15 @@ public class ArchiveReaderPublicationGateTest {
     }
 
     private ArchiveProgressEnvelope envelope(Kind kind, String participant, int epoch) {
+      return envelope(kind, participant, epoch, null);
+    }
+
+    private ArchiveProgressEnvelope envelope(Kind kind, String participant, int epoch,
+        byte[] mutationPlanDigest) {
       HistoryCommitMarker marker = history.get(epoch);
       return new ArchiveProgressEnvelope(kind, participant, epoch,
           marker.getMeta().getBlockHash(), marker.getBatchId(),
-          marker.getHistoryLocation().getBodyDigest(), participants);
+          marker.getHistoryLocation().getBodyDigest(), mutationPlanDigest, participants);
     }
 
     private void store(Path path, ArchiveProgressEnvelope envelope) throws IOException {

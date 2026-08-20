@@ -18,7 +18,7 @@ import org.iq80.leveldb.WriteBatch;
 import org.iq80.leveldb.WriteOptions;
 
 /** LevelDB participant whose business mutations and D[i] share one synced native WriteBatch. */
-public final class LevelDbArchiveParticipant implements Closeable {
+public final class LevelDbArchiveParticipant implements Closeable, ArchiveParticipant {
 
   private static final byte BUSINESS_PREFIX = 1;
   private static final byte[] PROGRESS_KEY = new byte[]{0, 'p', 'r', 'o', 'g', 'r', 'e', 's', 's'};
@@ -50,17 +50,20 @@ public final class LevelDbArchiveParticipant implements Closeable {
     database = open();
   }
 
-  public synchronized void apply(List<Mutation> mutations, ArchiveProgressEnvelope progress)
+  @Override
+  public synchronized void apply(List<ArchiveParticipantMutation> mutations,
+      ArchiveProgressEnvelope progress)
       throws IOException {
     Objects.requireNonNull(mutations, "mutations");
     requireProgress(progress);
     try (WriteBatch batch = database.createWriteBatch()) {
-      for (Mutation mutation : mutations) {
+      for (ArchiveParticipantMutation mutation : mutations) {
         Objects.requireNonNull(mutation, "mutation");
-        if (mutation.value == null) {
-          batch.delete(businessKey(mutation.key));
+        byte[] value = mutation.getValue();
+        if (value == null) {
+          batch.delete(businessKey(mutation.getKey()));
         } else {
-          batch.put(businessKey(mutation.key), mutation.value);
+          batch.put(businessKey(mutation.getKey()), value);
         }
       }
       batch.put(PROGRESS_KEY, progressCodec.encode(progress));
@@ -75,6 +78,7 @@ public final class LevelDbArchiveParticipant implements Closeable {
     return value == null ? null : Arrays.copyOf(value, value.length);
   }
 
+  @Override
   public synchronized ArchiveProgressEnvelope loadProgress() {
     byte[] encoded = database.get(PROGRESS_KEY);
     if (encoded == null) {
@@ -140,24 +144,6 @@ public final class LevelDbArchiveParticipant implements Closeable {
       previous = current;
     }
     return Collections.unmodifiableList(copy);
-  }
-
-  public static final class Mutation {
-    private final byte[] key;
-    private final byte[] value;
-
-    private Mutation(byte[] key, byte[] value) {
-      this.key = Arrays.copyOf(Objects.requireNonNull(key, "key"), key.length);
-      this.value = value == null ? null : Arrays.copyOf(value, value.length);
-    }
-
-    public static Mutation put(byte[] key, byte[] value) {
-      return new Mutation(key, Objects.requireNonNull(value, "value"));
-    }
-
-    public static Mutation delete(byte[] key) {
-      return new Mutation(key, null);
-    }
   }
 
   enum Stage {
