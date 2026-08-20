@@ -136,6 +136,14 @@ public final class ArchiveHistoryWriter implements DurableBlockReverseDiffSink, 
     return commits.head();
   }
 
+  synchronized HistoryCommitMarker committedMarker(long epoch) {
+    HistoryCommitMarker marker = commits.get(epoch);
+    if (marker == null) {
+      return null;
+    }
+    return commitCodec.decode(commitCodec.encode(marker));
+  }
+
   @Override
   public synchronized void awaitCommitted(long epoch) {
     HistoryCommitMarker head = commits.head();
