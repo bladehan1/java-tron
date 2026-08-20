@@ -80,6 +80,21 @@ public class ArchiveTargetMutationPlanBuilderTest {
     assertThrows(ArchivePersistenceException.class,
         () -> new ArchiveTargetMutationPlanBuilder().build(incompleteTarget,
             new ArchiveParticipantMutationBatch(incompleteTarget, Collections.emptyList())));
+
+    List<String> oldExact27 = new ArrayList<>(participants());
+    oldExact27.add("abi");
+    Collections.sort(oldExact27);
+    HistoryCommitMarker oldTarget = marker(1, oldExact27);
+    assertThrows(ArchivePersistenceException.class,
+        () -> new ArchiveTargetMutationPlanBuilder().build(oldTarget,
+            new ArchiveParticipantMutationBatch(oldTarget, Collections.emptyList())));
+
+    List<String> v2OnlyExact25 = new ArrayList<>(participants());
+    v2OnlyExact25.remove("asset-issue");
+    HistoryCommitMarker v2OnlyTarget = marker(1, v2OnlyExact25);
+    assertThrows(ArchivePersistenceException.class,
+        () -> new ArchiveTargetMutationPlanBuilder().build(v2OnlyTarget,
+            new ArchiveParticipantMutationBatch(v2OnlyTarget, Collections.emptyList())));
   }
 
   @Test
