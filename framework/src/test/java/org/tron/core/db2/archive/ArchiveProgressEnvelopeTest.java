@@ -5,6 +5,8 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
+import com.google.common.hash.Hashing;
+import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
@@ -40,6 +42,32 @@ public class ArchiveProgressEnvelopeTest {
     ArchiveProgressEnvelope bound = new ArchiveProgressEnvelope(Kind.APPLY_CHECKPOINT, null,
         10, bytes(32, 1), bytes(16, 2), bytes(32, 3), bytes(32, 4), PARTICIPANTS);
     assertEnvelope(bound, codec.decode(codec.encode(bound)));
+    assertEquals(ArchiveParticipantDescriptor.scopeIdentity(PARTICIPANTS),
+        codec.decode(first).getScopeIdentity());
+
+    List<String> approvedParticipants = ArchiveParticipantDescriptor.current().getParticipants();
+    ArchiveProgressEnvelope approved = new ArchiveProgressEnvelope(Kind.READER_VISIBLE, null,
+        10, bytes(32, 1), bytes(16, 2), bytes(32, 3), approvedParticipants);
+    assertEquals(ArchiveParticipantDescriptor.FORMAT_ID,
+        codec.decode(codec.encode(approved)).getScopeIdentity());
+  }
+
+  @Test
+  public void rejectsLegacyVersionAndSameParticipantsWithDifferentScope() {
+    ArchiveProgressEnvelopeCodec codec = new ArchiveProgressEnvelopeCodec();
+    byte[] legacy = codec.encode(checkpoint(10, 1));
+    ByteBuffer.wrap(legacy).putShort(4, (short) 2);
+    refreshChecksum(legacy);
+    assertThrows(IllegalArgumentException.class, () -> codec.decode(legacy));
+
+    ArchiveProgressEnvelope substituted = new ArchiveProgressEnvelope(
+        Kind.APPLY_CHECKPOINT, null, 10, bytes(32, 1), bytes(16, 2), bytes(32, 3), null,
+        PARTICIPANTS, "experimental/substituted-scope");
+    assertThrows(IllegalArgumentException.class,
+        () -> codec.decode(codec.encode(substituted)));
+    assertThrows(ArchivePersistenceException.class,
+        () -> substituted.requireIdentity(Kind.APPLY_CHECKPOINT, null, 10, bytes(32, 1),
+            bytes(16, 2), bytes(32, 3), PARTICIPANTS));
   }
 
   @Test
@@ -148,6 +176,13 @@ public class ArchiveProgressEnvelopeTest {
     assertArrayEquals(expected.getBatchId(), actual.getBatchId());
     assertArrayEquals(expected.getPayloadDigest(), actual.getPayloadDigest());
     assertArrayEquals(expected.getMutationPlanDigest(), actual.getMutationPlanDigest());
+    assertEquals(expected.getScopeIdentity(), actual.getScopeIdentity());
     assertEquals(expected.getParticipants(), actual.getParticipants());
+  }
+
+  private static void refreshChecksum(byte[] encoded) {
+    int payloadLength = encoded.length - Integer.BYTES;
+    int checksum = Hashing.crc32c().hashBytes(encoded, 0, payloadLength).asInt();
+    ByteBuffer.wrap(encoded, payloadLength, Integer.BYTES).putInt(checksum);
   }
 }
