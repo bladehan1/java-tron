@@ -151,21 +151,7 @@ final class ArchiveBaseManifest {
   }
 
   private static String scopeIdentity(List<String> participants) {
-    if (ArchiveParticipantDescriptor.current().getParticipants().equals(participants)) {
-      return ArchiveParticipantDescriptor.FORMAT_ID;
-    }
-    try {
-      ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-      DataOutputStream output = new DataOutputStream(bytes);
-      for (String participant : participants) {
-        writeString(output, participant);
-      }
-      output.flush();
-      return "experimental/" + Hashing.sha256().hashBytes(bytes.toByteArray());
-    } catch (IOException impossible) {
-      throw new IllegalStateException("Unexpected participant identity encoding failure",
-          impossible);
-    }
+    return ArchiveParticipantDescriptor.scopeIdentity(participants);
   }
 
   private static void writeString(DataOutputStream output, String value) throws IOException {
