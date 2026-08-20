@@ -41,6 +41,7 @@ import org.tron.core.db2.archive.AccountAssetPreparedBlockPayloadOwner;
 import org.tron.core.db2.archive.AccountAssetPreparedBlockPayloadOwner.FrozenBatch;
 import org.tron.core.db2.archive.ArchiveBlockForwardPayload;
 import org.tron.core.db2.archive.ArchiveBlockProjectionPreparer;
+import org.tron.core.db2.archive.ArchivePersistenceException;
 import org.tron.core.db2.archive.ArchiveStateBarrier.ArchiveStateAction;
 import org.tron.core.db2.archive.ArchiveStoreScope;
 import org.tron.core.db2.archive.BlockChangeView;
@@ -107,6 +108,7 @@ public class SnapshotManager implements RevokingDatabase {
       archiveForwardPayloadOwners = new HashMap<>();
   private FrozenBatch pendingArchiveForwardFlush;
   private List<ArchiveBlockForwardPayload> sealedArchiveForwardFlush;
+  private Long submittedArchiveForwardHistoryEpoch;
   private BlockReverseDiffSink blockReverseDiffSink;
   @Getter
   private volatile long archiveReadableEpoch = -1;
@@ -626,6 +628,7 @@ public class SnapshotManager implements RevokingDatabase {
       pendingArchiveForwardFlush = null;
     }
     sealedArchiveForwardFlush = null;
+    submittedArchiveForwardHistoryEpoch = null;
     for (Map.Entry<BlockSnapshotMeta, AccountAssetPreparedBlockPayloadOwner> entry
         : archiveForwardPayloadOwners.entrySet()) {
       AccountAssetPreparedBlockPayloadOwner owner = entry.getValue();
@@ -754,6 +757,8 @@ public class SnapshotManager implements RevokingDatabase {
     if (!(blockReverseDiffSink instanceof DurableBlockReverseDiffSink)) {
       throw new TronDBException("Archive sink cannot prove durable history before checkpoint");
     }
+    FrozenBatch frozenForward = archiveBlockProjectionPreparer == null
+        ? null : freezeArchiveForwardFlushRange();
     Chainbase stateDatabase = dbs.stream()
         .filter(db -> ArchiveStoreScope.isStateDatabase(db.getDbName()))
         .findFirst()
@@ -787,8 +792,22 @@ public class SnapshotManager implements RevokingDatabase {
     try {
       DurableBlockReverseDiffSink durableSink =
           (DurableBlockReverseDiffSink) blockReverseDiffSink;
-      durableSink.acceptAll(prepared);
+      if (frozenForward == null || submittedArchiveForwardHistoryEpoch == null) {
+        durableSink.acceptAll(prepared);
+        if (frozenForward != null) {
+          submittedArchiveForwardHistoryEpoch = last.getEpoch();
+        }
+      } else if (submittedArchiveForwardHistoryEpoch.longValue() != last.getEpoch()) {
+        throw new ArchivePersistenceException(
+            "Submitted archive history target does not match frozen forward range");
+      }
       durableSink.awaitCommitted(last.getEpoch());
+      if (frozenForward != null) {
+        DurableHistoryMarkerRangeReceipt receipt =
+            durableSink.createMarkerRangeReceipt(prepared.size());
+        sealPendingArchiveForwardFlush(receipt);
+        submittedArchiveForwardHistoryEpoch = null;
+      }
     } catch (RuntimeException e) {
       throw new TronDBException("Archive history durability gate failed", e);
     }
