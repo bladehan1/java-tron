@@ -36,13 +36,20 @@ import org.tron.common.utils.StorageUtils;
 import org.tron.core.db.RevokingDatabase;
 import org.tron.core.db.TronDatabase;
 import org.tron.core.db2.ISession;
-import org.tron.core.db2.archive.ArchiveStoreScope;
+import org.tron.core.db2.archive.AccountAssetBlockProjectionBridge.PreparedBlockProjection;
+import org.tron.core.db2.archive.AccountAssetPreparedBlockPayloadOwner;
+import org.tron.core.db2.archive.AccountAssetPreparedBlockPayloadOwner.FrozenBatch;
+import org.tron.core.db2.archive.ArchiveBlockForwardPayload;
+import org.tron.core.db2.archive.ArchiveBlockProjectionPreparer;
 import org.tron.core.db2.archive.ArchiveStateBarrier.ArchiveStateAction;
+import org.tron.core.db2.archive.ArchiveStoreScope;
 import org.tron.core.db2.archive.BlockChangeView;
 import org.tron.core.db2.archive.BlockReverseDiff;
 import org.tron.core.db2.archive.BlockReverseDiffSink;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
 import org.tron.core.db2.archive.DurableBlockReverseDiffSink;
+import org.tron.core.db2.archive.DurableHistoryMarkerRangeReceipt;
+import org.tron.core.db2.archive.HistoryCommitMarker;
 import org.tron.core.db2.archive.OldValueCollector;
 import org.tron.core.db2.common.DB;
 import org.tron.core.db2.common.IRevokingDB;
@@ -95,6 +102,11 @@ public class SnapshotManager implements RevokingDatabase {
   private int checkpointVersion = 1;   // default v1
 
   private OldValueCollector oldValueCollector;
+  private ArchiveBlockProjectionPreparer archiveBlockProjectionPreparer;
+  private final Map<BlockSnapshotMeta, AccountAssetPreparedBlockPayloadOwner>
+      archiveForwardPayloadOwners = new HashMap<>();
+  private FrozenBatch pendingArchiveForwardFlush;
+  private List<ArchiveBlockForwardPayload> sealedArchiveForwardFlush;
   private BlockReverseDiffSink blockReverseDiffSink;
   @Getter
   private volatile long archiveReadableEpoch = -1;
@@ -253,23 +265,50 @@ public class SnapshotManager implements RevokingDatabase {
     }
 
     BlockReverseDiff reverseDiff = null;
-    if (oldValueCollector != null) {
-      reverseDiff = Objects.requireNonNull(
-          oldValueCollector.collect(BlockChangeView.capture(meta, dbs)),
-          "archive collector returned null");
-    }
-
-    dbs.forEach(db -> {
-      if (db.getHead().isOptimized()) {
-        db.getHead().reloadToMem();
+    AccountAssetPreparedBlockPayloadOwner forwardOwner = null;
+    PreparedBlockProjection projection = null;
+    boolean forwardOwnerAttached = false;
+    try {
+      if (archiveBlockProjectionPreparer != null) {
+        if (archiveForwardPayloadOwners.containsKey(meta)) {
+          throw new IllegalStateException("Archive forward payload owner already exists: " + meta);
+        }
+        BlockChangeView view = BlockChangeView.capture(meta, dbs);
+        projection = Objects.requireNonNull(
+            archiveBlockProjectionPreparer.prepare(view),
+            "archive projection preparer returned null");
+        forwardOwner = new AccountAssetPreparedBlockPayloadOwner(meta);
+        forwardOwner.attach(projection);
+        forwardOwnerAttached = true;
+        reverseDiff = forwardOwner.getReverseDiff();
+      } else if (oldValueCollector != null) {
+        reverseDiff = Objects.requireNonNull(
+            oldValueCollector.collect(BlockChangeView.capture(meta, dbs)),
+            "archive collector returned null");
       }
-    });
+
+      dbs.forEach(db -> {
+        if (db.getHead().isOptimized()) {
+          db.getHead().reloadToMem();
+        }
+      });
+    } catch (RuntimeException | Error failure) {
+      if (forwardOwnerAttached) {
+        forwardOwner.discard();
+      } else if (projection != null) {
+        projection.abort();
+      }
+      throw failure;
+    }
 
     // All fallible work is complete. From here the prepared payload is owned by the block layer;
     // fastPop/reorg can discard it without touching durable archive state.
     for (Chainbase db : dbs) {
       ((SnapshotImpl) db.getHead()).attachArchiveBlock(meta,
           ArchiveStoreScope.isStateDatabase(db.getDbName()) ? reverseDiff : null);
+    }
+    if (forwardOwner != null) {
+      archiveForwardPayloadOwners.put(meta, forwardOwner);
     }
     --activeSession;
   }
@@ -313,6 +352,154 @@ public class SnapshotManager implements RevokingDatabase {
     blockReverseDiffSink = Objects.requireNonNull(sink, "sink");
   }
 
+  /** Enables shared reverse/forward preparation; absent by default and installed independently. */
+  public synchronized void installArchiveProjectionPreparer(
+      ArchiveBlockProjectionPreparer preparer) {
+    ArchiveStoreScope.validate(dbs);
+    if (oldValueCollector == null || blockReverseDiffSink == null) {
+      throw new IllegalStateException("Archive collector must be installed before its preparer");
+    }
+    archiveBlockProjectionPreparer = Objects.requireNonNull(preparer, "preparer");
+  }
+
+  /** Visible for lifecycle verification until the flush freeze coordinator consumes this registry. */
+  public synchronized int getArchiveForwardPayloadOwnerCount() {
+    return archiveForwardPayloadOwners.size();
+  }
+
+  /** Visible for lifecycle verification until the flush freeze coordinator consumes this registry. */
+  public synchronized boolean hasArchiveForwardPayloadOwner(BlockSnapshotMeta meta) {
+    return archiveForwardPayloadOwners.containsKey(Objects.requireNonNull(meta, "meta"));
+  }
+
+  /** Atomically transfers the exact oldest flush range from the registry to one pending owner. */
+  public synchronized FrozenBatch freezeArchiveForwardFlushRange() {
+    if (pendingArchiveForwardFlush != null) {
+      return pendingArchiveForwardFlush;
+    }
+    if (sealedArchiveForwardFlush != null) {
+      throw new IllegalStateException("Archive forward flush is sealed and awaiting claim");
+    }
+    if (archiveBlockProjectionPreparer == null) {
+      throw new IllegalStateException("Archive projection preparer is not installed");
+    }
+    if (flushCount <= 0 || flushCount > size) {
+      throw new IllegalStateException("Archive forward flush range is empty or exceeds topology");
+    }
+
+    List<BlockSnapshotMeta> topology = stateLayerMetas();
+    if (topology.size() != size) {
+      throw new IllegalStateException("Archive state topology size mismatch");
+    }
+    java.util.Set<BlockSnapshotMeta> unique = new java.util.LinkedHashSet<>(topology);
+    if (unique.size() != topology.size()) {
+      throw new IllegalStateException("Archive state topology contains duplicate block metadata");
+    }
+    BlockSnapshotMeta previous = null;
+    for (BlockSnapshotMeta current : topology) {
+      if (previous != null && (current.getEpoch() != previous.getEpoch() + 1
+          || current.getBlockNumber() != previous.getBlockNumber() + 1
+          || !Arrays.equals(current.getParentHash(), previous.getBlockHash()))) {
+        throw new IllegalStateException("Archive state topology is not contiguous");
+      }
+      previous = current;
+    }
+    if (!archiveForwardPayloadOwners.keySet().equals(unique)) {
+      throw new IllegalStateException("Archive forward owner registry does not match topology");
+    }
+    for (BlockSnapshotMeta meta : topology) {
+      AccountAssetPreparedBlockPayloadOwner owner = archiveForwardPayloadOwners.get(meta);
+      if (owner == null || !owner.isAttachedTo(meta)) {
+        throw new IllegalStateException("Archive forward owner is missing or not attached");
+      }
+    }
+
+    List<BlockSnapshotMeta> range = new ArrayList<>(topology.subList(0, flushCount));
+    List<AccountAssetPreparedBlockPayloadOwner> owners = new ArrayList<>(range.size());
+    for (BlockSnapshotMeta meta : range) {
+      owners.add(archiveForwardPayloadOwners.get(meta));
+    }
+
+    FrozenBatch frozen = AccountAssetPreparedBlockPayloadOwner.freezeContiguous(owners);
+    for (BlockSnapshotMeta meta : range) {
+      archiveForwardPayloadOwners.remove(meta);
+    }
+    pendingArchiveForwardFlush = frozen;
+    return frozen;
+  }
+
+  public synchronized boolean hasPendingArchiveForwardFlush() {
+    return pendingArchiveForwardFlush != null || sealedArchiveForwardFlush != null;
+  }
+
+  /** Seals the pending range with an externally validated exact marker list. */
+  public synchronized void sealPendingArchiveForwardFlush(List<HistoryCommitMarker> markers) {
+    FrozenBatch pending = requirePendingArchiveForwardFlush();
+    List<ArchiveBlockForwardPayload> sealed = pending.seal(markers);
+    sealedArchiveForwardFlush = sealed;
+    pendingArchiveForwardFlush = null;
+  }
+
+  /** Reads an exact durable marker receipt and seals the same pending range. */
+  public synchronized void sealPendingArchiveForwardFlush(
+      DurableHistoryMarkerRangeReceipt receipt) {
+    FrozenBatch pending = requirePendingArchiveForwardFlush();
+    List<ArchiveBlockForwardPayload> sealed = Objects.requireNonNull(receipt, "receipt")
+        .seal(pending);
+    sealedArchiveForwardFlush = sealed;
+    pendingArchiveForwardFlush = null;
+  }
+
+  /** Transfers the sealed ordered payloads exactly once and clears manager ownership. */
+  public synchronized List<ArchiveBlockForwardPayload> claimArchiveForwardFlushPayloads() {
+    if (sealedArchiveForwardFlush == null) {
+      throw new IllegalStateException("Archive forward flush is not sealed");
+    }
+    List<ArchiveBlockForwardPayload> claimed = sealedArchiveForwardFlush;
+    sealedArchiveForwardFlush = null;
+    return claimed;
+  }
+
+  private FrozenBatch requirePendingArchiveForwardFlush() {
+    if (sealedArchiveForwardFlush != null) {
+      throw new IllegalStateException("Archive forward flush is already sealed");
+    }
+    if (pendingArchiveForwardFlush == null) {
+      throw new IllegalStateException("Archive forward flush range is not frozen");
+    }
+    return pendingArchiveForwardFlush;
+  }
+
+  private List<BlockSnapshotMeta> stateLayerMetas() {
+    List<BlockSnapshotMeta> reference = null;
+    for (Chainbase db : dbs) {
+      if (!ArchiveStoreScope.isStateDatabase(db.getDbName())) {
+        continue;
+      }
+      List<BlockSnapshotMeta> candidate = new ArrayList<>(size);
+      Snapshot next = db.getHead().getRoot();
+      for (int i = 0; i < size; i++) {
+        next = next.getNext();
+        if (!Snapshot.isImpl(next)) {
+          throw new IllegalStateException("Archive state topology is missing a snapshot layer");
+        }
+        BlockSnapshotMeta meta = ((SnapshotImpl) next).getBlockSnapshotMeta();
+        if (meta == null) {
+          throw new IllegalStateException("Archive state topology contains an unbound layer");
+        }
+        candidate.add(meta);
+      }
+      if (reference != null && !reference.equals(candidate)) {
+        throw new IllegalStateException("Block metadata differs across state database topology");
+      }
+      reference = candidate;
+    }
+    if (reference == null) {
+      throw new IllegalStateException("Archive mode has no state database topology");
+    }
+    return reference;
+  }
+
   /** Runs latest-state snapshot acquisition inside the canonical apply/flush monitor. */
   public synchronized void withArchiveStateBarrier(ArchiveStateAction action) throws IOException {
     Objects.requireNonNull(action, "action").run();
@@ -343,8 +530,57 @@ public class SnapshotManager implements RevokingDatabase {
   }
 
   @Override
-  public void fastPop() {
+  public synchronized void fastPop() {
+    if (activeSession != 0) {
+      throw new RevokingStoreIllegalStateException(
+          String.format("activeSession has to be equal 0, current %d", activeSession));
+    }
+    if (size <= 0) {
+      throw new RevokingStoreIllegalStateException(
+          String.format("there is not snapshot to be popped, current: %d", size));
+    }
+    BlockSnapshotMeta poppedMeta = currentStateHeadBlockMeta();
+    if ((pendingArchiveForwardFlush != null && pendingArchiveForwardFlush.contains(poppedMeta))
+        || sealedArchiveForwardFlushContains(poppedMeta)) {
+      throw new IllegalStateException("Cannot pop a block owned by pending archive flush");
+    }
+    if (poppedMeta != null) {
+      AccountAssetPreparedBlockPayloadOwner owner = archiveForwardPayloadOwners.get(poppedMeta);
+      if (owner != null) {
+        owner.discard();
+        archiveForwardPayloadOwners.remove(poppedMeta);
+      }
+    }
     pop();
+  }
+
+  private BlockSnapshotMeta currentStateHeadBlockMeta() {
+    BlockSnapshotMeta current = null;
+    for (Chainbase db : dbs) {
+      if (!ArchiveStoreScope.isStateDatabase(db.getDbName()) || !Snapshot.isImpl(db.getHead())) {
+        continue;
+      }
+      BlockSnapshotMeta candidate = ((SnapshotImpl) db.getHead()).getBlockSnapshotMeta();
+      if (candidate != null && current != null && !current.equals(candidate)) {
+        throw new IllegalStateException("Current block metadata differs across state databases");
+      }
+      if (candidate != null) {
+        current = candidate;
+      }
+    }
+    return current;
+  }
+
+  private boolean sealedArchiveForwardFlushContains(BlockSnapshotMeta meta) {
+    if (sealedArchiveForwardFlush == null || meta == null) {
+      return false;
+    }
+    for (ArchiveBlockForwardPayload payload : sealedArchiveForwardFlush) {
+      if (meta.equals(payload.getMeta())) {
+        return true;
+      }
+    }
+    return false;
   }
 
   public synchronized void enable() {
@@ -371,6 +607,7 @@ public class SnapshotManager implements RevokingDatabase {
 
   @Override
   public void shutdown() {
+    abortArchiveForwardPayloads();
     ExecutorServiceManager.shutdownAndAwaitTermination(pruneCheckpointThread, pruneName);
     flushServices.forEach((key, value) -> ExecutorServiceManager.shutdownAndAwaitTermination(value,
         "flush-service-" + key));
@@ -381,6 +618,22 @@ public class SnapshotManager implements RevokingDatabase {
         logger.error("Failed to close archive history sink.", e);
       }
     }
+  }
+
+  private synchronized void abortArchiveForwardPayloads() {
+    if (pendingArchiveForwardFlush != null) {
+      pendingArchiveForwardFlush.abortIfFrozen();
+      pendingArchiveForwardFlush = null;
+    }
+    sealedArchiveForwardFlush = null;
+    for (Map.Entry<BlockSnapshotMeta, AccountAssetPreparedBlockPayloadOwner> entry
+        : archiveForwardPayloadOwners.entrySet()) {
+      AccountAssetPreparedBlockPayloadOwner owner = entry.getValue();
+      if (owner != null && owner.isAttachedTo(entry.getKey())) {
+        owner.discard();
+      }
+    }
+    archiveForwardPayloadOwners.clear();
   }
 
   public void updateSolidity(int hops) {
