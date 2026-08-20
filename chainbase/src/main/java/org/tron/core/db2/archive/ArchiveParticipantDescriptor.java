@@ -1,5 +1,8 @@
 package org.tron.core.db2.archive;
 
+import com.google.common.hash.Hasher;
+import com.google.common.hash.Hashing;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -84,6 +87,18 @@ final class ArchiveParticipantDescriptor {
 
   List<String> getParticipants() {
     return participants;
+  }
+
+  static String scopeIdentity(List<String> participants) {
+    if (current().getParticipants().equals(participants)) {
+      return FORMAT_ID;
+    }
+    Hasher hasher = Hashing.sha256().newHasher();
+    for (String participant : participants) {
+      byte[] encoded = participant.getBytes(StandardCharsets.UTF_8);
+      hasher.putInt(encoded.length).putBytes(encoded);
+    }
+    return "experimental/" + hasher.hash();
   }
 
   Map<Integer, String> getTombstonesByStoreId() {
