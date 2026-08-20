@@ -46,8 +46,8 @@ public class AccountAssetBlockProjectionBridgeTest extends BaseMethodTest {
   public void sharesExactAccountProjectionAcrossDeterministicReverseAndForwardBuilders() {
     BlockSnapshotMeta meta = meta(1);
     HistoryCommitMarker marker = marker(meta);
-    byte[] updateKey = bytes(2, 1);
-    byte[] deleteKey = bytes(2, 2);
+    byte[] updateKey = accountKey(1);
+    byte[] deleteKey = accountKey(2);
     byte[] updateAsset = assetKey(updateKey, "1000001");
     byte[] deleteAsset = assetKey(deleteKey, "1000002");
     Account oldUpdate = optimizedAccount(updateKey);
@@ -103,7 +103,7 @@ public class AccountAssetBlockProjectionBridgeTest extends BaseMethodTest {
   public void rejectsActivationIdentityAndCoverageBeforeAnyPhysicalRead() {
     BlockSnapshotMeta meta = meta(2);
     HistoryCommitMarker marker = marker(meta);
-    byte[] accountKey = bytes(2, 3);
+    byte[] accountKey = accountKey(3);
     Account old = optimizedAccount(accountKey);
     AccountAssetStore assetStore = mock(AccountAssetStore.class);
     AccountAssetBlockProjectionBridge bridge = bridge(assetStore);
@@ -142,8 +142,8 @@ public class AccountAssetBlockProjectionBridgeTest extends BaseMethodTest {
   public void projectionFailurePublishesNoPartialResultAndAllowsFreshRetry() {
     BlockSnapshotMeta meta = meta(4);
     HistoryCommitMarker marker = marker(meta);
-    byte[] validKey = bytes(2, 4);
-    byte[] invalidKey = bytes(2, 5);
+    byte[] validKey = accountKey(4);
+    byte[] invalidKey = accountKey(5);
     Account validOld = optimizedAccount(validKey);
     Account validPost = validOld.toBuilder().putAssetV2("1000003", 30L).build();
     AccountAssetStore assetStore = mock(AccountAssetStore.class);
@@ -156,7 +156,7 @@ public class AccountAssetBlockProjectionBridgeTest extends BaseMethodTest {
         databases.get("account").put(validKey, validPost.toByteArray());
         databases.get("account").put(invalidKey, bytes(3, 99));
       });
-      assertThrows(IllegalStateException.class,
+      assertThrows(ArchivePersistenceException.class,
           () -> bridge.prepare(failing,
               TargetAssetOptimization.forTarget(meta, true)));
 
@@ -174,12 +174,24 @@ public class AccountAssetBlockProjectionBridgeTest extends BaseMethodTest {
   @Test
   public void physicalInputFailurePublishesNothingAndFreshPrepareCanRetry() {
     BlockSnapshotMeta meta = meta(24);
-    byte[] accountKey = bytes(2, 24);
+    byte[] accountKey = accountKey(24);
     Account old = optimizedAccount(accountKey);
-    boolean[] fail = {true};
+    int[] failureMode = {1};
     AccountAssetOldPhysicalAssetsSource source = key -> {
-      if (fail[0]) {
+      if (failureMode[0] == 1) {
         throw new IllegalStateException("injected physical input failure");
+      }
+      if (failureMode[0] == 2) {
+        return Collections.singletonMap(
+            WrappedByteArray.copyOf(assetKey(key, "01000001")), Longs.toByteArray(1L));
+      }
+      if (failureMode[0] == 3) {
+        return Collections.singletonMap(
+            WrappedByteArray.copyOf(assetKey(key, "1000001")), new byte[7]);
+      }
+      if (failureMode[0] == 4) {
+        return Collections.singletonMap(
+            WrappedByteArray.copyOf(assetKey(key, "1000001")), Longs.toByteArray(0L));
       }
       return Collections.emptyMap();
     };
@@ -196,7 +208,12 @@ public class AccountAssetBlockProjectionBridgeTest extends BaseMethodTest {
           () -> bridge.prepare(view, activation));
       assertTrue(failure.getMessage().contains("old physical AccountAsset input"));
 
-      fail[0] = false;
+      for (int mode = 2; mode <= 4; mode++) {
+        failureMode[0] = mode;
+        assertThrows(ArchivePersistenceException.class,
+            () -> bridge.prepare(view, activation));
+      }
+      failureMode[0] = 0;
       PreparedBlockProjection prepared = bridge.prepare(view, activation);
       assertEquals(meta, prepared.getReverseDiff().getMeta());
       prepared.abort();
@@ -207,7 +224,7 @@ public class AccountAssetBlockProjectionBridgeTest extends BaseMethodTest {
   public void resolvesActivationBlockFromProposalSixtySixAndFeedsSharedBridge() {
     BlockSnapshotMeta meta = meta(5);
     HistoryCommitMarker marker = marker(meta);
-    byte[] accountKey = bytes(2, 6);
+    byte[] accountKey = accountKey(6);
     byte[] physicalAsset = assetKey(accountKey, "1000005");
     Account old = optimizedAccount(accountKey);
     Account post = old.toBuilder().putAssetV2("1000005", 50L).build();
@@ -242,7 +259,7 @@ public class AccountAssetBlockProjectionBridgeTest extends BaseMethodTest {
   public void inheritsUnchangedProposalSixtySixWithoutUsingProposalFiftyThree() {
     BlockSnapshotMeta meta = meta(6);
     HistoryCommitMarker marker = marker(meta);
-    byte[] accountKey = bytes(2, 7);
+    byte[] accountKey = accountKey(7);
     Account raw = Account.newBuilder()
         .setAddress(ByteString.copyFrom(accountKey))
         .putAssetV2("1000006", 60L)
@@ -272,7 +289,7 @@ public class AccountAssetBlockProjectionBridgeTest extends BaseMethodTest {
   public void rejectsMissingCorruptSubstitutedAndReorgActivationBeforePrefix() {
     BlockSnapshotMeta meta = meta(7);
     HistoryCommitMarker marker = marker(meta);
-    byte[] accountKey = bytes(2, 8);
+    byte[] accountKey = accountKey(8);
     Account old = optimizedAccount(accountKey);
     AccountAssetStore assetStore = mock(AccountAssetStore.class);
     AccountAssetBlockProjectionBridge bridge = bridge(assetStore);
@@ -328,7 +345,7 @@ public class AccountAssetBlockProjectionBridgeTest extends BaseMethodTest {
   public void rejectsWrongMarkerWithoutConsumingPreparedProjectionAndSealsExactlyOnce() {
     BlockSnapshotMeta meta = meta(9);
     HistoryCommitMarker marker = marker(meta);
-    byte[] accountKey = bytes(2, 9);
+    byte[] accountKey = accountKey(9);
     Account account = optimizedAccount(accountKey);
     AccountAssetStore assetStore = mock(AccountAssetStore.class);
     when(assetStore.prefixQuery(any(byte[].class))).thenReturn(Collections.emptyMap());
@@ -635,6 +652,13 @@ public class AccountAssetBlockProjectionBridgeTest extends BaseMethodTest {
         .setAddress(ByteString.copyFrom(accountKey))
         .setAssetOptimized(true)
         .build();
+  }
+
+  private static byte[] accountKey(int suffix) {
+    byte[] key = new byte[21];
+    key[0] = 0x41;
+    key[20] = (byte) suffix;
+    return key;
   }
 
   private static byte[] assetKey(byte[] accountKey, String token) {
