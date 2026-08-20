@@ -16,9 +16,7 @@ final class ArchiveTargetMutationPlanBuilder {
   private final List<String> participants;
 
   ArchiveTargetMutationPlanBuilder() {
-    List<String> expected = new ArrayList<>(ArchiveStoreScope.getStateDatabases());
-    Collections.sort(expected);
-    participants = Collections.unmodifiableList(expected);
+    participants = ArchiveParticipantDescriptor.current().getParticipants();
   }
 
   ArchiveTargetMutationPlan build(HistoryCommitMarker committedTarget,

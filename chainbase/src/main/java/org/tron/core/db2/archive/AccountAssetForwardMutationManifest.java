@@ -100,9 +100,7 @@ public final class AccountAssetForwardMutationManifest implements AccountAssetFo
   }
 
   private static List<String> sortedParticipants() {
-    List<String> participants = new ArrayList<>(ArchiveStoreScope.getStateDatabases());
-    Collections.sort(participants);
-    return participants;
+    return ArchiveParticipantDescriptor.current().getParticipants();
   }
 
   /** One changed account's exact raw input and canonical physical outputs. */

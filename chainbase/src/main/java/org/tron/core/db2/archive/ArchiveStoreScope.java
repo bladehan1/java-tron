@@ -11,38 +11,13 @@ import org.tron.core.db2.core.Chainbase;
 /** Explicit classification of every database registered with {@code SnapshotManager}. */
 public final class ArchiveStoreScope {
 
-  private static final Set<String> STATE_DATABASES = immutableSet(
-      "accountid-index",
-      "account-index",
-      "account",
-      "account-asset",
-      "asset-issue",
-      "asset-issue-v2",
-      "code",
-      "contract-state",
-      "contract",
-      "DelegatedResourceAccountIndex",
-      "DelegatedResource",
-      "delegation",
-      "properties",
-      "exchange",
-      "exchange-v2",
-      "market_account",
-      "market_order",
-      "market_pair_price_to_order",
-      "market_pair_to_price",
-      "proposal",
-      "storage-row",
-      "votes",
-      "witness_schedule",
-      "witness",
-      "nullifier",
-      "IncrementalMerkleTree");
+  private static final ArchiveParticipantDescriptor DESCRIPTOR =
+      ArchiveParticipantDescriptor.current();
+  private static final Set<String> STATE_DATABASES = DESCRIPTOR.getActiveDatabases();
+  private static final Set<String> EXCLUDED_DATABASES = DESCRIPTOR.getExcludedDatabases();
 
-  // Candidate store ID 1 is reserved for abi and must never be reused by state history.
-  private static final Set<String> EXCLUDED_DATABASES = immutableSet("abi");
-
-  private static final Set<String> NON_STATE_DATABASES = immutableSet(
+  private static final Set<String> NON_STATE_DATABASES = Collections.unmodifiableSet(
+      new LinkedHashSet<>(Arrays.asList(
       "account-trace",
       "accountTrie",
       "balance-trace",
@@ -55,7 +30,7 @@ public final class ArchiveStoreScope {
       "trans-cache",
       "transactionHistoryStore",
       "transactionRetStore",
-      "tree-block-index");
+      "tree-block-index")));
 
   private ArchiveStoreScope() {
   }
@@ -104,9 +79,5 @@ public final class ArchiveStoreScope {
       throw new IllegalStateException(
           "Archive state scope has unclassified Chainbase dbName(s): " + unknown);
     }
-  }
-
-  private static Set<String> immutableSet(String... values) {
-    return Collections.unmodifiableSet(new LinkedHashSet<>(Arrays.asList(values)));
   }
 }
