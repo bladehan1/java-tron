@@ -23,6 +23,7 @@ public final class ArchiveProgressEnvelope {
   private final byte[] payloadDigest;
   private final byte[] mutationPlanDigest;
   private final List<String> participants;
+  private final String scopeIdentity;
 
   public ArchiveProgressEnvelope(Kind kind, String participant, long epoch, byte[] blockHash,
       byte[] batchId, byte[] payloadDigest, List<String> participants) {
@@ -32,6 +33,13 @@ public final class ArchiveProgressEnvelope {
   public ArchiveProgressEnvelope(Kind kind, String participant, long epoch, byte[] blockHash,
       byte[] batchId, byte[] payloadDigest, byte[] mutationPlanDigest,
       List<String> participants) {
+    this(kind, participant, epoch, blockHash, batchId, payloadDigest, mutationPlanDigest,
+        participants, ArchiveParticipantDescriptor.scopeIdentity(participants));
+  }
+
+  ArchiveProgressEnvelope(Kind kind, String participant, long epoch, byte[] blockHash,
+      byte[] batchId, byte[] payloadDigest, byte[] mutationPlanDigest,
+      List<String> participants, String scopeIdentity) {
     this.kind = Objects.requireNonNull(kind, "kind");
     if (epoch < 0) {
       throw new IllegalArgumentException("Archive progress epoch must be non-negative");
@@ -43,6 +51,10 @@ public final class ArchiveProgressEnvelope {
     this.mutationPlanDigest = mutationPlanDigest == null ? null
         : exactBytes(mutationPlanDigest, 32, "mutationPlanDigest");
     this.participants = validateParticipants(participants);
+    if (scopeIdentity == null || scopeIdentity.isEmpty()) {
+      throw new IllegalArgumentException("Archive scope identity must not be empty");
+    }
+    this.scopeIdentity = scopeIdentity;
     if (kind != Kind.PARTICIPANT_PROGRESS) {
       if (participant != null) {
         throw new IllegalArgumentException("Global archive progress must not name one participant");
@@ -90,6 +102,10 @@ public final class ArchiveProgressEnvelope {
     return participants;
   }
 
+  public String getScopeIdentity() {
+    return scopeIdentity;
+  }
+
   public void requireIdentity(Kind expectedKind, String expectedParticipant, long expectedEpoch,
       byte[] expectedBlockHash, byte[] expectedBatchId, byte[] expectedPayloadDigest,
       List<String> expectedParticipants) {
@@ -105,6 +121,7 @@ public final class ArchiveProgressEnvelope {
         || !Arrays.equals(batchId, expectedBatchId)
         || !Arrays.equals(payloadDigest, expectedPayloadDigest)
         || !Arrays.equals(mutationPlanDigest, expectedMutationPlanDigest)
+        || !scopeIdentity.equals(ArchiveParticipantDescriptor.scopeIdentity(expectedParticipants))
         || !participants.equals(expectedParticipants)) {
       throw new ArchivePersistenceException("Archive progress identity mismatch");
     }
