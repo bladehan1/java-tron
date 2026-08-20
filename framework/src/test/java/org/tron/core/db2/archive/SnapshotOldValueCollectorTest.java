@@ -291,7 +291,7 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
 
   @Test
   public void projectsAccountAssetTransitionBeforeRootMerge() {
-    byte[] address = bytes("account-address");
+    byte[] address = archiveAddress(1);
     byte[] token = bytes("1000001");
     Account oldAccount = Account.newBuilder()
         .setAddress(ByteString.copyFrom(address))
@@ -340,7 +340,7 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
 
   @Test
   public void projectsOldPhysicalAssetValueForOptimizedAccount() {
-    byte[] address = bytes("optimized-address");
+    byte[] address = archiveAddress(2);
     byte[] token = bytes("1000002");
     byte[] assetKey = Bytes.concat(address, token);
     Account oldAccount = Account.newBuilder()
@@ -382,7 +382,7 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
 
   @Test
   public void sharedAccountAssetProjectionUsesOneSnapshotAndStableForwardOrder() {
-    byte[] address = bytes("shared-projection-address");
+    byte[] address = archiveAddress(3);
     byte[] firstKey = Bytes.concat(address, bytes("1000001"));
     byte[] secondKey = Bytes.concat(address, bytes("1000002"));
     Account oldAccount = Account.newBuilder()
@@ -424,7 +424,7 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
 
   @Test
   public void pureProjectionRequiresAndCopiesExplicitOldPhysicalAssets() {
-    byte[] address = bytes("pure-input-address");
+    byte[] address = archiveAddress(4);
     byte[] assetKey = Bytes.concat(address, bytes("1000009"));
     Account optimized = Account.newBuilder()
         .setAddress(ByteString.copyFrom(address))
@@ -458,7 +458,7 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
 
   @Test
   public void targetAssetOptimizationOverridesLegacySupplierAndCoversDelete() {
-    byte[] address = bytes("target-activation-address");
+    byte[] address = archiveAddress(5);
     byte[] assetKey = Bytes.concat(address, bytes("1000003"));
     Account rawPost = Account.newBuilder()
         .setAddress(ByteString.copyFrom(address))
@@ -480,6 +480,11 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
             Collections.emptyMap());
     assertArrayEquals(rawPost.toByteArray(), disabled.postAccount.getValue());
     assertTrue(disabled.forwardAssets.isEmpty());
+    Map<WrappedByteArray, byte[]> mixedPhysical = new HashMap<>();
+    mixedPhysical.put(WrappedByteArray.copyOf(assetKey), Longs.toByteArray(300L));
+    assertThrows(ArchivePersistenceException.class,
+        () -> projector.project(address, null,
+            BlockChangeView.PostValue.present(rawPost.toByteArray()), true, mixedPhysical));
 
     Account optimizedOld = rawPost.toBuilder()
         .setAssetOptimized(true)
@@ -497,7 +502,7 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
 
   @Test
   public void sharedProjectionUsesOuterFinalViewAfterNestedMergeAndRevoke() {
-    byte[] address = bytes("nested-account-address");
+    byte[] address = archiveAddress(6);
     byte[] assetKey = Bytes.concat(address, bytes("1000004"));
     Account oldAccount = Account.newBuilder()
         .setAddress(ByteString.copyFrom(address))
@@ -1196,6 +1201,13 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
 
   private static byte[] bytes(String value) {
     return value.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+  }
+
+  private static byte[] archiveAddress(int suffix) {
+    byte[] address = new byte[21];
+    address[0] = 0x41;
+    address[20] = (byte) suffix;
+    return address;
   }
 
   private static byte[] hash(int suffix) {
