@@ -12,7 +12,6 @@ import org.tron.core.db2.core.Chainbase;
 public final class ArchiveStoreScope {
 
   private static final Set<String> STATE_DATABASES = immutableSet(
-      "abi",
       "accountid-index",
       "account-index",
       "account",
@@ -40,6 +39,9 @@ public final class ArchiveStoreScope {
       "nullifier",
       "IncrementalMerkleTree");
 
+  // Candidate store ID 1 is reserved for abi and must never be reused by state history.
+  private static final Set<String> EXCLUDED_DATABASES = immutableSet("abi");
+
   private static final Set<String> NON_STATE_DATABASES = immutableSet(
       "account-trace",
       "accountTrie",
@@ -63,7 +65,8 @@ public final class ArchiveStoreScope {
   }
 
   public static boolean isClassified(String dbName) {
-    return STATE_DATABASES.contains(dbName) || NON_STATE_DATABASES.contains(dbName);
+    return STATE_DATABASES.contains(dbName) || NON_STATE_DATABASES.contains(dbName)
+        || EXCLUDED_DATABASES.contains(dbName);
   }
 
   public static Set<String> getStateDatabases() {
@@ -72,6 +75,14 @@ public final class ArchiveStoreScope {
 
   public static Set<String> getNonStateDatabases() {
     return NON_STATE_DATABASES;
+  }
+
+  public static boolean isExcludedDatabase(String dbName) {
+    return EXCLUDED_DATABASES.contains(dbName);
+  }
+
+  public static Set<String> getExcludedDatabases() {
+    return EXCLUDED_DATABASES;
   }
 
   public static void validate(Collection<Chainbase> databases) {
