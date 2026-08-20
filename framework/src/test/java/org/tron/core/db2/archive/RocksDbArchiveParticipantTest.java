@@ -16,7 +16,6 @@ import java.util.Map;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
-import org.tron.core.db2.archive.RocksDbArchiveParticipant.Mutation;
 import org.tron.core.db2.archive.RocksDbArchiveParticipant.Stage;
 
 public class RocksDbArchiveParticipantTest {
@@ -33,14 +32,16 @@ public class RocksDbArchiveParticipantTest {
       Path directory = temporaryFolder.newFolder("native-" + failedStage).toPath();
       try (RocksDbArchiveParticipant participant = new RocksDbArchiveParticipant(
           directory, "account", PARTICIPANTS)) {
-        participant.apply(Collections.singletonList(Mutation.put(bytes("key"), bytes("old"))),
+        participant.apply(Collections.singletonList(
+            ArchiveParticipantMutation.put(bytes("key"), bytes("old"))),
             progress(1));
       }
 
       try (RocksDbArchiveParticipant failing = new RocksDbArchiveParticipant(
           directory, "account", PARTICIPANTS, stage -> failAt(failedStage, stage))) {
         assertThrows(IOException.class, () -> failing.apply(
-            Collections.singletonList(Mutation.put(bytes("key"), bytes("new"))), progress(2)));
+            Collections.singletonList(
+                ArchiveParticipantMutation.put(bytes("key"), bytes("new"))), progress(2)));
       }
 
       try (RocksDbArchiveParticipant reopened = new RocksDbArchiveParticipant(
@@ -58,9 +59,11 @@ public class RocksDbArchiveParticipantTest {
     Path directory = temporaryFolder.newFolder("native-delete").toPath();
     try (RocksDbArchiveParticipant participant = new RocksDbArchiveParticipant(
         directory, "account", PARTICIPANTS)) {
-      participant.apply(Collections.singletonList(Mutation.put(bytes("key"), bytes("value"))),
+      participant.apply(Collections.singletonList(
+          ArchiveParticipantMutation.put(bytes("key"), bytes("value"))),
           progress(1));
-      participant.apply(Collections.singletonList(Mutation.delete(bytes("key"))), progress(2));
+      participant.apply(Collections.singletonList(
+          ArchiveParticipantMutation.delete(bytes("key"))), progress(2));
       assertNull(participant.get(bytes("key")));
       assertEquals(2, participant.loadProgress().getEpoch());
     }
@@ -75,7 +78,8 @@ public class RocksDbArchiveParticipantTest {
           ArchiveProgressEnvelope.Kind.PARTICIPANT_PROGRESS, "account-asset", 1,
           bytes(32, 1), bytes(16, 2), bytes(32, 3), PARTICIPANTS);
       assertThrows(IllegalArgumentException.class, () -> participant.apply(
-          Collections.singletonList(Mutation.put(bytes("key"), bytes("value"))), wrong));
+          Collections.singletonList(
+              ArchiveParticipantMutation.put(bytes("key"), bytes("value"))), wrong));
       assertNull(participant.get(bytes("key")));
       assertThrows(ArchivePersistenceException.class, participant::loadProgress);
     }
@@ -106,7 +110,7 @@ public class RocksDbArchiveParticipantTest {
       engines.put("account-asset", asset);
 
       ArchiveRecoveryExecutor.RecoverySnapshot snapshot =
-          ArchiveRecoveryAuthorityScanner.forRocksDbParticipants(history, checkpointPath,
+          ArchiveRecoveryAuthorityScanner.forParticipants(history, checkpointPath,
               engines, readerPath, PARTICIPANTS).scan();
       assertEquals(2, snapshot.getHistoryHead());
       assertEquals(2, snapshot.getCheckpointHead());

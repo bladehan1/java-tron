@@ -17,7 +17,7 @@ import org.rocksdb.WriteBatch;
 import org.rocksdb.WriteOptions;
 
 /** RocksDB participant whose business mutations and D[i] share one synced native WriteBatch. */
-public final class RocksDbArchiveParticipant implements Closeable {
+public final class RocksDbArchiveParticipant implements Closeable, ArchiveParticipant {
 
   private static final byte BUSINESS_PREFIX = 1;
   private static final byte[] PROGRESS_KEY = new byte[]{0, 'p', 'r', 'o', 'g', 'r', 'e', 's', 's'};
@@ -63,17 +63,20 @@ public final class RocksDbArchiveParticipant implements Closeable {
     }
   }
 
-  public synchronized void apply(List<Mutation> mutations, ArchiveProgressEnvelope progress)
+  @Override
+  public synchronized void apply(List<ArchiveParticipantMutation> mutations,
+      ArchiveProgressEnvelope progress)
       throws IOException {
     Objects.requireNonNull(mutations, "mutations");
     requireProgress(progress);
     try (WriteBatch batch = new WriteBatch()) {
-      for (Mutation mutation : mutations) {
+      for (ArchiveParticipantMutation mutation : mutations) {
         Objects.requireNonNull(mutation, "mutation");
-        if (mutation.value == null) {
-          batch.delete(businessKey(mutation.key));
+        byte[] value = mutation.getValue();
+        if (value == null) {
+          batch.delete(businessKey(mutation.getKey()));
         } else {
-          batch.put(businessKey(mutation.key), mutation.value);
+          batch.put(businessKey(mutation.getKey()), value);
         }
       }
       batch.put(PROGRESS_KEY, progressCodec.encode(progress));
@@ -94,6 +97,7 @@ public final class RocksDbArchiveParticipant implements Closeable {
     }
   }
 
+  @Override
   public synchronized ArchiveProgressEnvelope loadProgress() throws IOException {
     try {
       byte[] encoded = database.get(PROGRESS_KEY);
@@ -146,24 +150,6 @@ public final class RocksDbArchiveParticipant implements Closeable {
       previous = current;
     }
     return Collections.unmodifiableList(copy);
-  }
-
-  public static final class Mutation {
-    private final byte[] key;
-    private final byte[] value;
-
-    private Mutation(byte[] key, byte[] value) {
-      this.key = Arrays.copyOf(Objects.requireNonNull(key, "key"), key.length);
-      this.value = value == null ? null : Arrays.copyOf(value, value.length);
-    }
-
-    public static Mutation put(byte[] key, byte[] value) {
-      return new Mutation(key, Objects.requireNonNull(value, "value"));
-    }
-
-    public static Mutation delete(byte[] key) {
-      return new Mutation(key, null);
-    }
   }
 
   enum Stage {

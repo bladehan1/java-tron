@@ -18,7 +18,8 @@ import org.tron.core.db2.archive.ArchiveProgressEnvelope.Kind;
 public final class ArchiveProgressEnvelopeCodec {
 
   private static final int MAGIC = 0x54415047; // TAPG
-  private static final short VERSION = 1;
+  private static final short VERSION_1 = 1;
+  private static final short VERSION_2 = 2;
   private static final int HEADER_LENGTH = 12;
   private static final int MAX_FIELD_LENGTH = 1024;
   private static final int MAX_PARTICIPANTS = 1024;
@@ -29,7 +30,8 @@ public final class ArchiveProgressEnvelopeCodec {
       ByteArrayOutputStream bytes = new ByteArrayOutputStream();
       DataOutputStream output = new DataOutputStream(bytes);
       output.writeInt(MAGIC);
-      output.writeShort(VERSION);
+      byte[] mutationPlanDigest = envelope.getMutationPlanDigest();
+      output.writeShort(mutationPlanDigest == null ? VERSION_1 : VERSION_2);
       output.writeByte(kindCode(envelope.getKind()));
       output.writeByte(0);
       output.writeInt(0);
@@ -37,6 +39,9 @@ public final class ArchiveProgressEnvelopeCodec {
       output.write(envelope.getBlockHash());
       output.write(envelope.getBatchId());
       output.write(envelope.getPayloadDigest());
+      if (mutationPlanDigest != null) {
+        output.write(mutationPlanDigest);
+      }
       writeString(output, envelope.getParticipant() == null ? "" : envelope.getParticipant());
       output.writeInt(envelope.getParticipants().size());
       for (String participant : envelope.getParticipants()) {
@@ -73,7 +78,9 @@ public final class ArchiveProgressEnvelopeCodec {
     }
     try {
       DataInputStream input = new DataInputStream(new ByteArrayInputStream(encoded));
-      if (input.readInt() != MAGIC || input.readShort() != VERSION) {
+      int magic = input.readInt();
+      short version = input.readShort();
+      if (magic != MAGIC || version != VERSION_1 && version != VERSION_2) {
         throw new IllegalArgumentException("Unsupported archive progress envelope header");
       }
       Kind kind = decodeKind(input.readUnsignedByte());
@@ -84,6 +91,7 @@ public final class ArchiveProgressEnvelopeCodec {
       byte[] blockHash = readExact(input, 32);
       byte[] batchId = readExact(input, 16);
       byte[] payloadDigest = readExact(input, 32);
+      byte[] mutationPlanDigest = version == VERSION_2 ? readExact(input, 32) : null;
       String participant = readString(input, true);
       int count = input.readInt();
       if (count <= 0 || count > MAX_PARTICIPANTS) {
@@ -97,7 +105,7 @@ public final class ArchiveProgressEnvelopeCodec {
         throw new IllegalArgumentException("Archive progress envelope payload mismatch");
       }
       return new ArchiveProgressEnvelope(kind, participant.isEmpty() ? null : participant, epoch,
-          blockHash, batchId, payloadDigest, participants);
+          blockHash, batchId, payloadDigest, mutationPlanDigest, participants);
     } catch (EOFException truncated) {
       throw new IllegalArgumentException("Archive progress envelope is truncated", truncated);
     } catch (IOException invalid) {

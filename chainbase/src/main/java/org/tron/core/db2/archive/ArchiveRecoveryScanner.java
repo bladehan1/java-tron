@@ -2,6 +2,7 @@ package org.tron.core.db2.archive;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -49,6 +50,12 @@ public final class ArchiveRecoveryScanner {
             "Missing archive participant progress: " + participant);
       }
       validateEnvelope(envelope, Kind.PARTICIPANT_PROGRESS, participant);
+      if (envelope.getEpoch() == checkpoint.getEpoch()
+          && !Arrays.equals(envelope.getMutationPlanDigest(),
+              checkpoint.getMutationPlanDigest())) {
+        throw new ArchivePersistenceException(
+            "Archive participant mutation-plan digest mismatch: " + participant);
+      }
       participantHeads.put(participant, envelope.getEpoch());
     }
     ArchiveProgressEnvelope readerVisible = progress.loadReaderVisible();
@@ -56,6 +63,12 @@ public final class ArchiveRecoveryScanner {
       throw new ArchivePersistenceException("Missing archive reader-visible progress");
     }
     validateEnvelope(readerVisible, Kind.READER_VISIBLE, null);
+    if (readerVisible.getEpoch() == checkpoint.getEpoch()
+        && !Arrays.equals(readerVisible.getMutationPlanDigest(),
+            checkpoint.getMutationPlanDigest())) {
+      throw new ArchivePersistenceException(
+          "Archive reader mutation-plan digest mismatch");
+    }
     return new RecoverySnapshot(history.committedHeadEpoch(), checkpoint.getEpoch(),
         participantHeads, readerVisible.getEpoch());
   }

@@ -29,6 +29,10 @@ public final class ArchiveReaderHeadPublisher {
   }
 
   public void publish(long epoch) throws IOException {
+    publish(epoch, null);
+  }
+
+  public void publish(long epoch, byte[] mutationPlanDigest) throws IOException {
     HistoryCommitMarker marker = history.get(epoch);
     if (marker == null || marker.getMeta().getEpoch() != epoch
         || !marker.getDatabases().equals(participants)) {
@@ -37,7 +41,7 @@ public final class ArchiveReaderHeadPublisher {
     }
     progressFile.store(new ArchiveProgressEnvelope(Kind.READER_VISIBLE, null, epoch,
         marker.getMeta().getBlockHash(), marker.getBatchId(),
-        marker.getHistoryLocation().getBodyDigest(), participants));
+        marker.getHistoryLocation().getBodyDigest(), mutationPlanDigest, participants));
   }
 
   private static List<String> validateParticipants(List<String> participants) {
