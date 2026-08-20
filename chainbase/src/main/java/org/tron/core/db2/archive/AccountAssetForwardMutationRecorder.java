@@ -8,12 +8,14 @@ import java.util.TreeMap;
 import org.tron.core.db2.archive.AccountAssetForwardMutationManifest.Entry;
 import org.tron.core.db2.archive.AccountAssetForwardProjector.AssetMutation;
 import org.tron.core.db2.archive.BlockChangeView.PostValue;
+import org.tron.core.db2.archive.P66AccountAssetCodec.Phase;
 
 /** Collects explicit execution-time AccountAsset events for one target without Store reads. */
 public final class AccountAssetForwardMutationRecorder {
 
   private final BlockSnapshotMeta targetMeta;
   private final ArchiveBlockForwardMutationLimits limits;
+  private final Phase targetPhase;
   private final TreeMap<Key, AccountEvents> accounts = new TreeMap<>();
   private int accountCount;
   private int assetMutationCount;
@@ -21,8 +23,9 @@ public final class AccountAssetForwardMutationRecorder {
   private boolean sealed;
 
   public AccountAssetForwardMutationRecorder(BlockSnapshotMeta targetMeta,
-      ArchiveBlockForwardMutationLimits limits) {
+      Phase targetPhase, ArchiveBlockForwardMutationLimits limits) {
     this.targetMeta = Objects.requireNonNull(targetMeta, "targetMeta");
+    this.targetPhase = Objects.requireNonNull(targetPhase, "targetPhase");
     this.limits = Objects.requireNonNull(limits, "limits");
   }
 
@@ -83,7 +86,7 @@ public final class AccountAssetForwardMutationRecorder {
           account.canonicalAccountPostValue, new ArrayList<>(account.assets.values())));
     }
     AccountAssetForwardMutationManifest manifest =
-        new AccountAssetForwardMutationManifest(committedTarget, entries);
+        new AccountAssetForwardMutationManifest(committedTarget, targetPhase, entries);
     sealed = true;
     clearPayload();
     return manifest;

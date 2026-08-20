@@ -10,19 +10,36 @@ import org.tron.core.db2.archive.ArchiveParticipantMutationBatch.Mutation;
 import org.tron.core.db2.archive.BlockChangeView.Change;
 import org.tron.core.db2.archive.BlockChangeView.DatabaseChanges;
 import org.tron.core.db2.archive.BlockChangeView.PostValue;
+import org.tron.core.db2.archive.P66AccountAssetCodec.Phase;
 
 /** Converts one immutable block post-state view into a target-bound physical mutation batch. */
 public final class ArchiveParticipantMutationBatchCollector {
 
   private final AccountAssetForwardProjector accountAssetProjector;
+  private final String accountAssetFormatId;
+  private final Phase targetPhase;
   private final List<String> participants;
 
-  public ArchiveParticipantMutationBatchCollector() {
-    this(null);
+  public ArchiveParticipantMutationBatchCollector(Phase targetPhase) {
+    this(P66AccountAssetCodec.FORMAT_ID, targetPhase, null);
   }
 
   public ArchiveParticipantMutationBatchCollector(
+      AccountAssetForwardMutationManifest manifest) {
+    this(Objects.requireNonNull(manifest, "manifest").getFormatId(), manifest.getTargetPhase(),
+        manifest);
+  }
+
+  public ArchiveParticipantMutationBatchCollector(Phase targetPhase,
       AccountAssetForwardProjector accountAssetProjector) {
+    this(P66AccountAssetCodec.FORMAT_ID, targetPhase, accountAssetProjector);
+  }
+
+  private ArchiveParticipantMutationBatchCollector(String accountAssetFormatId,
+      Phase targetPhase, AccountAssetForwardProjector accountAssetProjector) {
+    this.accountAssetFormatId = Objects.requireNonNull(accountAssetFormatId,
+        "accountAssetFormatId");
+    this.targetPhase = Objects.requireNonNull(targetPhase, "targetPhase");
     this.accountAssetProjector = accountAssetProjector;
     participants = ArchiveParticipantDescriptor.current().getParticipants();
   }
@@ -57,7 +74,8 @@ public final class ArchiveParticipantMutationBatchCollector {
     if (accountAssetProjector != null) {
       accountAssetProjector.complete();
     }
-    return new ArchiveParticipantMutationBatch(target, mutations);
+    return new ArchiveParticipantMutationBatch(target, accountAssetFormatId, targetPhase,
+        mutations);
   }
 
   private void collectAccount(Change change, List<Mutation> mutations) {

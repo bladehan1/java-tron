@@ -31,6 +31,7 @@ import org.tron.core.db2.ISession;
 import org.tron.core.db2.archive.AccountAssetBlockProjectionBridge.PreparedBlockProjection;
 import org.tron.core.db2.archive.AccountAssetBlockProjectionBridge.TargetAssetOptimization;
 import org.tron.core.db2.archive.AccountAssetPreparedBlockPayloadOwner.FrozenBatch;
+import org.tron.core.db2.archive.P66AccountAssetCodec.Phase;
 import org.tron.core.db2.common.DB;
 import org.tron.core.db2.common.Flusher;
 import org.tron.core.db2.common.WrappedByteArray;
@@ -248,9 +249,11 @@ public class AccountAssetBlockProjectionBridgeTest extends BaseMethodTest {
       TargetAssetOptimization activation = resolver.resolve(meta, view);
       PreparedBlockProjection result = bridge.prepare(view, activation);
       assertTrue(activation.isEnabled());
+      assertEquals(Phase.P66_ACTIVATION, activation.getPhase());
+      ArchiveTargetMutationPlan plan = plan(marker, view, result.seal(marker));
+      assertEquals(Phase.P66_ACTIVATION, plan.getTargetPhase());
       assertArrayEquals(Longs.toByteArray(50L),
-          plan(marker, view, result.seal(marker))
-              .getMutations("account-asset").get(0).getValue());
+          plan.getMutations("account-asset").get(0).getValue());
     }
     verify(assetStore, times(1)).prefixQuery(any(byte[].class));
   }
@@ -278,7 +281,9 @@ public class AccountAssetBlockProjectionBridgeTest extends BaseMethodTest {
       TargetAssetOptimization activation = resolver.resolve(meta, view);
       PreparedBlockProjection result = bridge.prepare(view, activation);
       assertFalse(activation.isEnabled());
+      assertEquals(Phase.P66_OFF, activation.getPhase());
       ArchiveTargetMutationPlan plan = plan(marker, view, result.seal(marker));
+      assertEquals(Phase.P66_OFF, plan.getTargetPhase());
       assertArrayEquals(raw.toByteArray(), plan.getMutations("account").get(0).getValue());
       assertEquals(0, plan.getMutations("account-asset").size());
     }
@@ -337,6 +342,14 @@ public class AccountAssetBlockProjectionBridgeTest extends BaseMethodTest {
           databases -> databases.get("account").delete(accountKey));
       assertThrows(ArchivePersistenceException.class,
           () -> bridge.prepare(view, resolver.resolve(meta(8), view)));
+    }
+    try (Fixture regressed = new Fixture(participants())) {
+      regressed.rootPut("properties", proposal66Key(), ByteArray.fromLong(1L));
+      BlockChangeView view = regressed.capture(meta,
+          databases -> databases.get("properties").put(
+              proposal66Key(), ByteArray.fromLong(0L)));
+      assertThrows(ArchivePersistenceException.class,
+          () -> resolver.resolve(meta, view));
     }
     verify(assetStore, never()).prefixQuery(any(byte[].class));
   }
@@ -471,7 +484,8 @@ public class AccountAssetBlockProjectionBridgeTest extends BaseMethodTest {
           () -> prepared.sealPayload(marker(firstMeta)));
 
       AccountAssetForwardMutationManifest manifest =
-          new AccountAssetForwardMutationManifest(marker(firstMeta), Collections.emptyList());
+          new AccountAssetForwardMutationManifest(marker(firstMeta), Phase.P66_OFF,
+              Collections.emptyList());
       assertThrows(ArchivePersistenceException.class,
           () -> new ArchiveBlockForwardPayload(marker(firstMeta), secondView, manifest));
     }
