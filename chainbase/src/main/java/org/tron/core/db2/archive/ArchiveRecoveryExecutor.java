@@ -35,6 +35,7 @@ public final class ArchiveRecoveryExecutor {
         execute(action);
         faultHook.afterDurableAction(action);
       }
+      storage.recoveryComplete();
       return plan;
     } catch (IOException failure) {
       throw new ArchivePersistenceException("Archive recovery action failed", failure);
@@ -75,6 +76,9 @@ public final class ArchiveRecoveryExecutor {
         throws IOException;
 
     void publishReaderHeadAndSync(long readerVisibleHead) throws IOException;
+
+    default void recoveryComplete() throws IOException {
+    }
   }
 
   /** Immutable result of one fresh durable H/C/D[i]/R scan. */

@@ -16,7 +16,7 @@ public final class ArchiveRecoveryAuthorityScanner {
 
   private final HistoryCommitStore history;
   private final Path checkpointPath;
-  private final Map<String, ParticipantProgressSource> participantSources;
+  private final Map<String, ArchiveParticipantProgressSource> participantSources;
   private final Path readerVisiblePath;
   private final List<String> participants;
   private final ArchiveProgressEnvelopeCodec progressCodec = new ArchiveProgressEnvelopeCodec();
@@ -34,7 +34,7 @@ public final class ArchiveRecoveryAuthorityScanner {
         || sortedPaths.containsValue(null)) {
       throw new IllegalArgumentException("Archive participant progress path set mismatch");
     }
-    Map<String, ParticipantProgressSource> sources = new LinkedHashMap<>();
+    Map<String, ArchiveParticipantProgressSource> sources = new LinkedHashMap<>();
     sortedPaths.forEach((participant, path) ->
         sources.put(participant, () -> progressFile(path).load()));
     this.participantSources = Collections.unmodifiableMap(sources);
@@ -53,20 +53,21 @@ public final class ArchiveRecoveryAuthorityScanner {
         || sortedBatches.containsValue(null)) {
       throw new IllegalArgumentException("Archive participant batch set mismatch");
     }
-    Map<String, ParticipantProgressSource> sources = new LinkedHashMap<>();
+    Map<String, ArchiveParticipantProgressSource> sources = new LinkedHashMap<>();
     sortedBatches.forEach((participant, batch) ->
         sources.put(participant, () -> batch.load().getProgress()));
     this.participantSources = Collections.unmodifiableMap(sources);
   }
 
   private ArchiveRecoveryAuthorityScanner(HistoryCommitStore history, Path checkpointPath,
-      Map<String, ParticipantProgressSource> participantSources, Path readerVisiblePath,
+      Map<String, ? extends ArchiveParticipantProgressSource> participantSources,
+      Path readerVisiblePath,
       List<String> participants, byte nativeEngineAuthority) {
     this.history = Objects.requireNonNull(history, "history");
     this.checkpointPath = Objects.requireNonNull(checkpointPath, "checkpointPath");
     this.readerVisiblePath = Objects.requireNonNull(readerVisiblePath, "readerVisiblePath");
     this.participants = validateParticipants(participants);
-    TreeMap<String, ParticipantProgressSource> sortedSources = new TreeMap<>(
+    TreeMap<String, ArchiveParticipantProgressSource> sortedSources = new TreeMap<>(
         Objects.requireNonNull(participantSources, "participantSources"));
     if (!new ArrayList<>(sortedSources.keySet()).equals(this.participants)
         || sortedSources.containsValue(null)) {
@@ -84,13 +85,14 @@ public final class ArchiveRecoveryAuthorityScanner {
         readerVisiblePath, participants, true);
   }
 
-  public static ArchiveRecoveryAuthorityScanner forRocksDbParticipants(
+  public static ArchiveRecoveryAuthorityScanner forParticipants(
       HistoryCommitStore history, Path checkpointPath,
-      Map<String, RocksDbArchiveParticipant> participantEngines, Path readerVisiblePath,
+      Map<String, ? extends ArchiveParticipantProgressSource> participantEngines,
+      Path readerVisiblePath,
       List<String> participants) {
-    Map<String, ParticipantProgressSource> sources = new LinkedHashMap<>();
+    Map<String, ArchiveParticipantProgressSource> sources = new LinkedHashMap<>();
     Objects.requireNonNull(participantEngines, "participantEngines")
-        .forEach((participant, engine) -> sources.put(participant, engine::loadProgress));
+        .forEach(sources::put);
     return new ArchiveRecoveryAuthorityScanner(history, checkpointPath, sources,
         readerVisiblePath, participants, (byte) 1);
   }
@@ -123,9 +125,9 @@ public final class ArchiveRecoveryAuthorityScanner {
           public Map<String, ArchiveProgressEnvelope> loadParticipantProgress()
               throws IOException {
             Map<String, ArchiveProgressEnvelope> loaded = new LinkedHashMap<>();
-            for (Map.Entry<String, ParticipantProgressSource> entry
+            for (Map.Entry<String, ArchiveParticipantProgressSource> entry
                 : participantSources.entrySet()) {
-              loaded.put(entry.getKey(), entry.getValue().load());
+              loaded.put(entry.getKey(), entry.getValue().loadProgress());
             }
             return loaded;
           }
@@ -140,11 +142,6 @@ public final class ArchiveRecoveryAuthorityScanner {
 
   private ArchiveProgressFile progressFile(Path path) {
     return new ArchiveProgressFile(path, progressCodec);
-  }
-
-  @FunctionalInterface
-  private interface ParticipantProgressSource {
-    ArchiveProgressEnvelope load() throws IOException;
   }
 
   private static List<String> validateParticipants(List<String> participants) {

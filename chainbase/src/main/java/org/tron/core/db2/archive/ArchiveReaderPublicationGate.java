@@ -18,7 +18,7 @@ public final class ArchiveReaderPublicationGate {
 
   private final HistoryCommitStore history;
   private final ProgressSource checkpointSource;
-  private final Map<String, ProgressSource> participantSources;
+  private final Map<String, ArchiveParticipantProgressSource> participantSources;
   private final Path readerVisiblePath;
   private final ArchiveProgressFile readerVisibleFile;
   private final ArchiveReaderHeadPublisher publisher;
@@ -26,20 +26,22 @@ public final class ArchiveReaderPublicationGate {
   private final ArchiveStateBarrier barrier;
 
   public ArchiveReaderPublicationGate(HistoryCommitStore history,
-      ProgressSource checkpointSource, Map<String, ProgressSource> participantSources,
+      ProgressSource checkpointSource,
+      Map<String, ? extends ArchiveParticipantProgressSource> participantSources,
       Path readerVisiblePath, List<String> participants, ArchiveStateBarrier barrier) {
     this(history, checkpointSource, participantSources, readerVisiblePath, participants, barrier,
         temporary -> { });
   }
 
   ArchiveReaderPublicationGate(HistoryCommitStore history,
-      ProgressSource checkpointSource, Map<String, ProgressSource> participantSources,
+      ProgressSource checkpointSource,
+      Map<String, ? extends ArchiveParticipantProgressSource> participantSources,
       Path readerVisiblePath, List<String> participants, ArchiveStateBarrier barrier,
       ArchiveProgressFile.FaultHook faultHook) {
     this.history = Objects.requireNonNull(history, "history");
     this.checkpointSource = Objects.requireNonNull(checkpointSource, "checkpointSource");
     this.participants = validateParticipants(participants);
-    TreeMap<String, ProgressSource> sorted = new TreeMap<>(
+    TreeMap<String, ArchiveParticipantProgressSource> sorted = new TreeMap<>(
         Objects.requireNonNull(participantSources, "participantSources"));
     if (!new ArrayList<>(sorted.keySet()).equals(this.participants)
         || sorted.containsValue(null)) {
@@ -63,7 +65,7 @@ public final class ArchiveReaderPublicationGate {
     if (sorted.containsValue(null)) {
       throw new IllegalArgumentException("Archive publication participant path is missing");
     }
-    Map<String, ProgressSource> sources = new LinkedHashMap<>();
+    Map<String, ArchiveParticipantProgressSource> sources = new LinkedHashMap<>();
     ArchiveProgressEnvelopeCodec codec = new ArchiveProgressEnvelopeCodec();
     sorted.forEach((participant, path) -> sources.put(participant,
         () -> new ArchiveProgressFile(path, codec).load()));
@@ -73,23 +75,36 @@ public final class ArchiveReaderPublicationGate {
   }
 
   public void publish(long targetEpoch) throws IOException {
+    publishAfterRefresh(targetEpoch, () -> { });
+  }
+
+  public void publishAfterRefresh(long targetEpoch,
+      ArchiveStateBarrier.ArchiveStateAction refresh) throws IOException {
     if (targetEpoch < 0) {
       throw new IllegalArgumentException("Reader publication target must be non-negative");
     }
-    barrier.run(() -> publishInsideBarrier(targetEpoch));
+    Objects.requireNonNull(refresh, "refresh");
+    barrier.run(() -> {
+      refresh.run();
+      publishInsideBarrier(targetEpoch);
+    });
   }
 
   private void publishInsideBarrier(long targetEpoch) throws IOException {
     HistoryCommitMarker target = requireMarker(targetEpoch);
     validateCurrentReader(targetEpoch);
-    validateAuthorities(target);
-    validateAuthorities(target);
+    byte[] firstDigest = validateAuthorities(target);
+    byte[] secondDigest = validateAuthorities(target);
+    if (!Arrays.equals(firstDigest, secondDigest)) {
+      throw new ArchivePersistenceException(
+          "Archive mutation-plan authority drifted during reader publication");
+    }
     HistoryCommitMarker reloaded = requireMarker(targetEpoch);
     if (!sameIdentity(target, reloaded)) {
       throw new ArchivePersistenceException(
           "Committed history identity drifted during reader publication");
     }
-    publisher.publish(targetEpoch);
+    publisher.publish(targetEpoch, secondDigest);
   }
 
   private HistoryCommitMarker requireMarker(long targetEpoch) {
@@ -114,14 +129,24 @@ public final class ArchiveReaderPublicationGate {
     }
   }
 
-  private void validateAuthorities(HistoryCommitMarker target) throws IOException {
+  private byte[] validateAuthorities(HistoryCommitMarker target) throws IOException {
     ArchiveProgressEnvelope checkpoint = load(checkpointSource, "archive apply checkpoint");
     requireIdentity(checkpoint, Kind.APPLY_CHECKPOINT, null, target);
-    for (Map.Entry<String, ProgressSource> entry : participantSources.entrySet()) {
-      ArchiveProgressEnvelope progress = load(entry.getValue(),
-          "archive participant progress: " + entry.getKey());
+    byte[] mutationPlanDigest = checkpoint.getMutationPlanDigest();
+    for (Map.Entry<String, ArchiveParticipantProgressSource> entry
+        : participantSources.entrySet()) {
+      ArchiveProgressEnvelope progress = entry.getValue().loadProgress();
+      if (progress == null) {
+        throw new ArchivePersistenceException(
+            "Missing archive participant progress: " + entry.getKey());
+      }
       requireIdentity(progress, Kind.PARTICIPANT_PROGRESS, entry.getKey(), target);
+      if (!Arrays.equals(mutationPlanDigest, progress.getMutationPlanDigest())) {
+        throw new ArchivePersistenceException(
+            "Archive participant mutation-plan digest mismatch: " + entry.getKey());
+      }
     }
+    return mutationPlanDigest;
   }
 
   private ArchiveProgressEnvelope load(ProgressSource source, String name) throws IOException {

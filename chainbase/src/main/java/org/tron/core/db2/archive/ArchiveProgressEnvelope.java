@@ -21,10 +21,17 @@ public final class ArchiveProgressEnvelope {
   private final byte[] blockHash;
   private final byte[] batchId;
   private final byte[] payloadDigest;
+  private final byte[] mutationPlanDigest;
   private final List<String> participants;
 
   public ArchiveProgressEnvelope(Kind kind, String participant, long epoch, byte[] blockHash,
       byte[] batchId, byte[] payloadDigest, List<String> participants) {
+    this(kind, participant, epoch, blockHash, batchId, payloadDigest, null, participants);
+  }
+
+  public ArchiveProgressEnvelope(Kind kind, String participant, long epoch, byte[] blockHash,
+      byte[] batchId, byte[] payloadDigest, byte[] mutationPlanDigest,
+      List<String> participants) {
     this.kind = Objects.requireNonNull(kind, "kind");
     if (epoch < 0) {
       throw new IllegalArgumentException("Archive progress epoch must be non-negative");
@@ -33,6 +40,8 @@ public final class ArchiveProgressEnvelope {
     this.blockHash = exactBytes(blockHash, 32, "blockHash");
     this.batchId = exactBytes(batchId, 16, "batchId");
     this.payloadDigest = exactBytes(payloadDigest, 32, "payloadDigest");
+    this.mutationPlanDigest = mutationPlanDigest == null ? null
+        : exactBytes(mutationPlanDigest, 32, "mutationPlanDigest");
     this.participants = validateParticipants(participants);
     if (kind != Kind.PARTICIPANT_PROGRESS) {
       if (participant != null) {
@@ -72,6 +81,11 @@ public final class ArchiveProgressEnvelope {
     return Arrays.copyOf(payloadDigest, payloadDigest.length);
   }
 
+  public byte[] getMutationPlanDigest() {
+    return mutationPlanDigest == null ? null
+        : Arrays.copyOf(mutationPlanDigest, mutationPlanDigest.length);
+  }
+
   public List<String> getParticipants() {
     return participants;
   }
@@ -79,10 +93,18 @@ public final class ArchiveProgressEnvelope {
   public void requireIdentity(Kind expectedKind, String expectedParticipant, long expectedEpoch,
       byte[] expectedBlockHash, byte[] expectedBatchId, byte[] expectedPayloadDigest,
       List<String> expectedParticipants) {
+    requireIdentity(expectedKind, expectedParticipant, expectedEpoch, expectedBlockHash,
+        expectedBatchId, expectedPayloadDigest, mutationPlanDigest, expectedParticipants);
+  }
+
+  public void requireIdentity(Kind expectedKind, String expectedParticipant, long expectedEpoch,
+      byte[] expectedBlockHash, byte[] expectedBatchId, byte[] expectedPayloadDigest,
+      byte[] expectedMutationPlanDigest, List<String> expectedParticipants) {
     if (kind != expectedKind || !Objects.equals(participant, expectedParticipant)
         || epoch != expectedEpoch || !Arrays.equals(blockHash, expectedBlockHash)
         || !Arrays.equals(batchId, expectedBatchId)
         || !Arrays.equals(payloadDigest, expectedPayloadDigest)
+        || !Arrays.equals(mutationPlanDigest, expectedMutationPlanDigest)
         || !participants.equals(expectedParticipants)) {
       throw new ArchivePersistenceException("Archive progress identity mismatch");
     }

@@ -36,6 +36,10 @@ public class ArchiveProgressEnvelopeTest {
 
     ArchiveProgressEnvelope reader = reader(10, 1);
     assertEnvelope(reader, codec.decode(codec.encode(reader)));
+
+    ArchiveProgressEnvelope bound = new ArchiveProgressEnvelope(Kind.APPLY_CHECKPOINT, null,
+        10, bytes(32, 1), bytes(16, 2), bytes(32, 3), bytes(32, 4), PARTICIPANTS);
+    assertEnvelope(bound, codec.decode(codec.encode(bound)));
   }
 
   @Test
@@ -80,6 +84,15 @@ public class ArchiveProgressEnvelopeTest {
         () -> progress.requireIdentity(Kind.PARTICIPANT_PROGRESS, "account-asset", 10,
             bytes(32, 1), bytes(16, 2), bytes(32, 3),
             Arrays.asList("account", "account-asset")));
+
+    ArchiveProgressEnvelope bound = new ArchiveProgressEnvelope(Kind.PARTICIPANT_PROGRESS,
+        "account-asset", 10, bytes(32, 1), bytes(16, 2), bytes(32, 3), bytes(32, 4),
+        PARTICIPANTS);
+    bound.requireIdentity(Kind.PARTICIPANT_PROGRESS, "account-asset", 10,
+        bytes(32, 1), bytes(16, 2), bytes(32, 3), bytes(32, 4), PARTICIPANTS);
+    assertThrows(ArchivePersistenceException.class,
+        () -> bound.requireIdentity(Kind.PARTICIPANT_PROGRESS, "account-asset", 10,
+            bytes(32, 1), bytes(16, 2), bytes(32, 3), bytes(32, 5), PARTICIPANTS));
   }
 
   @Test
@@ -134,6 +147,7 @@ public class ArchiveProgressEnvelopeTest {
     assertArrayEquals(expected.getBlockHash(), actual.getBlockHash());
     assertArrayEquals(expected.getBatchId(), actual.getBatchId());
     assertArrayEquals(expected.getPayloadDigest(), actual.getPayloadDigest());
+    assertArrayEquals(expected.getMutationPlanDigest(), actual.getMutationPlanDigest());
     assertEquals(expected.getParticipants(), actual.getParticipants());
   }
 }
