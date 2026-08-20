@@ -5,6 +5,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
+import org.tron.core.db2.archive.P66AccountAssetCodec.Phase;
 
 /** Immutable producer payload for one committed target's exact physical participant mutations. */
 public final class ArchiveParticipantMutationBatch {
@@ -13,15 +14,29 @@ public final class ArchiveParticipantMutationBatch {
   private final byte[] blockHash;
   private final byte[] batchId;
   private final byte[] historyPayloadDigest;
+  private final String accountAssetFormatId;
+  private final Phase targetPhase;
   private final List<String> participants;
   private final List<Mutation> mutations;
 
-  public ArchiveParticipantMutationBatch(HistoryCommitMarker target, List<Mutation> mutations) {
+  public ArchiveParticipantMutationBatch(HistoryCommitMarker target, Phase targetPhase,
+      List<Mutation> mutations) {
+    this(target, P66AccountAssetCodec.FORMAT_ID, targetPhase, mutations);
+  }
+
+  ArchiveParticipantMutationBatch(HistoryCommitMarker target, String accountAssetFormatId,
+      Phase targetPhase, List<Mutation> mutations) {
     HistoryCommitMarker checkedTarget = Objects.requireNonNull(target, "target");
     targetEpoch = checkedTarget.getMeta().getEpoch();
     blockHash = checkedTarget.getMeta().getBlockHash();
     batchId = checkedTarget.getBatchId();
     historyPayloadDigest = checkedTarget.getHistoryLocation().getBodyDigest();
+    this.accountAssetFormatId = Objects.requireNonNull(accountAssetFormatId,
+        "accountAssetFormatId");
+    if (accountAssetFormatId.isEmpty()) {
+      throw new IllegalArgumentException("AccountAsset transition format must not be empty");
+    }
+    this.targetPhase = Objects.requireNonNull(targetPhase, "targetPhase");
     participants = Collections.unmodifiableList(
         new ArrayList<>(checkedTarget.getDatabases()));
     List<Mutation> copy = new ArrayList<>(Objects.requireNonNull(mutations, "mutations"));
@@ -45,6 +60,14 @@ public final class ArchiveParticipantMutationBatch {
 
   byte[] getHistoryPayloadDigest() {
     return Arrays.copyOf(historyPayloadDigest, historyPayloadDigest.length);
+  }
+
+  String getAccountAssetFormatId() {
+    return accountAssetFormatId;
+  }
+
+  Phase getTargetPhase() {
+    return targetPhase;
   }
 
   List<String> getParticipants() {

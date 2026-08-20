@@ -10,6 +10,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.TreeMap;
 import org.tron.core.db2.archive.ArchiveProgressEnvelope.Kind;
+import org.tron.core.db2.archive.P66AccountAssetCodec.Phase;
 import org.tron.core.db2.archive.ArchiveRecoveryExecutor.RecoverySnapshot;
 
 /** Advances one standalone normal target through C, mixed D, latest refresh, and R. */
@@ -68,13 +69,14 @@ public final class ArchiveTargetApplyCoordinator {
     this.faultHook = Objects.requireNonNull(faultHook, "faultHook");
   }
 
-  public void apply(long targetEpoch,
+  public void apply(long targetEpoch, Phase targetPhase,
       Map<String, ? extends List<ArchiveParticipantMutation>> mutationPlans,
       ArchiveStateBarrier.ArchiveStateAction refresh) throws IOException {
     HistoryCommitMarker target = validateTarget(targetEpoch);
     Map<String, List<ArchiveParticipantMutation>> plans = validatePlans(mutationPlans);
     ArchiveTargetMutationPlan plan = new ArchiveTargetMutationPlan(
-        progress(Kind.APPLY_CHECKPOINT, null, target, null), plans);
+        progress(Kind.APPLY_CHECKPOINT, null, target, null),
+        P66AccountAssetCodec.FORMAT_ID, Objects.requireNonNull(targetPhase, "targetPhase"), plans);
     apply(target, plan, refresh);
   }
 

@@ -2,6 +2,7 @@ package org.tron.core.db2.archive;
 
 import java.util.Objects;
 import org.tron.core.db2.archive.BlockChangeView.PostValue;
+import org.tron.core.db2.archive.P66AccountAssetCodec.Phase;
 
 /** One-shot owner of a block's explicit AccountAsset events, post-state view, and output batch. */
 public final class ArchiveBlockForwardMutationCapture {
@@ -12,9 +13,9 @@ public final class ArchiveBlockForwardMutationCapture {
   private State state = State.OPEN;
 
   public ArchiveBlockForwardMutationCapture(BlockSnapshotMeta targetMeta,
-      ArchiveBlockForwardMutationLimits limits) {
+      Phase targetPhase, ArchiveBlockForwardMutationLimits limits) {
     this.targetMeta = Objects.requireNonNull(targetMeta, "targetMeta");
-    accountAssetRecorder = new AccountAssetForwardMutationRecorder(targetMeta,
+    accountAssetRecorder = new AccountAssetForwardMutationRecorder(targetMeta, targetPhase,
         Objects.requireNonNull(limits, "limits"));
   }
 

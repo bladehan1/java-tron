@@ -21,6 +21,7 @@ import org.tron.core.db2.ISession;
 import org.tron.core.db2.archive.AccountAssetForwardMutationManifest.Entry;
 import org.tron.core.db2.archive.AccountAssetForwardProjector.AssetMutation;
 import org.tron.core.db2.archive.AccountAssetForwardProjector.Projection;
+import org.tron.core.db2.archive.P66AccountAssetCodec.Phase;
 import org.tron.core.db2.common.DB;
 import org.tron.core.db2.common.Flusher;
 import org.tron.core.db2.common.WrappedByteArray;
@@ -50,7 +51,7 @@ public class ArchiveParticipantMutationBatchCollectorTest extends BaseMethodTest
         databases.get("proposal").put(bytes(2, 3), bytes(1, 3));
       });
       ArchiveParticipantMutationBatchCollector collector =
-          new ArchiveParticipantMutationBatchCollector();
+          new ArchiveParticipantMutationBatchCollector(Phase.P66_ON);
       ArchiveTargetMutationPlan firstPlan = new ArchiveTargetMutationPlanBuilder().build(marker,
           collector.collect(marker, firstView));
       ArchiveTargetMutationPlan secondPlan = new ArchiveTargetMutationPlanBuilder().build(marker,
@@ -77,7 +78,7 @@ public class ArchiveParticipantMutationBatchCollectorTest extends BaseMethodTest
       BlockChangeView view = fixture.capture(meta,
           databases -> databases.get("account").put(accountKey, rawAccount));
       assertThrows(ArchivePersistenceException.class,
-          () -> new ArchiveParticipantMutationBatchCollector().collect(marker, view));
+          () -> new ArchiveParticipantMutationBatchCollector(Phase.P66_ON).collect(marker, view));
       AccountAssetForwardProjector projector = (key, post) -> {
         assertArrayEquals(accountKey, key);
         assertArrayEquals(rawAccount, post.getValue());
@@ -86,7 +87,8 @@ public class ArchiveParticipantMutationBatchCollectorTest extends BaseMethodTest
             new AssetMutation(assetPut, BlockChangeView.PostValue.present(new byte[0]))));
       };
       ArchiveParticipantMutationBatch batch =
-          new ArchiveParticipantMutationBatchCollector(projector).collect(marker, view);
+          new ArchiveParticipantMutationBatchCollector(Phase.P66_ON, projector)
+              .collect(marker, view);
       ArchiveTargetMutationPlan plan = new ArchiveTargetMutationPlanBuilder().build(marker, batch);
 
       assertArrayEquals(canonicalAccount,
@@ -108,7 +110,7 @@ public class ArchiveParticipantMutationBatchCollectorTest extends BaseMethodTest
       BlockChangeView view = exact.capture(meta,
           databases -> databases.get("code").put(bytes(1, 1), bytes(1, 2)));
       assertThrows(ArchivePersistenceException.class,
-          () -> new ArchiveParticipantMutationBatchCollector().collect(
+          () -> new ArchiveParticipantMutationBatchCollector(Phase.P66_ON).collect(
               marker(meta(2), participants()), view));
     }
 
@@ -116,14 +118,14 @@ public class ArchiveParticipantMutationBatchCollectorTest extends BaseMethodTest
       BlockChangeView view = incomplete.capture(meta,
           databases -> databases.get("code").put(bytes(1, 1), bytes(1, 2)));
       assertThrows(ArchivePersistenceException.class,
-          () -> new ArchiveParticipantMutationBatchCollector().collect(marker, view));
+          () -> new ArchiveParticipantMutationBatchCollector(Phase.P66_ON).collect(marker, view));
     }
 
     try (Fixture account = new Fixture(participants())) {
       BlockChangeView view = account.capture(meta,
           databases -> databases.get("account").put(bytes(1, 1), bytes(1, 2)));
       assertThrows(ArchivePersistenceException.class,
-          () -> new ArchiveParticipantMutationBatchCollector((key, post) -> null)
+          () -> new ArchiveParticipantMutationBatchCollector(Phase.P66_ON, (key, post) -> null)
               .collect(marker, view));
     }
   }
@@ -153,7 +155,7 @@ public class ArchiveParticipantMutationBatchCollectorTest extends BaseMethodTest
         databases.get("account").delete(deleteKey);
       });
       AccountAssetForwardMutationManifest manifest =
-          new AccountAssetForwardMutationManifest(marker, Arrays.asList(
+          new AccountAssetForwardMutationManifest(marker, Phase.P66_ON, Arrays.asList(
               entry(createKey, rawCreate, canonicalCreate,
                   new AssetMutation(createAsset,
                       BlockChangeView.PostValue.present(new byte[0]))),
@@ -192,18 +194,19 @@ public class ArchiveParticipantMutationBatchCollectorTest extends BaseMethodTest
       BlockChangeView view = fixture.capture(meta,
           databases -> databases.get("account").put(accountKey, rawAccount));
       AccountAssetForwardMutationManifest missing =
-          new AccountAssetForwardMutationManifest(marker, Collections.emptyList());
+          new AccountAssetForwardMutationManifest(marker, Phase.P66_ON, Collections.emptyList());
       assertThrows(ArchivePersistenceException.class,
           () -> new ArchiveParticipantMutationBatchCollector(missing).collect(marker, view));
 
-      AccountAssetForwardMutationManifest extra = new AccountAssetForwardMutationManifest(marker,
-          Arrays.asList(entry(accountKey, rawAccount, rawAccount),
-              entry(bytes(2, 9), bytes(3, 9), bytes(3, 9))));
+      AccountAssetForwardMutationManifest extra =
+          new AccountAssetForwardMutationManifest(marker, Phase.P66_ON,
+              Arrays.asList(entry(accountKey, rawAccount, rawAccount),
+                  entry(bytes(2, 9), bytes(3, 9), bytes(3, 9))));
       assertThrows(ArchivePersistenceException.class,
           () -> new ArchiveParticipantMutationBatchCollector(extra).collect(marker, view));
 
       AccountAssetForwardMutationManifest wrongRaw =
-          new AccountAssetForwardMutationManifest(marker,
+          new AccountAssetForwardMutationManifest(marker, Phase.P66_ON,
               Collections.singletonList(entry(accountKey, bytes(3, 8), rawAccount)));
       assertThrows(ArchivePersistenceException.class,
           () -> new ArchiveParticipantMutationBatchCollector(wrongRaw).collect(marker, view));
@@ -215,7 +218,7 @@ public class ArchiveParticipantMutationBatchCollectorTest extends BaseMethodTest
       BlockChangeView otherView = fixture.capture(otherMeta,
           databases -> databases.get("account").put(accountKey, rawAccount));
       AccountAssetForwardMutationManifest wrongTarget =
-          new AccountAssetForwardMutationManifest(marker,
+          new AccountAssetForwardMutationManifest(marker, Phase.P66_ON,
               Collections.singletonList(entry(accountKey, rawAccount, rawAccount)));
       assertThrows(ArchivePersistenceException.class,
           () -> new ArchiveParticipantMutationBatchCollector(wrongTarget)
@@ -230,9 +233,10 @@ public class ArchiveParticipantMutationBatchCollectorTest extends BaseMethodTest
     byte[] rawAccount = bytes(3, 2);
     Entry entry = entry(accountKey, rawAccount, rawAccount);
     assertThrows(IllegalArgumentException.class,
-        () -> new AccountAssetForwardMutationManifest(marker, Arrays.asList(entry, entry)));
+        () -> new AccountAssetForwardMutationManifest(marker, Phase.P66_ON,
+            Arrays.asList(entry, entry)));
     assertThrows(IllegalArgumentException.class,
-        () -> new AccountAssetForwardMutationManifest(marker,
+        () -> new AccountAssetForwardMutationManifest(marker, Phase.P66_ON,
             Collections.singletonList(null)));
     assertThrows(IllegalArgumentException.class,
         () -> entry(accountKey, rawAccount, rawAccount,
@@ -243,7 +247,8 @@ public class ArchiveParticipantMutationBatchCollectorTest extends BaseMethodTest
             new AssetMutation(bytes(3, 7), BlockChangeView.PostValue.absent())));
 
     AccountAssetForwardMutationManifest singleUse =
-        new AccountAssetForwardMutationManifest(marker, Collections.singletonList(entry));
+        new AccountAssetForwardMutationManifest(marker, Phase.P66_ON,
+            Collections.singletonList(entry));
     singleUse.begin(marker, Collections.singletonList(accountKey));
     singleUse.project(accountKey, BlockChangeView.PostValue.present(rawAccount));
     assertThrows(ArchivePersistenceException.class,
@@ -251,7 +256,8 @@ public class ArchiveParticipantMutationBatchCollectorTest extends BaseMethodTest
     singleUse.complete();
 
     AccountAssetForwardMutationManifest unused =
-        new AccountAssetForwardMutationManifest(marker, Collections.singletonList(entry));
+        new AccountAssetForwardMutationManifest(marker, Phase.P66_ON,
+            Collections.singletonList(entry));
     unused.begin(marker, Collections.singletonList(accountKey));
     assertThrows(ArchivePersistenceException.class, unused::complete);
   }
@@ -267,7 +273,7 @@ public class ArchiveParticipantMutationBatchCollectorTest extends BaseMethodTest
     byte[] deletedAsset = assetKey(updateKey, 2);
     byte[] removedAccountAsset = assetKey(deleteKey, 1);
     AccountAssetForwardMutationRecorder recorder =
-        new AccountAssetForwardMutationRecorder(meta, limits());
+        new AccountAssetForwardMutationRecorder(meta, Phase.P66_ON, limits());
 
     recorder.recordAssetDelete(meta, deleteKey, removedAccountAsset);
     recorder.recordAssetPut(meta, updateKey, emptyAsset, new byte[0]);
@@ -308,9 +314,9 @@ public class ArchiveParticipantMutationBatchCollectorTest extends BaseMethodTest
     byte[] firstAsset = assetKey(accountKey, 1);
     byte[] secondAsset = assetKey(accountKey, 2);
     AccountAssetForwardMutationRecorder first =
-        new AccountAssetForwardMutationRecorder(meta, limits());
+        new AccountAssetForwardMutationRecorder(meta, Phase.P66_ON, limits());
     AccountAssetForwardMutationRecorder second =
-        new AccountAssetForwardMutationRecorder(meta, limits());
+        new AccountAssetForwardMutationRecorder(meta, Phase.P66_ON, limits());
 
     first.recordAssetDelete(meta, accountKey, secondAsset);
     first.recordAccount(meta, accountKey, BlockChangeView.PostValue.present(rawAccount),
@@ -343,7 +349,7 @@ public class ArchiveParticipantMutationBatchCollectorTest extends BaseMethodTest
     byte[] assetKey = assetKey(accountKey, 1);
 
     AccountAssetForwardMutationRecorder wrongTarget =
-        new AccountAssetForwardMutationRecorder(meta, limits());
+        new AccountAssetForwardMutationRecorder(meta, Phase.P66_ON, limits());
     assertThrows(ArchivePersistenceException.class,
         () -> wrongTarget.recordAccount(otherMeta, accountKey,
             BlockChangeView.PostValue.present(rawAccount),
@@ -351,7 +357,7 @@ public class ArchiveParticipantMutationBatchCollectorTest extends BaseMethodTest
     assertThrows(ArchivePersistenceException.class, () -> wrongTarget.seal(otherMarker));
 
     AccountAssetForwardMutationRecorder duplicates =
-        new AccountAssetForwardMutationRecorder(meta, limits());
+        new AccountAssetForwardMutationRecorder(meta, Phase.P66_ON, limits());
     duplicates.recordAccount(meta, accountKey, BlockChangeView.PostValue.present(rawAccount),
         BlockChangeView.PostValue.present(rawAccount));
     assertThrows(ArchivePersistenceException.class,
@@ -365,12 +371,12 @@ public class ArchiveParticipantMutationBatchCollectorTest extends BaseMethodTest
         () -> duplicates.recordAssetPut(meta, accountKey, bytes(3, 7), bytes(1, 3)));
 
     AccountAssetForwardMutationRecorder incomplete =
-        new AccountAssetForwardMutationRecorder(meta, limits());
+        new AccountAssetForwardMutationRecorder(meta, Phase.P66_ON, limits());
     incomplete.recordAssetDelete(meta, accountKey, assetKey);
     assertThrows(ArchivePersistenceException.class, () -> incomplete.seal(marker));
 
     AccountAssetForwardMutationRecorder sealed =
-        new AccountAssetForwardMutationRecorder(meta, limits());
+        new AccountAssetForwardMutationRecorder(meta, Phase.P66_ON, limits());
     sealed.recordAccount(meta, accountKey, BlockChangeView.PostValue.present(rawAccount),
         BlockChangeView.PostValue.present(rawAccount));
     sealed.seal(marker);
@@ -393,7 +399,7 @@ public class ArchiveParticipantMutationBatchCollectorTest extends BaseMethodTest
     byte[] expectedAssetKey = Arrays.copyOf(assetKey, assetKey.length);
     byte[] expectedAssetValue = Arrays.copyOf(assetValue, assetValue.length);
     AccountAssetForwardMutationRecorder recorder =
-        new AccountAssetForwardMutationRecorder(meta, limits());
+        new AccountAssetForwardMutationRecorder(meta, Phase.P66_ON, limits());
 
     recorder.recordAccount(meta, accountKey, BlockChangeView.PostValue.present(rawAccount),
         BlockChangeView.PostValue.present(canonicalAccount));
@@ -428,7 +434,7 @@ public class ArchiveParticipantMutationBatchCollectorTest extends BaseMethodTest
     byte[] canonicalAccount = bytes(3, 3);
     byte[] assetKey = assetKey(accountKey, 1);
     ArchiveBlockForwardMutationCapture capture =
-        new ArchiveBlockForwardMutationCapture(meta, limits());
+        new ArchiveBlockForwardMutationCapture(meta, Phase.P66_ON, limits());
     capture.recordAssetPut(meta, accountKey, assetKey, new byte[0]);
     capture.recordAccount(meta, accountKey, BlockChangeView.PostValue.present(rawAccount),
         BlockChangeView.PostValue.present(canonicalAccount));
@@ -460,7 +466,7 @@ public class ArchiveParticipantMutationBatchCollectorTest extends BaseMethodTest
     HistoryCommitMarker marker = marker(meta, participants());
     HistoryCommitMarker otherMarker = marker(otherMeta, participants());
     ArchiveBlockForwardMutationCapture capture =
-        new ArchiveBlockForwardMutationCapture(meta, limits());
+        new ArchiveBlockForwardMutationCapture(meta, Phase.P66_ON, limits());
     assertThrows(ArchivePersistenceException.class, () -> capture.seal(marker));
 
     try (Fixture exact = new Fixture(participants());
@@ -485,7 +491,7 @@ public class ArchiveParticipantMutationBatchCollectorTest extends BaseMethodTest
     byte[] accountKey = bytes(2, 1);
     byte[] rawAccount = bytes(3, 2);
     ArchiveBlockForwardMutationCapture capture =
-        new ArchiveBlockForwardMutationCapture(meta, limits());
+        new ArchiveBlockForwardMutationCapture(meta, Phase.P66_ON, limits());
 
     try (Fixture fixture = new Fixture(participants())) {
       BlockChangeView view = fixture.capture(meta,
@@ -511,7 +517,7 @@ public class ArchiveParticipantMutationBatchCollectorTest extends BaseMethodTest
     byte[] accountKey = bytes(2, 1);
     byte[] assetKey = assetKey(accountKey, 1);
     ArchiveBlockForwardMutationCapture capture =
-        new ArchiveBlockForwardMutationCapture(meta, limits());
+        new ArchiveBlockForwardMutationCapture(meta, Phase.P66_ON, limits());
     capture.recordAccount(meta, accountKey, BlockChangeView.PostValue.present(bytes(3, 2)),
         BlockChangeView.PostValue.present(bytes(3, 3)));
     capture.recordAssetPut(meta, accountKey, assetKey, bytes(3, 4));
@@ -543,7 +549,7 @@ public class ArchiveParticipantMutationBatchCollectorTest extends BaseMethodTest
     HistoryCommitMarker marker = marker(meta, participants());
     byte[] accountKey = bytes(2, 1);
     ArchiveBlockForwardMutationCapture capture =
-        new ArchiveBlockForwardMutationCapture(meta, limits());
+        new ArchiveBlockForwardMutationCapture(meta, Phase.P66_ON, limits());
     capture.recordAccount(meta, accountKey, BlockChangeView.PostValue.absent(),
         BlockChangeView.PostValue.absent());
 
@@ -577,7 +583,7 @@ public class ArchiveParticipantMutationBatchCollectorTest extends BaseMethodTest
     ArchiveBlockForwardMutationLimits exact =
         new ArchiveBlockForwardMutationLimits(1, 2, 3, 1, 13);
     ArchiveBlockForwardMutationCapture capture =
-        new ArchiveBlockForwardMutationCapture(meta, exact);
+        new ArchiveBlockForwardMutationCapture(meta, Phase.P66_ON, exact);
     capture.recordAssetPut(meta, accountKey, emptyAsset, new byte[0]);
     capture.recordAssetDelete(meta, accountKey, deletedAsset);
     capture.recordAccount(meta, accountKey, BlockChangeView.PostValue.present(rawAccount),
@@ -603,33 +609,33 @@ public class ArchiveParticipantMutationBatchCollectorTest extends BaseMethodTest
         () -> new ArchiveBlockForwardMutationLimits(-1, 1, 1, 1, 1));
 
     AccountAssetForwardMutationRecorder accounts = new AccountAssetForwardMutationRecorder(meta,
-        new ArchiveBlockForwardMutationLimits(0, 1, 3, 1, 10));
+        Phase.P66_ON, new ArchiveBlockForwardMutationLimits(0, 1, 3, 1, 10));
     assertThrows(ArchivePersistenceException.class,
         () -> accounts.recordAccount(meta, accountKey, BlockChangeView.PostValue.absent(),
             BlockChangeView.PostValue.absent()));
 
     AccountAssetForwardMutationRecorder assets = new AccountAssetForwardMutationRecorder(meta,
-        new ArchiveBlockForwardMutationLimits(1, 0, 3, 1, 10));
+        Phase.P66_ON, new ArchiveBlockForwardMutationLimits(1, 0, 3, 1, 10));
     assets.recordAccount(meta, accountKey, BlockChangeView.PostValue.absent(),
         BlockChangeView.PostValue.absent());
     assertThrows(ArchivePersistenceException.class,
         () -> assets.recordAssetDelete(meta, accountKey, assetKey));
 
     AccountAssetForwardMutationRecorder keys = new AccountAssetForwardMutationRecorder(meta,
-        new ArchiveBlockForwardMutationLimits(1, 1, 1, 1, 10));
+        Phase.P66_ON, new ArchiveBlockForwardMutationLimits(1, 1, 1, 1, 10));
     assertThrows(ArchivePersistenceException.class,
         () -> keys.recordAccount(meta, accountKey, BlockChangeView.PostValue.absent(),
             BlockChangeView.PostValue.absent()));
 
     AccountAssetForwardMutationRecorder values = new AccountAssetForwardMutationRecorder(meta,
-        new ArchiveBlockForwardMutationLimits(1, 1, 3, 0, 10));
+        Phase.P66_ON, new ArchiveBlockForwardMutationLimits(1, 1, 3, 0, 10));
     assertThrows(ArchivePersistenceException.class,
         () -> values.recordAccount(meta, accountKey,
             BlockChangeView.PostValue.present(bytes(1, 2)),
             BlockChangeView.PostValue.present(bytes(1, 3))));
 
     AccountAssetForwardMutationRecorder total = new AccountAssetForwardMutationRecorder(meta,
-        new ArchiveBlockForwardMutationLimits(1, 1, 3, 1, 3));
+        Phase.P66_ON, new ArchiveBlockForwardMutationLimits(1, 1, 3, 1, 3));
     assertThrows(ArchivePersistenceException.class,
         () -> total.recordAccount(meta, accountKey,
             BlockChangeView.PostValue.present(bytes(1, 2)),
@@ -644,7 +650,7 @@ public class ArchiveParticipantMutationBatchCollectorTest extends BaseMethodTest
     byte[] firstAsset = assetKey(accountKey, 1);
     byte[] secondAsset = assetKey(accountKey, 2);
     ArchiveBlockForwardMutationCapture capture = new ArchiveBlockForwardMutationCapture(meta,
-        new ArchiveBlockForwardMutationLimits(1, 2, 3, 1, 10));
+        Phase.P66_ON, new ArchiveBlockForwardMutationLimits(1, 2, 3, 1, 10));
 
     assertThrows(ArchivePersistenceException.class,
         () -> capture.recordAccount(meta, accountKey,
@@ -677,7 +683,7 @@ public class ArchiveParticipantMutationBatchCollectorTest extends BaseMethodTest
     BlockSnapshotMeta meta = meta(19);
     HistoryCommitMarker marker = marker(meta, participants());
     ArchiveBlockForwardMutationCapture total = new ArchiveBlockForwardMutationCapture(meta,
-        new ArchiveBlockForwardMutationLimits(0, 0, 3, 3, 3));
+        Phase.P66_ON, new ArchiveBlockForwardMutationLimits(0, 0, 3, 3, 3));
     try (Fixture fixture = new Fixture(participants())) {
       BlockChangeView tooLarge = fixture.capture(meta,
           databases -> databases.get("code").put(bytes(2, 1), bytes(2, 2)));
@@ -689,9 +695,9 @@ public class ArchiveParticipantMutationBatchCollectorTest extends BaseMethodTest
     }
 
     ArchiveBlockForwardMutationCapture key = new ArchiveBlockForwardMutationCapture(meta,
-        new ArchiveBlockForwardMutationLimits(0, 0, 1, 2, 10));
+        Phase.P66_ON, new ArchiveBlockForwardMutationLimits(0, 0, 1, 2, 10));
     ArchiveBlockForwardMutationCapture value = new ArchiveBlockForwardMutationCapture(meta,
-        new ArchiveBlockForwardMutationLimits(0, 0, 2, 1, 10));
+        Phase.P66_ON, new ArchiveBlockForwardMutationLimits(0, 0, 2, 1, 10));
     try (Fixture fixture = new Fixture(participants())) {
       BlockChangeView keyTooLarge = fixture.capture(meta,
           databases -> databases.get("code").put(bytes(2, 1), new byte[0]));

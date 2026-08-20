@@ -19,6 +19,7 @@ import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.tron.core.db2.archive.ArchiveParticipantMutationBatch.Mutation;
 import org.tron.core.db2.archive.ArchiveProgressEnvelope.Kind;
+import org.tron.core.db2.archive.P66AccountAssetCodec.Phase;
 
 public class ArchiveTargetMutationPlanBuilderTest {
 
@@ -31,7 +32,7 @@ public class ArchiveTargetMutationPlanBuilderTest {
     byte[] key = bytes(3, 3);
     byte[] value = bytes(2, 7);
     ArchiveParticipantMutationBatch first = new ArchiveParticipantMutationBatch(target,
-        Arrays.asList(Mutation.delete("storage-row", bytes(3, 2)),
+        Phase.P66_ON, Arrays.asList(Mutation.delete("storage-row", bytes(3, 2)),
             Mutation.put("account", key, value),
             Mutation.put("account", bytes(3, 1), new byte[0])));
     key[0] = 99;
@@ -46,7 +47,7 @@ public class ArchiveTargetMutationPlanBuilderTest {
     assertEquals(participants(), new ArrayList<>(plan.getMutations().keySet()));
 
     ArchiveParticipantMutationBatch reordered = new ArchiveParticipantMutationBatch(target,
-        Arrays.asList(Mutation.put("account", bytes(3, 1), new byte[0]),
+        Phase.P66_ON, Arrays.asList(Mutation.put("account", bytes(3, 1), new byte[0]),
             Mutation.put("account", bytes(3, 3), bytes(2, 7)),
             Mutation.delete("storage-row", bytes(3, 2))));
     assertArrayEquals(plan.digest(),
@@ -62,7 +63,7 @@ public class ArchiveTargetMutationPlanBuilderTest {
         Mutation.delete("accountTrie", bytes(1, 1))));
     assertThrows(IllegalArgumentException.class,
         () -> new ArchiveTargetMutationPlanBuilder().build(target,
-            new ArchiveParticipantMutationBatch(target, Arrays.asList(
+            new ArchiveParticipantMutationBatch(target, Phase.P66_ON, Arrays.asList(
                 Mutation.put("account", bytes(1, 1), bytes(1, 2)),
                 Mutation.delete("account", bytes(1, 1))))));
   }
@@ -71,7 +72,7 @@ public class ArchiveTargetMutationPlanBuilderTest {
   public void rejectsTargetIdentityAndExactParticipantSetMismatch() {
     HistoryCommitMarker target = marker(1, participants());
     ArchiveParticipantMutationBatch batch = new ArchiveParticipantMutationBatch(target,
-        Collections.emptyList());
+        Phase.P66_ON, Collections.emptyList());
     assertThrows(ArchivePersistenceException.class,
         () -> new ArchiveTargetMutationPlanBuilder().build(marker(2, participants()), batch));
 
@@ -79,7 +80,8 @@ public class ArchiveTargetMutationPlanBuilderTest {
     HistoryCommitMarker incompleteTarget = marker(1, incomplete);
     assertThrows(ArchivePersistenceException.class,
         () -> new ArchiveTargetMutationPlanBuilder().build(incompleteTarget,
-            new ArchiveParticipantMutationBatch(incompleteTarget, Collections.emptyList())));
+            new ArchiveParticipantMutationBatch(incompleteTarget, Phase.P66_ON,
+                Collections.emptyList())));
 
     List<String> oldExact27 = new ArrayList<>(participants());
     oldExact27.add("abi");
@@ -87,14 +89,35 @@ public class ArchiveTargetMutationPlanBuilderTest {
     HistoryCommitMarker oldTarget = marker(1, oldExact27);
     assertThrows(ArchivePersistenceException.class,
         () -> new ArchiveTargetMutationPlanBuilder().build(oldTarget,
-            new ArchiveParticipantMutationBatch(oldTarget, Collections.emptyList())));
+            new ArchiveParticipantMutationBatch(oldTarget, Phase.P66_ON,
+                Collections.emptyList())));
 
     List<String> v2OnlyExact25 = new ArrayList<>(participants());
     v2OnlyExact25.remove("asset-issue");
     HistoryCommitMarker v2OnlyTarget = marker(1, v2OnlyExact25);
     assertThrows(ArchivePersistenceException.class,
         () -> new ArchiveTargetMutationPlanBuilder().build(v2OnlyTarget,
-            new ArchiveParticipantMutationBatch(v2OnlyTarget, Collections.emptyList())));
+            new ArchiveParticipantMutationBatch(v2OnlyTarget, Phase.P66_ON,
+                Collections.emptyList())));
+  }
+
+  @Test
+  public void bindsAccountAssetFormatAndPhaseIntoPlanDigest() {
+    HistoryCommitMarker target = marker(1, participants());
+    List<Mutation> mutations = Collections.singletonList(
+        Mutation.put("account", bytes(3, 1), bytes(2, 2)));
+    ArchiveTargetMutationPlan activation = new ArchiveTargetMutationPlanBuilder().build(target,
+        new ArchiveParticipantMutationBatch(target, Phase.P66_ACTIVATION, mutations));
+    ArchiveTargetMutationPlan enabled = new ArchiveTargetMutationPlanBuilder().build(target,
+        new ArchiveParticipantMutationBatch(target, Phase.P66_ON, mutations));
+
+    assertEquals(P66AccountAssetCodec.FORMAT_ID, activation.getAccountAssetFormatId());
+    assertEquals(Phase.P66_ACTIVATION, activation.getTargetPhase());
+    assertFalse(Arrays.equals(activation.digest(), enabled.digest()));
+    assertThrows(ArchivePersistenceException.class,
+        () -> new ArchiveTargetMutationPlanBuilder().build(target,
+            new ArchiveParticipantMutationBatch(target, "legacy-format", Phase.P66_ON,
+                mutations)));
   }
 
   @Test
@@ -121,7 +144,7 @@ public class ArchiveTargetMutationPlanBuilderTest {
       history.commitAll(Arrays.asList(zero, one));
       ArchiveTargetApplyCoordinator coordinator = new ArchiveTargetApplyCoordinator(history,
           checkpointPath, engines, readerPath, participants, action -> action.run());
-      coordinator.apply(new ArchiveParticipantMutationBatch(one, Arrays.asList(
+      coordinator.apply(new ArchiveParticipantMutationBatch(one, Phase.P66_ON, Arrays.asList(
           Mutation.put("account", bytes(2, 1), new byte[0]),
           Mutation.delete("storage-row", bytes(2, 2)))), () -> { });
     }
@@ -141,7 +164,7 @@ public class ArchiveTargetMutationPlanBuilderTest {
   private static void assertBuildFails(HistoryCommitMarker target, List<Mutation> mutations) {
     assertThrows(ArchivePersistenceException.class,
         () -> new ArchiveTargetMutationPlanBuilder().build(target,
-            new ArchiveParticipantMutationBatch(target, mutations)));
+            new ArchiveParticipantMutationBatch(target, Phase.P66_ON, mutations)));
   }
 
   private static List<String> participants() {

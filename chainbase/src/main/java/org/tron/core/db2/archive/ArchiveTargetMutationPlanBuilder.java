@@ -29,6 +29,9 @@ final class ArchiveTargetMutationPlanBuilder {
       throw new ArchivePersistenceException(
           "Participant mutation batch does not contain the exact VERSIONED_STATE set");
     }
+    if (!P66AccountAssetCodec.FORMAT_ID.equals(input.getAccountAssetFormatId())) {
+      throw new ArchivePersistenceException("Unsupported AccountAsset transition format");
+    }
     Map<String, List<ArchiveParticipantMutation>> grouped = new LinkedHashMap<>();
     for (String participant : participants) {
       grouped.put(participant, new ArrayList<>());
@@ -49,7 +52,8 @@ final class ArchiveTargetMutationPlanBuilder {
         Kind.APPLY_CHECKPOINT, null, target.getMeta().getEpoch(),
         target.getMeta().getBlockHash(), target.getBatchId(),
         target.getHistoryLocation().getBodyDigest(), participants);
-    return new ArchiveTargetMutationPlan(targetEnvelope, grouped);
+    return new ArchiveTargetMutationPlan(targetEnvelope, input.getAccountAssetFormatId(),
+        input.getTargetPhase(), grouped);
   }
 
   private void requireTargetIdentity(HistoryCommitMarker target,

@@ -10,6 +10,7 @@ import org.tron.core.db2.archive.AccountAssetForwardMutationManifest.Entry;
 import org.tron.core.db2.archive.BlockChangeView.Change;
 import org.tron.core.db2.archive.BlockChangeView.DatabaseChanges;
 import org.tron.core.db2.archive.BlockChangeView.PostValue;
+import org.tron.core.db2.archive.P66AccountAssetCodec.Phase;
 import org.tron.core.db2.common.WrappedByteArray;
 
 /**
@@ -75,7 +76,8 @@ public final class AccountAssetBlockProjectionBridge {
     }
 
     BlockReverseDiff reverse = new BlockReverseDiff(input.getMeta(), groups);
-    return new PreparedBlockProjection(input, participants, reverse, forwardEntries);
+    return new PreparedBlockProjection(input, participants, reverse, forwardEntries,
+        targetActivation.getPhase());
   }
 
   private void validateBeforeProjection(BlockChangeView view,
@@ -107,15 +109,19 @@ public final class AccountAssetBlockProjectionBridge {
   /** Target-bound proposal-66 state; mismatched identity is rejected before any Store read. */
   public static final class TargetAssetOptimization {
     private final BlockSnapshotMeta meta;
-    private final boolean enabled;
+    private final Phase phase;
 
-    private TargetAssetOptimization(BlockSnapshotMeta meta, boolean enabled) {
+    private TargetAssetOptimization(BlockSnapshotMeta meta, Phase phase) {
       this.meta = Objects.requireNonNull(meta, "meta");
-      this.enabled = enabled;
+      this.phase = Objects.requireNonNull(phase, "phase");
     }
 
     public static TargetAssetOptimization forTarget(BlockSnapshotMeta meta, boolean enabled) {
-      return new TargetAssetOptimization(meta, enabled);
+      return forTarget(meta, enabled ? Phase.P66_ON : Phase.P66_OFF);
+    }
+
+    static TargetAssetOptimization forTarget(BlockSnapshotMeta meta, Phase phase) {
+      return new TargetAssetOptimization(meta, phase);
     }
 
     BlockSnapshotMeta getMeta() {
@@ -123,7 +129,11 @@ public final class AccountAssetBlockProjectionBridge {
     }
 
     boolean isEnabled() {
-      return enabled;
+      return phase != Phase.P66_OFF;
+    }
+
+    Phase getPhase() {
+      return phase;
     }
   }
 
@@ -134,15 +144,17 @@ public final class AccountAssetBlockProjectionBridge {
     private BlockChangeView view;
     private BlockReverseDiff reverseDiff;
     private List<Entry> forwardEntries;
+    private final Phase targetPhase;
     private State state = State.PREPARED;
 
     private PreparedBlockProjection(BlockChangeView view, List<String> participants,
-        BlockReverseDiff reverseDiff, List<Entry> forwardEntries) {
+        BlockReverseDiff reverseDiff, List<Entry> forwardEntries, Phase targetPhase) {
       this.view = Objects.requireNonNull(view, "view");
       this.meta = view.getMeta();
       this.participants = Collections.unmodifiableList(new ArrayList<>(participants));
       this.reverseDiff = Objects.requireNonNull(reverseDiff, "reverseDiff");
       this.forwardEntries = Collections.unmodifiableList(new ArrayList<>(forwardEntries));
+      this.targetPhase = Objects.requireNonNull(targetPhase, "targetPhase");
     }
 
     public synchronized BlockReverseDiff getReverseDiff() {
@@ -174,13 +186,13 @@ public final class AccountAssetBlockProjectionBridge {
 
     synchronized AccountAssetForwardMutationManifest previewSeal(HistoryCommitMarker marker) {
       HistoryCommitMarker target = validateMarker(marker);
-      return new AccountAssetForwardMutationManifest(target, forwardEntries);
+      return new AccountAssetForwardMutationManifest(target, targetPhase, forwardEntries);
     }
 
     synchronized ArchiveBlockForwardPayload previewSealPayload(HistoryCommitMarker marker) {
       HistoryCommitMarker target = validateMarker(marker);
       return new ArchiveBlockForwardPayload(target, view,
-          new AccountAssetForwardMutationManifest(target, forwardEntries));
+          new AccountAssetForwardMutationManifest(target, targetPhase, forwardEntries));
     }
 
     synchronized HistoryCommitMarker validateMarker(HistoryCommitMarker marker) {

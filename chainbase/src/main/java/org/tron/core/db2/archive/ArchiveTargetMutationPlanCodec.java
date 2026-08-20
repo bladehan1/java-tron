@@ -8,21 +8,24 @@ import java.io.DataOutputStream;
 import java.io.EOFException;
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import org.tron.core.db2.archive.P66AccountAssetCodec.Phase;
 
 /** Checksummed bounded codec for one durable target mutation plan. */
 final class ArchiveTargetMutationPlanCodec {
 
   private static final int MAGIC = 0x54414d50; // TAMP
-  private static final short VERSION = 1;
+  private static final short VERSION = 2;
   private static final int HEADER_LENGTH = 12;
   private static final int MAX_PARTICIPANTS = 1024;
   private static final int MAX_MUTATIONS = 1_000_000;
   private static final int MAX_FIELD_LENGTH = 64 * 1024 * 1024;
+  private static final int MAX_IDENTITY_LENGTH = 256;
   static final int MAX_ENCODED_LENGTH = 128 * 1024 * 1024;
   private final ArchiveProgressEnvelopeCodec progressCodec = new ArchiveProgressEnvelopeCodec();
 
@@ -35,6 +38,8 @@ final class ArchiveTargetMutationPlanCodec {
       output.writeShort(VERSION);
       output.writeShort(0);
       output.writeInt(0);
+      writeIdentity(output, plan.getAccountAssetFormatId());
+      writeIdentity(output, plan.getTargetPhase().name());
       writeBytes(output, target);
       output.writeInt(plan.getTarget().getParticipants().size());
       for (String participant : plan.getTarget().getParticipants()) {
@@ -87,6 +92,16 @@ final class ArchiveTargetMutationPlanCodec {
           || input.readInt() != encoded.length) {
         throw new IllegalArgumentException("Unsupported mutation-plan header");
       }
+      String formatId = readIdentity(input);
+      if (!P66AccountAssetCodec.FORMAT_ID.equals(formatId)) {
+        throw new IllegalArgumentException("Unsupported AccountAsset transition format");
+      }
+      Phase targetPhase;
+      try {
+        targetPhase = Phase.valueOf(readIdentity(input));
+      } catch (IllegalArgumentException invalidPhase) {
+        throw new IllegalArgumentException("Unsupported AccountAsset target phase", invalidPhase);
+      }
       ArchiveProgressEnvelope target = progressCodec.decode(readBytes(input));
       int participantCount = input.readInt();
       if (participantCount <= 0 || participantCount > MAX_PARTICIPANTS
@@ -115,7 +130,7 @@ final class ArchiveTargetMutationPlanCodec {
       if (input.available() != Integer.BYTES) {
         throw new IllegalArgumentException("Mutation-plan payload mismatch");
       }
-      return new ArchiveTargetMutationPlan(target, mutations);
+      return new ArchiveTargetMutationPlan(target, formatId, targetPhase, mutations);
     } catch (EOFException truncated) {
       throw new IllegalArgumentException("Mutation plan is truncated", truncated);
     } catch (IOException invalid) {
@@ -133,6 +148,27 @@ final class ArchiveTargetMutationPlanCodec {
     }
     output.writeInt(value.length);
     output.write(value);
+  }
+
+  private static void writeIdentity(DataOutputStream output, String value) throws IOException {
+    byte[] encoded = value.getBytes(StandardCharsets.US_ASCII);
+    if (!value.equals(new String(encoded, StandardCharsets.US_ASCII))
+        || encoded.length == 0 || encoded.length > MAX_IDENTITY_LENGTH) {
+      throw new IllegalArgumentException("Mutation-plan identity is invalid");
+    }
+    writeBytes(output, encoded);
+  }
+
+  private static String readIdentity(DataInputStream input) throws IOException {
+    byte[] encoded = readBytes(input);
+    if (encoded.length == 0 || encoded.length > MAX_IDENTITY_LENGTH) {
+      throw new IllegalArgumentException("Mutation-plan identity is invalid");
+    }
+    String value = new String(encoded, StandardCharsets.US_ASCII);
+    if (!Arrays.equals(encoded, value.getBytes(StandardCharsets.US_ASCII))) {
+      throw new IllegalArgumentException("Mutation-plan identity is not ASCII");
+    }
+    return value;
   }
 
   private static byte[] readBytes(DataInputStream input) throws IOException {

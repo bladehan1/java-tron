@@ -23,6 +23,7 @@ import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.tron.core.db2.archive.ArchiveProgressEnvelope.Kind;
 import org.tron.core.db2.archive.ArchiveTargetApplyCoordinator.Stage;
+import org.tron.core.db2.archive.P66AccountAssetCodec.Phase;
 
 public class ArchiveTargetApplyCoordinatorTest {
 
@@ -47,7 +48,7 @@ public class ArchiveTargetApplyCoordinatorTest {
       try (HistoryCommitStore history = fixture.openHistory()) {
         ArchiveTargetApplyCoordinator coordinator = new ArchiveTargetApplyCoordinator(history,
             fixture.checkpointPath, fixture.engines(), fixture.readerPath, PARTICIPANTS, barrier);
-        coordinator.apply(1, plans(), () -> {
+        coordinator.apply(1, Phase.P66_ON, plans(), () -> {
           assertTrue(insideBarrier.get());
           assertEquals(1, fixture.account.loadProgress().getEpoch());
           assertEquals(1, fixture.asset.loadProgress().getEpoch());
@@ -86,7 +87,7 @@ public class ArchiveTargetApplyCoordinatorTest {
               throw new IOException("injected during publication");
             }
           }, (stage, path) -> failPlanStage(point, stage));
-          assertThrows(IOException.class, () -> coordinator.apply(1, plans(), () -> {
+          assertThrows(IOException.class, () -> coordinator.apply(1, Phase.P66_ON, plans(), () -> {
             refreshes.incrementAndGet();
             if (point == FailurePoint.DURING_REFRESH) {
               throw new IOException("injected during refresh");

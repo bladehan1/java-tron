@@ -6,7 +6,10 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
 
+import com.google.common.hash.Hashing;
+import com.google.common.io.BaseEncoding;
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
@@ -19,6 +22,7 @@ import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.tron.core.db2.archive.ArchiveProgressEnvelope.Kind;
 import org.tron.core.db2.archive.ArchiveTargetMutationPlanFile.Stage;
+import org.tron.core.db2.archive.P66AccountAssetCodec.Phase;
 
 public class ArchiveTargetMutationPlanFileTest {
 
@@ -35,19 +39,49 @@ public class ArchiveTargetMutationPlanFileTest {
         new ArchiveTargetMutationPlanCodec().encode(plan));
 
     assertEquals(1, decoded.getTarget().getEpoch());
+    assertEquals(P66AccountAssetCodec.FORMAT_ID, decoded.getAccountAssetFormatId());
+    assertEquals(Phase.P66_ON, decoded.getTargetPhase());
     assertEquals(PARTICIPANTS, decoded.getTarget().getParticipants());
     assertArrayEquals(bytes(3, 1), decoded.getMutations("account").get(0).getKey());
     assertArrayEquals(new byte[0], decoded.getMutations("account").get(0).getValue());
     assertNull(decoded.getMutations("account-asset").get(0).getValue());
     assertArrayEquals(plan.digest(), decoded.digest());
+    assertEquals("e4bd9becc28e2afae72429f5630b3bd04bbe55fe9ae651809667bc5d5ad43bbf",
+        BaseEncoding.base16().lowerCase().encode(plan.digest()));
 
     Map<String, List<ArchiveParticipantMutation>> substituted = new LinkedHashMap<>(
         plan.getMutations());
     substituted.put("account", Collections.singletonList(
         ArchiveParticipantMutation.put(bytes(3, 1), bytes(1, 9))));
     ArchiveTargetMutationPlan replacement = new ArchiveTargetMutationPlan(
-        plan.getTarget(), substituted);
+        plan.getTarget(), P66AccountAssetCodec.FORMAT_ID, Phase.P66_ON, substituted);
     assertFalse(Arrays.equals(plan.digest(), replacement.digest()));
+  }
+
+  @Test
+  public void digestBindsFormatAndPhaseAndLegacyVersionFailsClosed() {
+    ArchiveTargetMutationPlan canonical = plan(1);
+    ArchiveTargetMutationPlan activation = new ArchiveTargetMutationPlan(
+        canonical.getTarget(), P66AccountAssetCodec.FORMAT_ID, Phase.P66_ACTIVATION,
+        canonical.getMutations());
+    ArchiveTargetMutationPlan substitutedFormat = new ArchiveTargetMutationPlan(
+        canonical.getTarget(), "archive-state/p66-account-asset/legacy",
+        Phase.P66_ON, canonical.getMutations());
+
+    assertFalse(Arrays.equals(canonical.digest(), activation.digest()));
+    assertFalse(Arrays.equals(canonical.digest(), substitutedFormat.digest()));
+    ArchiveTargetMutationPlanCodec codec = new ArchiveTargetMutationPlanCodec();
+    assertEquals(Phase.P66_ACTIVATION,
+        codec.decode(codec.encode(activation)).getTargetPhase());
+    assertThrows(IllegalArgumentException.class,
+        () -> codec.decode(codec.encode(substitutedFormat)));
+
+    byte[] legacy = codec.encode(canonical);
+    ByteBuffer.wrap(legacy).putShort(Integer.BYTES, (short) 1);
+    byte[] payload = Arrays.copyOf(legacy, legacy.length - Integer.BYTES);
+    ByteBuffer.wrap(legacy, legacy.length - Integer.BYTES, Integer.BYTES)
+        .putInt(Hashing.crc32c().hashBytes(payload).asInt());
+    assertThrows(IllegalArgumentException.class, () -> codec.decode(legacy));
   }
 
   @Test
@@ -104,14 +138,17 @@ public class ArchiveTargetMutationPlanFileTest {
         ArchiveParticipantMutation.put(bytes(3, 3), bytes(1, 3))));
     second.put("account-asset", Collections.singletonList(
         ArchiveParticipantMutation.delete(bytes(3, 2))));
-    assertArrayEquals(new ArchiveTargetMutationPlan(target, first).digest(),
-        new ArchiveTargetMutationPlan(target, second).digest());
+    assertArrayEquals(new ArchiveTargetMutationPlan(target, P66AccountAssetCodec.FORMAT_ID,
+            Phase.P66_ON, first).digest(),
+        new ArchiveTargetMutationPlan(target, P66AccountAssetCodec.FORMAT_ID,
+            Phase.P66_ON, second).digest());
 
     second.put("account", Arrays.asList(
         ArchiveParticipantMutation.put(bytes(3, 1), bytes(1, 1)),
         ArchiveParticipantMutation.delete(bytes(3, 1))));
     assertThrows(IllegalArgumentException.class,
-        () -> new ArchiveTargetMutationPlan(target, second));
+        () -> new ArchiveTargetMutationPlan(target, P66AccountAssetCodec.FORMAT_ID,
+            Phase.P66_ON, second));
   }
 
   private static ArchiveTargetMutationPlan plan(long epoch) {
@@ -123,7 +160,8 @@ public class ArchiveTargetMutationPlanFileTest {
         ArchiveParticipantMutation.put(bytes(3, 1), new byte[0])));
     mutations.put("account-asset", Collections.singletonList(
         ArchiveParticipantMutation.delete(bytes(3, 2))));
-    return new ArchiveTargetMutationPlan(target, mutations);
+    return new ArchiveTargetMutationPlan(target, P66AccountAssetCodec.FORMAT_ID,
+        Phase.P66_ON, mutations);
   }
 
   private static byte[] bytes(int length, int value) {
