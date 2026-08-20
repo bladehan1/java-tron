@@ -6,7 +6,9 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
+import com.google.common.hash.Hashing;
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -54,6 +56,8 @@ public class PersistentServingKeyIndexGenerationTest {
         assertArrayEquals(hash(3), generation.getHeadHash());
         assertArrayEquals(expectedDigest, generation.getAuthoritativePrefixDigest());
         assertArrayEquals(hash(77), generation.getLatestSourceIdentityDigest());
+        assertEquals(ArchiveParticipantDescriptor.scopeIdentity(PARTICIPANTS),
+            generation.getScopeIdentity());
         assertTrue(generation.isLatestSourceIdentityBound());
         assertEquals(4, generation.getKeyChangeCount());
         assertEquals(1, change(generation, "account", bytes("hot"), 0, 3));
@@ -67,11 +71,52 @@ public class PersistentServingKeyIndexGenerationTest {
 
       try (PersistentServingKeyIndexGeneration reopened =
           PersistentServingKeyIndexGeneration.open(generationPath)) {
+        assertEquals(ArchiveParticipantDescriptor.scopeIdentity(PARTICIPANTS),
+            reopened.getScopeIdentity());
         assertArrayEquals(hash(77), reopened.getLatestSourceIdentityDigest());
         assertEquals(3, change(reopened, "account", bytes("hot"), 2, 3));
         assertThrows(UnsupportedOperationException.class,
             () -> reopened.changesInRange("account", new byte[0], null, 0, 3, 10));
       }
+    }
+  }
+
+  @Test
+  public void rejectsLegacyAndSubstitutedGenerationManifestScope() throws Exception {
+    Path root = temporaryFolder.newFolder("generation-scope").toPath();
+    Path approvedPath = root.resolve("approved-generation");
+    try (PersistentServingKeyIndexGeneration approved =
+        PersistentServingKeyIndexGeneration.build(approvedPath, "approved", 0, hash(0),
+            Collections.emptyList(), location -> {
+              throw new AssertionError("empty prefix must not read an index record");
+            }, ArchiveParticipantDescriptor.current().getParticipants())) {
+      assertEquals(ArchiveParticipantDescriptor.FORMAT_ID, approved.getScopeIdentity());
+    }
+    try (Fixture fixture = new Fixture(root.resolve("authoritative"))) {
+      fixture.append(1, group("account", bytes("key")));
+      fixture.sync();
+      Path generationPath = root.resolve("generation");
+      try (PersistentServingKeyIndexGeneration ignored =
+          PersistentServingKeyIndexGeneration.build(generationPath, "generation", 0, hash(0),
+              fixture.markers, fixture.index::read, PARTICIPANTS)) {
+        // Close before mutating the durable manifest.
+      }
+      Path manifest = generationPath.resolve("generation.meta");
+      byte[] valid = Files.readAllBytes(manifest);
+
+      byte[] legacy = Arrays.copyOf(valid, valid.length);
+      ByteBuffer.wrap(legacy).putShort(4, (short) 2);
+      refreshChecksum(legacy);
+      Files.write(manifest, legacy);
+      assertThrows(ArchivePersistenceException.class,
+          () -> PersistentServingKeyIndexGeneration.open(generationPath));
+
+      byte[] substituted = Arrays.copyOf(valid, valid.length);
+      substituted[10] ^= 1;
+      refreshChecksum(substituted);
+      Files.write(manifest, substituted);
+      assertThrows(ArchivePersistenceException.class,
+          () -> PersistentServingKeyIndexGeneration.open(generationPath));
     }
   }
 
@@ -464,6 +509,12 @@ public class PersistentServingKeyIndexGenerationTest {
     byte[] hash = new byte[32];
     hash[31] = (byte) suffix;
     return hash;
+  }
+
+  private static void refreshChecksum(byte[] encoded) {
+    int payloadLength = encoded.length - Integer.BYTES;
+    int checksum = Hashing.crc32c().hashBytes(encoded, 0, payloadLength).asInt();
+    ByteBuffer.wrap(encoded, payloadLength, Integer.BYTES).putInt(checksum);
   }
 
   private static final class Fixture implements AutoCloseable {

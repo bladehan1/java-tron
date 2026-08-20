@@ -159,6 +159,8 @@ public final class LatestStateGenerationCoordinator
     ArchiveProgressEnvelope authority = Objects.requireNonNull(authorityReader.read(),
         "reader-visible authority");
     if (authority.getKind() != Kind.READER_VISIBLE
+        || !ArchiveParticipantDescriptor.scopeIdentity(participants)
+            .equals(authority.getScopeIdentity())
         || !participants.equals(authority.getParticipants())) {
       throw new ArchivePersistenceException("Invalid reader-visible generation authority");
     }
@@ -193,6 +195,7 @@ public final class LatestStateGenerationCoordinator
         && Arrays.equals(left.getBlockHash(), right.getBlockHash())
         && Arrays.equals(left.getBatchId(), right.getBatchId())
         && Arrays.equals(left.getPayloadDigest(), right.getPayloadDigest())
+        && left.getScopeIdentity().equals(right.getScopeIdentity())
         && left.getParticipants().equals(right.getParticipants());
   }
 
@@ -275,6 +278,7 @@ public final class LatestStateGenerationCoordinator
           || authority.getEpoch() != serving.getIndexedThrough()
           || !Arrays.equals(authority.getBlockHash(), serving.getHeadHash())
           || !Arrays.equals(sourceIdentityDigest, serving.getLatestSourceIdentityDigest())
+          || !authority.getScopeIdentity().equals(serving.getScopeIdentity())
           || !authority.getParticipants().equals(serving.getParticipatingDatabases())) {
         throw new IllegalArgumentException(
             "Serving generation does not match latest-state candidate");

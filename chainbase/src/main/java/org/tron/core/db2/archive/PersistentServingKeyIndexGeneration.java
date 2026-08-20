@@ -33,8 +33,7 @@ import org.rocksdb.WriteOptions;
 public final class PersistentServingKeyIndexGeneration implements ServingKeyIndex {
 
   private static final int MAGIC = 0x534b4947; // SKIG
-  private static final short VERSION = 2;
-  private static final short LEGACY_VERSION = 1;
+  private static final short VERSION = 3;
   private static final int MAX_MANIFEST_SIZE = 1024 * 1024;
   private static final byte DATA_PREFIX = 1;
   private static final byte[] PRESENT = new byte[]{1};
@@ -83,6 +82,7 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
     Objects.requireNonNull(committed, "committed");
     Objects.requireNonNull(reader, "reader");
     List<String> participants = sortedParticipants(participatingDatabases);
+    String scopeIdentity = ArchiveParticipantDescriptor.scopeIdentity(participants);
     if (generationId == null || generationId.isEmpty() || baseEpoch < 0) {
       throw new IllegalArgumentException("Invalid serving generation identity");
     }
@@ -96,6 +96,7 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
     MessageDigest sourceDigest = sha256();
     updateLong(sourceDigest, baseEpoch);
     sourceDigest.update(baseHash);
+    updateStringDigest(sourceDigest, scopeIdentity);
     updateParticipantDigest(sourceDigest, participants);
     long previousEpoch = baseEpoch;
     long previousBlock = baseEpoch;
@@ -133,8 +134,8 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
       buildOptions.close();
     }
 
-    Descriptor descriptor = new Descriptor(generationId, baseEpoch, previousEpoch, previousHash,
-        sourceDigest.digest(), latestSourceIdentityDigest, participants, keyChanges);
+    Descriptor descriptor = new Descriptor(scopeIdentity, generationId, baseEpoch, previousEpoch,
+        previousHash, sourceDigest.digest(), latestSourceIdentityDigest, participants, keyChanges);
     persistDescriptor(directory, descriptor);
     HistorySegmentStore.syncDirectory(directory);
     return open(directory);
@@ -211,6 +212,10 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
 
   public List<String> getParticipatingDatabases() {
     return descriptor.participants;
+  }
+
+  public String getScopeIdentity() {
+    return descriptor.scopeIdentity;
   }
 
   public long getKeyChangeCount() {
@@ -357,6 +362,12 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
     }
   }
 
+  private static void updateStringDigest(MessageDigest digest, String value) {
+    byte[] encoded = value.getBytes(StandardCharsets.UTF_8);
+    updateLong(digest, encoded.length);
+    digest.update(encoded);
+  }
+
   private static void updateLong(MessageDigest digest, long value) {
     digest.update(ByteBuffer.allocate(Long.BYTES).putLong(value).array());
   }
@@ -414,6 +425,7 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
       output.writeInt(MAGIC);
       output.writeShort(VERSION);
       output.writeShort(0);
+      output.writeUTF(descriptor.scopeIdentity);
       output.writeUTF(descriptor.generationId);
       output.writeLong(descriptor.indexedFrom);
       output.writeLong(descriptor.indexedThrough);
@@ -450,9 +462,10 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
         throw new IllegalArgumentException("Unsupported serving index manifest");
       }
       short version = input.readShort();
-      if (version != VERSION && version != LEGACY_VERSION || input.readShort() != 0) {
+      if (version != VERSION || input.readShort() != 0) {
         throw new IllegalArgumentException("Unsupported serving index manifest");
       }
+      String scopeIdentity = input.readUTF();
       String generationId = input.readUTF();
       long from = input.readLong();
       long through = input.readLong();
@@ -461,9 +474,7 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
       input.readFully(headHash);
       input.readFully(sourceDigest);
       byte[] latestSourceIdentityDigest = new byte[32];
-      if (version >= VERSION) {
-        input.readFully(latestSourceIdentityDigest);
-      }
+      input.readFully(latestSourceIdentityDigest);
       long keyChanges = input.readLong();
       int count = input.readInt();
       if (generationId.isEmpty() || from < 0 || through < from || keyChanges < 0
@@ -477,14 +488,19 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
       if (input.available() != Integer.BYTES) {
         throw new IllegalArgumentException("Serving index manifest payload mismatch");
       }
-      return new Descriptor(generationId, from, through, headHash, sourceDigest,
-          latestSourceIdentityDigest, sortedParticipants(participants), keyChanges);
+      List<String> sorted = sortedParticipants(participants);
+      if (!scopeIdentity.equals(ArchiveParticipantDescriptor.scopeIdentity(sorted))) {
+        throw new IllegalArgumentException("Serving index manifest scope identity mismatch");
+      }
+      return new Descriptor(scopeIdentity, generationId, from, through, headHash, sourceDigest,
+          latestSourceIdentityDigest, sorted, keyChanges);
     } catch (IOException invalid) {
       throw new IllegalArgumentException("Serving index manifest is truncated", invalid);
     }
   }
 
   private static final class Descriptor {
+    private final String scopeIdentity;
     private final String generationId;
     private final long indexedFrom;
     private final long indexedThrough;
@@ -494,9 +510,11 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
     private final List<String> participants;
     private final long keyChanges;
 
-    private Descriptor(String generationId, long indexedFrom, long indexedThrough,
+    private Descriptor(String scopeIdentity, String generationId, long indexedFrom,
+        long indexedThrough,
         byte[] headHash, byte[] sourceDigest, byte[] latestSourceIdentityDigest,
         List<String> participants, long keyChanges) {
+      this.scopeIdentity = scopeIdentity;
       this.generationId = generationId;
       this.indexedFrom = indexedFrom;
       this.indexedThrough = indexedThrough;
