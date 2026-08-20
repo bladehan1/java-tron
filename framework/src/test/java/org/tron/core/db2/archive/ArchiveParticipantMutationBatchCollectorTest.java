@@ -41,12 +41,12 @@ public class ArchiveParticipantMutationBatchCollectorTest extends BaseMethodTest
       second.rootPut("storage-row", deleted, bytes(1, 8));
       BlockChangeView firstView = first.capture(meta, databases -> {
         databases.get("proposal").put(bytes(2, 3), bytes(1, 3));
-        databases.get("abi").put(bytes(2, 1), new byte[0]);
+        databases.get("code").put(bytes(2, 1), new byte[0]);
         databases.get("storage-row").delete(deleted);
       });
       BlockChangeView secondView = second.capture(meta, databases -> {
         databases.get("storage-row").delete(deleted);
-        databases.get("abi").put(bytes(2, 1), new byte[0]);
+        databases.get("code").put(bytes(2, 1), new byte[0]);
         databases.get("proposal").put(bytes(2, 3), bytes(1, 3));
       });
       ArchiveParticipantMutationBatchCollector collector =
@@ -56,7 +56,7 @@ public class ArchiveParticipantMutationBatchCollectorTest extends BaseMethodTest
       ArchiveTargetMutationPlan secondPlan = new ArchiveTargetMutationPlanBuilder().build(marker,
           collector.collect(marker, secondView));
 
-      assertArrayEquals(new byte[0], firstPlan.getMutations("abi").get(0).getValue());
+      assertArrayEquals(new byte[0], firstPlan.getMutations("code").get(0).getValue());
       assertNull(firstPlan.getMutations("storage-row").get(0).getValue());
       assertArrayEquals(bytes(1, 3),
           firstPlan.getMutations("proposal").get(0).getValue());
@@ -106,15 +106,15 @@ public class ArchiveParticipantMutationBatchCollectorTest extends BaseMethodTest
     HistoryCommitMarker marker = marker(meta, participants());
     try (Fixture exact = new Fixture(participants())) {
       BlockChangeView view = exact.capture(meta,
-          databases -> databases.get("abi").put(bytes(1, 1), bytes(1, 2)));
+          databases -> databases.get("code").put(bytes(1, 1), bytes(1, 2)));
       assertThrows(ArchivePersistenceException.class,
           () -> new ArchiveParticipantMutationBatchCollector().collect(
               marker(meta(2), participants()), view));
     }
 
-    try (Fixture incomplete = new Fixture(Collections.singletonList("abi"))) {
+    try (Fixture incomplete = new Fixture(Collections.singletonList("code"))) {
       BlockChangeView view = incomplete.capture(meta,
-          databases -> databases.get("abi").put(bytes(1, 1), bytes(1, 2)));
+          databases -> databases.get("code").put(bytes(1, 1), bytes(1, 2)));
       assertThrows(ArchivePersistenceException.class,
           () -> new ArchiveParticipantMutationBatchCollector().collect(marker, view));
     }
@@ -466,10 +466,10 @@ public class ArchiveParticipantMutationBatchCollectorTest extends BaseMethodTest
     try (Fixture exact = new Fixture(participants());
         Fixture other = new Fixture(participants())) {
       BlockChangeView wrongView = other.capture(otherMeta,
-          databases -> databases.get("abi").put(bytes(1, 1), bytes(1, 2)));
+          databases -> databases.get("code").put(bytes(1, 1), bytes(1, 2)));
       assertThrows(ArchivePersistenceException.class, () -> capture.attach(wrongView));
       BlockChangeView view = exact.capture(meta,
-          databases -> databases.get("abi").put(bytes(1, 1), bytes(1, 2)));
+          databases -> databases.get("code").put(bytes(1, 1), bytes(1, 2)));
       capture.attach(view);
       assertThrows(ArchivePersistenceException.class, () -> capture.attach(view));
       assertThrows(ArchivePersistenceException.class, () -> capture.seal(otherMarker));
@@ -532,7 +532,7 @@ public class ArchiveParticipantMutationBatchCollectorTest extends BaseMethodTest
 
     try (Fixture fixture = new Fixture(participants())) {
       BlockChangeView view = fixture.capture(meta,
-          databases -> databases.get("abi").put(bytes(1, 1), bytes(1, 2)));
+          databases -> databases.get("code").put(bytes(1, 1), bytes(1, 2)));
       assertThrows(ArchivePersistenceException.class, () -> capture.attach(view));
     }
   }
@@ -680,10 +680,10 @@ public class ArchiveParticipantMutationBatchCollectorTest extends BaseMethodTest
         new ArchiveBlockForwardMutationLimits(0, 0, 3, 3, 3));
     try (Fixture fixture = new Fixture(participants())) {
       BlockChangeView tooLarge = fixture.capture(meta,
-          databases -> databases.get("abi").put(bytes(2, 1), bytes(2, 2)));
+          databases -> databases.get("code").put(bytes(2, 1), bytes(2, 2)));
       assertThrows(ArchivePersistenceException.class, () -> total.attach(tooLarge));
       BlockChangeView exact = fixture.capture(meta,
-          databases -> databases.get("abi").put(bytes(1, 1), bytes(1, 2)));
+          databases -> databases.get("code").put(bytes(1, 1), bytes(1, 2)));
       total.attach(exact);
       assertEquals(meta.getEpoch(), total.seal(marker).getTargetEpoch());
     }
@@ -694,10 +694,10 @@ public class ArchiveParticipantMutationBatchCollectorTest extends BaseMethodTest
         new ArchiveBlockForwardMutationLimits(0, 0, 2, 1, 10));
     try (Fixture fixture = new Fixture(participants())) {
       BlockChangeView keyTooLarge = fixture.capture(meta,
-          databases -> databases.get("abi").put(bytes(2, 1), new byte[0]));
+          databases -> databases.get("code").put(bytes(2, 1), new byte[0]));
       assertThrows(ArchivePersistenceException.class, () -> key.attach(keyTooLarge));
       BlockChangeView valueTooLarge = fixture.capture(meta,
-          databases -> databases.get("abi").put(bytes(1, 1), bytes(2, 2)));
+          databases -> databases.get("code").put(bytes(1, 1), bytes(2, 2)));
       assertThrows(ArchivePersistenceException.class, () -> value.attach(valueTooLarge));
     }
   }

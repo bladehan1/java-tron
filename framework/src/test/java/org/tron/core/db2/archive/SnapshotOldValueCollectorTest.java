@@ -3,12 +3,14 @@ package org.tron.core.db2.archive;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -27,10 +29,14 @@ import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.Test;
 import org.tron.common.BaseMethodTest;
 import org.tron.core.db.common.DbSourceInter;
 import org.tron.core.db2.ISession;
+import org.tron.core.db2.archive.AccountAssetForwardProjector.AssetMutation;
+import org.tron.core.db2.archive.AccountAssetPreparedBlockPayloadOwner.FrozenBatch;
 import org.tron.core.db2.archive.BlockReverseDiff.DbGroup;
 import org.tron.core.db2.archive.BlockReverseDiff.Entry;
 import org.tron.core.db2.common.DB;
@@ -49,7 +55,7 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
 
   @Test
   public void collectsBlockPreStateAfterNestedSessionsFinish() {
-    MemoryDb memoryDb = new MemoryDb("abi");
+    MemoryDb memoryDb = new MemoryDb("code");
     byte[] changed = bytes("changed");
     byte[] deleted = bytes("deleted");
     byte[] created = bytes("created");
@@ -92,7 +98,7 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
     assertEquals(meta, ((SnapshotImpl) database.getHead()).getBlockSnapshotMeta());
     assertEquals(1, diff.getGroups().size());
     DbGroup group = diff.getGroups().get(0);
-    assertEquals("abi", group.getDbName());
+    assertEquals("code", group.getDbName());
     assertEquals(3, group.getEntries().size());
 
     assertArrayEquals(bytes("old"), find(group, changed).getOldValue().getValue());
@@ -140,8 +146,32 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
   }
 
   @Test
+  public void excludesAbiChangesFromCanonicalStateHistory() {
+    SnapshotManager manager = new SnapshotManager("");
+    Chainbase abi = new Chainbase(new SnapshotRoot(new MemoryDb("abi")));
+    Chainbase code = new Chainbase(new SnapshotRoot(new MemoryDb("code")));
+    manager.add(abi);
+    manager.add(code);
+    manager.enable();
+    manager.installArchiveCollector(new SnapshotOldValueCollector(), diff -> { });
+
+    try (ISession block = manager.buildSession()) {
+      abi.put(bytes("contract"), bytes("abi-metadata"));
+      code.put(bytes("contract"), bytes("runtime-code"));
+      block.commit(BlockSnapshotMeta.forBlock(1, hash(1), hash(0), 1L));
+    }
+
+    BlockReverseDiff diff = prepared(code);
+    assertEquals(1, diff.getGroups().size());
+    assertEquals("code", diff.getGroups().get(0).getDbName());
+    assertFalse(diff.getGroups().stream().anyMatch(group -> "abi".equals(group.getDbName())));
+    assertTrue(((SnapshotImpl) abi.getHead()).getPreparedArchiveBlock() == null);
+    manager.shutdown();
+  }
+
+  @Test
   public void preservesPresentEmptyAndEmitsNoopBlockMetadata() {
-    MemoryDb memoryDb = new MemoryDb("abi");
+    MemoryDb memoryDb = new MemoryDb("code");
     byte[] key = bytes("key");
     memoryDb.put(key, new byte[0]);
     SnapshotManager manager = new SnapshotManager("");
@@ -176,8 +206,8 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
     unknown.shutdown();
 
     SnapshotManager duplicate = new SnapshotManager("");
-    duplicate.add(new Chainbase(new SnapshotRoot(new MemoryDb("abi"))));
-    duplicate.add(new Chainbase(new SnapshotRoot(new MemoryDb("abi"))));
+    duplicate.add(new Chainbase(new SnapshotRoot(new MemoryDb("code"))));
+    duplicate.add(new Chainbase(new SnapshotRoot(new MemoryDb("code"))));
     IllegalStateException duplicateError = assertThrows(IllegalStateException.class,
         () -> duplicate.installArchiveCollector(new SnapshotOldValueCollector(), diff -> { }));
     assertTrue(duplicateError.getMessage().contains("Duplicate"));
@@ -188,11 +218,15 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
   public void classifiesEveryChainbaseRegisteredByTheApplication() {
     SnapshotManager applicationManager = context.getBean(SnapshotManager.class);
     ArchiveStoreScope.validate(applicationManager.getDbs());
+    assertEquals(26, ArchiveStoreScope.getStateDatabases().size());
+    assertFalse(ArchiveStoreScope.isStateDatabase("abi"));
+    assertTrue(ArchiveStoreScope.isExcludedDatabase("abi"));
+    assertTrue(ArchiveStoreScope.isClassified("abi"));
   }
 
   @Test
   public void matchesReferenceStateForRandomBlockOperations() {
-    MemoryDb memoryDb = new MemoryDb("abi");
+    MemoryDb memoryDb = new MemoryDb("code");
     SnapshotManager manager = new SnapshotManager("");
     Chainbase database = new Chainbase(new SnapshotRoot(memoryDb));
     manager.add(database);
@@ -274,9 +308,9 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
     Chainbase database = new Chainbase(new SnapshotRoot(memoryDb));
     manager.add(database);
     manager.enable();
-    AccountAssetArchiveProjector projector = new AccountAssetArchiveProjector(assetStore,
-        () -> true);
-    manager.installArchiveCollector(new SnapshotOldValueCollector(projector), diff -> { });
+    AccountAssetArchiveProjector projector = new AccountAssetArchiveProjector();
+    manager.installArchiveCollector(new SnapshotOldValueCollector(projector,
+        accountKey -> assetStore.prefixQuery(accountKey), () -> true), diff -> { });
 
     try (ISession block = manager.buildSession()) {
       database.put(address, postAccount.toByteArray());
@@ -327,7 +361,8 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
     manager.add(database);
     manager.enable();
     manager.installArchiveCollector(new SnapshotOldValueCollector(
-        new AccountAssetArchiveProjector(assetStore, () -> true)), diff -> { });
+        new AccountAssetArchiveProjector(),
+        accountKey -> assetStore.prefixQuery(accountKey), () -> true), diff -> { });
 
     try (ISession block = manager.buildSession()) {
       database.put(address, postAccount.toByteArray());
@@ -346,8 +381,196 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
   }
 
   @Test
+  public void sharedAccountAssetProjectionUsesOneSnapshotAndStableForwardOrder() {
+    byte[] address = bytes("shared-projection-address");
+    byte[] firstKey = Bytes.concat(address, bytes("1000001"));
+    byte[] secondKey = Bytes.concat(address, bytes("1000002"));
+    Account oldAccount = Account.newBuilder()
+        .setAddress(ByteString.copyFrom(address))
+        .setAssetOptimized(true)
+        .build();
+    Account postAccount = oldAccount.toBuilder()
+        .putAssetV2("1000001", 80L)
+        .putAssetV2("1000002", 0L)
+        .build();
+    AccountAssetStore assetStore = mock(AccountAssetStore.class);
+    Map<WrappedByteArray, byte[]> persisted = new LinkedHashMap<>();
+    persisted.put(WrappedByteArray.copyOf(secondKey), Longs.toByteArray(200L));
+    persisted.put(WrappedByteArray.copyOf(firstKey), Longs.toByteArray(100L));
+    when(assetStore.prefixQuery(any(byte[].class))).thenReturn(persisted);
+
+    AccountAssetArchiveProjector.Projection projection =
+        new AccountAssetArchiveProjector().project(address, oldAccount.toByteArray(),
+            BlockChangeView.PostValue.present(postAccount.toByteArray()), false, persisted);
+
+    verify(assetStore, never()).prefixQuery(any(byte[].class));
+    assertEquals(2, projection.reverseAssets.size());
+    assertEquals(2, projection.forwardAssets.size());
+    assertArrayEquals(firstKey, projection.reverseAssets.get(0).getKey());
+    assertArrayEquals(secondKey, projection.reverseAssets.get(1).getKey());
+    assertArrayEquals(firstKey, projection.forwardAssets.get(0).getPhysicalRawKey());
+    assertArrayEquals(secondKey, projection.forwardAssets.get(1).getPhysicalRawKey());
+    assertArrayEquals(Longs.toByteArray(100L),
+        projection.reverseAssets.get(0).getOldValue().getValue());
+    assertArrayEquals(Longs.toByteArray(80L),
+        projection.forwardAssets.get(0).getPostValue().getValue());
+    assertFalse(projection.forwardAssets.get(1).getPostValue().isPresent());
+    assertThrows(UnsupportedOperationException.class, projection.reverseAssets::clear);
+    assertThrows(UnsupportedOperationException.class, projection.forwardAssets::clear);
+    Account canonicalPost = parseAccount(projection.postAccount.getValue());
+    assertTrue(canonicalPost.getAssetOptimized());
+    assertTrue(canonicalPost.getAssetV2Map().isEmpty());
+  }
+
+  @Test
+  public void pureProjectionRequiresAndCopiesExplicitOldPhysicalAssets() {
+    byte[] address = bytes("pure-input-address");
+    byte[] assetKey = Bytes.concat(address, bytes("1000009"));
+    Account optimized = Account.newBuilder()
+        .setAddress(ByteString.copyFrom(address))
+        .setAssetOptimized(true)
+        .build();
+    Map<WrappedByteArray, byte[]> oldPhysicalAssets = new HashMap<>();
+    oldPhysicalAssets.put(WrappedByteArray.copyOf(assetKey), Longs.toByteArray(900L));
+    AccountAssetArchiveProjector projector = new AccountAssetArchiveProjector();
+
+    assertThrows(ArchivePersistenceException.class,
+        () -> projector.project(address, optimized.toByteArray(),
+            BlockChangeView.PostValue.absent(), true, null));
+    Map<WrappedByteArray, byte[]> wrongAccountAssets = new HashMap<>();
+    wrongAccountAssets.put(WrappedByteArray.copyOf(bytes("another-account-token")),
+        Longs.toByteArray(1L));
+    assertThrows(ArchivePersistenceException.class,
+        () -> projector.project(address, optimized.toByteArray(),
+            BlockChangeView.PostValue.absent(), true, wrongAccountAssets));
+
+    AccountAssetArchiveProjector.Projection projection = projector.project(address,
+        optimized.toByteArray(), BlockChangeView.PostValue.absent(), true,
+        oldPhysicalAssets);
+    oldPhysicalAssets.clear();
+
+    assertEquals(1, projection.reverseAssets.size());
+    assertArrayEquals(assetKey, projection.reverseAssets.get(0).getKey());
+    assertArrayEquals(Longs.toByteArray(900L),
+        projection.reverseAssets.get(0).getOldValue().getValue());
+    assertFalse(projection.forwardAssets.get(0).getPostValue().isPresent());
+  }
+
+  @Test
+  public void targetAssetOptimizationOverridesLegacySupplierAndCoversDelete() {
+    byte[] address = bytes("target-activation-address");
+    byte[] assetKey = Bytes.concat(address, bytes("1000003"));
+    Account rawPost = Account.newBuilder()
+        .setAddress(ByteString.copyFrom(address))
+        .putAssetV2("1000003", 300L)
+        .build();
+    AccountAssetArchiveProjector projector = new AccountAssetArchiveProjector();
+
+    AccountAssetArchiveProjector.Projection enabled = projector.project(address, null,
+        BlockChangeView.PostValue.present(rawPost.toByteArray()), true, Collections.emptyMap());
+    assertTrue(parseAccount(enabled.postAccount.getValue()).getAssetOptimized());
+    assertEquals(1, enabled.forwardAssets.size());
+    assertArrayEquals(assetKey, enabled.forwardAssets.get(0).getPhysicalRawKey());
+    assertArrayEquals(Longs.toByteArray(300L),
+        enabled.forwardAssets.get(0).getPostValue().getValue());
+
+    AccountAssetArchiveProjector.Projection disabled =
+        new AccountAssetArchiveProjector().project(address, null,
+            BlockChangeView.PostValue.present(rawPost.toByteArray()), false,
+            Collections.emptyMap());
+    assertArrayEquals(rawPost.toByteArray(), disabled.postAccount.getValue());
+    assertTrue(disabled.forwardAssets.isEmpty());
+
+    Account optimizedOld = rawPost.toBuilder()
+        .setAssetOptimized(true)
+        .clearAssetV2()
+        .build();
+    Map<WrappedByteArray, byte[]> persisted = new HashMap<>();
+    persisted.put(WrappedByteArray.copyOf(assetKey), Longs.toByteArray(300L));
+    AccountAssetArchiveProjector.Projection deleted = projector.project(address,
+        optimizedOld.toByteArray(), BlockChangeView.PostValue.absent(), true, persisted);
+    assertFalse(deleted.postAccount.isPresent());
+    assertEquals(1, deleted.reverseAssets.size());
+    assertEquals(1, deleted.forwardAssets.size());
+    assertFalse(deleted.forwardAssets.get(0).getPostValue().isPresent());
+  }
+
+  @Test
+  public void sharedProjectionUsesOuterFinalViewAfterNestedMergeAndRevoke() {
+    byte[] address = bytes("nested-account-address");
+    byte[] assetKey = Bytes.concat(address, bytes("1000004"));
+    Account oldAccount = Account.newBuilder()
+        .setAddress(ByteString.copyFrom(address))
+        .putAssetV2("1000004", 100L)
+        .build();
+    MemoryDb memoryDb = new MemoryDb("account");
+    memoryDb.put(address, oldAccount.toByteArray());
+    SnapshotManager manager = new SnapshotManager("");
+    Chainbase database = new Chainbase(new SnapshotRoot(memoryDb));
+    manager.add(database);
+    manager.enable();
+    BlockSnapshotMeta meta = BlockSnapshotMeta.forBlock(1, hash(1), hash(0), 1L);
+
+    try (ISession block = manager.buildSession()) {
+      database.put(address, oldAccount.toBuilder().putAssetV2("1000004", 90L)
+          .build().toByteArray());
+      try (ISession merged = manager.buildSession()) {
+        database.put(address, oldAccount.toBuilder().putAssetV2("1000004", 80L)
+            .build().toByteArray());
+        merged.merge();
+      }
+      try (ISession revoked = manager.buildSession()) {
+        database.put(address, oldAccount.toBuilder().putAssetV2("1000004", 70L)
+            .build().toByteArray());
+      }
+      BlockChangeView view = BlockChangeView.capture(meta,
+          Collections.singletonList(database));
+      BlockChangeView.Change finalChange = view.getDatabases().get(0).getChanges().get(0);
+      AccountAssetArchiveProjector.Projection projection =
+          new AccountAssetArchiveProjector().project(address, oldAccount.toByteArray(),
+              finalChange.getPostValue(), true, Collections.emptyMap());
+      assertEquals(1, projection.forwardAssets.size());
+      AssetMutation mutation = projection.forwardAssets.get(0);
+      assertArrayEquals(assetKey, mutation.getPhysicalRawKey());
+      assertArrayEquals(Longs.toByteArray(80L), mutation.getPostValue().getValue());
+    }
+    manager.shutdown();
+  }
+
+  @Test
+  public void sharedProjectionMatchesSnapshotRootBytesWithProposalSixtySix() {
+    byte[] address = new byte[21];
+    address[0] = 65;
+    address[20] = 79;
+    String token = "1000005";
+    byte[] assetKey = Bytes.concat(address, bytes(token));
+    Account rawPost = Account.newBuilder()
+        .setAddress(ByteString.copyFrom(address))
+        .putAssetV2(token, 500L)
+        .build();
+    AccountAssetArchiveProjector.Projection projection =
+        new AccountAssetArchiveProjector().project(address, null,
+            BlockChangeView.PostValue.present(rawPost.toByteArray()), true,
+            Collections.emptyMap());
+
+    chainBaseManager.getDynamicPropertiesStore().setAllowAccountAssetOptimization(0);
+    chainBaseManager.getDynamicPropertiesStore().setAllowAssetOptimization(1);
+    MemoryDb accountRootDb = new MemoryDb("account");
+    SnapshotRoot accountRoot = new SnapshotRoot(accountRootDb);
+    accountRoot.put(address, rawPost.toByteArray());
+
+    assertArrayEquals(projection.postAccount.getValue(), accountRootDb.get(address));
+    assertArrayEquals(Longs.toByteArray(500L),
+        chainBaseManager.getAccountAssetStore().get(assetKey));
+    assertEquals(1, projection.forwardAssets.size());
+    assertArrayEquals(assetKey, projection.forwardAssets.get(0).getPhysicalRawKey());
+    assertArrayEquals(Longs.toByteArray(500L),
+        projection.forwardAssets.get(0).getPostValue().getValue());
+  }
+
+  @Test
   public void archiveDurabilityFailurePreventsCheckpointAndRefresh() throws Exception {
-    MemoryDb memoryDb = new MemoryDb("abi");
+    MemoryDb memoryDb = new MemoryDb("code");
     SnapshotManager manager = new SnapshotManager("");
     Chainbase database = new Chainbase(new SnapshotRoot(memoryDb));
     manager.add(database);
@@ -374,7 +597,7 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
 
   @Test
   public void fastPopDiscardsPreparedPayloadWithoutRevertingDurableHistory() {
-    MemoryDb memoryDb = new MemoryDb("abi");
+    MemoryDb memoryDb = new MemoryDb("code");
     SnapshotManager manager = new SnapshotManager("");
     Chainbase database = new Chainbase(new SnapshotRoot(memoryDb));
     manager.add(database);
@@ -400,7 +623,7 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
 
   @Test
   public void collectorFailureLeavesSessionOwnedSoCloseRevokesLayer() {
-    MemoryDb memoryDb = new MemoryDb("abi");
+    MemoryDb memoryDb = new MemoryDb("code");
     SnapshotManager manager = new SnapshotManager("");
     Chainbase database = new Chainbase(new SnapshotRoot(memoryDb));
     manager.add(database);
@@ -426,8 +649,379 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
   }
 
   @Test
+  public void sharedProjectionPreparerIsDisabledUntilExplicitlyInstalled() {
+    MemoryDb memoryDb = new MemoryDb("code");
+    SnapshotManager manager = new SnapshotManager("");
+    Chainbase database = new Chainbase(new SnapshotRoot(memoryDb));
+    manager.add(database);
+    manager.enable();
+    OldValueCollector collector = mock(OldValueCollector.class);
+    BlockReverseDiff reverse = mock(BlockReverseDiff.class);
+    when(collector.collect(any(BlockChangeView.class))).thenReturn(reverse);
+    manager.installArchiveCollector(collector, diff -> { });
+
+    try (ISession block = manager.buildSession()) {
+      database.put(bytes("key"), bytes("value"));
+      block.commit(BlockSnapshotMeta.forBlock(1, hash(1), hash(0), 1L));
+    }
+
+    verify(collector).collect(any(BlockChangeView.class));
+    assertEquals(0, manager.getArchiveForwardPayloadOwnerCount());
+    manager.shutdown();
+  }
+
+  @Test
+  public void sharedProjectionPreparerOwnsOneCapturedViewAndReversePayload() {
+    MemoryDb memoryDb = new MemoryDb("code");
+    SnapshotManager manager = new SnapshotManager("");
+    Chainbase database = new Chainbase(new SnapshotRoot(memoryDb));
+    manager.add(database);
+    manager.enable();
+    OldValueCollector legacy = mock(OldValueCollector.class);
+    manager.installArchiveCollector(legacy, diff -> { });
+    BlockSnapshotMeta meta = BlockSnapshotMeta.forBlock(1, hash(1), hash(0), 1L);
+    BlockReverseDiff reverse = mock(BlockReverseDiff.class);
+    AccountAssetBlockProjectionBridge.PreparedBlockProjection projection =
+        preparedProjection(meta, reverse);
+    AtomicInteger calls = new AtomicInteger();
+    AtomicReference<BlockChangeView> captured = new AtomicReference<>();
+    manager.installArchiveProjectionPreparer(view -> {
+      calls.incrementAndGet();
+      captured.set(view);
+      return projection;
+    });
+
+    try (ISession block = manager.buildSession()) {
+      database.put(bytes("key"), bytes("value"));
+      block.commit(meta);
+    }
+
+    assertEquals(1, calls.get());
+    assertEquals(meta, captured.get().getMeta());
+    assertEquals(reverse, prepared(database));
+    assertTrue(manager.hasArchiveForwardPayloadOwner(meta));
+    verify(legacy, never()).collect(any(BlockChangeView.class));
+    manager.fastPop();
+    verify(projection).abort();
+    manager.shutdown();
+  }
+
+  @Test
+  public void projectionPrepareFailureLeavesSessionOwnedAndRegistryEmpty() {
+    MemoryDb memoryDb = new MemoryDb("code");
+    SnapshotManager manager = new SnapshotManager("");
+    Chainbase database = new Chainbase(new SnapshotRoot(memoryDb));
+    manager.add(database);
+    manager.enable();
+    manager.installArchiveCollector(new SnapshotOldValueCollector(), diff -> { });
+    manager.installArchiveProjectionPreparer(view -> {
+      throw new ArchivePersistenceException("injected prepare failure");
+    });
+
+    assertThrows(ArchivePersistenceException.class, () -> {
+      try (ISession block = manager.buildSession()) {
+        database.put(bytes("key"), bytes("value"));
+        block.commit(BlockSnapshotMeta.forBlock(1, hash(1), hash(0), 1L));
+      }
+    });
+
+    assertEquals(0, manager.getActiveSession());
+    assertEquals(0, manager.size());
+    assertEquals(0, manager.getArchiveForwardPayloadOwnerCount());
+    assertTrue(database.getHead() instanceof SnapshotRoot);
+    manager.shutdown();
+  }
+
+  @Test
+  public void projectionAttachFailureAbortsUnownedPayloadAndRevokesLayer() {
+    MemoryDb memoryDb = new MemoryDb("code");
+    SnapshotManager manager = new SnapshotManager("");
+    Chainbase database = new Chainbase(new SnapshotRoot(memoryDb));
+    manager.add(database);
+    manager.enable();
+    manager.installArchiveCollector(new SnapshotOldValueCollector(), diff -> { });
+    BlockSnapshotMeta target = BlockSnapshotMeta.forBlock(1, hash(1), hash(0), 1L);
+    AccountAssetBlockProjectionBridge.PreparedBlockProjection mismatched =
+        preparedProjection(BlockSnapshotMeta.forBlock(2, hash(2), hash(1), 2L),
+            mock(BlockReverseDiff.class));
+    manager.installArchiveProjectionPreparer(view -> mismatched);
+
+    assertThrows(ArchivePersistenceException.class, () -> {
+      try (ISession block = manager.buildSession()) {
+        database.put(bytes("key"), bytes("value"));
+        block.commit(target);
+      }
+    });
+
+    verify(mismatched).abort();
+    assertEquals(0, manager.getActiveSession());
+    assertEquals(0, manager.size());
+    assertEquals(0, manager.getArchiveForwardPayloadOwnerCount());
+    assertTrue(database.getHead() instanceof SnapshotRoot);
+    manager.shutdown();
+  }
+
+  @Test
+  public void shortReorgDiscardsOnlySameMetaUnfrozenOwners() {
+    MemoryDb memoryDb = new MemoryDb("code");
+    SnapshotManager manager = new SnapshotManager("");
+    Chainbase database = new Chainbase(new SnapshotRoot(memoryDb));
+    manager.add(database);
+    manager.enable();
+    manager.installArchiveCollector(new SnapshotOldValueCollector(), diff -> { });
+    BlockSnapshotMeta firstMeta = BlockSnapshotMeta.forBlock(1, hash(1), hash(0), 1L);
+    BlockSnapshotMeta secondMeta = BlockSnapshotMeta.forBlock(2, hash(2), hash(1), 2L);
+    AccountAssetBlockProjectionBridge.PreparedBlockProjection first =
+        preparedProjection(firstMeta, mock(BlockReverseDiff.class));
+    AccountAssetBlockProjectionBridge.PreparedBlockProjection second =
+        preparedProjection(secondMeta, mock(BlockReverseDiff.class));
+    manager.installArchiveProjectionPreparer(
+        view -> firstMeta.equals(view.getMeta()) ? first : second);
+
+    try (ISession block = manager.buildSession()) {
+      database.put(bytes("key-1"), bytes("value-1"));
+      block.commit(firstMeta);
+    }
+    try (ISession block = manager.buildSession()) {
+      database.put(bytes("key-2"), bytes("value-2"));
+      block.commit(secondMeta);
+    }
+
+    assertEquals(2, manager.getArchiveForwardPayloadOwnerCount());
+    manager.fastPop();
+    verify(second).abort();
+    verify(first, never()).abort();
+    assertTrue(manager.hasArchiveForwardPayloadOwner(firstMeta));
+    assertFalse(manager.hasArchiveForwardPayloadOwner(secondMeta));
+    manager.fastPop();
+    verify(first).abort();
+    assertEquals(0, manager.getArchiveForwardPayloadOwnerCount());
+    manager.shutdown();
+  }
+
+  @Test
+  public void oldestForwardFlushRangeFreezesOnceAndExcludesFastPop() throws Exception {
+    MemoryDb memoryDb = new MemoryDb("code");
+    SnapshotManager manager = new SnapshotManager("");
+    Chainbase database = new Chainbase(new SnapshotRoot(memoryDb));
+    manager.add(database);
+    manager.enable();
+    manager.installArchiveCollector(new SnapshotOldValueCollector(), diff -> { });
+    BlockSnapshotMeta firstMeta = BlockSnapshotMeta.forBlock(1, hash(1), hash(0), 1L);
+    BlockSnapshotMeta secondMeta = BlockSnapshotMeta.forBlock(2, hash(2), hash(1), 2L);
+    AccountAssetBlockProjectionBridge.PreparedBlockProjection first =
+        preparedProjection(firstMeta, mock(BlockReverseDiff.class));
+    AccountAssetBlockProjectionBridge.PreparedBlockProjection second =
+        preparedProjection(secondMeta, mock(BlockReverseDiff.class));
+    manager.installArchiveProjectionPreparer(
+        view -> firstMeta.equals(view.getMeta()) ? first : second);
+    commitBlock(manager, database, firstMeta, "key-1");
+    commitBlock(manager, database, secondMeta, "key-2");
+    setFlushCount(manager, 1);
+
+    FrozenBatch pending = manager.freezeArchiveForwardFlushRange();
+
+    assertEquals(Collections.singletonList(firstMeta), pending.getExpectedMetas());
+    assertSame(pending, manager.freezeArchiveForwardFlushRange());
+    assertTrue(manager.hasPendingArchiveForwardFlush());
+    assertEquals(1, manager.getArchiveForwardPayloadOwnerCount());
+    manager.fastPop();
+    verify(second).abort();
+    verify(first, never()).abort();
+    assertThrows(IllegalStateException.class, manager::fastPop);
+    assertEquals(1, manager.size());
+
+    manager.shutdown();
+    verify(first).abort();
+  }
+
+  @Test
+  public void forwardFlushRegistryMismatchFailsBeforeOwnershipTransfer() throws Exception {
+    MemoryDb memoryDb = new MemoryDb("code");
+    SnapshotManager manager = new SnapshotManager("");
+    Chainbase database = new Chainbase(new SnapshotRoot(memoryDb));
+    manager.add(database);
+    manager.enable();
+    manager.installArchiveCollector(new SnapshotOldValueCollector(), diff -> { });
+    BlockSnapshotMeta firstMeta = BlockSnapshotMeta.forBlock(1, hash(1), hash(0), 1L);
+    BlockSnapshotMeta secondMeta = BlockSnapshotMeta.forBlock(2, hash(2), hash(1), 2L);
+    AccountAssetBlockProjectionBridge.PreparedBlockProjection first =
+        preparedProjection(firstMeta, mock(BlockReverseDiff.class));
+    AccountAssetBlockProjectionBridge.PreparedBlockProjection second =
+        preparedProjection(secondMeta, mock(BlockReverseDiff.class));
+    manager.installArchiveProjectionPreparer(
+        view -> firstMeta.equals(view.getMeta()) ? first : second);
+    commitBlock(manager, database, firstMeta, "key-1");
+    commitBlock(manager, database, secondMeta, "key-2");
+    setFlushCount(manager, 1);
+    Map<BlockSnapshotMeta, AccountAssetPreparedBlockPayloadOwner> owners = forwardOwners(manager);
+
+    AccountAssetPreparedBlockPayloadOwner removed = owners.remove(firstMeta);
+    assertThrows(IllegalStateException.class, manager::freezeArchiveForwardFlushRange);
+    assertEquals(1, owners.size());
+    assertTrue(removed.isAttachedTo(firstMeta));
+    owners.put(firstMeta, removed);
+
+    BlockSnapshotMeta extraMeta = BlockSnapshotMeta.forBlock(3, hash(3), hash(2), 3L);
+    AccountAssetPreparedBlockPayloadOwner extra =
+        new AccountAssetPreparedBlockPayloadOwner(extraMeta);
+    extra.attach(preparedProjection(extraMeta, mock(BlockReverseDiff.class)));
+    owners.put(extraMeta, extra);
+    assertThrows(IllegalStateException.class, manager::freezeArchiveForwardFlushRange);
+    assertEquals(3, owners.size());
+    assertTrue(removed.isAttachedTo(firstMeta));
+    assertTrue(owners.get(secondMeta).isAttachedTo(secondMeta));
+
+    manager.shutdown();
+  }
+
+  @Test
+  public void forwardFlushRejectsTopologyGapAndUnattachedOwnerWithoutPartialTransfer()
+      throws Exception {
+    MemoryDb memoryDb = new MemoryDb("code");
+    SnapshotManager manager = new SnapshotManager("");
+    Chainbase database = new Chainbase(new SnapshotRoot(memoryDb));
+    manager.add(database);
+    manager.enable();
+    manager.installArchiveCollector(new SnapshotOldValueCollector(), diff -> { });
+    BlockSnapshotMeta firstMeta = BlockSnapshotMeta.forBlock(1, hash(1), hash(0), 1L);
+    BlockSnapshotMeta secondMeta = BlockSnapshotMeta.forBlock(2, hash(2), hash(1), 2L);
+    AccountAssetBlockProjectionBridge.PreparedBlockProjection first =
+        preparedProjection(firstMeta, mock(BlockReverseDiff.class));
+    AccountAssetBlockProjectionBridge.PreparedBlockProjection second =
+        preparedProjection(secondMeta, mock(BlockReverseDiff.class));
+    manager.installArchiveProjectionPreparer(
+        view -> firstMeta.equals(view.getMeta()) ? first : second);
+    commitBlock(manager, database, firstMeta, "key-1");
+    commitBlock(manager, database, secondMeta, "key-2");
+    setFlushCount(manager, 1);
+
+    SnapshotImpl newest = (SnapshotImpl) database.getHead();
+    setBlockMeta(newest, firstMeta);
+    assertThrows(IllegalStateException.class, manager::freezeArchiveForwardFlushRange);
+    setBlockMeta(newest, BlockSnapshotMeta.forBlock(3, hash(3), hash(2), 3L));
+    assertThrows(IllegalStateException.class, manager::freezeArchiveForwardFlushRange);
+    setBlockMeta(newest, secondMeta);
+
+    Map<BlockSnapshotMeta, AccountAssetPreparedBlockPayloadOwner> owners = forwardOwners(manager);
+    owners.get(secondMeta).discard();
+    assertThrows(IllegalStateException.class, manager::freezeArchiveForwardFlushRange);
+    assertEquals(2, owners.size());
+    assertTrue(owners.get(firstMeta).isAttachedTo(firstMeta));
+    verify(first, never()).abort();
+
+    manager.shutdown();
+    verify(first).abort();
+    verify(second).abort();
+  }
+
+  @Test
+  public void pendingForwardFlushSealRetriesAndClaimsOrderedPayloadsOnce() throws Exception {
+    MemoryDb memoryDb = new MemoryDb("code");
+    SnapshotManager manager = new SnapshotManager("");
+    Chainbase database = new Chainbase(new SnapshotRoot(memoryDb));
+    manager.add(database);
+    manager.enable();
+    manager.installArchiveCollector(new SnapshotOldValueCollector(), diff -> { });
+    BlockSnapshotMeta firstMeta = BlockSnapshotMeta.forBlock(1, hash(1), hash(0), 1L);
+    BlockSnapshotMeta secondMeta = BlockSnapshotMeta.forBlock(2, hash(2), hash(1), 2L);
+    BlockChangeView firstView = mock(BlockChangeView.class);
+    BlockChangeView secondView = mock(BlockChangeView.class);
+    when(firstView.getMeta()).thenReturn(firstMeta);
+    when(secondView.getMeta()).thenReturn(secondMeta);
+    AccountAssetBlockProjectionBridge.PreparedBlockProjection first =
+        sealReadyProjection(firstMeta, firstView);
+    AccountAssetBlockProjectionBridge.PreparedBlockProjection second =
+        sealReadyProjection(secondMeta, secondView);
+    manager.installArchiveProjectionPreparer(
+        captured -> firstMeta.equals(captured.getMeta()) ? first : second);
+    commitBlock(manager, database, firstMeta, "key-1");
+    commitBlock(manager, database, secondMeta, "key-2");
+    setFlushCount(manager, 2);
+    FrozenBatch frozen = manager.freezeArchiveForwardFlushRange();
+
+    assertThrows(ArchivePersistenceException.class,
+        () -> manager.sealPendingArchiveForwardFlush(
+            Arrays.asList(marker(firstMeta), marker(BlockSnapshotMeta.forBlock(
+                3, hash(3), hash(2), 3L)))));
+    assertSame(frozen, manager.freezeArchiveForwardFlushRange());
+    verify(first, never()).completeSeal();
+    verify(second, never()).completeSeal();
+
+    manager.sealPendingArchiveForwardFlush(Arrays.asList(marker(firstMeta), marker(secondMeta)));
+
+    verify(first).completeSeal();
+    verify(second).completeSeal();
+    assertTrue(manager.hasPendingArchiveForwardFlush());
+    assertThrows(IllegalStateException.class, manager::freezeArchiveForwardFlushRange);
+    assertThrows(IllegalStateException.class, manager::fastPop);
+    List<ArchiveBlockForwardPayload> claimed =
+        manager.claimArchiveForwardFlushPayloads();
+    assertEquals(2, claimed.size());
+    assertEquals(firstMeta, claimed.get(0).getMeta());
+    assertSame(firstView, claimed.get(0).getView());
+    assertEquals(secondMeta, claimed.get(1).getMeta());
+    assertSame(secondView, claimed.get(1).getView());
+    assertFalse(manager.hasPendingArchiveForwardFlush());
+    assertThrows(IllegalStateException.class, manager::claimArchiveForwardFlushPayloads);
+    manager.shutdown();
+    verify(first, never()).abort();
+    verify(second, never()).abort();
+  }
+
+  @Test
+  public void durableReceiptFailureKeepsFrozenSlotAndShutdownReleasesSealedSlot()
+      throws Exception {
+    MemoryDb memoryDb = new MemoryDb("code");
+    SnapshotManager manager = new SnapshotManager("");
+    Chainbase database = new Chainbase(new SnapshotRoot(memoryDb));
+    manager.add(database);
+    manager.enable();
+    manager.installArchiveCollector(new SnapshotOldValueCollector(), diff -> { });
+    BlockSnapshotMeta meta = BlockSnapshotMeta.forBlock(1, hash(1), hash(0), 1L);
+    HistoryCommitMarker committed = marker(meta);
+    BlockChangeView view = mock(BlockChangeView.class);
+    when(view.getMeta()).thenReturn(meta);
+    AccountAssetBlockProjectionBridge.PreparedBlockProjection projection =
+        sealReadyProjection(meta, view);
+    manager.installArchiveProjectionPreparer(captured -> projection);
+    commitBlock(manager, database, meta, "key-1");
+    setFlushCount(manager, 1);
+    FrozenBatch frozen = manager.freezeArchiveForwardFlushRange();
+    boolean[] substitute = {true};
+    DurableHistoryMarkerRangeReceipt receipt = new DurableHistoryMarkerRangeReceipt(
+        new DurableHistoryMarkerRangeReceipt.Source() {
+          @Override
+          public HistoryCommitMarker marker(long epoch) {
+            return substitute[0]
+                ? SnapshotOldValueCollectorTest.marker(BlockSnapshotMeta.forBlock(
+                    2, hash(2), hash(1), 2L)) : committed;
+          }
+
+          @Override
+          public BlockReverseDiff readCommitted(long epoch) {
+            return new BlockReverseDiff(meta, Collections.emptyList());
+          }
+        }, 1);
+
+    assertThrows(ArchivePersistenceException.class,
+        () -> manager.sealPendingArchiveForwardFlush(receipt));
+    assertSame(frozen, manager.freezeArchiveForwardFlushRange());
+    substitute[0] = false;
+    manager.sealPendingArchiveForwardFlush(receipt);
+    assertTrue(manager.hasPendingArchiveForwardFlush());
+
+    manager.shutdown();
+
+    assertFalse(manager.hasPendingArchiveForwardFlush());
+    assertThrows(IllegalStateException.class, manager::claimArchiveForwardFlushPayloads);
+    verify(projection).completeSeal();
+    verify(projection, never()).abort();
+  }
+
+  @Test
   public void flushPublishesOnlyTheNonRevertibleRange() throws Exception {
-    MemoryDb memoryDb = new MemoryDb("abi");
+    MemoryDb memoryDb = new MemoryDb("code");
     SnapshotManager manager = new SnapshotManager("");
     Chainbase database = new Chainbase(new SnapshotRoot(memoryDb));
     manager.add(database);
@@ -469,8 +1063,74 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
         .orElseThrow(AssertionError::new);
   }
 
+  private static Account parseAccount(byte[] value) {
+    try {
+      return Account.parseFrom(value);
+    } catch (com.google.protobuf.InvalidProtocolBufferException e) {
+      throw new AssertionError(e);
+    }
+  }
+
   private static BlockReverseDiff prepared(Chainbase database) {
     return ((SnapshotImpl) database.getHead()).getPreparedArchiveBlock();
+  }
+
+  private static void commitBlock(SnapshotManager manager, Chainbase database,
+      BlockSnapshotMeta meta, String key) {
+    try (ISession block = manager.buildSession()) {
+      database.put(bytes(key), bytes("value-" + key));
+      block.commit(meta);
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  private static Map<BlockSnapshotMeta, AccountAssetPreparedBlockPayloadOwner> forwardOwners(
+      SnapshotManager manager) throws Exception {
+    java.lang.reflect.Field field = SnapshotManager.class.getDeclaredField(
+        "archiveForwardPayloadOwners");
+    field.setAccessible(true);
+    return (Map<BlockSnapshotMeta, AccountAssetPreparedBlockPayloadOwner>) field.get(manager);
+  }
+
+  private static void setBlockMeta(SnapshotImpl snapshot, BlockSnapshotMeta meta)
+      throws Exception {
+    java.lang.reflect.Field field = SnapshotImpl.class.getDeclaredField("blockSnapshotMeta");
+    field.setAccessible(true);
+    field.set(snapshot, meta);
+  }
+
+  private static AccountAssetBlockProjectionBridge.PreparedBlockProjection preparedProjection(
+      BlockSnapshotMeta meta, BlockReverseDiff reverse) {
+    AccountAssetBlockProjectionBridge.PreparedBlockProjection projection =
+        mock(AccountAssetBlockProjectionBridge.PreparedBlockProjection.class);
+    when(projection.getMeta()).thenReturn(meta);
+    when(projection.getReverseDiff()).thenReturn(reverse);
+    return projection;
+  }
+
+  private static AccountAssetBlockProjectionBridge.PreparedBlockProjection sealReadyProjection(
+      BlockSnapshotMeta meta, BlockChangeView view) {
+    AccountAssetBlockProjectionBridge.PreparedBlockProjection projection =
+        preparedProjection(meta, mock(BlockReverseDiff.class));
+    when(projection.previewSealPayload(any(HistoryCommitMarker.class))).thenAnswer(invocation -> {
+      HistoryCommitMarker target = invocation.getArgument(0);
+      if (!meta.equals(target.getMeta())) {
+        throw new ArchivePersistenceException("Prepared block projection target mismatch");
+      }
+      return new ArchiveBlockForwardPayload(target, view,
+          new AccountAssetForwardMutationManifest(target, Collections.emptyList()));
+    });
+    return projection;
+  }
+
+  private static HistoryCommitMarker marker(BlockSnapshotMeta meta) {
+    int epoch = (int) meta.getEpoch();
+    List<String> participants = new ArrayList<>(ArchiveStoreScope.getStateDatabases());
+    Collections.sort(participants);
+    return new HistoryCommitMarker(meta, epoch - 1,
+        new HistoryLocation(0, epoch * 100L, 100, epoch, hash(epoch + 20)),
+        new HistoryIndexLocation(epoch * 50L, 50, hash(epoch + 30)),
+        Arrays.copyOf(hash(epoch + 40), 16), participants);
   }
 
   private static void setFlushCount(SnapshotManager manager, int count) throws Exception {
