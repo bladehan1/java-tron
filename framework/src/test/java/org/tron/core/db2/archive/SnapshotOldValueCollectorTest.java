@@ -596,6 +596,57 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
   }
 
   @Test
+  public void flushRetriesDurabilityAndReceiptWithoutResubmittingHistory() throws Exception {
+    MemoryDb memoryDb = new MemoryDb("code");
+    SnapshotManager manager = new SnapshotManager("");
+    Chainbase database = new Chainbase(new SnapshotRoot(memoryDb));
+    manager.add(database);
+    manager.enable();
+    manager.setUnChecked(false);
+    CheckTmpStore checkpoint = mock(CheckTmpStore.class);
+    DbSourceInter<byte[]> checkpointDb = mock(DbSourceInter.class);
+    when(checkpointDb.iterator()).thenReturn(Collections.emptyIterator());
+    when(checkpoint.getDbSource()).thenReturn(checkpointDb);
+    manager.setCheckTmpStore(checkpoint);
+    ArchiveHistoryWriter writer = new ArchiveHistoryWriter(
+        temporaryFolder.newFolder("flush-receipt-retry").toPath(), 4096,
+        ArchiveStoreScope.getStateDatabases());
+    FailOnceReceiptSink sink = new FailOnceReceiptSink(writer);
+    manager.installArchiveCollector(new SnapshotOldValueCollector(), sink);
+    AtomicReference<AccountAssetBlockProjectionBridge.PreparedBlockProjection> prepared =
+        new AtomicReference<>();
+    manager.installArchiveProjectionPreparer(view -> {
+      AccountAssetBlockProjectionBridge.PreparedBlockProjection projection =
+          sealReadyProjection(view.getMeta(), view);
+      prepared.set(projection);
+      return projection;
+    });
+
+    BlockSnapshotMeta meta = BlockSnapshotMeta.forBlock(1, hash(1), hash(0), 1L);
+    commitBlock(manager, database, meta, "key-1");
+    setFlushCount(manager, 1);
+
+    assertThrows(TronError.class, manager::flush);
+    assertTrue(manager.hasPendingArchiveForwardFlush());
+    verify(checkpoint, never()).updateByBatch(any(Map.class));
+
+    assertThrows(TronError.class, manager::flush);
+    assertTrue(manager.hasPendingArchiveForwardFlush());
+    verify(checkpoint, never()).updateByBatch(any(Map.class));
+
+    manager.flush();
+
+    assertEquals(1, sink.acceptAllCalls);
+    assertEquals(3, sink.awaitCalls);
+    assertEquals(2, sink.receiptCalls);
+    verify(prepared.get()).completeSeal();
+    assertEquals(1, manager.claimArchiveForwardFlushPayloads().size());
+    assertFalse(manager.hasPendingArchiveForwardFlush());
+    manager.shutdown();
+    writer.close();
+  }
+
+  @Test
   public void fastPopDiscardsPreparedPayloadWithoutRevertingDurableHistory() {
     MemoryDb memoryDb = new MemoryDb("code");
     SnapshotManager manager = new SnapshotManager("");
@@ -1111,7 +1162,7 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
   private static AccountAssetBlockProjectionBridge.PreparedBlockProjection sealReadyProjection(
       BlockSnapshotMeta meta, BlockChangeView view) {
     AccountAssetBlockProjectionBridge.PreparedBlockProjection projection =
-        preparedProjection(meta, mock(BlockReverseDiff.class));
+        preparedProjection(meta, new BlockReverseDiff(meta, Collections.emptyList()));
     when(projection.previewSealPayload(any(HistoryCommitMarker.class))).thenAnswer(invocation -> {
       HistoryCommitMarker target = invocation.getArgument(0);
       if (!meta.equals(target.getMeta())) {
@@ -1178,6 +1229,67 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
     Map<String, byte[]> copy = new HashMap<>();
     source.forEach((key, value) -> copy.put(key, Arrays.copyOf(value, value.length)));
     return copy;
+  }
+
+  private static final class FailOnceReceiptSink implements DurableBlockReverseDiffSink {
+    private final ArchiveHistoryWriter writer;
+    private int acceptAllCalls;
+    private int awaitCalls;
+    private int receiptCalls;
+
+    private FailOnceReceiptSink(ArchiveHistoryWriter writer) {
+      this.writer = writer;
+    }
+
+    @Override
+    public void accept(BlockReverseDiff diff) {
+      writer.accept(diff);
+    }
+
+    @Override
+    public void acceptAll(List<BlockReverseDiff> diffs) {
+      acceptAllCalls++;
+      writer.acceptAll(diffs);
+    }
+
+    @Override
+    public void revert(BlockSnapshotMeta meta) {
+      writer.revert(meta);
+    }
+
+    @Override
+    public void awaitCommitted(long epoch) {
+      awaitCalls++;
+      if (awaitCalls == 1) {
+        throw new ArchivePersistenceException("injected durable wait failure");
+      }
+      writer.awaitCommitted(epoch);
+    }
+
+    @Override
+    public DurableHistoryMarkerRangeReceipt createMarkerRangeReceipt(int maxMarkers) {
+      receiptCalls++;
+      if (receiptCalls == 1) {
+        return new DurableHistoryMarkerRangeReceipt(
+            new DurableHistoryMarkerRangeReceipt.Source() {
+              @Override
+              public HistoryCommitMarker marker(long epoch) {
+                return null;
+              }
+
+              @Override
+              public BlockReverseDiff readCommitted(long epoch) {
+                return writer.readCommitted(epoch);
+              }
+            }, maxMarkers);
+      }
+      return writer.createMarkerRangeReceipt(maxMarkers);
+    }
+
+    @Override
+    public void releaseThrough(long epoch) {
+      writer.releaseThrough(epoch);
+    }
   }
 
   private static final class MemoryDb implements DB<byte[], byte[]>, Flusher {

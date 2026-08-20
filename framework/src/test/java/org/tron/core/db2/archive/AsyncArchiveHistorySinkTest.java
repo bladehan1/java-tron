@@ -9,6 +9,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -54,6 +55,24 @@ public class AsyncArchiveHistorySinkTest {
       assertEquals(1, stages.stream().filter(stage -> stage == Stage.SYNC_BODY).count());
       assertEquals(1, stages.stream().filter(stage -> stage == Stage.SYNC_INDEX).count());
       assertEquals(3, stages.stream().filter(stage -> stage == Stage.COMMIT_MARKER).count());
+    }
+  }
+
+  @Test
+  public void createsReceiptFromTheSameDurableWriterAuthority() throws Exception {
+    Path archive = temporaryFolder.newFolder("async-receipt").toPath();
+    ArchiveHistoryWriter writer = new ArchiveHistoryWriter(archive, 4096,
+        ArchiveStoreScope.getStateDatabases());
+    try (AsyncArchiveHistorySink sink = new AsyncArchiveHistorySink(writer, 1)) {
+      BlockReverseDiff committed = diff(1);
+      sink.accept(committed);
+      sink.awaitCommitted(1);
+
+      List<HistoryCommitMarker> receipt = sink.createMarkerRangeReceipt(1)
+          .read(Collections.singletonList(committed.getMeta()));
+
+      assertEquals(1, receipt.size());
+      assertEquals(committed.getMeta(), receipt.get(0).getMeta());
     }
   }
 

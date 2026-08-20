@@ -29,7 +29,7 @@ public class DurableHistoryMarkerRangeReceiptTest {
         archive, 4096, new java.util.LinkedHashSet<>(participants()))) {
       writer.acceptAll(Arrays.asList(diff(1), diff(2), diff(3), diff(4)));
       List<HistoryCommitMarker> receipt =
-          new DurableHistoryMarkerRangeReceipt(writer, 2).read(expected);
+          writer.createMarkerRangeReceipt(2).read(expected);
       assertEquals(Arrays.asList(2L, 3L), epochs(receipt));
       HistoryCommitMarkerCodec codec = new HistoryCommitMarkerCodec();
       receipt.forEach(marker -> encoded.add(codec.encode(marker)));
@@ -38,7 +38,7 @@ public class DurableHistoryMarkerRangeReceiptTest {
     try (ArchiveHistoryWriter reopened = new ArchiveHistoryWriter(
         archive, 4096, new java.util.LinkedHashSet<>(participants()))) {
       List<HistoryCommitMarker> receipt =
-          new DurableHistoryMarkerRangeReceipt(reopened, 2).read(expected);
+          reopened.createMarkerRangeReceipt(2).read(expected);
       HistoryCommitMarkerCodec codec = new HistoryCommitMarkerCodec();
       assertArrayEquals(encoded.get(0), codec.encode(receipt.get(0)));
       assertArrayEquals(encoded.get(1), codec.encode(receipt.get(1)));
