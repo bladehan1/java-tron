@@ -644,11 +644,11 @@ public class Manager {
       }
       AsyncArchiveHistorySink sink = new AsyncArchiveHistorySink(writer,
           storage.getStateArchiveQueueCapacity());
-      AccountAssetArchiveProjector projector = new AccountAssetArchiveProjector(
-          chainBaseManager.getAccountAssetStore(),
-          () -> getDynamicPropertiesStore().supportAllowAccountAssetOptimization());
+      AccountAssetArchiveProjector projector = new AccountAssetArchiveProjector();
       ((SnapshotManager) revokingStore).installArchiveCollector(
-          new SnapshotOldValueCollector(projector), sink);
+          new SnapshotOldValueCollector(projector,
+              accountKey -> chainBaseManager.getAccountAssetStore().prefixQuery(accountKey),
+              () -> getDynamicPropertiesStore().supportAllowAccountAssetOptimization()), sink);
       archiveHistoryWriter = writer;
       if (archiveHead != null) {
         ((SnapshotManager) revokingStore).markArchiveReadableThrough(archiveHead.getEpoch());
