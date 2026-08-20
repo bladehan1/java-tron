@@ -24,9 +24,7 @@ public final class ArchiveParticipantMutationBatchCollector {
   public ArchiveParticipantMutationBatchCollector(
       AccountAssetForwardProjector accountAssetProjector) {
     this.accountAssetProjector = accountAssetProjector;
-    List<String> expected = new ArrayList<>(ArchiveStoreScope.getStateDatabases());
-    Collections.sort(expected);
-    participants = Collections.unmodifiableList(expected);
+    participants = ArchiveParticipantDescriptor.current().getParticipants();
   }
 
   public ArchiveParticipantMutationBatch collect(HistoryCommitMarker committedTarget,
