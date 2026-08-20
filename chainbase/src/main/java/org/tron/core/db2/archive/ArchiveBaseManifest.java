@@ -21,22 +21,25 @@ import java.util.UUID;
 final class ArchiveBaseManifest {
 
   private static final int MAGIC = 0x54414d46; // TAMF
-  private static final short VERSION = 1;
+  private static final short VERSION = 2;
   private static final int MAX_LENGTH = 1024 * 1024;
 
   private final Path directory;
   private final Path path;
   private final List<String> participants;
+  private final String scopeIdentity;
   private BaseIdentity base;
 
   ArchiveBaseManifest(Path directory, List<String> participants) throws IOException {
     this.directory = directory;
     this.path = directory.resolve("MANIFEST");
     this.participants = new ArrayList<>(participants);
+    this.scopeIdentity = scopeIdentity(this.participants);
     Files.createDirectories(directory);
     if (Files.exists(path)) {
       base = decode(Files.readAllBytes(path));
-      if (!this.participants.equals(base.participants)) {
+      if (!scopeIdentity.equals(base.scopeIdentity)
+          || !this.participants.equals(base.participants)) {
         throw new ArchivePersistenceException("Archive manifest participant set mismatch");
       }
     }
@@ -51,7 +54,7 @@ final class ArchiveBaseManifest {
       }
       return;
     }
-    BaseIdentity identity = new BaseIdentity(epoch, hash, participants);
+    BaseIdentity identity = new BaseIdentity(scopeIdentity, epoch, hash, participants);
     byte[] encoded = encode(identity);
     Path temporary = directory.resolve(".MANIFEST-" + UUID.randomUUID());
     Files.write(temporary, encoded);
@@ -76,6 +79,7 @@ final class ArchiveBaseManifest {
     output.writeShort(VERSION);
     output.writeShort(0);
     output.writeInt(0);
+    writeString(output, identity.scopeIdentity);
     output.writeLong(identity.epoch);
     output.write(identity.hash);
     output.writeInt(identity.participants.size());
@@ -115,6 +119,7 @@ final class ArchiveBaseManifest {
           || input.readInt() != encoded.length) {
         throw new ArchivePersistenceException("Unsupported archive manifest header");
       }
+      String scopeIdentity = readString(input, "Archive manifest scope identity is invalid");
       long epoch = input.readLong();
       byte[] hash = new byte[32];
       input.readFully(hash);
@@ -141,16 +146,56 @@ final class ArchiveBaseManifest {
       if (input.available() != Integer.BYTES) {
         throw new ArchivePersistenceException("Archive manifest payload mismatch");
       }
-      return new BaseIdentity(epoch, hash, participants);
+      return new BaseIdentity(scopeIdentity, epoch, hash, participants);
     }
   }
 
+  private static String scopeIdentity(List<String> participants) {
+    if (ArchiveParticipantDescriptor.current().getParticipants().equals(participants)) {
+      return ArchiveParticipantDescriptor.FORMAT_ID;
+    }
+    try {
+      ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+      DataOutputStream output = new DataOutputStream(bytes);
+      for (String participant : participants) {
+        writeString(output, participant);
+      }
+      output.flush();
+      return "experimental/" + Hashing.sha256().hashBytes(bytes.toByteArray());
+    } catch (IOException impossible) {
+      throw new IllegalStateException("Unexpected participant identity encoding failure",
+          impossible);
+    }
+  }
+
+  private static void writeString(DataOutputStream output, String value) throws IOException {
+    byte[] encoded = value.getBytes(StandardCharsets.UTF_8);
+    if (encoded.length == 0 || encoded.length > 1024) {
+      throw new IllegalArgumentException("Archive manifest string is invalid");
+    }
+    output.writeInt(encoded.length);
+    output.write(encoded);
+  }
+
+  private static String readString(DataInputStream input, String error) throws IOException {
+    int length = input.readInt();
+    if (length <= 0 || length > 1024 || length > input.available() - Integer.BYTES) {
+      throw new ArchivePersistenceException(error);
+    }
+    byte[] encoded = new byte[length];
+    input.readFully(encoded);
+    return new String(encoded, StandardCharsets.UTF_8);
+  }
+
   private static final class BaseIdentity {
+    private final String scopeIdentity;
     private final long epoch;
     private final byte[] hash;
     private final List<String> participants;
 
-    private BaseIdentity(long epoch, byte[] hash, List<String> participants) {
+    private BaseIdentity(String scopeIdentity, long epoch, byte[] hash,
+        List<String> participants) {
+      this.scopeIdentity = scopeIdentity;
       this.epoch = epoch;
       this.hash = Arrays.copyOf(hash, hash.length);
       this.participants = new ArrayList<>(participants);

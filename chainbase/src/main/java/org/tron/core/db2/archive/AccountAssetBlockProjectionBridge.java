@@ -27,9 +27,7 @@ public final class AccountAssetBlockProjectionBridge {
     this.projector = Objects.requireNonNull(projector, "projector");
     this.oldPhysicalAssetsSource = Objects.requireNonNull(oldPhysicalAssetsSource,
         "oldPhysicalAssetsSource");
-    List<String> expected = new ArrayList<>(ArchiveStoreScope.getStateDatabases());
-    Collections.sort(expected);
-    participants = Collections.unmodifiableList(expected);
+    participants = ArchiveParticipantDescriptor.current().getParticipants();
   }
 
   public PreparedBlockProjection prepare(BlockChangeView view,

@@ -25,9 +25,7 @@ public final class DurableHistoryMarkerRangeReceipt {
       throw new IllegalArgumentException("maxMarkers must be positive");
     }
     this.maxMarkers = maxMarkers;
-    List<String> expected = new ArrayList<>(ArchiveStoreScope.getStateDatabases());
-    Collections.sort(expected);
-    participants = Collections.unmodifiableList(expected);
+    participants = ArchiveParticipantDescriptor.current().getParticipants();
   }
 
   public List<ArchiveBlockForwardPayload> seal(FrozenBatch batch) {
