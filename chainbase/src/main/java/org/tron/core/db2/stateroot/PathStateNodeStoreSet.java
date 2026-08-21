@@ -128,6 +128,21 @@ public final class PathStateNodeStoreSet implements Closeable {
     return progress;
   }
 
+  static PathStateRootMetadata loadProgress(Path ownerDirectory,
+      PathStateStoreManifest manifest) throws IOException {
+    Path nodes = Objects.requireNonNull(ownerDirectory, "ownerDirectory").resolve(NODES_DIRECTORY);
+    if (!Files.exists(nodes, LinkOption.NOFOLLOW_LINKS)) {
+      return null;
+    }
+    if (!Files.isDirectory(nodes, LinkOption.NOFOLLOW_LINKS) || Files.isSymbolicLink(nodes)) {
+      throw new IOException("path-state node database is not a direct directory: " + nodes);
+    }
+    try (PathStateNativeNodeStore store = PathStateNativeNodeStore.open(nodes,
+        Objects.requireNonNull(manifest, "manifest").getEngine())) {
+      return decodeProgress(store.get(PROGRESS_KEY));
+    }
+  }
+
   public Path getDirectory() {
     return directory;
   }
