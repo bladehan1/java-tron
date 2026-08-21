@@ -31,6 +31,7 @@ public final class ArchiveHistoryWriter
   private final HistoryCommitMarkerCodec commitCodec;
   private final List<String> participatingDatabases;
   private final DurabilityHook hook;
+  private final Long bootstrapFloor;
 
   public ArchiveHistoryWriter(Path archiveDirectory, long maxSegmentSize,
       Set<String> participatingDatabases) throws IOException {
@@ -64,6 +65,9 @@ public final class ArchiveHistoryWriter
       closeAfterFailedConstruction(failure);
       throw failure;
     }
+    HistoryCommitMarker bootstrap = ArchiveBootstrapAnchor.loadAndValidateIfPresent(
+        archiveDirectory, this, this.participatingDatabases);
+    this.bootstrapFloor = bootstrap == null ? null : bootstrap.getMeta().getEpoch();
   }
 
   @Override
@@ -207,7 +211,7 @@ public final class ArchiveHistoryWriter
     if (head == null) {
       throw new IllegalStateException("State archive has no committed history");
     }
-    long base = commits.firstEpoch() - 1;
+    long base = bootstrapFloor == null ? commits.firstEpoch() - 1 : bootstrapFloor;
     if (targetBlock < base || targetBlock > head.getMeta().getEpoch()) {
       throw new IllegalArgumentException("Account query is outside archive coverage");
     }
@@ -242,8 +246,12 @@ public final class ArchiveHistoryWriter
     if (first == null) {
       throw new IllegalStateException("Cannot build a serving generation from empty history");
     }
-    long firstEpoch = commits.firstEpoch();
+    long firstEpoch = bootstrapFloor == null ? commits.firstEpoch() : bootstrapFloor + 1;
     long lastEpoch = commits.head().getMeta().getEpoch();
+    if (firstEpoch > lastEpoch) {
+      throw new IllegalStateException(
+          "Cannot build a serving generation before post-bootstrap history exists");
+    }
     Iterable<HistoryCommitMarker> committed = () -> new Iterator<HistoryCommitMarker>() {
       private long nextEpoch = firstEpoch;
 
@@ -260,8 +268,11 @@ public final class ArchiveHistoryWriter
         return commits.get(nextEpoch++);
       }
     };
+    long baseEpoch = firstEpoch - 1;
+    byte[] baseHash = bootstrapFloor == null
+        ? first.getMeta().getParentHash() : first.getMeta().getBlockHash();
     return PersistentServingKeyIndexGeneration.build(shadowDirectory, generationId,
-        firstEpoch - 1, first.getMeta().getParentHash(), committed, index::read,
+        baseEpoch, baseHash, committed, index::read,
         participatingDatabases, latestSourceIdentityDigest);
   }
 

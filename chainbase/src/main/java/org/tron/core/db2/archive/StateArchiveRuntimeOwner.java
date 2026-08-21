@@ -2,7 +2,11 @@ package org.tron.core.db2.archive;
 
 import java.io.Closeable;
 import java.io.IOException;
+import java.nio.file.AtomicMoveNotSupportedException;
+import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.IdentityHashMap;
@@ -12,8 +16,10 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.UUID;
 import org.tron.core.db2.archive.ArchiveProgressEnvelope.Kind;
 import org.tron.core.db2.archive.ArchiveRecoveryPlanner.RecoveryPlan;
+import org.tron.core.db2.archive.P66AccountAssetCodec.Phase;
 import org.tron.core.db2.core.SnapshotManager;
 
 /** Sole owner for exact-27 State Archive resources from recovered startup through shutdown. */
@@ -129,6 +135,90 @@ public final class StateArchiveRuntimeOwner implements Closeable {
       }
       return new StateArchiveRuntimeOwner(snapshotManager, root, maxSegmentSize, opened,
           openedByName, head.getMeta(), first.getActions().size());
+    } catch (IOException | RuntimeException failure) {
+      closeReverse(opened, failure);
+      throw failure;
+    }
+  }
+
+  /**
+   * Atomically establishes one empty-diff H/C/27D/R baseline at the persisted Chainbase head,
+   * then reopens it through the ordinary startup recovery path. The staging directory is never
+   * published until every durable authority is complete and independently recoverable.
+   */
+  public static StateArchiveRuntimeOwner bootstrapAndRecover(SnapshotManager snapshotManager,
+      Path archiveDirectory, long maxSegmentSize, String databaseEngine,
+      BlockSnapshotMeta baseHead, Phase targetPhase) throws IOException {
+    Objects.requireNonNull(snapshotManager, "snapshotManager");
+    Path root = Objects.requireNonNull(archiveDirectory, "archiveDirectory");
+    BlockSnapshotMeta head = Objects.requireNonNull(baseHead, "baseHead");
+    Phase phase = Objects.requireNonNull(targetPhase, "targetPhase");
+    Path parent = Objects.requireNonNull(root.getParent(), "archive parent directory");
+    requireEmptyBootstrapTarget(root);
+    Files.createDirectories(parent);
+    Path staging = parent.resolve("." + root.getFileName() + ".bootstrap-" + UUID.randomUUID());
+    String engine = Objects.requireNonNull(databaseEngine, "databaseEngine")
+        .toUpperCase(Locale.ROOT);
+    if (!"LEVELDB".equals(engine) && !"ROCKSDB".equals(engine)) {
+      throw new IllegalArgumentException("Unsupported State Archive database engine: " + engine);
+    }
+
+    List<String> names = ArchiveParticipantDescriptor.current().getParticipants();
+    List<Closeable> opened = new ArrayList<>();
+    try {
+      HistoryCommitMarker marker;
+      try (ArchiveHistoryWriter writer = new ArchiveHistoryWriter(staging, maxSegmentSize,
+          new java.util.LinkedHashSet<>(names))) {
+        writer.accept(new BlockReverseDiff(head, Collections.emptyList()));
+        marker = Objects.requireNonNull(writer.committedHead(), "bootstrap history head");
+      }
+
+      Map<String, ArchiveParticipant> engines = new LinkedHashMap<>();
+      for (String participant : names) {
+        Closeable nativeEngine = openParticipant(
+            staging.resolve("participants").resolve(participant), participant, names, engine);
+        opened.add(nativeEngine);
+        engines.put(participant, (ArchiveParticipant) nativeEngine);
+      }
+      Map<String, List<ArchiveParticipantMutation>> emptyMutations = new LinkedHashMap<>();
+      for (String participant : names) {
+        emptyMutations.put(participant, Collections.emptyList());
+      }
+      ArchiveProgressEnvelope target = progress(Kind.APPLY_CHECKPOINT, null, marker, null, names);
+      byte[] planDigest = new ArchiveTargetMutationPlan(target,
+          P66AccountAssetCodec.FORMAT_ID, phase, emptyMutations).digest();
+      ArchiveBootstrapAnchor.store(staging, marker, planDigest, names);
+      ArchiveProgressEnvelopeCodec codec = new ArchiveProgressEnvelopeCodec();
+      new ArchiveProgressFile(staging.resolve("progress/checkpoint.progress"), codec)
+          .store(progress(Kind.APPLY_CHECKPOINT, null, marker, planDigest, names));
+      for (String participant : names) {
+        engines.get(participant).apply(Collections.emptyList(),
+            progress(Kind.PARTICIPANT_PROGRESS, participant, marker, planDigest, names));
+      }
+      new ArchiveProgressFile(staging.resolve("progress/reader.progress"), codec)
+          .store(progress(Kind.READER_VISIBLE, null, marker, planDigest, names));
+      closeReverseOrThrow(opened);
+      opened.clear();
+
+      try (StateArchiveRuntimeOwner verified = recover(snapshotManager, staging,
+          maxSegmentSize, engine)) {
+        if (!head.equals(verified.getRecoveredHead())
+            || verified.getStartupRecoveryActionCount() != 0) {
+          throw new ArchivePersistenceException(
+              "Fresh State Archive baseline did not recover at a zero-action fixed point");
+        }
+      }
+      if (Files.exists(root, LinkOption.NOFOLLOW_LINKS)) {
+        Files.delete(root);
+      }
+      try {
+        Files.move(staging, root, StandardCopyOption.ATOMIC_MOVE);
+      } catch (AtomicMoveNotSupportedException failure) {
+        throw new ArchivePersistenceException(
+            "State Archive bootstrap requires atomic directory publication", failure);
+      }
+      HistorySegmentStore.syncDirectory(parent);
+      return recover(snapshotManager, root, maxSegmentSize, engine);
     } catch (IOException | RuntimeException failure) {
       closeReverse(opened, failure);
       throw failure;
@@ -318,6 +408,39 @@ public final class StateArchiveRuntimeOwner implements Closeable {
       return new RocksDbArchiveParticipant(directory, participant, participants);
     }
     return new LevelDbArchiveParticipant(directory, participant, participants);
+  }
+
+  private static void requireEmptyBootstrapTarget(Path root) throws IOException {
+    if (!Files.exists(root, LinkOption.NOFOLLOW_LINKS)) {
+      return;
+    }
+    if (Files.isSymbolicLink(root)
+        || !Files.isDirectory(root, LinkOption.NOFOLLOW_LINKS)) {
+      throw new ArchivePersistenceException("State Archive bootstrap target is not a directory");
+    }
+    try (java.util.stream.Stream<Path> entries = Files.list(root)) {
+      if (entries.findAny().isPresent()) {
+        throw new ArchivePersistenceException("State Archive bootstrap target is not empty");
+      }
+    }
+  }
+
+  private static ArchiveProgressEnvelope progress(Kind kind, String participant,
+      HistoryCommitMarker marker, byte[] planDigest, List<String> participants) {
+    return new ArchiveProgressEnvelope(kind, participant, marker.getMeta().getEpoch(),
+        marker.getMeta().getBlockHash(), marker.getBatchId(),
+        marker.getHistoryLocation().getBodyDigest(), planDigest, participants);
+  }
+
+  private static void closeReverseOrThrow(List<Closeable> resources) throws IOException {
+    IOException failure = null;
+    while (!resources.isEmpty()) {
+      int index = resources.size() - 1;
+      failure = closeOwned("bootstrap participant " + index, resources.remove(index), failure);
+    }
+    if (failure != null) {
+      throw failure;
+    }
   }
 
   private static void closeReverse(List<? extends Closeable> resources, Exception failure) {
