@@ -54,6 +54,36 @@ public class StateArchiveManagerStartupIntegrationTest {
   public TemporaryFolder temporaryFolder = new TemporaryFolder();
 
   @Test
+  public void automaticOverflowFlushKeepsForwardRegistryBoundToFullTopology() throws Exception {
+    Path output = temporaryFolder.newFolder("overflow-manager").toPath();
+    Path archive = output.resolve("state-archive");
+    HistoryCommitMarker head = initializeRecoverableTail(archive, "ROCKSDB");
+    SnapshotFixture fixture = snapshotFixture();
+    SnapshotManager snapshots = fixture.snapshots;
+    snapshots.setMaxSize(1);
+    Manager manager = manager(snapshots, head);
+
+    withArchiveConfig(output, "ROCKSDB", true, () -> invoke(manager, "initStateArchive"));
+
+    byte[] key = new byte[]{1, 6, 1, 8};
+    for (int epoch = 7; epoch <= 9; epoch++) {
+      BlockSnapshotMeta target = new BlockSnapshotMeta(epoch, epoch, hash(epoch),
+          hash(epoch - 1), epoch * 1_000L);
+      try (ISession block = snapshots.buildSession()) {
+        fixture.databases.get("proposal").put(key, new byte[]{(byte) epoch});
+        block.commit(target);
+      }
+      if (epoch == 9) {
+        assertEquals(new BlockSnapshotMeta(7, 7, hash(7), hash(6), 7_000L),
+            manager.getStateArchiveRuntime().verifyNormalWriteFixedPoint());
+      }
+    }
+
+    invoke(manager, "closeStateArchive");
+    snapshots.shutdown();
+  }
+
+  @Test
   public void managerBootstrapsFreshBaseAndContinuesNormalFlush() throws Exception {
     for (String engine : Arrays.asList("LEVELDB", "ROCKSDB")) {
       Path output = temporaryFolder.newFolder("fresh-manager-" + engine.toLowerCase()).toPath();
