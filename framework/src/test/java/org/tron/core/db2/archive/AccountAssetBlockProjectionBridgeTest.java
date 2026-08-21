@@ -592,13 +592,13 @@ public class AccountAssetBlockProjectionBridgeTest extends BaseMethodTest {
   }
 
   @Test
-  public void durableMarkerReceiptFailureLeavesFrozenBatchRetryable() {
+  public void durableMarkerEvidenceFailureLeavesFrozenBatchRetryable() {
     BlockSnapshotMeta meta = meta(22);
     HistoryCommitMarker marker = marker(meta);
     AccountAssetBlockProjectionBridge bridge = emptyBridge();
     boolean[] substitute = {true};
-    DurableHistoryMarkerRangeReceipt.Source source =
-        new DurableHistoryMarkerRangeReceipt.Source() {
+    DurableHistoryMarkerRangeEvidence.Source source =
+        new DurableHistoryMarkerRangeEvidence.Source() {
           @Override
           public HistoryCommitMarker marker(long epoch) {
             return substitute[0] ? AccountAssetBlockProjectionBridgeTest.marker(meta(23)) : marker;
@@ -619,21 +619,21 @@ public class AccountAssetBlockProjectionBridgeTest extends BaseMethodTest {
       owner.attach(prepared);
       FrozenBatch batch = AccountAssetPreparedBlockPayloadOwner.freezeContiguous(
           Collections.singletonList(owner));
-      DurableHistoryMarkerRangeReceipt receipt =
-          new DurableHistoryMarkerRangeReceipt(source, 1);
+      DurableHistoryMarkerRangeEvidence evidence =
+          new DurableHistoryMarkerRangeEvidence(source, 1);
 
-      assertThrows(ArchivePersistenceException.class, () -> receipt.seal(batch));
+      assertThrows(ArchivePersistenceException.class, () -> evidence.seal(batch));
       assertEquals(meta, batch.getExpectedMetas().get(0));
       assertTrue(prepared.retainsCapturedView());
       substitute[0] = false;
-      List<ArchiveBlockForwardPayload> payloads = receipt.seal(batch);
+      List<ArchiveBlockForwardPayload> payloads = evidence.seal(batch);
       assertEquals(1, payloads.size());
       assertSame(view, payloads.get(0).getView());
       assertFalse(prepared.retainsCapturedView());
       assertTrue(plan(payloads.get(0).getMarker(), payloads.get(0).getView(),
           payloads.get(0).getAccountAssetManifest()).getMutations().values().stream()
           .allMatch(List::isEmpty));
-      assertThrows(ArchivePersistenceException.class, () -> receipt.seal(batch));
+      assertThrows(ArchivePersistenceException.class, () -> evidence.seal(batch));
     }
   }
 

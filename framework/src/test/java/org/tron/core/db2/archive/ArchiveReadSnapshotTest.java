@@ -22,6 +22,7 @@ import org.bouncycastle.util.encoders.Hex;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
+import org.tron.common.utils.ByteArray;
 import org.tron.core.db2.archive.ArchiveReadContext.HistoricalStore;
 import org.tron.core.db2.archive.ArchiveReadContext.StoreAdapter;
 import org.tron.core.db2.archive.ArchiveReadSnapshot.PinnedLatestState;
@@ -30,6 +31,9 @@ import org.tron.core.db2.archive.BlockReverseDiff.Entry;
 import org.tron.core.db2.archive.HistoricalRangeOverlay.KeyRange;
 import org.tron.core.db2.archive.HistoricalRangeOverlay.Limits;
 import org.tron.core.db2.archive.HistoryIndexRecord.KeyGroup;
+import org.tron.core.db2.archive.P66AccountAssetCodec.Phase;
+import org.tron.protos.Protocol.Account;
+import org.tron.protos.Protocol.AccountType;
 import org.tron.protos.contract.SmartContractOuterClass.SmartContract;
 
 public class ArchiveReadSnapshotTest {
@@ -156,6 +160,141 @@ public class ArchiveReadSnapshotTest {
         assertFalse(context.getAdapterDbNames().contains("accountTrie"));
       }
       assertTrue(latest.closed);
+    }
+  }
+
+  @Test
+  public void contextResolvesHistoricalAccountAssetBeforePinnedHead() throws Exception {
+    byte[] address = address(41);
+    String tokenId = "1000001";
+    byte[] account = account(address, false, tokenId, 17L);
+    byte[] directKey = new P66AccountAssetCodec().assetPhysicalKey(address, tokenId);
+    try (Fixture fixture = new Fixture(
+        temporaryFolder.newFolder("historical-account-asset-context").toPath())) {
+      fixture.append(diff(1,
+          new DbGroup("properties", Collections.singletonList(new Entry(
+              HistoricalAccountAssetBalanceResolver.proposal66PhysicalKey(),
+              OldValue.present(ByteArray.fromLong(0L))))),
+          new DbGroup("account", Collections.singletonList(
+              new Entry(address, OldValue.present(account)))),
+          new DbGroup("account-asset", Collections.singletonList(
+              new Entry(directKey, OldValue.absent())))));
+      fixture.sync();
+      InMemoryLatest latest = new InMemoryLatest(1, hash(1), Collections.emptyMap());
+
+      try (ArchiveReadContext context = ArchiveReadContext.open(
+          fixture.snapshot(0, latest), rawAdapters().adapters)) {
+        HistoricalAccountAssetBalanceResolver.Result result =
+            context.resolveAccountAsset(address, tokenId);
+        assertEquals(0L, result.getBlockNumber());
+        assertEquals(Phase.P66_OFF, result.getPhase());
+        assertEquals(17L, result.getBalance());
+        assertArrayEquals(account, result.getAccountValue());
+        byte[] callerCopy = result.getAccountValue();
+        callerCopy[0] ^= 1;
+        assertArrayEquals(account, result.getAccountValue());
+
+        HistoricalAccountAssetPrefixResolver.Result all = context.resolveAccountAssets(address,
+            new HistoricalAccountAssetPrefixResolver.Limits(10, 10, 10, 64, 8, 1_000));
+        assertEquals(1, all.getBalances().size());
+        assertEquals(tokenId, all.getBalances().get(0).getTokenId());
+        assertEquals(17L, all.getBalances().get(0).getBalance());
+      }
+      assertTrue(latest.closed);
+    }
+  }
+
+  @Test
+  public void resolvesFixedP66TransitionVectorsAcrossCommittedSnapshots() throws Exception {
+    byte[] address = address(43);
+    String tokenId = "1000007";
+    byte[] directKey = new P66AccountAssetCodec().assetPhysicalKey(address, tokenId);
+    byte[] offAtZero = account(address, false, tokenId, 10L);
+    byte[] offAtOne = account(address, false, tokenId, 20L);
+    byte[] activationAtTwo = optimizedAccount(address, 2_000L);
+    byte[] onAtThree = optimizedAccount(address, 3_000L);
+    byte[] onAtFour = optimizedAccount(address, 4_000L);
+    HistoricalAccountAssetPrefixResolver.Limits limits =
+        new HistoricalAccountAssetPrefixResolver.Limits(10, 10, 10, 64, 8, 1_000);
+
+    try (Fixture fixture = new Fixture(
+        temporaryFolder.newFolder("p66-transition-vectors").toPath())) {
+      fixture.append(diff(1,
+          new DbGroup("account", Collections.singletonList(
+              new Entry(address, OldValue.present(offAtZero))))));
+      BlockReverseDiff activation = diff(2,
+          new DbGroup("properties", Collections.singletonList(new Entry(
+              HistoricalAccountAssetBalanceResolver.proposal66PhysicalKey(),
+              OldValue.present(ByteArray.fromLong(0L))))),
+          new DbGroup("account", Collections.singletonList(
+              new Entry(address, OldValue.present(offAtOne)))),
+          new DbGroup("account-asset", Collections.singletonList(
+              new Entry(directKey, OldValue.absent()))));
+      fixture.append(activation);
+      fixture.append(diff(3,
+          new DbGroup("account", Collections.singletonList(
+              new Entry(address, OldValue.present(activationAtTwo)))),
+          new DbGroup("account-asset", Collections.singletonList(
+              new Entry(directKey, OldValue.present(ByteArray.fromLong(30L)))))));
+      fixture.append(diff(4,
+          new DbGroup("account", Collections.singletonList(
+              new Entry(address, OldValue.present(onAtThree)))),
+          new DbGroup("account-asset", Collections.singletonList(
+              new Entry(directKey, OldValue.present(ByteArray.fromLong(40L)))))));
+      fixture.sync();
+
+      Entry activationReverseAsset = activation.getGroups().stream()
+          .filter(group -> "account-asset".equals(group.getDbName()))
+          .findFirst().orElseThrow(AssertionError::new).getEntries().get(0);
+      assertArrayEquals(directKey, activationReverseAsset.getKey());
+      assertFalse(activationReverseAsset.getOldValue().isPresent());
+
+      Map<String, Map<String, byte[]>> latestValues = new HashMap<>();
+      latestValues.put("properties", Collections.singletonMap(
+          text(HistoricalAccountAssetBalanceResolver.proposal66PhysicalKey()),
+          ByteArray.fromLong(1L)));
+      latestValues.put("account", Collections.singletonMap(text(address), onAtFour));
+      latestValues.put("account-asset", Collections.singletonMap(
+          text(directKey), ByteArray.fromLong(50L)));
+
+      assertAccountAssetVector(fixture, latestValues, 1L, Phase.P66_OFF, offAtOne,
+          tokenId, 20L, limits);
+      // The request API reports the activation target as P66_ON because both use the same
+      // canonical direct-row layout; the durable mutation plan retains P66_ACTIVATION.
+      assertAccountAssetVector(fixture, latestValues, 2L, Phase.P66_ON, activationAtTwo,
+          tokenId, 30L, limits);
+      assertAccountAssetVector(fixture, latestValues, 3L, Phase.P66_ON, onAtThree,
+          tokenId, 40L, limits);
+    }
+  }
+
+  @Test
+  public void accountAssetContextRejectsForeignAdaptersAndUseAfterClose() throws Exception {
+    byte[] address = address(42);
+    String tokenId = "1000001";
+    Map<String, byte[]> latestValues = new HashMap<>();
+    latestValues.put(text(HistoricalAccountAssetBalanceResolver.proposal66PhysicalKey()),
+        ByteArray.fromLong(1L));
+    latestValues.put(text(address), account(address, true, null, 0L));
+    InMemoryLatest latest = new InMemoryLatest(0, hash(0), latestValues);
+    AdapterSet adapters = rawAdapters();
+    try (Fixture fixture = new Fixture(
+        temporaryFolder.newFolder("closed-account-asset-context").toPath())) {
+      ArchiveReadContext context = ArchiveReadContext.open(
+          fixture.snapshot(0, latest), adapters.adapters);
+      StoreAdapter<byte[]> foreignAccount = StoreAdapter.define("account", value -> value);
+      assertThrows(IllegalArgumentException.class, () -> context.store(foreignAccount));
+      StoreAdapter<byte[]> foreignAbi = StoreAdapter.define("abi", value -> value);
+      assertThrows(IllegalArgumentException.class, () -> context.store(foreignAbi));
+      assertEquals(0L, context.resolveAccountAsset(address, tokenId).getBalance());
+
+      context.close();
+      assertTrue(latest.closed);
+      assertThrows(IllegalStateException.class,
+          () -> context.resolveAccountAsset(address, tokenId));
+      assertThrows(IllegalStateException.class,
+          () -> context.resolveAccountAssets(address,
+              new HistoricalAccountAssetPrefixResolver.Limits(10, 10, 10, 64, 8, 1_000)));
     }
   }
 
@@ -299,6 +438,59 @@ public class ArchiveReadSnapshotTest {
     return hash;
   }
 
+  private static byte[] address(int suffix) {
+    byte[] address = new byte[21];
+    address[0] = 0x41;
+    address[20] = (byte) suffix;
+    return address;
+  }
+
+  private static byte[] account(byte[] address, boolean optimized, String tokenId, long balance) {
+    Account.Builder builder = Account.newBuilder().setAddress(ByteString.copyFrom(address))
+        .setType(AccountType.Normal).setAssetOptimized(optimized);
+    if (tokenId != null) {
+      builder.putAsset("asset-name", balance).putAssetV2(tokenId, balance);
+    }
+    return builder.build().toByteArray();
+  }
+
+  private static byte[] optimizedAccount(byte[] address, long balance) {
+    return Account.newBuilder().setAddress(ByteString.copyFrom(address))
+        .setType(AccountType.Normal).setAssetOptimized(true).setBalance(balance)
+        .build().toByteArray();
+  }
+
+  private static void assertAccountAssetVector(Fixture fixture,
+      Map<String, Map<String, byte[]>> latestValues, long target, Phase expectedPhase,
+      byte[] expectedAccount,
+      String tokenId, long expectedBalance,
+      HistoricalAccountAssetPrefixResolver.Limits limits) throws Exception {
+    InMemoryLatest latest = InMemoryLatest.scoped(4, hash(4), latestValues);
+    ArchiveReadSnapshot snapshot = fixture.snapshot(target, latest);
+    assertArrayEquals(hash(4), snapshot.getPinnedHash());
+    snapshot.requirePinnedIdentity();
+    try (ArchiveReadContext context = ArchiveReadContext.open(
+        snapshot, rawAdapters().adapters)) {
+      assertEquals(target, context.getTargetBlock());
+      assertEquals(4L, context.getPinnedBlock());
+      HistoricalAccountAssetBalanceResolver.Result exact =
+          context.resolveAccountAsset(address(43), tokenId);
+      assertEquals(expectedPhase, exact.getPhase());
+      assertArrayEquals(expectedAccount, exact.getAccountValue());
+      assertEquals(expectedBalance, exact.getBalance());
+
+      HistoricalAccountAssetPrefixResolver.Result prefix =
+          context.resolveAccountAssets(address(43), limits);
+      assertEquals(expectedPhase, prefix.getPhase());
+      assertArrayEquals(expectedAccount, prefix.getAccountValue());
+      assertEquals(1, prefix.getBalances().size());
+      assertEquals(tokenId, prefix.getBalances().get(0).getTokenId());
+      assertEquals(expectedBalance, prefix.getBalances().get(0).getBalance());
+      snapshot.requirePinnedIdentity();
+    }
+    assertTrue(latest.closed);
+  }
+
   private static byte[] bytes(String value) {
     return value.getBytes(StandardCharsets.UTF_8);
   }
@@ -384,13 +576,33 @@ public class ArchiveReadSnapshotTest {
     private final long block;
     private final byte[] hash;
     private final Map<String, byte[]> values;
+    private final Map<String, Map<String, byte[]>> scopedValues;
     private boolean closed;
 
     private InMemoryLatest(long block, byte[] hash, Map<String, byte[]> values) {
       this.block = block;
       this.hash = Arrays.copyOf(hash, hash.length);
       this.values = new HashMap<>();
+      this.scopedValues = null;
       values.forEach((key, value) -> this.values.put(key, Arrays.copyOf(value, value.length)));
+    }
+
+    private InMemoryLatest(long block, byte[] hash,
+        Map<String, Map<String, byte[]>> scopedValues, boolean scoped) {
+      this.block = block;
+      this.hash = Arrays.copyOf(hash, hash.length);
+      this.values = Collections.emptyMap();
+      this.scopedValues = new HashMap<>();
+      scopedValues.forEach((dbName, rows) -> {
+        Map<String, byte[]> copy = new HashMap<>();
+        rows.forEach((key, value) -> copy.put(key, Arrays.copyOf(value, value.length)));
+        this.scopedValues.put(dbName, copy);
+      });
+    }
+
+    private static InMemoryLatest scoped(long block, byte[] hash,
+        Map<String, Map<String, byte[]>> values) {
+      return new InMemoryLatest(block, hash, values, true);
     }
 
     @Override
@@ -405,14 +617,18 @@ public class ArchiveReadSnapshotTest {
 
     @Override
     public OldValue get(String dbName, byte[] physicalRawKey) {
-      return OldValue.fromNullable(values.get(text(physicalRawKey)));
+      Map<String, byte[]> rows = scopedValues == null ? values
+          : scopedValues.getOrDefault(dbName, Collections.emptyMap());
+      return OldValue.fromNullable(rows.get(text(physicalRawKey)));
     }
 
     @Override
     public List<HistoricalRangeOverlay.Entry> range(String dbName, byte[] lowerInclusive,
         byte[] upperExclusive) {
       List<HistoricalRangeOverlay.Entry> result = new ArrayList<>();
-      values.forEach((key, value) -> {
+      Map<String, byte[]> rows = scopedValues == null ? values
+          : scopedValues.getOrDefault(dbName, Collections.emptyMap());
+      rows.forEach((key, value) -> {
         byte[] rawKey = bytes(key);
         if (BlockReverseDiff.compareUnsigned(rawKey, lowerInclusive) >= 0
             && (upperExclusive == null

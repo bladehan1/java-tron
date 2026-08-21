@@ -13,10 +13,12 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.withSettings;
 
 import com.google.common.primitives.Bytes;
 import com.google.common.primitives.Longs;
 import com.google.protobuf.ByteString;
+import java.io.Closeable;
 import java.util.AbstractMap;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -53,6 +55,104 @@ import org.tron.core.store.CheckTmpStore;
 import org.tron.protos.Protocol.Account;
 
 public class SnapshotOldValueCollectorTest extends BaseMethodTest {
+
+  @Test
+  public void borrowedRuntimeAttachmentIsAtomicAndIdentityBound() throws Exception {
+    SnapshotManager manager = new SnapshotManager("");
+    manager.add(new Chainbase(new SnapshotRoot(new MemoryDb("code"))));
+    OldValueCollector collector = mock(OldValueCollector.class);
+    ArchiveBlockProjectionPreparer preparer = mock(ArchiveBlockProjectionPreparer.class);
+    DurableBlockReverseDiffSink sink = mock(DurableBlockReverseDiffSink.class,
+        withSettings().extraInterfaces(Closeable.class));
+    ArchiveRuntimeAttachment attachment =
+        new ArchiveRuntimeAttachment(collector, preparer, sink);
+    ArchiveRuntimeAttachment foreign =
+        new ArchiveRuntimeAttachment(collector, preparer, sink);
+
+    manager.attachArchiveRuntime(attachment);
+
+    assertThrows(IllegalStateException.class, () -> manager.attachArchiveRuntime(foreign));
+    assertThrows(IllegalStateException.class, () -> manager.detachArchiveRuntime(foreign));
+    assertThrows(IllegalStateException.class,
+        () -> manager.installArchiveCollector(collector, sink));
+    assertThrows(IllegalStateException.class,
+        () -> manager.installArchiveProjectionPreparer(preparer));
+    assertSame(attachment, manager.detachArchiveRuntime(attachment));
+    assertThrows(IllegalStateException.class, () -> manager.detachArchiveRuntime(attachment));
+    verify((Closeable) sink, never()).close();
+
+    BlockReverseDiffSink legacySink = mock(BlockReverseDiffSink.class,
+        withSettings().extraInterfaces(Closeable.class));
+    manager.installArchiveCollector(collector, legacySink);
+    manager.installArchiveProjectionPreparer(preparer);
+    manager.shutdown();
+
+    verify((Closeable) legacySink).close();
+    verify((Closeable) sink, never()).close();
+  }
+
+  @Test
+  public void detachAbortsLayerAndFrozenForwardOwnership() throws Exception {
+    MemoryDb memoryDb = new MemoryDb("code");
+    SnapshotManager manager = new SnapshotManager("");
+    Chainbase database = new Chainbase(new SnapshotRoot(memoryDb));
+    manager.add(database);
+    manager.enable();
+    BlockSnapshotMeta meta = BlockSnapshotMeta.forBlock(1, hash(1), hash(0), 1L);
+    AccountAssetBlockProjectionBridge.PreparedBlockProjection projection =
+        preparedProjection(meta, mock(BlockReverseDiff.class));
+    DurableBlockReverseDiffSink sink = mock(DurableBlockReverseDiffSink.class,
+        withSettings().extraInterfaces(Closeable.class));
+    ArchiveRuntimeAttachment attachment = new ArchiveRuntimeAttachment(
+        new SnapshotOldValueCollector(), captured -> projection, sink);
+    manager.attachArchiveRuntime(attachment);
+    commitBlock(manager, database, meta, "key-1");
+    setFlushCount(manager, 1);
+    manager.freezeArchiveForwardFlushRange();
+
+    assertTrue(manager.hasPendingArchiveForwardFlush());
+    assertSame(attachment, manager.detachArchiveRuntime(attachment));
+
+    assertFalse(manager.hasPendingArchiveForwardFlush());
+    assertEquals(0, manager.getArchiveForwardPayloadOwnerCount());
+    assertThrows(IllegalStateException.class, manager::claimArchiveForwardFlushPayloads);
+    verify(projection).abort();
+    verify((Closeable) sink, never()).close();
+    manager.shutdown();
+    verify((Closeable) sink, never()).close();
+  }
+
+  @Test
+  public void detachClearsSealedForwardOwnershipWithoutAbortingCompletedProjection()
+      throws Exception {
+    MemoryDb memoryDb = new MemoryDb("code");
+    SnapshotManager manager = new SnapshotManager("");
+    Chainbase database = new Chainbase(new SnapshotRoot(memoryDb));
+    manager.add(database);
+    manager.enable();
+    BlockSnapshotMeta meta = BlockSnapshotMeta.forBlock(1, hash(1), hash(0), 1L);
+    BlockChangeView view = mock(BlockChangeView.class);
+    when(view.getMeta()).thenReturn(meta);
+    AccountAssetBlockProjectionBridge.PreparedBlockProjection projection =
+        sealReadyProjection(meta, view);
+    DurableBlockReverseDiffSink sink = mock(DurableBlockReverseDiffSink.class);
+    ArchiveRuntimeAttachment attachment = new ArchiveRuntimeAttachment(
+        new SnapshotOldValueCollector(), captured -> projection, sink);
+    manager.attachArchiveRuntime(attachment);
+    commitBlock(manager, database, meta, "key-1");
+    setFlushCount(manager, 1);
+    manager.freezeArchiveForwardFlushRange();
+    manager.sealPendingArchiveForwardFlush(Collections.singletonList(marker(meta)));
+
+    assertTrue(manager.hasPendingArchiveForwardFlush());
+    manager.detachArchiveRuntime(attachment);
+
+    assertFalse(manager.hasPendingArchiveForwardFlush());
+    assertThrows(IllegalStateException.class, manager::claimArchiveForwardFlushPayloads);
+    verify(projection).completeSeal();
+    verify(projection, never()).abort();
+    manager.shutdown();
+  }
 
   @Test
   public void collectsBlockPreStateAfterNestedSessionsFinish() {
@@ -147,7 +247,7 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
   }
 
   @Test
-  public void excludesAbiChangesFromCanonicalStateHistory() {
+  public void retainsAbiChangesInCanonicalStateHistory() {
     SnapshotManager manager = new SnapshotManager("");
     Chainbase abi = new Chainbase(new SnapshotRoot(new MemoryDb("abi")));
     Chainbase code = new Chainbase(new SnapshotRoot(new MemoryDb("code")));
@@ -163,10 +263,11 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
     }
 
     BlockReverseDiff diff = prepared(code);
-    assertEquals(1, diff.getGroups().size());
-    assertEquals("code", diff.getGroups().get(0).getDbName());
-    assertFalse(diff.getGroups().stream().anyMatch(group -> "abi".equals(group.getDbName())));
-    assertTrue(((SnapshotImpl) abi.getHead()).getPreparedArchiveBlock() == null);
+    assertEquals(2, diff.getGroups().size());
+    assertEquals("abi", diff.getGroups().get(0).getDbName());
+    assertEquals("code", diff.getGroups().get(1).getDbName());
+    assertFalse(find(diff.getGroups().get(0), bytes("contract")).getOldValue().isPresent());
+    assertEquals(diff, prepared(abi));
     manager.shutdown();
   }
 
@@ -219,9 +320,9 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
   public void classifiesEveryChainbaseRegisteredByTheApplication() {
     SnapshotManager applicationManager = context.getBean(SnapshotManager.class);
     ArchiveStoreScope.validate(applicationManager.getDbs());
-    assertEquals(26, ArchiveStoreScope.getStateDatabases().size());
-    assertFalse(ArchiveStoreScope.isStateDatabase("abi"));
-    assertTrue(ArchiveStoreScope.isExcludedDatabase("abi"));
+    assertEquals(27, ArchiveStoreScope.getStateDatabases().size());
+    assertTrue(ArchiveStoreScope.isStateDatabase("abi"));
+    assertFalse(ArchiveStoreScope.isExcludedDatabase("abi"));
     assertTrue(ArchiveStoreScope.isClassified("abi"));
   }
 
@@ -602,7 +703,7 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
   }
 
   @Test
-  public void flushRetriesDurabilityAndReceiptWithoutResubmittingHistory() throws Exception {
+  public void flushRetriesDurabilityAndEvidenceWithoutResubmittingHistory() throws Exception {
     MemoryDb memoryDb = new MemoryDb("code");
     SnapshotManager manager = new SnapshotManager("");
     Chainbase database = new Chainbase(new SnapshotRoot(memoryDb));
@@ -615,9 +716,9 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
     when(checkpoint.getDbSource()).thenReturn(checkpointDb);
     manager.setCheckTmpStore(checkpoint);
     ArchiveHistoryWriter writer = new ArchiveHistoryWriter(
-        temporaryFolder.newFolder("flush-receipt-retry").toPath(), 4096,
+        temporaryFolder.newFolder("flush-evidence-retry").toPath(), 4096,
         ArchiveStoreScope.getStateDatabases());
-    FailOnceReceiptSink sink = new FailOnceReceiptSink(writer);
+    FailOnceEvidenceSink sink = new FailOnceEvidenceSink(writer);
     manager.installArchiveCollector(new SnapshotOldValueCollector(), sink);
     AtomicReference<AccountAssetBlockProjectionBridge.PreparedBlockProjection> prepared =
         new AtomicReference<>();
@@ -644,7 +745,7 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
 
     assertEquals(1, sink.acceptAllCalls);
     assertEquals(3, sink.awaitCalls);
-    assertEquals(2, sink.receiptCalls);
+    assertEquals(2, sink.evidenceCalls);
     verify(prepared.get()).completeSeal();
     assertEquals(1, manager.claimArchiveForwardFlushPayloads().size());
     assertFalse(manager.hasPendingArchiveForwardFlush());
@@ -1027,7 +1128,7 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
   }
 
   @Test
-  public void durableReceiptFailureKeepsFrozenSlotAndShutdownReleasesSealedSlot()
+  public void durableEvidenceFailureKeepsFrozenSlotAndShutdownReleasesSealedSlot()
       throws Exception {
     MemoryDb memoryDb = new MemoryDb("code");
     SnapshotManager manager = new SnapshotManager("");
@@ -1046,8 +1147,8 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
     setFlushCount(manager, 1);
     FrozenBatch frozen = manager.freezeArchiveForwardFlushRange();
     boolean[] substitute = {true};
-    DurableHistoryMarkerRangeReceipt receipt = new DurableHistoryMarkerRangeReceipt(
-        new DurableHistoryMarkerRangeReceipt.Source() {
+    DurableHistoryMarkerRangeEvidence evidence = new DurableHistoryMarkerRangeEvidence(
+        new DurableHistoryMarkerRangeEvidence.Source() {
           @Override
           public HistoryCommitMarker marker(long epoch) {
             return substitute[0]
@@ -1062,10 +1163,10 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
         }, 1);
 
     assertThrows(ArchivePersistenceException.class,
-        () -> manager.sealPendingArchiveForwardFlush(receipt));
+        () -> manager.sealPendingArchiveForwardFlush(evidence));
     assertSame(frozen, manager.freezeArchiveForwardFlushRange());
     substitute[0] = false;
-    manager.sealPendingArchiveForwardFlush(receipt);
+    manager.sealPendingArchiveForwardFlush(evidence);
     assertTrue(manager.hasPendingArchiveForwardFlush());
 
     manager.shutdown();
@@ -1244,13 +1345,13 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
     return copy;
   }
 
-  private static final class FailOnceReceiptSink implements DurableBlockReverseDiffSink {
+  private static final class FailOnceEvidenceSink implements DurableBlockReverseDiffSink {
     private final ArchiveHistoryWriter writer;
     private int acceptAllCalls;
     private int awaitCalls;
-    private int receiptCalls;
+    private int evidenceCalls;
 
-    private FailOnceReceiptSink(ArchiveHistoryWriter writer) {
+    private FailOnceEvidenceSink(ArchiveHistoryWriter writer) {
       this.writer = writer;
     }
 
@@ -1280,11 +1381,11 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
     }
 
     @Override
-    public DurableHistoryMarkerRangeReceipt createMarkerRangeReceipt(int maxMarkers) {
-      receiptCalls++;
-      if (receiptCalls == 1) {
-        return new DurableHistoryMarkerRangeReceipt(
-            new DurableHistoryMarkerRangeReceipt.Source() {
+    public DurableHistoryMarkerRangeEvidence createMarkerRangeEvidence(int maxMarkers) {
+      evidenceCalls++;
+      if (evidenceCalls == 1) {
+        return new DurableHistoryMarkerRangeEvidence(
+            new DurableHistoryMarkerRangeEvidence.Source() {
               @Override
               public HistoryCommitMarker marker(long epoch) {
                 return null;
@@ -1296,7 +1397,7 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
               }
             }, maxMarkers);
       }
-      return writer.createMarkerRangeReceipt(maxMarkers);
+      return writer.createMarkerRangeEvidence(maxMarkers);
     }
 
     @Override

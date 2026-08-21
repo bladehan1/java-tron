@@ -7,6 +7,7 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
+import com.google.protobuf.ByteString;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -23,6 +24,8 @@ import org.junit.Test;
 import org.tron.common.BaseMethodTest;
 import org.tron.core.db2.ISession;
 import org.tron.core.db2.archive.ArchiveProgressEnvelope.Kind;
+import org.tron.core.db2.archive.ArchiveRecoveryPlanner.ActionType;
+import org.tron.core.db2.archive.ArchiveRecoveryPlanner.RecoveryPlan;
 import org.tron.core.db2.archive.ArchiveTargetApplyCoordinator.Stage;
 import org.tron.core.db2.archive.P66AccountAssetCodec.Phase;
 import org.tron.core.db2.common.DB;
@@ -31,6 +34,7 @@ import org.tron.core.db2.common.WrappedByteArray;
 import org.tron.core.db2.core.Chainbase;
 import org.tron.core.db2.core.SnapshotManager;
 import org.tron.core.db2.core.SnapshotRoot;
+import org.tron.protos.Protocol.Account;
 
 /** End-to-end ownership and recovery test from block capture to durable mixed participants. */
 public class ArchiveBlockForwardMutationRecoveryTest extends BaseMethodTest {
@@ -167,6 +171,129 @@ public class ArchiveBlockForwardMutationRecoveryTest extends BaseMethodTest {
     } finally {
       accountAsset.close();
       account.close();
+    }
+  }
+
+  @Test
+  public void p66ActivationCaptureRecoversExactParticipantSetAfterNativeReopen()
+      throws Exception {
+    Path archive = temporaryFolder.newFolder("p66-activation-exact-capture").toPath();
+    List<HistoryCommitMarker> markers = initializeHistory(archive, 1);
+    HistoryCommitMarker initial = markers.get(0);
+    HistoryCommitMarker target = markers.get(1);
+    Path checkpointPath = archive.resolve("progress/checkpoint.progress");
+    Path readerPath = archive.resolve("progress/reader.progress");
+    ArchiveProgressEnvelopeCodec progressCodec = new ArchiveProgressEnvelopeCodec();
+    new ArchiveProgressFile(checkpointPath, progressCodec).store(global(Kind.APPLY_CHECKPOINT,
+        initial));
+    new ArchiveProgressFile(readerPath, progressCodec).store(global(Kind.READER_VISIBLE, initial));
+
+    byte[] address = accountAddress(7);
+    String tokenId = "1000007";
+    Account raw = Account.newBuilder().setAddress(ByteString.copyFrom(address))
+        .putAsset("asset-name", 30L).putAssetV2(tokenId, 30L).build();
+    P66AccountAssetCodec codec = new P66AccountAssetCodec();
+    byte[] canonicalAccount = codec.canonicalizeAccount(
+        Phase.P66_ACTIVATION, address, raw.toByteArray());
+    P66AccountAssetCodec.AssetRow direct = codec.encodeAssetRow(
+        Phase.P66_ACTIVATION, address, tokenId, 30L);
+    byte[] assetKey = direct.getPhysicalRawKey();
+    byte[] assetValue = direct.getPostValue().getValue();
+    byte[] proposalKey = bytes(2, 61);
+    byte[] proposalValue = bytes(3, 71);
+
+    ArchiveParticipantMutationBatch batch;
+    try (ViewFixture viewFixture = new ViewFixture()) {
+      ArchiveBlockForwardMutationCapture capture = new ArchiveBlockForwardMutationCapture(
+          target.getMeta(), Phase.P66_ACTIVATION,
+          new ArchiveBlockForwardMutationLimits(10, 10, 1024, 1024, 1024 * 1024));
+      capture.recordAccount(target.getMeta(), address,
+          BlockChangeView.PostValue.present(raw.toByteArray()),
+          BlockChangeView.PostValue.present(canonicalAccount));
+      capture.recordAssetPut(target.getMeta(), address, assetKey, assetValue);
+      BlockChangeView view = viewFixture.capture(target.getMeta(), databases -> {
+        databases.get("account").put(address, raw.toByteArray());
+        databases.get("proposal").put(proposalKey, proposalValue);
+      });
+      capture.attach(view);
+      batch = capture.seal(target);
+    }
+    assertEquals(Phase.P66_ACTIVATION, batch.getTargetPhase());
+    assertEquals(P66AccountAssetCodec.FORMAT_ID, batch.getAccountAssetFormatId());
+    assertEquals(PARTICIPANTS, batch.getParticipants());
+    String firstParticipant = PARTICIPANTS.get(0);
+
+    try (ParticipantFixture participants = new ParticipantFixture(archive, initial)) {
+      try (HistoryCommitStore history = new HistoryCommitStore(
+          archive, new HistoryCommitMarkerCodec())) {
+        ArchiveTargetApplyCoordinator coordinator = new ArchiveTargetApplyCoordinator(history,
+            checkpointPath, participants.engines, readerPath, PARTICIPANTS,
+            action -> action.run(),
+            (stage, participant) -> failAfter(stage, participant, firstParticipant),
+            temporary -> { });
+        assertThrows(IOException.class, () -> coordinator.apply(batch, () -> { }));
+      }
+
+      ArchiveTargetMutationPlan durablePlan =
+          new ArchiveTargetMutationPlanFile(checkpointPath).loadRequired();
+      byte[] planDigest = durablePlan.digest();
+      assertEquals(Phase.P66_ACTIVATION, durablePlan.getTargetPhase());
+      assertEquals(target.getMeta().getEpoch(),
+          participants.engines.get(firstParticipant).loadProgress().getEpoch());
+      assertNull(participants.account.get(address));
+      assertNull(participants.accountAsset.get(assetKey));
+      assertNull(participants.memory.get("proposal").get(proposalKey));
+
+      participants.reopenNativeParticipants();
+      AtomicInteger refreshes = new AtomicInteger();
+      RecoveryPlan recoveryPlan;
+      try (ArchiveParticipantRecoveryStorage recovery =
+          new ArchiveParticipantRecoveryStorage(archive, 4096, checkpointPath,
+              participants.engines, readerPath, PARTICIPANTS, action -> action.run(),
+              refreshes::incrementAndGet)) {
+        recoveryPlan = new ArchiveRecoveryExecutor(recovery).recover();
+      }
+
+      List<String> replayed = new ArrayList<>();
+      recoveryPlan.getActions().stream()
+          .filter(action -> action.getType() == ActionType.REPLAY_PARTICIPANT)
+          .forEach(action -> replayed.add(action.getParticipant()));
+      assertEquals(PARTICIPANTS.subList(1, PARTICIPANTS.size()), replayed);
+      assertEquals(ActionType.PUBLISH_READER_HEAD,
+          recoveryPlan.getActions().get(recoveryPlan.getActions().size() - 1).getType());
+      assertEquals(1, refreshes.get());
+      assertArrayEquals(canonicalAccount, participants.account.get(address));
+      assertArrayEquals(assetValue, participants.accountAsset.get(assetKey));
+      assertArrayEquals(proposalValue,
+          participants.memory.get("proposal").get(proposalKey));
+
+      ArchiveProgressEnvelope checkpoint =
+          new ArchiveProgressFile(checkpointPath, progressCodec).load();
+      ArchiveProgressEnvelope reader =
+          new ArchiveProgressFile(readerPath, progressCodec).load();
+      assertArrayEquals(planDigest, checkpoint.getMutationPlanDigest());
+      assertArrayEquals(target.getMeta().getBlockHash(), checkpoint.getBlockHash());
+      assertEquals(target.getMeta().getEpoch(), reader.getEpoch());
+      assertArrayEquals(planDigest, reader.getMutationPlanDigest());
+      for (String participant : PARTICIPANTS) {
+        ArchiveProgressEnvelope progress = participants.engines.get(participant).loadProgress();
+        assertEquals(PARTICIPANTS, progress.getParticipants());
+        assertEquals(target.getMeta().getEpoch(), progress.getEpoch());
+        assertArrayEquals(target.getMeta().getBlockHash(), progress.getBlockHash());
+        assertArrayEquals(planDigest, progress.getMutationPlanDigest());
+      }
+      assertFalse(Files.exists(new ArchiveTargetMutationPlanFile(checkpointPath).getPath()));
+
+      participants.reopenNativeParticipants();
+      try (ArchiveParticipantRecoveryStorage fixed =
+          new ArchiveParticipantRecoveryStorage(archive, 4096, checkpointPath,
+              participants.engines, readerPath, PARTICIPANTS)) {
+        assertEquals(0, new ArchiveRecoveryExecutor(fixed).recover().getActions().size());
+      }
+      assertArrayEquals(canonicalAccount, participants.account.get(address));
+      assertArrayEquals(assetValue, participants.accountAsset.get(assetKey));
+      assertArrayEquals(proposalValue,
+          participants.memory.get("proposal").get(proposalKey));
     }
   }
 
@@ -468,6 +595,13 @@ public class ArchiveBlockForwardMutationRecoveryTest extends BaseMethodTest {
     return hash;
   }
 
+  private static byte[] accountAddress(int suffix) {
+    byte[] address = new byte[21];
+    address[0] = 0x41;
+    address[20] = (byte) suffix;
+    return address;
+  }
+
   private static byte[] bytes(int length, int value) {
     byte[] bytes = new byte[length];
     Arrays.fill(bytes, (byte) value);
@@ -518,17 +652,16 @@ public class ArchiveBlockForwardMutationRecoveryTest extends BaseMethodTest {
   }
 
   private static final class ParticipantFixture implements AutoCloseable {
-    private final LevelDbArchiveParticipant account;
-    private final RocksDbArchiveParticipant accountAsset;
+    private final Path archive;
+    private LevelDbArchiveParticipant account;
+    private RocksDbArchiveParticipant accountAsset;
     private final Map<String, CountingParticipant> counted = new LinkedHashMap<>();
     private final Map<String, MemoryParticipant> memory = new LinkedHashMap<>();
     private final Map<String, ArchiveParticipant> engines = new LinkedHashMap<>();
 
     private ParticipantFixture(Path archive, HistoryCommitMarker initial) throws IOException {
-      account = new LevelDbArchiveParticipant(
-          archive.resolve("participants/account"), "account", PARTICIPANTS);
-      accountAsset = new RocksDbArchiveParticipant(
-          archive.resolve("participants/account-asset"), "account-asset", PARTICIPANTS);
+      this.archive = archive;
+      openNativeParticipants();
       for (String participant : PARTICIPANTS) {
         ArchiveParticipant delegate;
         if ("account".equals(participant)) {
@@ -547,10 +680,39 @@ public class ArchiveBlockForwardMutationRecoveryTest extends BaseMethodTest {
       }
     }
 
-    @Override
-    public void close() throws IOException {
+    private void reopenNativeParticipants() throws IOException {
+      closeNativeParticipants();
+      openNativeParticipants();
+      replaceNativeParticipant("account", account);
+      replaceNativeParticipant("account-asset", accountAsset);
+    }
+
+    private void openNativeParticipants() throws IOException {
+      account = new LevelDbArchiveParticipant(
+          archive.resolve("participants/account"), "account", PARTICIPANTS);
+      try {
+        accountAsset = new RocksDbArchiveParticipant(
+            archive.resolve("participants/account-asset"), "account-asset", PARTICIPANTS);
+      } catch (IOException | RuntimeException failure) {
+        account.close();
+        throw failure;
+      }
+    }
+
+    private void replaceNativeParticipant(String participant, ArchiveParticipant delegate) {
+      CountingParticipant engine = new CountingParticipant(delegate);
+      counted.put(participant, engine);
+      engines.put(participant, engine);
+    }
+
+    private void closeNativeParticipants() throws IOException {
       accountAsset.close();
       account.close();
+    }
+
+    @Override
+    public void close() throws IOException {
+      closeNativeParticipants();
     }
   }
 

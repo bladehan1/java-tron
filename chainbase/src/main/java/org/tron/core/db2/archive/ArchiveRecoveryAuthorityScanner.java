@@ -14,14 +14,14 @@ import org.tron.core.db2.archive.ArchiveRecoveryExecutor.RecoverySnapshot;
 /** File-backed prototype authority adapters for one fresh validating recovery scan. */
 public final class ArchiveRecoveryAuthorityScanner {
 
-  private final HistoryCommitStore history;
+  private final CommittedHistoryAuthority history;
   private final Path checkpointPath;
   private final Map<String, ArchiveParticipantProgressSource> participantSources;
   private final Path readerVisiblePath;
   private final List<String> participants;
   private final ArchiveProgressEnvelopeCodec progressCodec = new ArchiveProgressEnvelopeCodec();
 
-  public ArchiveRecoveryAuthorityScanner(HistoryCommitStore history, Path checkpointPath,
+  public ArchiveRecoveryAuthorityScanner(CommittedHistoryAuthority history, Path checkpointPath,
       Map<String, Path> participantPaths, Path readerVisiblePath,
       List<String> participants) {
     this.history = Objects.requireNonNull(history, "history");
@@ -40,7 +40,7 @@ public final class ArchiveRecoveryAuthorityScanner {
     this.participantSources = Collections.unmodifiableMap(sources);
   }
 
-  private ArchiveRecoveryAuthorityScanner(HistoryCommitStore history, Path checkpointPath,
+  private ArchiveRecoveryAuthorityScanner(CommittedHistoryAuthority history, Path checkpointPath,
       Map<String, ArchiveParticipantBatchFile> participantBatches, Path readerVisiblePath,
       List<String> participants, boolean batchAuthority) {
     this.history = Objects.requireNonNull(history, "history");
@@ -59,7 +59,7 @@ public final class ArchiveRecoveryAuthorityScanner {
     this.participantSources = Collections.unmodifiableMap(sources);
   }
 
-  private ArchiveRecoveryAuthorityScanner(HistoryCommitStore history, Path checkpointPath,
+  private ArchiveRecoveryAuthorityScanner(CommittedHistoryAuthority history, Path checkpointPath,
       Map<String, ? extends ArchiveParticipantProgressSource> participantSources,
       Path readerVisiblePath,
       List<String> participants, byte nativeEngineAuthority) {
@@ -78,7 +78,7 @@ public final class ArchiveRecoveryAuthorityScanner {
   }
 
   public static ArchiveRecoveryAuthorityScanner forParticipantBatches(
-      HistoryCommitStore history, Path checkpointPath,
+      CommittedHistoryAuthority history, Path checkpointPath,
       Map<String, ArchiveParticipantBatchFile> participantBatches, Path readerVisiblePath,
       List<String> participants) {
     return new ArchiveRecoveryAuthorityScanner(history, checkpointPath, participantBatches,
@@ -86,7 +86,7 @@ public final class ArchiveRecoveryAuthorityScanner {
   }
 
   public static ArchiveRecoveryAuthorityScanner forParticipants(
-      HistoryCommitStore history, Path checkpointPath,
+      CommittedHistoryAuthority history, Path checkpointPath,
       Map<String, ? extends ArchiveParticipantProgressSource> participantEngines,
       Path readerVisiblePath,
       List<String> participants) {

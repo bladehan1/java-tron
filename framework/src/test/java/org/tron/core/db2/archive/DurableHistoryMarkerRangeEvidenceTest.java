@@ -15,33 +15,33 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 
-public class DurableHistoryMarkerRangeReceiptTest {
+public class DurableHistoryMarkerRangeEvidenceTest {
 
   @Rule
   public TemporaryFolder temporaryFolder = new TemporaryFolder();
 
   @Test
-  public void readsOnlyExactDurableRangeAndReopensWithIdenticalReceipt() throws Exception {
-    Path archive = temporaryFolder.newFolder("marker-receipt").toPath();
+  public void readsOnlyExactDurableRangeAndReopensWithIdenticalEvidence() throws Exception {
+    Path archive = temporaryFolder.newFolder("marker-evidence").toPath();
     List<BlockSnapshotMeta> expected = Arrays.asList(meta(2), meta(3));
     List<byte[]> encoded = new ArrayList<>();
     try (ArchiveHistoryWriter writer = new ArchiveHistoryWriter(
         archive, 4096, new java.util.LinkedHashSet<>(participants()))) {
       writer.acceptAll(Arrays.asList(diff(1), diff(2), diff(3), diff(4)));
-      List<HistoryCommitMarker> receipt =
-          writer.createMarkerRangeReceipt(2).read(expected);
-      assertEquals(Arrays.asList(2L, 3L), epochs(receipt));
+      List<HistoryCommitMarker> evidence =
+          writer.createMarkerRangeEvidence(2).read(expected);
+      assertEquals(Arrays.asList(2L, 3L), epochs(evidence));
       HistoryCommitMarkerCodec codec = new HistoryCommitMarkerCodec();
-      receipt.forEach(marker -> encoded.add(codec.encode(marker)));
+      evidence.forEach(marker -> encoded.add(codec.encode(marker)));
     }
 
     try (ArchiveHistoryWriter reopened = new ArchiveHistoryWriter(
         archive, 4096, new java.util.LinkedHashSet<>(participants()))) {
-      List<HistoryCommitMarker> receipt =
-          reopened.createMarkerRangeReceipt(2).read(expected);
+      List<HistoryCommitMarker> evidence =
+          reopened.createMarkerRangeEvidence(2).read(expected);
       HistoryCommitMarkerCodec codec = new HistoryCommitMarkerCodec();
-      assertArrayEquals(encoded.get(0), codec.encode(receipt.get(0)));
-      assertArrayEquals(encoded.get(1), codec.encode(receipt.get(1)));
+      assertArrayEquals(encoded.get(0), codec.encode(evidence.get(0)));
+      assertArrayEquals(encoded.get(1), codec.encode(evidence.get(1)));
       assertEquals(4L, reopened.committedHead().getMeta().getEpoch());
     }
   }
@@ -50,62 +50,62 @@ public class DurableHistoryMarkerRangeReceiptTest {
   public void markerPreflightRejectsMissingSubstitutedAndReorderedBeforeBodyRead() {
     FakeSource source = new FakeSource();
     source.put(marker(meta(1)), diff(1));
-    DurableHistoryMarkerRangeReceipt receipt =
-        new DurableHistoryMarkerRangeReceipt(source, 2);
+    DurableHistoryMarkerRangeEvidence evidence =
+        new DurableHistoryMarkerRangeEvidence(source, 2);
     List<BlockSnapshotMeta> expected = Arrays.asList(meta(1), meta(2));
 
-    assertThrows(ArchivePersistenceException.class, () -> receipt.read(expected));
+    assertThrows(ArchivePersistenceException.class, () -> evidence.read(expected));
     assertEquals(0, source.bodyReads);
 
     source.putAt(2, marker(meta(3)), diff(2));
-    assertThrows(ArchivePersistenceException.class, () -> receipt.read(expected));
+    assertThrows(ArchivePersistenceException.class, () -> evidence.read(expected));
     assertEquals(0, source.bodyReads);
 
     source.putAt(1, marker(meta(2)), diff(1));
     source.putAt(2, marker(meta(1)), diff(2));
-    assertThrows(ArchivePersistenceException.class, () -> receipt.read(expected));
+    assertThrows(ArchivePersistenceException.class, () -> evidence.read(expected));
     assertEquals(0, source.bodyReads);
 
     source.clear();
     source.put(marker(meta(1)), diff(1));
     source.put(marker(meta(2)), diff(2));
-    assertEquals(Arrays.asList(1L, 2L), epochs(receipt.read(expected)));
+    assertEquals(Arrays.asList(1L, 2L), epochs(evidence.read(expected)));
     assertEquals(2, source.bodyReads);
   }
 
   @Test
-  public void referenceFailureAndMarkerDriftLeaveReceiptRetryable() {
+  public void referenceFailureAndMarkerDriftLeaveEvidenceRetryable() {
     FakeSource source = new FakeSource();
     source.put(marker(meta(1)), diff(1));
     source.failBody = true;
-    DurableHistoryMarkerRangeReceipt receipt =
-        new DurableHistoryMarkerRangeReceipt(source, 1);
+    DurableHistoryMarkerRangeEvidence evidence =
+        new DurableHistoryMarkerRangeEvidence(source, 1);
 
     assertThrows(ArchivePersistenceException.class,
-        () -> receipt.read(Collections.singletonList(meta(1))));
+        () -> evidence.read(Collections.singletonList(meta(1))));
     source.failBody = false;
-    assertEquals(1, receipt.read(Collections.singletonList(meta(1))).size());
+    assertEquals(1, evidence.read(Collections.singletonList(meta(1))).size());
 
     source.bodyReads = 0;
     source.driftAfterBody = true;
     assertThrows(ArchivePersistenceException.class,
-        () -> receipt.read(Collections.singletonList(meta(1))));
+        () -> evidence.read(Collections.singletonList(meta(1))));
     source.driftAfterBody = false;
-    assertEquals(1, receipt.read(Collections.singletonList(meta(1))).size());
+    assertEquals(1, evidence.read(Collections.singletonList(meta(1))).size());
   }
 
   @Test
   public void invalidOrOversizedExpectedRangeFailsBeforeSourceAction() {
     FakeSource source = new FakeSource();
-    DurableHistoryMarkerRangeReceipt receipt =
-        new DurableHistoryMarkerRangeReceipt(source, 1);
+    DurableHistoryMarkerRangeEvidence evidence =
+        new DurableHistoryMarkerRangeEvidence(source, 1);
 
     assertThrows(ArchivePersistenceException.class,
-        () -> receipt.read(Collections.emptyList()));
+        () -> evidence.read(Collections.emptyList()));
     assertThrows(ArchivePersistenceException.class,
-        () -> receipt.read(Arrays.asList(meta(1), meta(2))));
+        () -> evidence.read(Arrays.asList(meta(1), meta(2))));
     assertThrows(ArchivePersistenceException.class,
-        () -> new DurableHistoryMarkerRangeReceipt(source, 2)
+        () -> new DurableHistoryMarkerRangeEvidence(source, 2)
             .read(Arrays.asList(meta(1), meta(3))));
     assertEquals(0, source.markerReads);
     assertEquals(0, source.bodyReads);
@@ -151,7 +151,7 @@ public class DurableHistoryMarkerRangeReceiptTest {
     return result;
   }
 
-  private static final class FakeSource implements DurableHistoryMarkerRangeReceipt.Source {
+  private static final class FakeSource implements DurableHistoryMarkerRangeEvidence.Source {
     private final Map<Long, HistoryCommitMarker> markers = new LinkedHashMap<>();
     private final Map<Long, BlockReverseDiff> bodies = new LinkedHashMap<>();
     private int markerReads;
@@ -179,7 +179,7 @@ public class DurableHistoryMarkerRangeReceiptTest {
     public HistoryCommitMarker marker(long epoch) {
       markerReads++;
       if (driftAfterBody && bodyReads > 0) {
-        return DurableHistoryMarkerRangeReceiptTest.marker(meta((int) epoch + 1));
+        return DurableHistoryMarkerRangeEvidenceTest.marker(meta((int) epoch + 1));
       }
       return markers.get(epoch);
     }

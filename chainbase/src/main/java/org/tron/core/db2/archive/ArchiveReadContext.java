@@ -19,6 +19,10 @@ public final class ArchiveReadContext implements Closeable {
 
   private final ArchiveReadSnapshot snapshot;
   private final Map<String, StoreAdapter<?>> adapters;
+  private final HistoricalAccountAssetBalanceResolver accountAssetResolver =
+      new HistoricalAccountAssetBalanceResolver();
+  private final HistoricalAccountAssetPrefixResolver accountAssetPrefixResolver =
+      new HistoricalAccountAssetPrefixResolver();
   private boolean closed;
 
   private ArchiveReadContext(ArchiveReadSnapshot snapshot,
@@ -58,6 +62,20 @@ public final class ArchiveReadContext implements Closeable {
 
   public long getPinnedBlock() {
     return snapshot.getPinnedBlock();
+  }
+
+  /** Resolves exact Account bytes and one P66-aware token balance from this request snapshot. */
+  public synchronized HistoricalAccountAssetBalanceResolver.Result resolveAccountAsset(
+      byte[] address, String tokenId) throws IOException {
+    ensureOpen();
+    return accountAssetResolver.resolve(snapshot, address, tokenId);
+  }
+
+  /** Resolves all token balances for exactly one Account under explicit query budgets. */
+  public synchronized HistoricalAccountAssetPrefixResolver.Result resolveAccountAssets(
+      byte[] address, HistoricalAccountAssetPrefixResolver.Limits limits) throws IOException {
+    ensureOpen();
+    return accountAssetPrefixResolver.resolve(snapshot, address, limits);
   }
 
   /** Resolves one logical contract slot using contract metadata from this same pinned context. */
