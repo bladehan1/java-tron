@@ -11,6 +11,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import org.iq80.leveldb.DB;
 import org.iq80.leveldb.WriteOptions;
@@ -79,6 +80,11 @@ final class PathStateNativeNodeStore implements Closeable {
     delegate.writeBatch(owned);
   }
 
+  synchronized List<KeyValue> scanPrefix(byte[] prefix) {
+    requireOpen();
+    return delegate.scanPrefix(nonEmpty(prefix, "prefix"));
+  }
+
   Path getDirectory() {
     return directory;
   }
@@ -114,6 +120,8 @@ final class PathStateNativeNodeStore implements Closeable {
     byte[] get(byte[] key);
 
     void writeBatch(List<BatchMutation> mutations);
+
+    List<KeyValue> scanPrefix(byte[] prefix);
   }
 
   private static final class LevelDelegate implements Delegate {
@@ -145,6 +153,24 @@ final class PathStateNativeNodeStore implements Closeable {
       } catch (IOException failure) {
         throw new IllegalStateException("failed to apply path-state LevelDB node batch", failure);
       }
+    }
+
+    @Override
+    public List<KeyValue> scanPrefix(byte[] prefix) {
+      List<KeyValue> entries = new ArrayList<>();
+      try (org.iq80.leveldb.DBIterator iterator = database.iterator()) {
+        iterator.seek(prefix);
+        while (iterator.hasNext()) {
+          Map.Entry<byte[], byte[]> entry = iterator.next();
+          if (!startsWith(entry.getKey(), prefix)) {
+            break;
+          }
+          entries.add(new KeyValue(entry.getKey(), entry.getValue()));
+        }
+      } catch (IOException failure) {
+        throw new IllegalStateException("failed to scan path-state LevelDB nodes", failure);
+      }
+      return entries;
     }
 
     @Override
@@ -197,6 +223,22 @@ final class PathStateNativeNodeStore implements Closeable {
     }
 
     @Override
+    public List<KeyValue> scanPrefix(byte[] prefix) {
+      List<KeyValue> entries = new ArrayList<>();
+      try (org.rocksdb.RocksIterator iterator = database.newIterator()) {
+        iterator.seek(prefix);
+        while (iterator.isValid() && startsWith(iterator.key(), prefix)) {
+          entries.add(new KeyValue(iterator.key(), iterator.value()));
+          iterator.next();
+        }
+        iterator.status();
+      } catch (RocksDBException failure) {
+        throw new IllegalStateException("failed to scan path-state RocksDB nodes", failure);
+      }
+      return entries;
+    }
+
+    @Override
     public void close() {
       syncWrites.close();
       database.close();
@@ -225,5 +267,29 @@ final class PathStateNativeNodeStore implements Closeable {
     static BatchMutation delete(byte[] key) {
       return new BatchMutation(key, null);
     }
+  }
+
+  static final class KeyValue {
+
+    private final byte[] key;
+    private final byte[] value;
+
+    private KeyValue(byte[] key, byte[] value) {
+      this.key = nonEmpty(key, "key");
+      this.value = nonEmpty(value, "value");
+    }
+
+    byte[] getKey() {
+      return Arrays.copyOf(key, key.length);
+    }
+
+    byte[] getValue() {
+      return Arrays.copyOf(value, value.length);
+    }
+  }
+
+  private static boolean startsWith(byte[] value, byte[] prefix) {
+    return value.length >= prefix.length
+        && Arrays.equals(Arrays.copyOf(value, prefix.length), prefix);
   }
 }

@@ -6,8 +6,10 @@ import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import org.tron.core.db2.stateroot.PathStateRootMetadata.Kind;
@@ -19,34 +21,45 @@ public final class PathStateNodeStoreSet implements Closeable {
   private static final byte[] PROGRESS_KEY = new byte[]{
       (byte) 0xff, (byte) 0xff, (byte) 0xff, (byte) 0xff,
       'p', 'r', 'o', 'g', 'r', 'e', 's', 's'};
+  private static final int LEAF_DOMAIN = -2;
+  private static final byte[] LEAF_PREFIX = ByteBuffer.allocate(Integer.BYTES)
+      .putInt(LEAF_DOMAIN).array();
+  private static final int LEAF_KEY_LENGTH = Integer.BYTES * 2 + PathMerkleTrie.SECURE_KEY_LENGTH;
 
   private final Path directory;
   private final PathStateParticipantScope scope;
   private final Map<String, PathNodeStore> participantStores = new LinkedHashMap<>();
   private final Map<BytesKey, byte[]> pending = new LinkedHashMap<>();
+  private final Map<BytesKey, byte[]> persistedLeaves = new LinkedHashMap<>();
   private final PathStateNativeNodeStore nativeStore;
   private final PathNodeStore superStore;
   private final byte[] manifestDigest;
   private final Kind kind;
-  private final PathStateRootMetadata expectedLayer;
+  private final PathStateRootMetadata expectedMetadata;
   private PathStateRootMetadata progress;
   private PathStateRoot root;
   private boolean rootClaimed;
   private boolean closed;
 
   private PathStateNodeStoreSet(Path directory, PathStateStoreManifest manifest, Kind kind,
-      PathStateRootMetadata expectedLayer)
+      PathStateRootMetadata expectedMetadata)
       throws IOException {
     this.directory = directory.resolve(NODES_DIRECTORY);
     this.scope = new PathStateCanonicalizer().participantScope();
     this.manifestDigest = manifest.getIdentityDigest();
     this.kind = kind;
-    this.expectedLayer = expectedLayer;
+    this.expectedMetadata = expectedMetadata;
     nativeStore = PathStateNativeNodeStore.open(this.directory, manifest.getEngine());
     try {
       progress = decodeProgress(nativeStore.get(PROGRESS_KEY));
       if (progress != null) {
         requireProgressIdentity(progress);
+      } else if (kind == Kind.BASE && expectedMetadata != null) {
+        throw new IOException("path-state BASE metadata exists without native progress");
+      }
+      loadPersistedLeaves();
+      if (progress == null && !persistedLeaves.isEmpty()) {
+        throw new IOException("path-state leaf inventory exists without native progress");
       }
       for (PathStateParticipant participant : scope.getParticipants()) {
         participantStores.put(participant.getDbName(),
@@ -62,8 +75,10 @@ public final class PathStateNodeStoreSet implements Closeable {
   public static PathStateNodeStoreSet openBase(PathStateStoreManifest manifest)
       throws IOException {
     PathStateStoreManifest admitted = Objects.requireNonNull(manifest, "manifest");
-    requireUnsealed(admitted.getBaseDirectory());
-    return new PathStateNodeStoreSet(admitted.getBaseDirectory(), admitted, Kind.BASE, null);
+    Path metadataPath = admitted.getBaseDirectory().resolve(PathStateCurrentStore.METADATA_FILE);
+    PathStateRootMetadata metadata = Files.exists(metadataPath, LinkOption.NOFOLLOW_LINKS)
+        ? PathStateMetadataFile.load(metadataPath) : null;
+    return new PathStateNodeStoreSet(admitted.getBaseDirectory(), admitted, Kind.BASE, metadata);
   }
 
   public static PathStateNodeStoreSet openLayer(PathStateStoreManifest manifest,
@@ -81,19 +96,23 @@ public final class PathStateNodeStoreSet implements Closeable {
     return new PathStateNodeStoreSet(layerDirectory, admitted, Kind.LAYER, layer);
   }
 
-  /** Claims this empty or in-process database for one trie owner. */
+  /** Claims this database and restores its durable leaves when progress already exists. */
   public synchronized PathStateRoot createRoot() {
     requireOpen();
     if (rootClaimed) {
       throw new IllegalStateException("path-state node database set already has a trie owner");
     }
-    if (progress != null) {
-      throw new IllegalStateException("path-state persisted root requires leaf restoration");
-    }
-    rootClaimed = true;
-    root = new PathStateRoot(scope,
+    PathStateRoot candidate = new PathStateRoot(scope,
         participant -> participantStores.get(participant.getDbName()),
         superStore);
+    if (progress != null) {
+      candidate.restoreLeaves(restoredLeafRecords(), progress.getStateRoot());
+      if (!pending.isEmpty()) {
+        throw new IllegalStateException("path-state leaf restoration attempted to repair nodes");
+      }
+    }
+    root = candidate;
+    rootClaimed = true;
     return root;
   }
 
@@ -109,17 +128,31 @@ public final class PathStateNodeStoreSet implements Closeable {
     if (!Arrays.equals(currentRoot, next.getStateRoot())) {
       throw new IllegalArgumentException("path-state progress root does not match trie root");
     }
-    java.util.List<PathStateNativeNodeStore.BatchMutation> mutations =
-        new java.util.ArrayList<>(pending.size() + 1);
+    List<PathStateNativeNodeStore.BatchMutation> mutations =
+        new ArrayList<>(pending.size() + persistedLeaves.size() + 1);
     for (Map.Entry<BytesKey, byte[]> entry : pending.entrySet()) {
       byte[] value = entry.getValue();
       mutations.add(value == null
           ? PathStateNativeNodeStore.BatchMutation.delete(entry.getKey().copy())
           : PathStateNativeNodeStore.BatchMutation.put(entry.getKey().copy(), value));
     }
+    Map<BytesKey, byte[]> nextLeaves = leafMap(root.leafRecords());
+    for (BytesKey persisted : persistedLeaves.keySet()) {
+      if (!nextLeaves.containsKey(persisted)) {
+        mutations.add(PathStateNativeNodeStore.BatchMutation.delete(persisted.copy()));
+      }
+    }
+    for (Map.Entry<BytesKey, byte[]> entry : nextLeaves.entrySet()) {
+      if (!Arrays.equals(persistedLeaves.get(entry.getKey()), entry.getValue())) {
+        mutations.add(PathStateNativeNodeStore.BatchMutation.put(
+            entry.getKey().copy(), entry.getValue()));
+      }
+    }
     mutations.add(PathStateNativeNodeStore.BatchMutation.put(PROGRESS_KEY, next.encode()));
     nativeStore.writeBatch(mutations);
     pending.clear();
+    persistedLeaves.clear();
+    persistedLeaves.putAll(nextLeaves);
     progress = next;
   }
 
@@ -184,9 +217,58 @@ public final class PathStateNodeStoreSet implements Closeable {
         || !Arrays.equals(metadata.getFormatDigest(), manifestDigest)) {
       throw new IOException("path-state native progress identity mismatch");
     }
-    if (expectedLayer != null && !Arrays.equals(metadata.encode(), expectedLayer.encode())) {
-      throw new IOException("path-state native layer progress mismatch");
+    if (expectedMetadata != null
+        && !Arrays.equals(metadata.encode(), expectedMetadata.encode())) {
+      throw new IOException("path-state native progress differs from immutable metadata");
     }
+  }
+
+  private void loadPersistedLeaves() throws IOException {
+    for (PathStateNativeNodeStore.KeyValue entry : nativeStore.scanPrefix(LEAF_PREFIX)) {
+      byte[] key = entry.getKey();
+      if (key.length != LEAF_KEY_LENGTH || ByteBuffer.wrap(key).getInt() != LEAF_DOMAIN) {
+        throw new IOException("path-state durable leaf key is malformed");
+      }
+      int storeId = ByteBuffer.wrap(key, Integer.BYTES, Integer.BYTES).getInt();
+      requireParticipant(storeId);
+      persistedLeaves.put(new BytesKey(key), entry.getValue());
+    }
+  }
+
+  private List<PathStateRoot.LeafRecord> restoredLeafRecords() {
+    List<PathStateRoot.LeafRecord> records = new ArrayList<>(persistedLeaves.size());
+    for (Map.Entry<BytesKey, byte[]> entry : persistedLeaves.entrySet()) {
+      byte[] key = entry.getKey().copy();
+      int storeId = ByteBuffer.wrap(key, Integer.BYTES, Integer.BYTES).getInt();
+      byte[] secureKey = Arrays.copyOfRange(key, Integer.BYTES * 2, key.length);
+      records.add(new PathStateRoot.LeafRecord(storeId, secureKey, entry.getValue()));
+    }
+    return records;
+  }
+
+  private Map<BytesKey, byte[]> leafMap(List<PathStateRoot.LeafRecord> records) {
+    Map<BytesKey, byte[]> leaves = new LinkedHashMap<>();
+    for (PathStateRoot.LeafRecord record : records) {
+      requireParticipant(record.getStoreId());
+      BytesKey key = new BytesKey(ByteBuffer.allocate(LEAF_KEY_LENGTH)
+          .putInt(LEAF_DOMAIN)
+          .putInt(record.getStoreId())
+          .put(record.getSecureKey())
+          .array());
+      if (leaves.put(key, record.getEncodedValue()) != null) {
+        throw new IllegalStateException("duplicate path-state durable leaf key");
+      }
+    }
+    return leaves;
+  }
+
+  private PathStateParticipant requireParticipant(int storeId) {
+    for (PathStateParticipant participant : scope.getParticipants()) {
+      if (participant.getStoreId() == storeId) {
+        return participant;
+      }
+    }
+    throw new IllegalArgumentException("unknown path-state durable leaf Store ID: " + storeId);
   }
 
   private static PathStateRootMetadata decodeProgress(byte[] encoded) throws IOException {

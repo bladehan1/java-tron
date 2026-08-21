@@ -87,7 +87,65 @@ public class PathStateNativeNodeStoreTest {
     }
     try (PathStateNodeStoreSet reopened = PathStateNodeStoreSet.openBase(manifest)) {
       assertArrayEquals(progress.encode(), reopened.getProgress().encode());
+      PathStateRoot restored = reopened.createRoot();
+      assertArrayEquals(rootHash, restored.rootHash());
+      restored.verifyNodeStores();
+    }
+  }
+
+  @Test
+  public void missingDurableLeafFailsClosedDuringRootRestore() throws Exception {
+    PathStateStoreManifest manifest = manifest("missing-leaf", Engine.ROCKSDB);
+    try (PathStateNodeStoreSet stores = PathStateNodeStoreSet.openBase(manifest)) {
+      PathStateRoot root = stores.createRoot();
+      root.apply(Collections.singletonList(
+          PathStateMutation.put("proposal", new byte[]{1}, new byte[]{2})));
+      byte[] stateRoot = root.rootHash();
+      stores.commit(PathStateRootMetadata.base(100, bytes(1), bytes(2), 300,
+          P66Phase.P66_ON, manifest.getIdentityDigest(), stateRoot, bytes(3)));
+    }
+    try (PathStateNativeNodeStore nodes = PathStateNativeNodeStore.open(
+        manifest.getBaseDirectory().resolve("nodes"), Engine.ROCKSDB)) {
+      nodes.delete(durableLeafKey(21,
+          PathStateCommitmentCodec.storeLeafKey(21, new byte[]{1})));
+    }
+    try (PathStateNodeStoreSet reopened = PathStateNodeStoreSet.openBase(manifest)) {
       assertThrows(IllegalStateException.class, reopened::createRoot);
+    }
+  }
+
+  @Test
+  public void restoredBaseCommitsLeafUpdatesAndDeletesAcrossSecondReopen() throws Exception {
+    for (Engine engine : availableEngines()) {
+      PathStateStoreManifest manifest = manifest("leaf-delta-" + engine, engine);
+      byte[] firstRoot;
+      try (PathStateNodeStoreSet stores = PathStateNodeStoreSet.openBase(manifest)) {
+        PathStateRoot root = stores.createRoot();
+        root.apply(Arrays.asList(
+            PathStateMutation.put("proposal", new byte[]{1}, new byte[]{2}),
+            PathStateMutation.put("account", new byte[]{3}, new byte[]{4})));
+        firstRoot = root.rootHash();
+        stores.commit(PathStateRootMetadata.base(100, bytes(1), bytes(2), 300,
+            P66Phase.P66_ON, manifest.getIdentityDigest(), firstRoot, bytes(3)));
+      }
+
+      byte[] secondRoot;
+      try (PathStateNodeStoreSet stores = PathStateNodeStoreSet.openBase(manifest)) {
+        PathStateRoot root = stores.createRoot();
+        assertArrayEquals(firstRoot, root.rootHash());
+        root.apply(Arrays.asList(
+            PathStateMutation.put("proposal", new byte[]{1}, new byte[]{5}),
+            PathStateMutation.delete("account", new byte[]{3})));
+        secondRoot = root.rootHash();
+        stores.commit(PathStateRootMetadata.base(101, bytes(4), bytes(1), 303,
+            P66Phase.P66_ON, manifest.getIdentityDigest(), secondRoot, bytes(6)));
+      }
+
+      try (PathStateNodeStoreSet stores = PathStateNodeStoreSet.openBase(manifest)) {
+        PathStateRoot root = stores.createRoot();
+        assertArrayEquals(secondRoot, root.rootHash());
+        root.verifyNodeStores();
+      }
     }
   }
 
@@ -167,6 +225,7 @@ public class PathStateNativeNodeStoreTest {
     }
     try (PathStateNodeStoreSet reopened = PathStateNodeStoreSet.openBase(manifest)) {
       assertArrayEquals(progress.encode(), reopened.getProgress().encode());
+      assertArrayEquals(stateRoot, reopened.createRoot().rootHash());
     }
     return stateRoot;
   }
@@ -188,6 +247,14 @@ public class PathStateNativeNodeStoreTest {
 
   private static byte[] namespaceRootKey(int storeId) {
     return java.nio.ByteBuffer.allocate(Integer.BYTES).putInt(storeId).array();
+  }
+
+  private static byte[] durableLeafKey(int storeId, byte[] secureKey) {
+    return java.nio.ByteBuffer.allocate(Integer.BYTES * 2 + secureKey.length)
+        .putInt(-2)
+        .putInt(storeId)
+        .put(secureKey)
+        .array();
   }
 
   private static byte[] bytes(int seed) {

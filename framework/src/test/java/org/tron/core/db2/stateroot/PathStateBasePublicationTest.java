@@ -117,6 +117,11 @@ public class PathStateBasePublicationTest {
         fixture.manifest.getBaseDirectory(), fixture.manifest).encode());
     assertFalse(Files.exists(
         fixture.manifest.getBaseDirectory().resolve(PathStateBasePublication.INTENT_FILE)));
+    try (PathStateNodeStoreSet reopened = PathStateNodeStoreSet.openBase(fixture.manifest)) {
+      PathStateRoot restored = reopened.createRoot();
+      assertArrayEquals(fixture.metadata.getStateRoot(), restored.rootHash());
+      restored.verifyNodeStores();
+    }
   }
 
   private static Engine[] availableEngines() {
