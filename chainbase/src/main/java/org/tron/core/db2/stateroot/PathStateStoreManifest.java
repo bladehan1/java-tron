@@ -32,10 +32,12 @@ public final class PathStateStoreManifest {
 
   private final Path directory;
   private final Engine engine;
+  private final byte[] identityDigest;
 
   private PathStateStoreManifest(Path directory, Engine engine) {
     this.directory = directory;
     this.engine = engine;
+    this.identityDigest = Hashing.sha256().hashBytes(encode(engine)).asBytes();
   }
 
   /** Creates a new exact-format manifest or validates an existing one without rewriting it. */
@@ -87,6 +89,10 @@ public final class PathStateStoreManifest {
 
   public Engine getEngine() {
     return engine;
+  }
+
+  public byte[] getIdentityDigest() {
+    return Arrays.copyOf(identityDigest, identityDigest.length);
   }
 
   private static byte[] encode(Engine engine) {
