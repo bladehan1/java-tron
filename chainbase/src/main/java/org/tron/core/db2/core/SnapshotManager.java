@@ -713,6 +713,10 @@ public class SnapshotManager implements RevokingDatabase {
   }
 
   private void refresh() {
+    refresh(flushCount);
+  }
+
+  private void refresh(int count) {
     List<ListenableFuture<?>> futures = new ArrayList<>(dbs.size());
     Chainbase properties = null;
     if (oldValueCollector != null) {
@@ -723,14 +727,14 @@ public class SnapshotManager implements RevokingDatabase {
       if (properties != null) {
         // Account root projection reads the durable optimization flag. Make that dependency
         // deterministic when archive mode projects account-asset changes at block boundaries.
-        refreshOne(properties);
+        refreshOne(properties, count);
       }
     }
     for (Chainbase db : dbs) {
       if (db == properties) {
         continue;
       }
-      futures.add(flushServices.get(db.getDbName()).submit(() -> refreshOne(db)));
+      futures.add(flushServices.get(db.getDbName()).submit(() -> refreshOne(db, count)));
     }
     Future<?> future = Futures.allAsList(futures);
     try {
@@ -743,7 +747,7 @@ public class SnapshotManager implements RevokingDatabase {
     }
   }
 
-  private void refreshOne(Chainbase db) {
+  private void refreshOne(Chainbase db, int count) {
     if (Snapshot.isRoot(db.getHead())) {
       return;
     }
@@ -752,7 +756,7 @@ public class SnapshotManager implements RevokingDatabase {
 
     SnapshotRoot root = (SnapshotRoot) db.getHead().getRoot();
     Snapshot next = root;
-    for (int i = 0; i < flushCount; ++i) {
+    for (int i = 0; i < count; ++i) {
       next = next.getNext();
       snapshots.add(next);
     }
@@ -821,11 +825,6 @@ public class SnapshotManager implements RevokingDatabase {
     if (!(blockReverseDiffSink instanceof DurableBlockReverseDiffSink)) {
       throw new TronDBException("Archive sink cannot prove durable history before checkpoint");
     }
-    if (archiveRuntimeAttachment != null
-        && archiveRuntimeAttachment.hasForwardFlushPublisher() && flushCount != 1) {
-      throw new TronDBException(
-          "S1 archive runtime requires exactly one target per normal flush");
-    }
     FrozenBatch frozenForward = archiveBlockProjectionPreparer == null
         ? null : freezeArchiveForwardFlushRange();
     Chainbase stateDatabase = dbs.stream()
@@ -890,11 +889,15 @@ public class SnapshotManager implements RevokingDatabase {
     }
     List<ArchiveBlockForwardPayload> payloads = claimArchiveForwardFlushPayloads();
     try {
-      runtime.publishForwardFlush(payloads, this::refresh);
+      runtime.publishForwardFlush(payloads, this::refreshOneArchiveTarget);
       return true;
     } catch (IOException | RuntimeException failure) {
       throw new TronDBException("Archive forward publication failed", failure);
     }
+  }
+
+  private void refreshOneArchiveTarget() {
+    refresh(1);
   }
 
   public void createCheckpoint() {

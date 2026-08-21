@@ -50,7 +50,7 @@ public final class ArchiveRuntimeAttachment {
     forwardFlushPublisher.publish(payloads, refresh);
   }
 
-  /** Publishes one frozen normal-flush target through C/D, refresh and R. */
+  /** Publishes one frozen normal-flush range target-by-target through C/D, refresh and R. */
   @FunctionalInterface
   public interface ForwardFlushPublisher {
 
