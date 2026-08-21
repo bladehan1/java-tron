@@ -208,6 +208,9 @@ public class StateArchiveManagerStartupIntegrationTest {
     SnapshotManager snapshots = new SnapshotManager("");
     Map<String, Chainbase> databases = new LinkedHashMap<>();
     for (String participant : PARTICIPANTS) {
+      if (AccountAssetArchiveProjector.ACCOUNT_ASSET_DB.equals(participant)) {
+        continue;
+      }
       Chainbase database = new Chainbase(new SnapshotRoot(new MemoryDb(participant)));
       snapshots.add(database);
       databases.put(participant, database);

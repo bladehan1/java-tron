@@ -125,7 +125,7 @@ public class AccountAssetBlockProjectionBridgeTest extends BaseMethodTest {
           () -> bridge.prepare(view,
               TargetAssetOptimization.forTarget(meta, true)));
     }
-    try (Fixture duplicateSource = new Fixture(participants())) {
+    try (Fixture duplicateSource = new Fixture(archiveParticipants())) {
       duplicateSource.rootPut("account", accountKey, old.toByteArray());
       BlockChangeView view = duplicateSource.capture(meta, databases -> {
         databases.get("account").delete(accountKey);
@@ -692,6 +692,12 @@ public class AccountAssetBlockProjectionBridgeTest extends BaseMethodTest {
   }
 
   private static List<String> participants() {
+    List<String> participants = archiveParticipants();
+    participants.remove(AccountAssetArchiveProjector.ACCOUNT_ASSET_DB);
+    return participants;
+  }
+
+  private static List<String> archiveParticipants() {
     List<String> participants = new ArrayList<>(ArchiveStoreScope.getStateDatabases());
     Collections.sort(participants);
     return participants;
@@ -702,7 +708,7 @@ public class AccountAssetBlockProjectionBridgeTest extends BaseMethodTest {
   }
 
   private static HistoryCommitMarker marker(BlockSnapshotMeta meta) {
-    return marker(meta, participants());
+    return marker(meta, archiveParticipants());
   }
 
   private static HistoryCommitMarker marker(BlockSnapshotMeta meta,
