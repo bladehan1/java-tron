@@ -16,6 +16,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.util.Arrays;
+import java.util.Locale;
 import java.util.UUID;
 import org.tron.core.db2.stateroot.PathStateParticipantDescriptor.StoreIdentity;
 
@@ -85,6 +86,18 @@ public final class PathStateStoreManifest {
 
   public Path getLayersDirectory() {
     return directory.resolve(LAYERS_DIRECTORY);
+  }
+
+  public Path getLayerDirectory(long blockNumber, byte[] blockHash) {
+    if (blockNumber < 0) {
+      throw new IllegalArgumentException("blockNumber must not be negative");
+    }
+    byte[] hash = Arrays.copyOf(blockHash, blockHash.length);
+    if (hash.length != PathStateRootMetadata.DIGEST_LENGTH) {
+      throw new IllegalArgumentException("blockHash must be exactly 32 bytes");
+    }
+    return getLayersDirectory().resolve(String.format(Locale.ROOT, "%020d-%s",
+        blockNumber, hex(hash)));
   }
 
   public Engine getEngine() {
@@ -232,6 +245,15 @@ public final class PathStateStoreManifest {
     try (FileChannel channel = FileChannel.open(directory, StandardOpenOption.READ)) {
       channel.force(true);
     }
+  }
+
+  private static String hex(byte[] value) {
+    StringBuilder encoded = new StringBuilder(value.length * 2);
+    for (byte current : value) {
+      encoded.append(Character.forDigit(current >>> 4 & 0xf, 16));
+      encoded.append(Character.forDigit(current & 0xf, 16));
+    }
+    return encoded.toString();
   }
 
   public enum Engine {
