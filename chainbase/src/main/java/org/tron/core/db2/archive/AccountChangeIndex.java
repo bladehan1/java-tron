@@ -101,6 +101,33 @@ final class AccountChangeIndex implements Closeable {
     }
   }
 
+  /** Truncates this derived index to the authoritative committed-history head. */
+  synchronized void truncateAfter(BlockSnapshotMeta newHead) throws IOException {
+    long target = newHead == null ? -1 : newHead.getEpoch();
+    try (WriteBatch batch = new WriteBatch(); RocksIterator iterator = database.newIterator()) {
+      iterator.seek(new byte[]{DATA_PREFIX});
+      while (iterator.isValid()) {
+        byte[] key = iterator.key();
+        if (key.length != DATA_KEY_LENGTH || key[0] != DATA_PREFIX) {
+          break;
+        }
+        long epoch = ByteBuffer.wrap(key, 1 + ADDRESS_LENGTH, Long.BYTES).getLong();
+        if (epoch > target) {
+          batch.delete(key);
+        }
+        iterator.next();
+      }
+      if (newHead == null) {
+        batch.delete(HEAD_KEY);
+      } else {
+        batch.put(HEAD_KEY, encodeHead(newHead));
+      }
+      database.write(syncWrites, batch);
+    } catch (RocksDBException failure) {
+      throw new IOException("Failed to truncate account change index", failure);
+    }
+  }
+
   synchronized OptionalLong firstChangeAfter(byte[] address, long target, long upperBound)
       throws IOException {
     if (address == null || address.length != ADDRESS_LENGTH) {

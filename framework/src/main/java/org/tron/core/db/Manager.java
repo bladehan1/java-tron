@@ -115,9 +115,13 @@ import org.tron.core.db.api.EnergyPriceHistoryLoader;
 import org.tron.core.db.api.MigrateTurkishKeyHelper;
 import org.tron.core.db.api.MoveAbiHelper;
 import org.tron.core.db2.ISession;
+import org.tron.core.db2.archive.AccountAssetArchiveProjector;
+import org.tron.core.db2.archive.AccountAssetBlockProjectionBridge;
+import org.tron.core.db2.archive.AccountAssetBlockProjectionBridge.TargetAssetOptimization;
 import org.tron.core.db2.archive.ArchiveHistoryWriter;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
 import org.tron.core.db2.archive.HistoricalAccountBalanceReader;
+import org.tron.core.db2.archive.SnapshotOldValueCollector;
 import org.tron.core.db2.archive.StateArchiveRuntimeOwner;
 import org.tron.core.db2.core.Chainbase;
 import org.tron.core.db2.core.SnapshotManager;
@@ -643,9 +647,16 @@ public class Manager {
         throw new IllegalStateException(
             "State archive committed head differs from the persisted state root");
       }
+      AccountAssetBlockProjectionBridge bridge = new AccountAssetBlockProjectionBridge(
+          new AccountAssetArchiveProjector(),
+          accountKey -> getAccountAssetStore().prefixQuery(accountKey));
+      archiveHistoryWriter = recovered.attachNormalWriter(new SnapshotOldValueCollector(),
+          view -> bridge.prepare(view, TargetAssetOptimization.forTarget(view.getMeta(),
+              getDynamicPropertiesStore().supportAllowAssetOptimization())),
+          storage.getStateArchiveQueueCapacity());
       stateArchiveRuntime = recovered;
       recovered = null;
-      logger.info("State archive startup recovered: directory={}, head={}, actions={}, engine={}",
+      logger.info("State archive runtime attached: directory={}, head={}, actions={}, engine={}",
           archiveDirectory, archiveHead.getBlockNumber(),
           stateArchiveRuntime.getStartupRecoveryActionCount(), storage.getDbEngine());
     } catch (java.io.IOException | RuntimeException failure) {
@@ -2759,6 +2770,7 @@ public class Manager {
     try {
       runtime.close();
       stateArchiveRuntime = null;
+      archiveHistoryWriter = null;
     } catch (java.io.IOException failure) {
       throw new IllegalStateException("Failed to close State Archive runtime", failure);
     }
