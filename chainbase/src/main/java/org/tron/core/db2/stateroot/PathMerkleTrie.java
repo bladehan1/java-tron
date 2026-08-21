@@ -87,18 +87,16 @@ public final class PathMerkleTrie {
     return entries;
   }
 
+  /** Initializes an empty trie from canonical leaves and writes its complete path-node set. */
+  synchronized void initializeLeaves(Collection<LeafEntry> entries) {
+    importLeaves(entries, "initialized");
+    dirty = true;
+    rootHash();
+  }
+
   /** Restores current leaves and verifies their complete path-node set without repairing it. */
   synchronized void restoreLeaves(Collection<LeafEntry> entries) {
-    if (!leaves.isEmpty() || !committedPaths.isEmpty() || dirty) {
-      throw new IllegalStateException("path trie is not empty before leaf restoration");
-    }
-    for (LeafEntry entry : Objects.requireNonNull(entries, "entries")) {
-      LeafEntry present = Objects.requireNonNull(entry, "entry");
-      if (leaves.put(secureKey(present.secureKey),
-          nonEmpty(present.encodedValue, "encodedValue")) != null) {
-        throw new IllegalArgumentException("duplicate restored path-state leaf");
-      }
-    }
+    importLeaves(entries, "restored");
     Map<BytesKey, byte[]> expectedNodes = buildCurrentNodes();
     for (Map.Entry<BytesKey, byte[]> entry : expectedNodes.entrySet()) {
       if (!Arrays.equals(nodeStore.get(entry.getKey().bytes), entry.getValue())) {
@@ -107,6 +105,19 @@ public final class PathMerkleTrie {
     }
     committedPaths.addAll(expectedNodes.keySet());
     rootHash = rootHash(expectedNodes);
+  }
+
+  private void importLeaves(Collection<LeafEntry> entries, String operation) {
+    if (!leaves.isEmpty() || !committedPaths.isEmpty() || dirty) {
+      throw new IllegalStateException("path trie is not empty before leaf " + operation);
+    }
+    for (LeafEntry entry : Objects.requireNonNull(entries, "entries")) {
+      LeafEntry present = Objects.requireNonNull(entry, "entry");
+      if (leaves.put(secureKey(present.secureKey),
+          nonEmpty(present.encodedValue, "encodedValue")) != null) {
+        throw new IllegalArgumentException("duplicate " + operation + " path-state leaf");
+      }
+    }
   }
 
   /** Verifies every path owned by the current committed node set without repairing corruption. */

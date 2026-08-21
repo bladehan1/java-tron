@@ -36,6 +36,7 @@ public final class PathStateNodeStoreSet implements Closeable {
   private final byte[] manifestDigest;
   private final Kind kind;
   private final PathStateRootMetadata expectedMetadata;
+  private final boolean sealed;
   private PathStateRootMetadata progress;
   private PathStateRoot root;
   private boolean rootClaimed;
@@ -49,6 +50,8 @@ public final class PathStateNodeStoreSet implements Closeable {
     this.manifestDigest = manifest.getIdentityDigest();
     this.kind = kind;
     this.expectedMetadata = expectedMetadata;
+    this.sealed = Files.exists(directory.resolve(PathStateCurrentStore.METADATA_FILE),
+        LinkOption.NOFOLLOW_LINKS);
     nativeStore = PathStateNativeNodeStore.open(this.directory, manifest.getEngine());
     try {
       progress = decodeProgress(nativeStore.get(PROGRESS_KEY));
@@ -96,6 +99,41 @@ public final class PathStateNodeStoreSet implements Closeable {
     return new PathStateNodeStoreSet(layerDirectory, admitted, Kind.LAYER, layer);
   }
 
+  /** Opens the node database referenced by the verified current authority. */
+  public static PathStateNodeStoreSet openCurrent(PathStateStoreManifest manifest)
+      throws IOException {
+    PathStateStoreManifest admitted = Objects.requireNonNull(manifest, "manifest");
+    PathStateRootMetadata current = new PathStateCurrentStore(admitted).current();
+    return openPublished(admitted, current);
+  }
+
+  static PathStateNodeStoreSet beginLayer(PathStateStoreManifest manifest,
+      PathStateRootMetadata identity) throws IOException {
+    PathStateStoreManifest admitted = Objects.requireNonNull(manifest, "manifest");
+    PathStateRootMetadata layer = Objects.requireNonNull(identity, "identity");
+    if (layer.getKind() != Kind.LAYER
+        || !Arrays.equals(layer.getFormatDigest(), admitted.getIdentityDigest())) {
+      throw new IOException("path-state layer node set identity mismatch");
+    }
+    Path directory = admitted.getLayerDirectory(layer.getBlockNumber(), layer.getBlockHash());
+    requireUnsealed(directory);
+    return new PathStateNodeStoreSet(directory, admitted, Kind.LAYER, null);
+  }
+
+  static PathStateNodeStoreSet openPublished(PathStateStoreManifest manifest,
+      PathStateRootMetadata metadata) throws IOException {
+    PathStateStoreManifest admitted = Objects.requireNonNull(manifest, "manifest");
+    PathStateRootMetadata published = Objects.requireNonNull(metadata, "metadata");
+    Path owner = published.getKind() == Kind.BASE ? admitted.getBaseDirectory()
+        : admitted.getLayerDirectory(published.getBlockNumber(), published.getBlockHash());
+    PathStateRootMetadata stored = PathStateMetadataFile.load(
+        owner.resolve(PathStateCurrentStore.METADATA_FILE));
+    if (!Arrays.equals(stored.encode(), published.encode())) {
+      throw new IOException("path-state published metadata differs from authority");
+    }
+    return new PathStateNodeStoreSet(owner, admitted, published.getKind(), published);
+  }
+
   /** Claims this database and restores its durable leaves when progress already exists. */
   public synchronized PathStateRoot createRoot() {
     requireOpen();
@@ -116,9 +154,37 @@ public final class PathStateNodeStoreSet implements Closeable {
     return root;
   }
 
+  synchronized PathStateRoot createRootFrom(List<PathStateRoot.LeafRecord> parentLeaves,
+      byte[] parentRoot) {
+    requireOpen();
+    if (rootClaimed) {
+      throw new IllegalStateException("path-state node database set already has a trie owner");
+    }
+    if (progress != null || !persistedLeaves.isEmpty()) {
+      throw new IllegalStateException("path-state layer already contains durable state");
+    }
+    PathStateRoot candidate = new PathStateRoot(scope,
+        participant -> participantStores.get(participant.getDbName()), superStore);
+    candidate.initializeLeaves(parentLeaves, parentRoot);
+    root = candidate;
+    rootClaimed = true;
+    return root;
+  }
+
+  synchronized List<PathStateRoot.LeafRecord> leafRecords() {
+    requireOpen();
+    if (root == null) {
+      throw new IllegalStateException("path-state node database set has no trie owner");
+    }
+    return root.leafRecords();
+  }
+
   /** Atomically persists all pending path nodes and their exact root progress. */
   public synchronized void commit(PathStateRootMetadata metadata) throws IOException {
     requireOpen();
+    if (sealed) {
+      throw new IOException("path-state node database set is sealed by immutable metadata");
+    }
     if (root == null) {
       throw new IllegalStateException("path-state node database set has no trie owner");
     }
