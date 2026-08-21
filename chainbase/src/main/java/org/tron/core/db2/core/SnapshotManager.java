@@ -111,7 +111,6 @@ public class SnapshotManager implements RevokingDatabase {
   private FrozenBatch pendingArchiveForwardFlush;
   private List<ArchiveBlockForwardPayload> sealedArchiveForwardFlush;
   private Long submittedArchiveForwardHistoryEpoch;
-  private Integer archiveForwardTopologySize;
   private BlockReverseDiffSink blockReverseDiffSink;
   @Getter
   private volatile long archiveReadableEpoch = -1;
@@ -159,7 +158,6 @@ public class SnapshotManager implements RevokingDatabase {
     }
 
     if (size > maxSize.get() && !hitDown) {
-      archiveForwardTopologySize = size;
       flushCount = flushCount + (size - maxSize.get());
       updateSolidity(size - maxSize.get());
       size = maxSize.get();
@@ -431,14 +429,9 @@ public class SnapshotManager implements RevokingDatabase {
     if (archiveBlockProjectionPreparer == null) {
       throw new IllegalStateException("Archive projection preparer is not installed");
     }
-    int topologySize = archiveForwardTopologySize == null ? size : archiveForwardTopologySize;
-    if (flushCount <= 0 || flushCount > topologySize) {
+    List<BlockSnapshotMeta> topology = stateLayerMetas();
+    if (flushCount <= 0 || flushCount > topology.size()) {
       throw new IllegalStateException("Archive forward flush range is empty or exceeds topology");
-    }
-
-    List<BlockSnapshotMeta> topology = stateLayerMetas(topologySize);
-    if (topology.size() != topologySize) {
-      throw new IllegalStateException("Archive state topology size mismatch");
     }
     java.util.Set<BlockSnapshotMeta> unique = new java.util.LinkedHashSet<>(topology);
     if (unique.size() != topology.size()) {
@@ -519,15 +512,16 @@ public class SnapshotManager implements RevokingDatabase {
     return pendingArchiveForwardFlush;
   }
 
-  private List<BlockSnapshotMeta> stateLayerMetas(int layerCount) {
+  private List<BlockSnapshotMeta> stateLayerMetas() {
     List<BlockSnapshotMeta> reference = null;
     for (Chainbase db : dbs) {
       if (!ArchiveStoreScope.isStateDatabase(db.getDbName())) {
         continue;
       }
-      List<BlockSnapshotMeta> candidate = new ArrayList<>(layerCount);
+      List<BlockSnapshotMeta> candidate = new ArrayList<>();
+      Snapshot head = db.getHead();
       Snapshot next = db.getHead().getRoot();
-      for (int i = 0; i < layerCount; i++) {
+      while (next != head) {
         next = next.getNext();
         if (!Snapshot.isImpl(next)) {
           throw new IllegalStateException("Archive state topology is missing a snapshot layer");
@@ -689,7 +683,6 @@ public class SnapshotManager implements RevokingDatabase {
     }
     sealedArchiveForwardFlush = null;
     submittedArchiveForwardHistoryEpoch = null;
-    archiveForwardTopologySize = null;
     for (Map.Entry<BlockSnapshotMeta, AccountAssetPreparedBlockPayloadOwner> entry
         : archiveForwardPayloadOwners.entrySet()) {
       AccountAssetPreparedBlockPayloadOwner owner = entry.getValue();
@@ -804,7 +797,6 @@ public class SnapshotManager implements RevokingDatabase {
           ((DurableBlockReverseDiffSink) blockReverseDiffSink).releaseThrough(archiveEpoch);
         }
         flushCount = 0;
-        archiveForwardTopologySize = null;
         logger.info("Flush cost: {} ms, create checkpoint cost: {} ms, refresh cost: {} ms.",
             System.currentTimeMillis() - start,
             checkPointEnd - start,

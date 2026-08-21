@@ -84,6 +84,36 @@ public class StateArchiveManagerStartupIntegrationTest {
   }
 
   @Test
+  public void batchedAutomaticOverflowFlushUsesCompletePhysicalTopology() throws Exception {
+    Path output = temporaryFolder.newFolder("batched-overflow-manager").toPath();
+    Path archive = output.resolve("state-archive");
+    HistoryCommitMarker head = initializeRecoverableTail(archive, "ROCKSDB");
+    SnapshotFixture fixture = snapshotFixture();
+    SnapshotManager snapshots = fixture.snapshots;
+    snapshots.setMaxSize(1);
+    snapshots.setMaxFlushCount(2);
+    Manager manager = manager(snapshots, head);
+
+    withArchiveConfig(output, "ROCKSDB", true, () -> invoke(manager, "initStateArchive"));
+
+    byte[] key = new byte[]{1, 6, 1, 9};
+    for (int epoch = 7; epoch <= 10; epoch++) {
+      BlockSnapshotMeta target = new BlockSnapshotMeta(epoch, epoch, hash(epoch),
+          hash(epoch - 1), epoch * 1_000L);
+      try (ISession block = snapshots.buildSession()) {
+        fixture.databases.get("proposal").put(key, new byte[]{(byte) epoch});
+        block.commit(target);
+      }
+    }
+
+    assertEquals(new BlockSnapshotMeta(8, 8, hash(8), hash(7), 8_000L),
+        manager.getStateArchiveRuntime().verifyNormalWriteFixedPoint());
+    assertEquals(2, snapshots.getArchiveForwardPayloadOwnerCount());
+    invoke(manager, "closeStateArchive");
+    snapshots.shutdown();
+  }
+
+  @Test
   public void managerBootstrapsFreshBaseAndContinuesNormalFlush() throws Exception {
     for (String engine : Arrays.asList("LEVELDB", "ROCKSDB")) {
       Path output = temporaryFolder.newFolder("fresh-manager-" + engine.toLowerCase()).toPath();
