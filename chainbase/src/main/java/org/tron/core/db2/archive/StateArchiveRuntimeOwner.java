@@ -12,6 +12,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import org.tron.core.db2.archive.ArchiveProgressEnvelope.Kind;
 import org.tron.core.db2.archive.ArchiveRecoveryPlanner.RecoveryPlan;
 import org.tron.core.db2.core.SnapshotManager;
 
@@ -27,14 +28,18 @@ public final class StateArchiveRuntimeOwner implements Closeable {
   }
 
   private final SnapshotManager snapshotManager;
-  private final ArchiveRuntimeAttachment attachment;
-  private final ArchiveRuntimeQueryGate queryGate;
-  private final Closeable latestCoordinator;
-  private final Closeable servingCatalog;
+  private final Path archiveDirectory;
+  private final long maxSegmentSize;
   private final List<Closeable> participants;
-  private final Closeable sink;
+  private final Map<String, ArchiveParticipant> participantEngines;
   private final BlockSnapshotMeta recoveredHead;
   private final int startupRecoveryActionCount;
+  private ArchiveRuntimeAttachment attachment;
+  private ArchiveRuntimeQueryGate queryGate;
+  private Closeable latestCoordinator;
+  private Closeable servingCatalog;
+  private Closeable sink;
+  private ArchiveHistoryWriter historyWriter;
   private State state;
   private boolean detached;
   private IOException terminalFailure;
@@ -44,6 +49,8 @@ public final class StateArchiveRuntimeOwner implements Closeable {
       Closeable latestCoordinator, Closeable servingCatalog,
       List<? extends Closeable> participants) {
     this.snapshotManager = Objects.requireNonNull(snapshotManager, "snapshotManager");
+    this.archiveDirectory = null;
+    this.maxSegmentSize = 0;
     this.attachment = Objects.requireNonNull(attachment, "attachment");
     this.queryGate = Objects.requireNonNull(queryGate, "queryGate");
     this.latestCoordinator = Objects.requireNonNull(latestCoordinator, "latestCoordinator");
@@ -53,6 +60,7 @@ public final class StateArchiveRuntimeOwner implements Closeable {
     }
     this.sink = (Closeable) attachment.getSink();
     this.participants = immutableParticipants(participants);
+    this.participantEngines = Collections.emptyMap();
     this.recoveredHead = null;
     this.startupRecoveryActionCount = 0;
     this.state = State.RUNNING;
@@ -60,14 +68,18 @@ public final class StateArchiveRuntimeOwner implements Closeable {
   }
 
   private StateArchiveRuntimeOwner(SnapshotManager snapshotManager,
-      List<? extends Closeable> participants, BlockSnapshotMeta recoveredHead,
-      int startupRecoveryActionCount) {
+      Path archiveDirectory, long maxSegmentSize, List<? extends Closeable> participants,
+      Map<String, ? extends ArchiveParticipant> participantEngines,
+      BlockSnapshotMeta recoveredHead, int startupRecoveryActionCount) {
     this.snapshotManager = Objects.requireNonNull(snapshotManager, "snapshotManager");
+    this.archiveDirectory = Objects.requireNonNull(archiveDirectory, "archiveDirectory");
+    this.maxSegmentSize = maxSegmentSize;
     this.attachment = null;
     this.queryGate = null;
     this.latestCoordinator = null;
     this.servingCatalog = null;
     this.participants = immutableParticipants(participants);
+    this.participantEngines = immutableParticipantEngines(participantEngines);
     this.sink = null;
     this.recoveredHead = Objects.requireNonNull(recoveredHead, "recoveredHead");
     this.startupRecoveryActionCount = startupRecoveryActionCount;
@@ -115,8 +127,8 @@ public final class StateArchiveRuntimeOwner implements Closeable {
       if (head == null) {
         throw new ArchivePersistenceException("State Archive recovered H head is missing");
       }
-      return new StateArchiveRuntimeOwner(snapshotManager, opened, head.getMeta(),
-          first.getActions().size());
+      return new StateArchiveRuntimeOwner(snapshotManager, root, maxSegmentSize, opened,
+          openedByName, head.getMeta(), first.getActions().size());
     } catch (IOException | RuntimeException failure) {
       closeReverse(opened, failure);
       throw failure;
@@ -136,6 +148,101 @@ public final class StateArchiveRuntimeOwner implements Closeable {
 
   public int getStartupRecoveryActionCount() {
     return startupRecoveryActionCount;
+  }
+
+  /** Continues this recovered owner into one atomically attached normal-write runtime. */
+  public synchronized ArchiveHistoryWriter attachNormalWriter(OldValueCollector collector,
+      ArchiveBlockProjectionPreparer projectionPreparer, int queueCapacity) throws IOException {
+    if (state != State.RECOVERED) {
+      throw new IllegalStateException("State Archive owner is not recovered");
+    }
+    ArchiveHistoryWriter writer = null;
+    AsyncArchiveHistorySink asyncSink = null;
+    ArchiveRuntimeAttachment candidate = null;
+    boolean attached = false;
+    try {
+      writer = new ArchiveHistoryWriter(archiveDirectory, maxSegmentSize,
+          new java.util.LinkedHashSet<>(participantEngines.keySet()));
+      if (!recoveredHead.equals(writer.committedHeadMeta())) {
+        throw new ArchivePersistenceException(
+            "Recovered archive head changed before normal writer attachment");
+      }
+      asyncSink = new AsyncArchiveHistorySink(writer, queueCapacity);
+      Path checkpoint = archiveDirectory.resolve("progress").resolve("checkpoint.progress");
+      Path reader = archiveDirectory.resolve("progress").resolve("reader.progress");
+      ArchiveTargetApplyCoordinator coordinator = new ArchiveTargetApplyCoordinator(writer,
+          checkpoint, participantEngines, reader, new ArrayList<>(participantEngines.keySet()),
+          snapshotManager::withArchiveStateBarrier);
+      candidate = new ArchiveRuntimeAttachment(collector, projectionPreparer, asyncSink,
+          (payloads, refresh) -> publishOneTarget(coordinator, payloads, refresh));
+      snapshotManager.attachArchiveRuntime(candidate);
+      attached = true;
+      attachment = candidate;
+      sink = asyncSink;
+      historyWriter = writer;
+      state = State.RUNNING;
+      return writer;
+    } catch (IOException | RuntimeException failure) {
+      if (attached) {
+        snapshotManager.detachArchiveRuntime(candidate);
+      }
+      if (asyncSink != null) {
+        try {
+          asyncSink.close();
+        } catch (IOException closeFailure) {
+          failure.addSuppressed(closeFailure);
+        }
+      } else if (writer != null) {
+        try {
+          writer.close();
+        } catch (IOException closeFailure) {
+          failure.addSuppressed(closeFailure);
+        }
+      }
+      throw failure;
+    }
+  }
+
+  public synchronized ArchiveHistoryWriter getHistoryWriter() {
+    if (state != State.RUNNING || historyWriter == null) {
+      throw new IllegalStateException("State Archive normal writer is not attached");
+    }
+    return historyWriter;
+  }
+
+  /** Machine-checks the current H=C=D[0..26]=R identity and retired mutation plan. */
+  public synchronized BlockSnapshotMeta verifyNormalWriteFixedPoint() throws IOException {
+    ArchiveHistoryWriter writer = getHistoryWriter();
+    HistoryCommitMarker head = Objects.requireNonNull(writer.committedHead(),
+        "archive history head");
+    List<String> names = new ArrayList<>(participantEngines.keySet());
+    Path checkpointPath = archiveDirectory.resolve("progress").resolve("checkpoint.progress");
+    if (new ArchiveTargetMutationPlanFile(checkpointPath).loadIfPresent() != null) {
+      throw new ArchivePersistenceException("Archive mutation plan is not retired");
+    }
+    ArchiveProgressEnvelopeCodec codec = new ArchiveProgressEnvelopeCodec();
+    ArchiveProgressEnvelope checkpoint = new ArchiveProgressFile(checkpointPath, codec).load();
+    ArchiveProgressEnvelope reader = new ArchiveProgressFile(
+        archiveDirectory.resolve("progress").resolve("reader.progress"), codec).load();
+    requireAuthority(checkpoint, Kind.APPLY_CHECKPOINT, null, head, names);
+    requireAuthority(reader, Kind.READER_VISIBLE, null, head, names);
+    if (!java.util.Arrays.equals(checkpoint.getMutationPlanDigest(),
+        reader.getMutationPlanDigest())) {
+      throw new ArchivePersistenceException("Archive C/R mutation-plan identity differs");
+    }
+    for (Map.Entry<String, ArchiveParticipant> entry : participantEngines.entrySet()) {
+      ArchiveProgressEnvelope progress = entry.getValue().loadProgress();
+      requireAuthority(progress, Kind.PARTICIPANT_PROGRESS, entry.getKey(), head, names);
+      if (!java.util.Arrays.equals(checkpoint.getMutationPlanDigest(),
+          progress.getMutationPlanDigest())) {
+        throw new ArchivePersistenceException(
+            "Archive participant mutation-plan identity differs: " + entry.getKey());
+      }
+    }
+    if (snapshotManager.getArchiveReadableEpoch() != head.getMeta().getEpoch()) {
+      throw new ArchivePersistenceException("SnapshotManager readable epoch differs from R");
+    }
+    return head.getMeta();
   }
 
   /** Quiesces, detaches and closes owned resources without waiting for active query leases. */
@@ -158,7 +265,9 @@ public final class StateArchiveRuntimeOwner implements Closeable {
       throw failure;
     }
     state = State.QUIESCING;
-    queryGate.quiesce();
+    if (queryGate != null) {
+      queryGate.quiesce();
+    }
     if (!detached) {
       ArchiveRuntimeAttachment returned = snapshotManager.detachArchiveRuntime(attachment);
       if (returned != attachment) {
@@ -166,16 +275,22 @@ public final class StateArchiveRuntimeOwner implements Closeable {
       }
       detached = true;
     }
-    if (!queryGate.isDrained()) {
+    if (queryGate != null && !queryGate.isDrained()) {
       throw new IllegalStateException(
           "State Archive runtime still has active query leases: "
               + queryGate.getActiveLeaseCount());
     }
-    queryGate.close();
+    if (queryGate != null) {
+      queryGate.close();
+    }
 
     IOException failure = null;
-    failure = closeOwned("latest coordinator", latestCoordinator, failure);
-    failure = closeOwned("serving catalog", servingCatalog, failure);
+    if (latestCoordinator != null) {
+      failure = closeOwned("latest coordinator", latestCoordinator, failure);
+    }
+    if (servingCatalog != null) {
+      failure = closeOwned("serving catalog", servingCatalog, failure);
+    }
     for (int i = participants.size() - 1; i >= 0; i--) {
       failure = closeOwned("archive participant " + i, participants.get(i), failure);
     }
@@ -225,6 +340,15 @@ public final class StateArchiveRuntimeOwner implements Closeable {
     return Collections.unmodifiableList(copy);
   }
 
+  private static Map<String, ArchiveParticipant> immutableParticipantEngines(
+      Map<String, ? extends ArchiveParticipant> engines) {
+    Map<String, ? extends ArchiveParticipant> source = Objects.requireNonNull(engines, "engines");
+    Map<String, ArchiveParticipant> copy = new LinkedHashMap<>();
+    source.forEach((name, engine) -> copy.put(Objects.requireNonNull(name, "participant name"),
+        Objects.requireNonNull(engine, "participant engine")));
+    return Collections.unmodifiableMap(copy);
+  }
+
   private void validateUniqueOwnership() {
     Set<Closeable> unique = Collections.newSetFromMap(new IdentityHashMap<Closeable, Boolean>());
     requireUnique(unique, latestCoordinator, "latestCoordinator");
@@ -233,6 +357,29 @@ public final class StateArchiveRuntimeOwner implements Closeable {
       requireUnique(unique, participants.get(i), "participant[" + i + "]");
     }
     requireUnique(unique, sink, "sink");
+  }
+
+  private static void publishOneTarget(ArchiveTargetApplyCoordinator coordinator,
+      List<ArchiveBlockForwardPayload> payloads,
+      ArchiveStateBarrier.ArchiveStateAction refresh) throws IOException {
+    if (payloads.size() != 1) {
+      throw new ArchivePersistenceException(
+          "S1 archive runtime requires one forward payload per normal flush");
+    }
+    ArchiveBlockForwardPayload payload = payloads.get(0);
+    ArchiveParticipantMutationBatch batch = new ArchiveParticipantMutationBatchCollector(
+        payload.getAccountAssetManifest()).collect(payload.getMarker(), payload.getView());
+    coordinator.apply(batch, refresh);
+  }
+
+  private static void requireAuthority(ArchiveProgressEnvelope envelope, Kind kind,
+      String participant, HistoryCommitMarker marker, List<String> participants) {
+    if (envelope == null) {
+      throw new ArchivePersistenceException("Missing archive authority: " + kind);
+    }
+    envelope.requireIdentity(kind, participant, marker.getMeta().getEpoch(),
+        marker.getMeta().getBlockHash(), marker.getBatchId(),
+        marker.getHistoryLocation().getBodyDigest(), participants);
   }
 
   private static void requireUnique(Set<Closeable> unique, Closeable resource, String name) {
