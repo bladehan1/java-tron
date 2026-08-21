@@ -57,6 +57,14 @@ final class PathStateMetadataFile {
     requireExact(path, Objects.requireNonNull(metadata, "metadata").encode());
   }
 
+  static void deleteDurable(Path path) throws IOException {
+    Path target = Objects.requireNonNull(path, "path");
+    Path directory = Objects.requireNonNull(target.getParent(), "metadata directory");
+    if (Files.deleteIfExists(target)) {
+      syncDirectory(directory);
+    }
+  }
+
   private static void requireExact(Path path, byte[] expected) throws IOException {
     if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
       throw new IOException("path-state metadata is not a regular file: " + path);
