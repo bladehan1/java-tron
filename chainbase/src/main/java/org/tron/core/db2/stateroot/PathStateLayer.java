@@ -11,7 +11,7 @@ import org.tron.core.db2.stateroot.PathStateCanonicalizer.P66Phase;
 public final class PathStateLayer implements Closeable {
 
   private final PathStateStoreManifest manifest;
-  private final PathStateCurrentStore currentStore;
+  private final PathStateLayerPublication publication;
   private final PathStateNodeStoreSet stores;
   private final PathStateRoot root;
   private final PathStateRootMetadata parent;
@@ -22,15 +22,14 @@ public final class PathStateLayer implements Closeable {
   private final P66Phase phase;
   private final byte[] transitionDigest;
   private PathStateRootMetadata prepared;
-  private boolean persisted;
   private PathStateRootMetadata committed;
 
-  private PathStateLayer(PathStateStoreManifest manifest, PathStateCurrentStore currentStore,
+  private PathStateLayer(PathStateStoreManifest manifest, PathStateLayerPublication publication,
       PathStateNodeStoreSet stores, PathStateRoot root, PathStateRootMetadata parent,
       long blockNumber, byte[] blockHash, byte[] parentHash, long timestamp, P66Phase phase,
       byte[] transitionDigest) {
     this.manifest = manifest;
-    this.currentStore = currentStore;
+    this.publication = publication;
     this.stores = stores;
     this.root = root;
     this.parent = parent;
@@ -46,6 +45,14 @@ public final class PathStateLayer implements Closeable {
   public static PathStateLayer begin(PathStateStoreManifest manifest,
       PathStateRootMetadata parent, long blockNumber, byte[] blockHash, byte[] parentHash,
       long timestamp, P66Phase phase, byte[] transitionDigest) throws IOException {
+    return begin(manifest, parent, blockNumber, blockHash, parentHash, timestamp, phase,
+        transitionDigest, stage -> { });
+  }
+
+  static PathStateLayer begin(PathStateStoreManifest manifest,
+      PathStateRootMetadata parent, long blockNumber, byte[] blockHash, byte[] parentHash,
+      long timestamp, P66Phase phase, byte[] transitionDigest,
+      PathStateLayerPublication.FaultHook faultHook) throws IOException {
     PathStateStoreManifest admitted = Objects.requireNonNull(manifest, "manifest");
     PathStateRootMetadata admittedParent = Objects.requireNonNull(parent, "parent");
     PathStateCurrentStore currentStore = new PathStateCurrentStore(admitted);
@@ -66,8 +73,10 @@ public final class PathStateLayer implements Closeable {
       try {
         PathStateRoot childRoot = childStores.createRootFrom(parentStores.leafRecords(),
             parentRoot.rootHash());
-        return new PathStateLayer(admitted, currentStore, childStores, childRoot, admittedParent,
-            blockNumber, blockHash, parentHash, timestamp, phase, transitionDigest);
+        return new PathStateLayer(admitted,
+            new PathStateLayerPublication(admitted, faultHook), childStores, childRoot,
+            admittedParent, blockNumber, blockHash, parentHash, timestamp, phase,
+            transitionDigest);
       } catch (RuntimeException failure) {
         try {
           childStores.close();
@@ -93,11 +102,7 @@ public final class PathStateLayer implements Closeable {
       prepared = PathStateRootMetadata.layer(blockNumber, blockHash, parentHash, timestamp, phase,
           manifest.getIdentityDigest(), parent.getStateRoot(), root.rootHash(), transitionDigest);
     }
-    if (!persisted) {
-      stores.commit(prepared);
-      persisted = true;
-    }
-    committed = currentStore.appendLayer(prepared);
+    committed = publication.publish(stores, prepared);
     return committed;
   }
 
