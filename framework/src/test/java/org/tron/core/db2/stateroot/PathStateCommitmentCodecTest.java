@@ -40,6 +40,16 @@ public class PathStateCommitmentCodecTest {
   }
 
   @Test
+  public void approvedAbiAndAssetIssueStoresHaveIndependentLeafDomains() throws Exception {
+    assertGolden("14af9866899065b509f6ea5d45902d443a4357efad5e6478c47ef108d603b8d7",
+        1, new byte[]{1});
+    assertGolden("5c0a5639b07fa98f7e067c3e0c1d067ca1de752810b7576bc20fd2c75ba89eb5",
+        6, new byte[]{1});
+    assertGolden("99951328ba6d7d4a7fa199cf727a7c4494bd885ce2ac8c04475dd1fd699af7de",
+        7, new byte[]{1});
+  }
+
+  @Test
   public void presentValuesKeepEmptyAndZeroDistinct() {
     assertArrayEquals(Hex.decode("c20180"),
         PathStateCommitmentCodec.presentLeafValue(new byte[0]));
