@@ -788,7 +788,9 @@ public class SnapshotManager implements RevokingDatabase {
         createCheckpoint();
 
         long checkPointEnd = System.currentTimeMillis();
-        refresh();
+        if (!publishArchiveForwardStateForFlush()) {
+          refresh();
+        }
         if (archiveEpoch != null) {
           archiveReadableEpoch = archiveEpoch;
           ((DurableBlockReverseDiffSink) blockReverseDiffSink).releaseThrough(archiveEpoch);
@@ -813,6 +815,11 @@ public class SnapshotManager implements RevokingDatabase {
     }
     if (!(blockReverseDiffSink instanceof DurableBlockReverseDiffSink)) {
       throw new TronDBException("Archive sink cannot prove durable history before checkpoint");
+    }
+    if (archiveRuntimeAttachment != null
+        && archiveRuntimeAttachment.hasForwardFlushPublisher() && flushCount != 1) {
+      throw new TronDBException(
+          "S1 archive runtime requires exactly one target per normal flush");
     }
     FrozenBatch frozenForward = archiveBlockProjectionPreparer == null
         ? null : freezeArchiveForwardFlushRange();
@@ -869,6 +876,20 @@ public class SnapshotManager implements RevokingDatabase {
       throw new TronDBException("Archive history durability gate failed", e);
     }
     return last.getEpoch();
+  }
+
+  private boolean publishArchiveForwardStateForFlush() {
+    ArchiveRuntimeAttachment runtime = archiveRuntimeAttachment;
+    if (runtime == null || !runtime.hasForwardFlushPublisher()) {
+      return false;
+    }
+    List<ArchiveBlockForwardPayload> payloads = claimArchiveForwardFlushPayloads();
+    try {
+      runtime.publishForwardFlush(payloads, this::refresh);
+      return true;
+    } catch (IOException | RuntimeException failure) {
+      throw new TronDBException("Archive forward publication failed", failure);
+    }
   }
 
   public void createCheckpoint() {

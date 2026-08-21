@@ -329,18 +329,25 @@ public class ArchiveHistoryWriterTest {
   }
 
   @Test
-  public void failsClosedWhenDerivedAccountIndexIsAheadAfterRecovery() throws Exception {
+  public void truncatesDerivedAccountIndexToRecoveredHistoryAuthority() throws Exception {
     Path archive = temporaryFolder.newFolder("writer-index-ahead").toPath();
     try (ArchiveHistoryWriter writer = new ArchiveHistoryWriter(archive, 4096, databases())) {
       writer.acceptAll(Arrays.asList(diff(1), diff(2), diff(3)));
     }
     prepareTruncation(archive, 2);
 
-    assertThrows(ArchivePersistenceException.class,
-        () -> new ArchiveHistoryWriter(archive, 4096, databases()));
+    try (ArchiveHistoryWriter reopened = new ArchiveHistoryWriter(
+        archive, 4096, databases())) {
+      assertEquals(2, reopened.committedHead().getMeta().getEpoch());
+    }
     ArchiveRestartCheckpoint checkpoint = ArchiveRestartCheckpoint.load(archive,
         new HistoryCommitMarkerCodec());
     assertEquals(2, checkpoint.getMarker().getMeta().getEpoch());
+    try (AccountChangeIndex index = new AccountChangeIndex(
+        archive.resolve("account-change-index"))) {
+      assertEquals(2, index.getIndexedThrough());
+      assertTrue(index.headMatches(checkpoint.getMarker().getMeta()));
+    }
     assertFalse(Files.exists(archive.resolve("truncation.intent")));
   }
 

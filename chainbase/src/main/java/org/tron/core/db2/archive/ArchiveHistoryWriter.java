@@ -372,10 +372,17 @@ public final class ArchiveHistoryWriter
   private void catchUpAccountIndex() throws IOException {
     HistoryCommitMarker head = commits.head();
     if (head == null) {
+      if (accountIndex.getIndexedThrough() >= 0) {
+        accountIndex.truncateAfter(null);
+      }
       return;
     }
     long indexed = accountIndex.getIndexedThrough();
     long first = commits.firstEpoch();
+    if (indexed > head.getMeta().getEpoch()) {
+      accountIndex.truncateAfter(head.getMeta());
+      indexed = head.getMeta().getEpoch();
+    }
     if (indexed >= 0) {
       HistoryCommitMarker indexedMarker = commits.get(indexed);
       if (indexedMarker == null || !accountIndex.headMatches(indexedMarker.getMeta())) {
@@ -384,9 +391,6 @@ public final class ArchiveHistoryWriter
       }
     }
     if (indexed >= head.getMeta().getEpoch()) {
-      if (indexed > head.getMeta().getEpoch()) {
-        throw new ArchivePersistenceException("Account index is ahead of committed history");
-      }
       return;
     }
     long next = indexed < 0 ? first : indexed + 1;
