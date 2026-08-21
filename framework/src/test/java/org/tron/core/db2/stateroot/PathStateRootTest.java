@@ -8,6 +8,9 @@ import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import org.bouncycastle.util.encoders.Hex;
 import org.junit.Test;
 import org.tron.core.trie.TrieImpl;
@@ -113,6 +116,68 @@ public class PathStateRootTest {
         () -> new PathStateRoot(scope,
             participant -> participant.getDbName().equals("abi")
                 ? sharedStore : new InMemoryPathNodeStore(), sharedStore));
+  }
+
+  @Test
+  public void batchValidationRejectsPartialAndDuplicateMutationSets() {
+    PathStateRoot stateRoot = stateRoot(participants());
+    byte[] originalRoot = stateRoot.rootHash();
+    List<PathStateMutation> partial = Arrays.asList(
+        PathStateMutation.put("account", bytes("valid"), bytes("value")),
+        PathStateMutation.put("unknown", bytes("invalid"), bytes("value")));
+    assertThrows(IllegalArgumentException.class, () -> stateRoot.apply(partial));
+    assertArrayEquals(originalRoot, stateRoot.rootHash());
+
+    List<PathStateMutation> duplicate = Arrays.asList(
+        PathStateMutation.put("abi", bytes("key"), new byte[0]),
+        PathStateMutation.delete("abi", bytes("key")));
+    assertThrows(IllegalArgumentException.class, () -> stateRoot.apply(duplicate));
+    assertArrayEquals(originalRoot, stateRoot.rootHash());
+    assertThrows(IllegalArgumentException.class,
+        () -> stateRoot.apply(java.util.Collections.emptyList()));
+  }
+
+  @Test
+  public void emptyAndZeroValuesProduceDifferentRoots() {
+    PathStateRoot empty = stateRoot(participants());
+    empty.put("abi", bytes("key"), new byte[0]);
+    PathStateRoot zero = stateRoot(participants());
+    zero.put("abi", bytes("key"), new byte[]{0});
+    org.junit.Assert.assertFalse(Arrays.equals(empty.rootHash(), zero.rootHash()));
+  }
+
+  @Test
+  public void verificationRequiresCurrentMaterializedSuperRoot() {
+    PathStateRoot stateRoot = stateRoot(participants());
+    assertThrows(IllegalStateException.class, stateRoot::verifyNodeStores);
+    stateRoot.rootHash();
+    stateRoot.verifyNodeStores();
+    stateRoot.put("abi", bytes("key"), bytes("value"));
+    assertThrows(IllegalStateException.class, stateRoot::verifyNodeStores);
+    stateRoot.rootHash();
+    stateRoot.verifyNodeStores();
+  }
+
+  @Test
+  public void concurrentUniqueMutationsMatchSequentialRoot() throws Exception {
+    PathStateRoot concurrent = stateRoot(participants());
+    PathStateRoot sequential = stateRoot(participants());
+    ExecutorService executor = Executors.newFixedThreadPool(4);
+    List<Future<?>> futures = new ArrayList<>();
+    try {
+      for (int i = 0; i < 64; i++) {
+        final byte[] key = bytes("key-" + i);
+        final byte[] value = bytes("value-" + i);
+        sequential.put("account", key, value);
+        futures.add(executor.submit(() -> concurrent.put("account", key, value)));
+      }
+      for (Future<?> future : futures) {
+        future.get();
+      }
+    } finally {
+      executor.shutdownNow();
+    }
+    assertArrayEquals(sequential.rootHash(), concurrent.rootHash());
   }
 
   private static byte[] referenceRoot(List<PathStateParticipant> participants,

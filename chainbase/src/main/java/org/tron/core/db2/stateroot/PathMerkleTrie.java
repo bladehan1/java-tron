@@ -50,46 +50,57 @@ public final class PathMerkleTrie {
     this.nodeStore = Objects.requireNonNull(nodeStore, "nodeStore");
   }
 
-  public void put(byte[] secureKey, byte[] encodedValue) {
+  public synchronized void put(byte[] secureKey, byte[] encodedValue) {
     BytesKey key = secureKey(secureKey);
     byte[] value = nonEmpty(encodedValue, "encodedValue");
     byte[] previous = leaves.put(key, value);
     dirty |= !Arrays.equals(previous, value);
   }
 
-  public void delete(byte[] secureKey) {
+  public synchronized void delete(byte[] secureKey) {
     dirty |= leaves.remove(secureKey(secureKey)) != null;
   }
 
-  public byte[] get(byte[] secureKey) {
+  public synchronized byte[] get(byte[] secureKey) {
     byte[] value = leaves.get(secureKey(secureKey));
     return value == null ? null : Arrays.copyOf(value, value.length);
   }
 
   /** Reconciles path-addressed nodes and returns the canonical root hash. */
-  public byte[] rootHash() {
+  public synchronized byte[] rootHash() {
     if (dirty) {
       commit();
     }
     return Arrays.copyOf(rootHash, rootHash.length);
   }
 
-  public int size() {
+  public synchronized int size() {
     return leaves.size();
   }
 
-  private void commit() {
-    Map<BytesKey, byte[]> nextNodes = new LinkedHashMap<>();
-    if (leaves.isEmpty()) {
-      rootHash = Arrays.copyOf(Hash.EMPTY_TRIE_HASH, Hash.EMPTY_TRIE_HASH.length);
-    } else {
-      List<Leaf> entries = new ArrayList<>(leaves.size());
-      for (Map.Entry<BytesKey, byte[]> entry : leaves.entrySet()) {
-        entries.add(new Leaf(toNibbles(entry.getKey().bytes), entry.getValue()));
-      }
-      byte[] root = build(entries, 0, EMPTY_PATH, nextNodes);
-      rootHash = Hash.sha3(root);
+  /** Verifies every path owned by the current committed node set without repairing corruption. */
+  public synchronized void verifyNodeStore() {
+    if (dirty) {
+      throw new IllegalStateException("cannot verify a dirty path trie");
     }
+    Map<BytesKey, byte[]> expectedNodes = buildCurrentNodes();
+    if (!committedPaths.equals(expectedNodes.keySet())) {
+      throw new IllegalStateException("committed path set does not match current leaves");
+    }
+    byte[] expectedRoot = rootHash(expectedNodes);
+    if (!Arrays.equals(rootHash, expectedRoot)) {
+      throw new IllegalStateException("committed path root does not match current leaves");
+    }
+    for (Map.Entry<BytesKey, byte[]> entry : expectedNodes.entrySet()) {
+      if (!Arrays.equals(nodeStore.get(entry.getKey().bytes), entry.getValue())) {
+        throw new IllegalStateException("missing or corrupt committed path node");
+      }
+    }
+  }
+
+  private void commit() {
+    Map<BytesKey, byte[]> nextNodes = buildCurrentNodes();
+    rootHash = rootHash(nextNodes);
 
     Set<BytesKey> stalePaths = new LinkedHashSet<>(committedPaths);
     stalePaths.removeAll(nextNodes.keySet());
@@ -105,6 +116,29 @@ public final class PathMerkleTrie {
     committedPaths.clear();
     committedPaths.addAll(nextNodes.keySet());
     dirty = false;
+  }
+
+  private Map<BytesKey, byte[]> buildCurrentNodes() {
+    Map<BytesKey, byte[]> nodes = new LinkedHashMap<>();
+    if (!leaves.isEmpty()) {
+      List<Leaf> entries = new ArrayList<>(leaves.size());
+      for (Map.Entry<BytesKey, byte[]> entry : leaves.entrySet()) {
+        entries.add(new Leaf(toNibbles(entry.getKey().bytes), entry.getValue()));
+      }
+      build(entries, 0, EMPTY_PATH, nodes);
+    }
+    return nodes;
+  }
+
+  private static byte[] rootHash(Map<BytesKey, byte[]> nodes) {
+    if (nodes.isEmpty()) {
+      return Arrays.copyOf(Hash.EMPTY_TRIE_HASH, Hash.EMPTY_TRIE_HASH.length);
+    }
+    byte[] root = nodes.get(new BytesKey(EMPTY_PATH));
+    if (root == null) {
+      throw new IllegalStateException("path node set has no root");
+    }
+    return Hash.sha3(root);
   }
 
   private static byte[] build(List<Leaf> entries, int depth, byte[] nodePath,
