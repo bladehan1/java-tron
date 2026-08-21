@@ -19,15 +19,27 @@ public final class PathStateLayerPublication {
 
   private final PathStateStoreManifest manifest;
   private final PathStateCurrentStore currentStore;
+  private final PathStateLayerLimits limits;
   private final FaultHook faultHook;
 
   public PathStateLayerPublication(PathStateStoreManifest manifest) {
-    this(manifest, stage -> { });
+    this(manifest, PathStateLayerLimits.defaults());
+  }
+
+  public PathStateLayerPublication(PathStateStoreManifest manifest,
+      PathStateLayerLimits limits) {
+    this(manifest, limits, stage -> { });
   }
 
   PathStateLayerPublication(PathStateStoreManifest manifest, FaultHook faultHook) {
+    this(manifest, PathStateLayerLimits.defaults(), faultHook);
+  }
+
+  PathStateLayerPublication(PathStateStoreManifest manifest, PathStateLayerLimits limits,
+      FaultHook faultHook) {
     this.manifest = Objects.requireNonNull(manifest, "manifest");
     this.currentStore = new PathStateCurrentStore(manifest);
+    this.limits = Objects.requireNonNull(limits, "limits");
     this.faultHook = Objects.requireNonNull(faultHook, "faultHook");
   }
 
@@ -43,6 +55,8 @@ public final class PathStateLayerPublication {
       throw new IllegalArgumentException("path-state LAYER node database directory mismatch");
     }
     requireCurrentParentOrChild(layer);
+    limits.verifyAdmission(manifest, directory, layer,
+        nodeStores.projectedLogicalBytes(layer));
 
     Path intent = directory.resolve(INTENT_FILE);
     PathStateMetadataFile.publishImmutable(intent, layer);
@@ -64,6 +78,7 @@ public final class PathStateLayerPublication {
 
   /** Reconciles the sole unfinished layer intent and verifies all settled layer authorities. */
   public synchronized RecoveryAction recover() throws IOException {
+    limits.verifyExisting(manifest);
     List<LayerState> layers = scanLayers();
     LayerState pending = null;
     for (LayerState layer : layers) {
@@ -91,6 +106,7 @@ public final class PathStateLayerPublication {
       }
       PathStateMetadataFile.deleteDurable(pending.intentPath);
       verifyCurrentProgress();
+      limits.verifyExisting(manifest);
       return RecoveryAction.ROLLED_BACK_INTENT;
     }
 
@@ -101,6 +117,7 @@ public final class PathStateLayerPublication {
     }
     PathStateMetadataFile.deleteDurable(pending.intentPath);
     verifyCurrentProgress();
+    limits.verifyExisting(manifest);
     return RecoveryAction.COMPLETED_PUBLICATION;
   }
 
