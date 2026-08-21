@@ -102,9 +102,17 @@ public final class ArchiveParticipantMutationBatchCollector {
       actual.add(database.getDbName());
     }
     Collections.sort(actual);
-    if (!actual.equals(participants) || !target.getDatabases().equals(participants)) {
+    List<String> captured = new ArrayList<>(participants);
+    captured.remove(AccountAssetArchiveProjector.ACCOUNT_ASSET_DB);
+    boolean legacyEmptyDerivedGroup = actual.equals(participants)
+        && view.getDatabases().stream()
+        .filter(database -> AccountAssetArchiveProjector.ACCOUNT_ASSET_DB.equals(
+            database.getDbName()))
+        .allMatch(database -> database.getChanges().isEmpty());
+    if ((!actual.equals(captured) && !legacyEmptyDerivedGroup)
+        || !target.getDatabases().equals(participants)) {
       throw new ArchivePersistenceException(
-          "Block mutation view does not cover the exact VERSIONED_STATE set");
+          "Block mutation source set mismatch: expected=" + captured + ", actual=" + actual);
     }
   }
 

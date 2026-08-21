@@ -95,9 +95,11 @@ public final class AccountAssetBlockProjectionBridge {
       }
     }
     Collections.sort(actual);
-    if (!actual.equals(participants)) {
+    List<String> captured = new ArrayList<>(participants);
+    captured.remove(AccountAssetArchiveProjector.ACCOUNT_ASSET_DB);
+    if (!actual.equals(captured)) {
       throw new ArchivePersistenceException(
-          "Block projection does not cover the exact VERSIONED_STATE set");
+          "Block projection source set mismatch: expected=" + captured + ", actual=" + actual);
     }
   }
 
