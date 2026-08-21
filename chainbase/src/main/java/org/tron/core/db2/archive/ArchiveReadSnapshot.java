@@ -129,6 +129,12 @@ public final class ArchiveReadSnapshot implements Closeable {
     return Arrays.copyOf(pinnedHash, pinnedHash.length);
   }
 
+  /** Revalidates that all request-owned resources still expose the pinned generation identity. */
+  public synchronized void requirePinnedIdentity() {
+    ensureOpen();
+    validateIdentity(targetBlock, pinnedBlock);
+  }
+
   @Override
   public synchronized void close() throws IOException {
     if (closed) {

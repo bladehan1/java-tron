@@ -11,16 +11,17 @@ import org.tron.core.db2.archive.ArchiveProgressEnvelope.Kind;
 /** Atomically publishes a reader-visible R identity derived from committed history. */
 public final class ArchiveReaderHeadPublisher {
 
-  private final HistoryCommitStore history;
+  private final CommittedHistoryAuthority history;
   private final ArchiveProgressFile progressFile;
   private final List<String> participants;
 
-  public ArchiveReaderHeadPublisher(HistoryCommitStore history, Path path,
+  public ArchiveReaderHeadPublisher(CommittedHistoryAuthority history, Path path,
       List<String> participants) {
     this(history, path, participants, temporary -> { });
   }
 
-  ArchiveReaderHeadPublisher(HistoryCommitStore history, Path path, List<String> participants,
+  ArchiveReaderHeadPublisher(CommittedHistoryAuthority history, Path path,
+      List<String> participants,
       ArchiveProgressFile.FaultHook faultHook) {
     this.history = Objects.requireNonNull(history, "history");
     this.progressFile = new ArchiveProgressFile(Objects.requireNonNull(path, "path"),

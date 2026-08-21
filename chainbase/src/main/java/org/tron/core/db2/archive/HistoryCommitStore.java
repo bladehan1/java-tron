@@ -17,7 +17,7 @@ import java.util.List;
  * same encoded length. Contiguous epochs can be addressed directly without retaining one object
  * or creating one directory entry per block.
  */
-public final class HistoryCommitStore implements Closeable {
+public final class HistoryCommitStore implements Closeable, CommittedHistoryAuthority {
 
   private static final String FILE_NAME = "commit.log";
 
@@ -156,6 +156,7 @@ public final class HistoryCommitStore implements Closeable {
     channel.position(channel.size());
   }
 
+  @Override
   public synchronized HistoryCommitMarker head() {
     return head;
   }
@@ -164,8 +165,16 @@ public final class HistoryCommitStore implements Closeable {
     return recordCount;
   }
 
+  @Override
   public synchronized long firstEpoch() {
     return firstEpoch;
+  }
+
+  /** Returns one atomic height-coverage snapshot of the validated contiguous commit log. */
+  @Override
+  public synchronized HistoryCoverage coverage() {
+    return head == null ? null : new HistoryCoverage(firstEpoch, recordCount,
+        head.getMeta().getEpoch(), head.getMeta().getBlockHash());
   }
 
   /** Materializes the committed prefix. Do not use this method in the scale ingestion path. */
@@ -184,6 +193,7 @@ public final class HistoryCommitStore implements Closeable {
     }
   }
 
+  @Override
   public synchronized HistoryCommitMarker get(long epoch) {
     if (recordCount == 0 || epoch < firstEpoch || epoch - firstEpoch >= recordCount) {
       return null;

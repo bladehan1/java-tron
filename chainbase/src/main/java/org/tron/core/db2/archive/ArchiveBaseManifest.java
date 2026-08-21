@@ -10,6 +10,7 @@ import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
@@ -37,12 +38,21 @@ final class ArchiveBaseManifest {
     this.scopeIdentity = scopeIdentity(this.participants);
     Files.createDirectories(directory);
     if (Files.exists(path)) {
-      base = decode(Files.readAllBytes(path));
-      if (!scopeIdentity.equals(base.scopeIdentity)
-          || !this.participants.equals(base.participants)) {
-        throw new ArchivePersistenceException("Archive manifest participant set mismatch");
-      }
+      base = loadExisting(path, scopeIdentity, this.participants);
     }
+  }
+
+  /** Validates an existing manifest without creating or modifying any filesystem entry. */
+  static ExistingBase validateExisting(Path directory, List<String> participants)
+      throws IOException {
+    List<String> expectedParticipants = new ArrayList<>(participants);
+    Path manifest = directory.resolve("MANIFEST");
+    if (!Files.isRegularFile(manifest, LinkOption.NOFOLLOW_LINKS)) {
+      throw new ArchivePersistenceException("Archive manifest is missing or not a regular file");
+    }
+    BaseIdentity existing = loadExisting(manifest, scopeIdentity(expectedParticipants),
+        expectedParticipants);
+    return new ExistingBase(existing.epoch, existing.hash);
   }
 
   synchronized void ensureBase(BlockSnapshotMeta firstArchivedBlock) throws IOException {
@@ -154,6 +164,16 @@ final class ArchiveBaseManifest {
     return ArchiveParticipantDescriptor.scopeIdentity(participants);
   }
 
+  private static BaseIdentity loadExisting(Path path, String expectedScope,
+      List<String> expectedParticipants) throws IOException {
+    BaseIdentity existing = decode(Files.readAllBytes(path));
+    if (!expectedScope.equals(existing.scopeIdentity)
+        || !expectedParticipants.equals(existing.participants)) {
+      throw new ArchivePersistenceException("Archive manifest participant set mismatch");
+    }
+    return existing;
+  }
+
   private static void writeString(DataOutputStream output, String value) throws IOException {
     byte[] encoded = value.getBytes(StandardCharsets.UTF_8);
     if (encoded.length == 0 || encoded.length > 1024) {
@@ -185,6 +205,25 @@ final class ArchiveBaseManifest {
       this.epoch = epoch;
       this.hash = Arrays.copyOf(hash, hash.length);
       this.participants = new ArrayList<>(participants);
+    }
+  }
+
+  /** Read-only identity returned by validation; it exposes no manifest mutation capability. */
+  static final class ExistingBase {
+    private final long epoch;
+    private final byte[] hash;
+
+    private ExistingBase(long epoch, byte[] hash) {
+      this.epoch = epoch;
+      this.hash = Arrays.copyOf(hash, hash.length);
+    }
+
+    long getEpoch() {
+      return epoch;
+    }
+
+    byte[] getHash() {
+      return Arrays.copyOf(hash, hash.length);
     }
   }
 }

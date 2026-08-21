@@ -42,6 +42,7 @@ import org.tron.core.db2.archive.AccountAssetPreparedBlockPayloadOwner.FrozenBat
 import org.tron.core.db2.archive.ArchiveBlockForwardPayload;
 import org.tron.core.db2.archive.ArchiveBlockProjectionPreparer;
 import org.tron.core.db2.archive.ArchivePersistenceException;
+import org.tron.core.db2.archive.ArchiveRuntimeAttachment;
 import org.tron.core.db2.archive.ArchiveStateBarrier.ArchiveStateAction;
 import org.tron.core.db2.archive.ArchiveStoreScope;
 import org.tron.core.db2.archive.BlockChangeView;
@@ -49,7 +50,7 @@ import org.tron.core.db2.archive.BlockReverseDiff;
 import org.tron.core.db2.archive.BlockReverseDiffSink;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
 import org.tron.core.db2.archive.DurableBlockReverseDiffSink;
-import org.tron.core.db2.archive.DurableHistoryMarkerRangeReceipt;
+import org.tron.core.db2.archive.DurableHistoryMarkerRangeEvidence;
 import org.tron.core.db2.archive.HistoryCommitMarker;
 import org.tron.core.db2.archive.OldValueCollector;
 import org.tron.core.db2.common.DB;
@@ -104,6 +105,7 @@ public class SnapshotManager implements RevokingDatabase {
 
   private OldValueCollector oldValueCollector;
   private ArchiveBlockProjectionPreparer archiveBlockProjectionPreparer;
+  private ArchiveRuntimeAttachment archiveRuntimeAttachment;
   private final Map<BlockSnapshotMeta, AccountAssetPreparedBlockPayloadOwner>
       archiveForwardPayloadOwners = new HashMap<>();
   private FrozenBatch pendingArchiveForwardFlush;
@@ -350,6 +352,9 @@ public class SnapshotManager implements RevokingDatabase {
   public synchronized void installArchiveCollector(OldValueCollector collector,
       BlockReverseDiffSink sink) {
     ArchiveStoreScope.validate(dbs);
+    if (archiveRuntimeAttachment != null) {
+      throw new IllegalStateException("Borrowed archive runtime is already attached");
+    }
     oldValueCollector = Objects.requireNonNull(collector, "collector");
     blockReverseDiffSink = Objects.requireNonNull(sink, "sink");
   }
@@ -358,10 +363,49 @@ public class SnapshotManager implements RevokingDatabase {
   public synchronized void installArchiveProjectionPreparer(
       ArchiveBlockProjectionPreparer preparer) {
     ArchiveStoreScope.validate(dbs);
+    if (archiveRuntimeAttachment != null) {
+      throw new IllegalStateException("Borrowed archive runtime is already attached");
+    }
     if (oldValueCollector == null || blockReverseDiffSink == null) {
       throw new IllegalStateException("Archive collector must be installed before its preparer");
     }
     archiveBlockProjectionPreparer = Objects.requireNonNull(preparer, "preparer");
+  }
+
+  /** Atomically installs one borrowed archive runtime bundle after store registration. */
+  public synchronized void attachArchiveRuntime(ArchiveRuntimeAttachment attachment) {
+    ArchiveStoreScope.validate(dbs);
+    ArchiveRuntimeAttachment candidate = Objects.requireNonNull(attachment, "attachment");
+    if (archiveRuntimeAttachment != null) {
+      throw new IllegalStateException("Archive runtime is already attached");
+    }
+    if (oldValueCollector != null || archiveBlockProjectionPreparer != null
+        || blockReverseDiffSink != null) {
+      throw new IllegalStateException("Legacy archive collaborators are already installed");
+    }
+    oldValueCollector = candidate.getCollector();
+    archiveBlockProjectionPreparer = candidate.getProjectionPreparer();
+    blockReverseDiffSink = candidate.getSink();
+    archiveRuntimeAttachment = candidate;
+  }
+
+  /** Detaches the exact borrowed bundle without closing resources owned by its runtime. */
+  public synchronized ArchiveRuntimeAttachment detachArchiveRuntime(
+      ArchiveRuntimeAttachment expected) {
+    ArchiveRuntimeAttachment candidate = Objects.requireNonNull(expected, "expected");
+    if (archiveRuntimeAttachment == null) {
+      throw new IllegalStateException("Archive runtime is not attached");
+    }
+    if (archiveRuntimeAttachment != candidate) {
+      throw new IllegalStateException("Cannot detach a foreign archive runtime");
+    }
+    abortArchiveForwardPayloads();
+    archiveRuntimeAttachment = null;
+    oldValueCollector = null;
+    archiveBlockProjectionPreparer = null;
+    blockReverseDiffSink = null;
+    archiveReadableEpoch = -1;
+    return candidate;
   }
 
   /** Visible for lifecycle verification until the flush freeze coordinator consumes this registry. */
@@ -442,11 +486,11 @@ public class SnapshotManager implements RevokingDatabase {
     pendingArchiveForwardFlush = null;
   }
 
-  /** Reads an exact durable marker receipt and seals the same pending range. */
+  /** Reads exact durable marker evidence and seals the same pending range. */
   public synchronized void sealPendingArchiveForwardFlush(
-      DurableHistoryMarkerRangeReceipt receipt) {
+      DurableHistoryMarkerRangeEvidence evidence) {
     FrozenBatch pending = requirePendingArchiveForwardFlush();
-    List<ArchiveBlockForwardPayload> sealed = Objects.requireNonNull(receipt, "receipt")
+    List<ArchiveBlockForwardPayload> sealed = Objects.requireNonNull(evidence, "evidence")
         .seal(pending);
     sealedArchiveForwardFlush = sealed;
     pendingArchiveForwardFlush = null;
@@ -609,17 +653,30 @@ public class SnapshotManager implements RevokingDatabase {
 
   @Override
   public void shutdown() {
-    abortArchiveForwardPayloads();
+    Closeable legacyArchiveSink = prepareArchiveShutdown();
     ExecutorServiceManager.shutdownAndAwaitTermination(pruneCheckpointThread, pruneName);
     flushServices.forEach((key, value) -> ExecutorServiceManager.shutdownAndAwaitTermination(value,
         "flush-service-" + key));
-    if (blockReverseDiffSink instanceof Closeable) {
+    if (legacyArchiveSink != null) {
       try {
-        ((Closeable) blockReverseDiffSink).close();
+        legacyArchiveSink.close();
       } catch (IOException e) {
         logger.error("Failed to close archive history sink.", e);
       }
     }
+  }
+
+  private synchronized Closeable prepareArchiveShutdown() {
+    abortArchiveForwardPayloads();
+    if (archiveRuntimeAttachment != null) {
+      archiveRuntimeAttachment = null;
+      oldValueCollector = null;
+      archiveBlockProjectionPreparer = null;
+      blockReverseDiffSink = null;
+      archiveReadableEpoch = -1;
+      return null;
+    }
+    return blockReverseDiffSink instanceof Closeable ? (Closeable) blockReverseDiffSink : null;
   }
 
   private synchronized void abortArchiveForwardPayloads() {
@@ -803,9 +860,9 @@ public class SnapshotManager implements RevokingDatabase {
       }
       durableSink.awaitCommitted(last.getEpoch());
       if (frozenForward != null) {
-        DurableHistoryMarkerRangeReceipt receipt =
-            durableSink.createMarkerRangeReceipt(prepared.size());
-        sealPendingArchiveForwardFlush(receipt);
+        DurableHistoryMarkerRangeEvidence evidence =
+            durableSink.createMarkerRangeEvidence(prepared.size());
+        sealPendingArchiveForwardFlush(evidence);
         submittedArchiveForwardHistoryEpoch = null;
       }
     } catch (RuntimeException e) {

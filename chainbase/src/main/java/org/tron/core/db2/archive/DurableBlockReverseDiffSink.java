@@ -5,7 +5,7 @@ public interface DurableBlockReverseDiffSink extends BlockReverseDiffSink {
 
   void awaitCommitted(long epoch);
 
-  DurableHistoryMarkerRangeReceipt createMarkerRangeReceipt(int maxMarkers);
+  DurableHistoryMarkerRangeEvidence createMarkerRangeEvidence(int maxMarkers);
 
   void releaseThrough(long epoch);
 }

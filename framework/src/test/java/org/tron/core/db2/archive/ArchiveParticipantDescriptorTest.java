@@ -1,7 +1,6 @@
 package org.tron.core.db2.archive;
 
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
@@ -11,7 +10,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.List;
 import org.junit.Rule;
 import org.junit.Test;
@@ -23,32 +21,33 @@ public class ArchiveParticipantDescriptorTest {
   public TemporaryFolder temporaryFolder = new TemporaryFolder();
 
   @Test
-  public void definesExact26WithStableAbiTombstoneAndLegacyAsset() {
+  public void definesExact27WithAbiAndBothAssetIssueStores() {
     ArchiveParticipantDescriptor descriptor = ArchiveParticipantDescriptor.current();
 
-    assertEquals(26, descriptor.getParticipants().size());
+    assertEquals(27, descriptor.getParticipants().size());
     assertEquals(ArchiveParticipantDescriptor.ABI_STORE_ID,
         descriptor.getStoreId("abi"));
     assertEquals(6, descriptor.getStoreId("asset-issue"));
     assertEquals(7, descriptor.getStoreId("asset-issue-v2"));
-    assertEquals("abi", descriptor.getTombstonesByStoreId().get(1));
+    assertTrue(descriptor.getTombstonesByStoreId().isEmpty());
     assertTrue(descriptor.getParticipants().contains("asset-issue"));
     assertTrue(descriptor.getParticipants().contains("asset-issue-v2"));
-    assertFalse(descriptor.getParticipants().contains("abi"));
-    assertEquals("archive-state/exact-26-abi-tombstone/v1",
+    assertTrue(descriptor.getParticipants().contains("abi"));
+    assertEquals("archive-state/exact-27-abi-retained/v1",
         ArchiveParticipantDescriptor.FORMAT_ID);
   }
 
   @Test
-  public void rejectsOldExact27AndV2OnlyExact25ParticipantSets() {
+  public void rejectsAbiExcludedExact26AndV2OnlyExact25ParticipantSets() {
     ArchiveParticipantDescriptor descriptor = ArchiveParticipantDescriptor.current();
-    List<String> exact27 = new ArrayList<>(descriptor.getParticipants());
-    exact27.add("abi");
+    List<String> exact26 = new ArrayList<>(descriptor.getParticipants());
+    exact26.remove("abi");
     List<String> exact25 = new ArrayList<>(descriptor.getParticipants());
+    exact25.remove("abi");
     exact25.remove("asset-issue");
 
     assertThrows(ArchivePersistenceException.class,
-        () -> descriptor.requireExactParticipants(exact27));
+        () -> descriptor.requireExactParticipants(exact26));
     assertThrows(ArchivePersistenceException.class,
         () -> descriptor.requireExactParticipants(exact25));
     descriptor.requireExactParticipants(descriptor.getParticipants());
@@ -57,7 +56,7 @@ public class ArchiveParticipantDescriptorTest {
   @Test
   public void manifestBindsApprovedScopeAndRejectsLegacyVersion() throws Exception {
     List<String> participants = ArchiveParticipantDescriptor.current().getParticipants();
-    Path archive = temporaryFolder.newFolder("exact-26-manifest").toPath();
+    Path archive = temporaryFolder.newFolder("exact-27-manifest").toPath();
     ArchiveBaseManifest manifest = new ArchiveBaseManifest(archive, participants);
     manifest.ensureBase(meta(1));
 
@@ -65,11 +64,10 @@ public class ArchiveParticipantDescriptorTest {
     assertEquals(2, ByteBuffer.wrap(encoded, Integer.BYTES, Short.BYTES).getShort());
     new ArchiveBaseManifest(archive, participants);
 
-    List<String> oldExact27 = new ArrayList<>(participants);
-    oldExact27.add("abi");
-    Collections.sort(oldExact27);
+    List<String> abiExcludedExact26 = new ArrayList<>(participants);
+    abiExcludedExact26.remove("abi");
     assertThrows(ArchivePersistenceException.class,
-        () -> new ArchiveBaseManifest(archive, oldExact27));
+        () -> new ArchiveBaseManifest(archive, abiExcludedExact26));
 
     ByteBuffer.wrap(encoded).putShort(Integer.BYTES, (short) 1);
     byte[] payload = Arrays.copyOf(encoded, encoded.length - Integer.BYTES);

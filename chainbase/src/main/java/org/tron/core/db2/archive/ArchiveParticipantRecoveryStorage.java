@@ -119,6 +119,11 @@ public final class ArchiveParticipantRecoveryStorage implements RecoveryStorage,
     return snapshot;
   }
 
+  /** Returns the committed H head observed by this startup recovery session. */
+  public HistoryCommitMarker committedHead() {
+    return history.head();
+  }
+
   @Override
   public void truncateHistoryAndSync(long historyHead) throws IOException {
     ArchiveTruncationIntent.prepare(archiveDirectory, history, index, bodies, historyHead,

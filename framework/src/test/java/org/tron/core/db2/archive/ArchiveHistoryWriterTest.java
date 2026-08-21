@@ -1,5 +1,6 @@
 package org.tron.core.db2.archive;
 
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
@@ -54,6 +55,49 @@ public class ArchiveHistoryWriterTest {
         archive, 4096, databases())) {
       assertEquals(1, reopened.committedHead().getMeta().getEpoch());
       assertEquals(diff(1).getMeta(), reopened.readCommitted(1).getMeta());
+    }
+  }
+
+  @Test
+  public void rollsBackShortP66OnTailWithoutLosingActivationReverseDeletion() throws Exception {
+    Path archive = temporaryFolder.newFolder("p66-short-rollback").toPath();
+    byte[] address = new byte[21];
+    address[0] = 0x41;
+    address[20] = 7;
+    byte[] directKey = new P66AccountAssetCodec().assetPhysicalKey(address, "1000007");
+    BlockReverseDiff off = new BlockReverseDiff(diff(1).getMeta(), Collections.emptyList());
+    BlockReverseDiff activation = new BlockReverseDiff(diff(2).getMeta(), Arrays.asList(
+        new DbGroup("account", Collections.singletonList(
+            new Entry(address, OldValue.present(account(address, 20L))))),
+        new DbGroup("account-asset", Collections.singletonList(
+            new Entry(directKey, OldValue.absent())))));
+    BlockReverseDiff on = new BlockReverseDiff(diff(3).getMeta(), Collections.singletonList(
+        new DbGroup("account-asset", Collections.singletonList(
+            new Entry(directKey, OldValue.present(java.nio.ByteBuffer.allocate(Long.BYTES)
+                .putLong(30L).array()))))));
+    Set<String> p66Databases = new java.util.LinkedHashSet<>(
+        Arrays.asList("account", "account-asset", "properties"));
+
+    try (ArchiveHistoryWriter writer = new ArchiveHistoryWriter(
+        archive, 4096, p66Databases)) {
+      writer.acceptAll(Arrays.asList(off, activation, on));
+      writer.revert(on.getMeta());
+      assertEquals(activation.getMeta(), writer.committedHeadMeta());
+      Entry reverseDeletion = writer.readCommitted(2).getGroups().stream()
+          .filter(group -> "account-asset".equals(group.getDbName()))
+          .findFirst().orElseThrow(AssertionError::new).getEntries().get(0);
+      assertArrayEquals(directKey, reverseDeletion.getKey());
+      assertFalse(reverseDeletion.getOldValue().isPresent());
+    }
+
+    try (ArchiveHistoryWriter reopened = new ArchiveHistoryWriter(
+        archive, 4096, p66Databases)) {
+      assertEquals(activation.getMeta(), reopened.committedHeadMeta());
+      assertThrows(IllegalArgumentException.class, () -> reopened.readCommitted(3));
+      Entry reverseDeletion = reopened.readCommitted(2).getGroups().stream()
+          .filter(group -> "account-asset".equals(group.getDbName()))
+          .findFirst().orElseThrow(AssertionError::new).getEntries().get(0);
+      assertFalse(reverseDeletion.getOldValue().isPresent());
     }
   }
 
@@ -316,6 +360,28 @@ public class ArchiveHistoryWriterTest {
   }
 
   @Test
+  public void exposesImmutableContiguousHistoryCoverageAcrossTailChanges() throws Exception {
+    Path archive = temporaryFolder.newFolder("history-coverage").toPath();
+    initializeHistory(archive, 3);
+
+    try (HistoryCommitStore commits = new HistoryCommitStore(
+        archive, new HistoryCommitMarkerCodec())) {
+      assertCoverage(commits.coverage(), 1, 3, 3, hash(3));
+      byte[] exposedHash = commits.coverage().getHeadHash();
+      exposedHash[31] = 99;
+      assertArrayEquals(hash(3), commits.coverage().getHeadHash());
+
+      commits.truncateAfter(2);
+      assertCoverage(commits.coverage(), 1, 2, 2, hash(2));
+      HistoryCommitMarker second = commits.head();
+      commits.removeHead(second.getMeta());
+      assertCoverage(commits.coverage(), 1, 1, 1, hash(1));
+      commits.removeHead(commits.head().getMeta());
+      assertNull(commits.coverage());
+    }
+  }
+
+  @Test
   public void commitLogForceBoundaryFailurePreservesRecordAsUncertain() throws Exception {
     Path archive = temporaryFolder.newFolder("uncertain-marker").toPath();
     HistoryCommitMarker marker = new HistoryCommitMarker(diff(1).getMeta(), 0,
@@ -338,6 +404,14 @@ public class ArchiveHistoryWriterTest {
 
   private static Set<String> databases() {
     return new java.util.LinkedHashSet<>(Arrays.asList("account", "properties"));
+  }
+
+  private static void assertCoverage(HistoryCoverage coverage, long firstEpoch,
+      long recordCount, long headEpoch, byte[] headHash) {
+    assertEquals(firstEpoch, coverage.getFirstEpoch());
+    assertEquals(recordCount, coverage.getRecordCount());
+    assertEquals(headEpoch, coverage.getHeadEpoch());
+    assertArrayEquals(headHash, coverage.getHeadHash());
   }
 
   private static void initializeHistory(Path archive, int lastEpoch) throws Exception {

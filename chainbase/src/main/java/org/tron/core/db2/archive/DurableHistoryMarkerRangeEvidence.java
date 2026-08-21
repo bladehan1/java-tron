@@ -7,19 +7,19 @@ import java.util.List;
 import java.util.Objects;
 import org.tron.core.db2.archive.AccountAssetPreparedBlockPayloadOwner.FrozenBatch;
 
-/** Bounded authoritative marker receipt for one exact frozen flush range. */
-public final class DurableHistoryMarkerRangeReceipt {
+/** Bounded authoritative marker evidence for one exact frozen flush range. */
+public final class DurableHistoryMarkerRangeEvidence {
 
   private final Source source;
   private final int maxMarkers;
   private final List<String> participants;
   private final HistoryCommitMarkerCodec codec = new HistoryCommitMarkerCodec();
 
-  public DurableHistoryMarkerRangeReceipt(ArchiveHistoryWriter writer, int maxMarkers) {
+  public DurableHistoryMarkerRangeEvidence(ArchiveHistoryWriter writer, int maxMarkers) {
     this(new WriterSource(writer), maxMarkers);
   }
 
-  DurableHistoryMarkerRangeReceipt(Source source, int maxMarkers) {
+  DurableHistoryMarkerRangeEvidence(Source source, int maxMarkers) {
     this.source = Objects.requireNonNull(source, "source");
     if (maxMarkers <= 0) {
       throw new IllegalArgumentException("maxMarkers must be positive");
@@ -45,7 +45,7 @@ public final class DurableHistoryMarkerRangeReceipt {
       markers.add(marker);
     }
 
-    List<HistoryCommitMarker> receipt = new ArrayList<>(markers.size());
+    List<HistoryCommitMarker> evidence = new ArrayList<>(markers.size());
     for (int i = 0; i < markers.size(); i++) {
       HistoryCommitMarker marker = markers.get(i);
       BlockReverseDiff body = source.readCommitted(marker.getMeta().getEpoch());
@@ -56,25 +56,25 @@ public final class DurableHistoryMarkerRangeReceipt {
       HistoryCommitMarker reloaded = source.marker(marker.getMeta().getEpoch());
       validateMarker(expected.get(i), reloaded);
       if (!Arrays.equals(codec.encode(marker), codec.encode(reloaded))) {
-        throw new ArchivePersistenceException("History marker changed while building receipt");
+        throw new ArchivePersistenceException("History marker changed while building evidence");
       }
-      receipt.add(codec.decode(codec.encode(reloaded)));
+      evidence.add(codec.decode(codec.encode(reloaded)));
     }
-    return Collections.unmodifiableList(receipt);
+    return Collections.unmodifiableList(evidence);
   }
 
   private void validateExpectedRange(List<BlockSnapshotMeta> expected) {
     if (expected.isEmpty()) {
-      throw new ArchivePersistenceException("Marker receipt range must not be empty");
+      throw new ArchivePersistenceException("Marker evidence range must not be empty");
     }
     if (expected.size() > maxMarkers) {
-      throw new ArchivePersistenceException("Marker receipt range exceeds configured bound");
+      throw new ArchivePersistenceException("Marker evidence range exceeds configured bound");
     }
     BlockSnapshotMeta previous = null;
     for (BlockSnapshotMeta meta : expected) {
       BlockSnapshotMeta current = Objects.requireNonNull(meta, "expectedMeta");
       if (previous != null && !isNext(previous, current)) {
-        throw new ArchivePersistenceException("Expected marker receipt range is not contiguous");
+        throw new ArchivePersistenceException("Expected marker evidence range is not contiguous");
       }
       previous = current;
     }
