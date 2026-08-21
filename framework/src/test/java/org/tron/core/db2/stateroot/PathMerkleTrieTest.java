@@ -1,0 +1,154 @@
+package org.tron.core.db2.stateroot;
+
+import static org.junit.Assert.assertArrayEquals;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertThrows;
+import static org.junit.Assert.assertTrue;
+
+import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import org.bouncycastle.util.encoders.Hex;
+import org.junit.Test;
+import org.tron.common.crypto.Hash;
+import org.tron.core.trie.TrieImpl;
+
+public class PathMerkleTrieTest {
+
+  @Test
+  public void emptyAndSingleLeafMatchIndependentTrieOracle() {
+    InMemoryPathNodeStore store = new InMemoryPathNodeStore();
+    PathMerkleTrie trie = new PathMerkleTrie(store);
+    assertArrayEquals(Hash.EMPTY_TRIE_HASH, trie.rootHash());
+    assertTrue(store.nodes.isEmpty());
+
+    byte[] key = filledKey(0x11);
+    byte[] value = Hex.decode("c20180");
+    trie.put(key, value);
+
+    assertArrayEquals(referenceRoot(new byte[][]{key}, new byte[][]{value}), trie.rootHash());
+    assertArrayEquals(value, trie.get(key));
+    assertEquals(1, trie.size());
+    assertTrue(store.nodes.containsKey(""));
+  }
+
+  @Test
+  public void mutationOrderProducesSameRootAndPathNodeSet() {
+    byte[][] keys = {filledKey(0x11), keyWithTail(0x11, 0x12), filledKey(0x21),
+        keyWithTail(0x21, 0x22)};
+    byte[][] values = {value("one"), value("two"), value("three"), value("four")};
+
+    InMemoryPathNodeStore forwardStore = new InMemoryPathNodeStore();
+    PathMerkleTrie forward = new PathMerkleTrie(forwardStore);
+    for (int i = 0; i < keys.length; i++) {
+      forward.put(keys[i], values[i]);
+    }
+
+    InMemoryPathNodeStore reverseStore = new InMemoryPathNodeStore();
+    PathMerkleTrie reverse = new PathMerkleTrie(reverseStore);
+    for (int i = keys.length - 1; i >= 0; i--) {
+      reverse.put(keys[i], values[i]);
+    }
+
+    byte[] expected = referenceRoot(keys, values);
+    assertArrayEquals(
+        Hex.decode("dc1c7bfcacb455baeca2454d8aedbe4b17da4a66364fbc0baa7e5919cacf2bdc"),
+        expected);
+    assertArrayEquals(expected, forward.rootHash());
+    assertArrayEquals(expected, reverse.rootHash());
+    assertNodeMapsEqual(forwardStore.nodes, reverseStore.nodes);
+  }
+
+  @Test
+  public void updateAndDeleteCompressCanonicalPaths() {
+    byte[] first = filledKey(0x33);
+    byte[] second = keyWithTail(0x33, 0x34);
+    byte[] third = filledKey(0x44);
+    InMemoryPathNodeStore store = new InMemoryPathNodeStore();
+    PathMerkleTrie trie = new PathMerkleTrie(store);
+    trie.put(first, value("first"));
+    trie.put(second, value("second"));
+    trie.put(third, value("third"));
+    trie.rootHash();
+    int expandedNodeCount = store.nodes.size();
+
+    trie.put(first, value("updated"));
+    trie.delete(second);
+    byte[] expected = referenceRoot(new byte[][]{first, third},
+        new byte[][]{value("updated"), value("third")});
+    assertArrayEquals(expected, trie.rootHash());
+    assertNull(trie.get(second));
+    assertTrue(store.nodes.size() < expandedNodeCount);
+
+    trie.delete(first);
+    trie.delete(third);
+    assertArrayEquals(Hash.EMPTY_TRIE_HASH, trie.rootHash());
+    assertTrue(store.nodes.isEmpty());
+  }
+
+  @Test
+  public void rejectsInvalidKeysAndEmptyValues() {
+    PathMerkleTrie trie = new PathMerkleTrie(new InMemoryPathNodeStore());
+    assertThrows(NullPointerException.class, () -> new PathMerkleTrie(null));
+    assertThrows(IllegalArgumentException.class, () -> trie.put(new byte[31], value("x")));
+    assertThrows(IllegalArgumentException.class,
+        () -> trie.put(new byte[PathMerkleTrie.SECURE_KEY_LENGTH], new byte[0]));
+    assertThrows(NullPointerException.class, () -> trie.delete(null));
+  }
+
+  private static byte[] referenceRoot(byte[][] keys, byte[][] values) {
+    TrieImpl reference = new TrieImpl();
+    reference.setAsync(false);
+    for (int i = 0; i < keys.length; i++) {
+      reference.put(keys[i], values[i]);
+    }
+    return reference.getRootHash();
+  }
+
+  private static byte[] filledKey(int value) {
+    byte[] key = new byte[PathMerkleTrie.SECURE_KEY_LENGTH];
+    Arrays.fill(key, (byte) value);
+    return key;
+  }
+
+  private static byte[] keyWithTail(int prefix, int tail) {
+    byte[] key = filledKey(prefix);
+    key[key.length - 1] = (byte) tail;
+    return key;
+  }
+
+  private static byte[] value(String value) {
+    return PathStateCommitmentCodec.presentLeafValue(value.getBytes(StandardCharsets.UTF_8));
+  }
+
+  private static void assertNodeMapsEqual(Map<String, byte[]> expected,
+      Map<String, byte[]> actual) {
+    assertEquals(expected.keySet(), actual.keySet());
+    for (String path : expected.keySet()) {
+      assertArrayEquals(expected.get(path), actual.get(path));
+    }
+  }
+
+  private static final class InMemoryPathNodeStore implements PathNodeStore {
+
+    private final Map<String, byte[]> nodes = new LinkedHashMap<>();
+
+    @Override
+    public byte[] get(byte[] path) {
+      byte[] value = nodes.get(Hex.toHexString(path));
+      return value == null ? null : Arrays.copyOf(value, value.length);
+    }
+
+    @Override
+    public void put(byte[] path, byte[] encodedNode) {
+      nodes.put(Hex.toHexString(path), Arrays.copyOf(encodedNode, encodedNode.length));
+    }
+
+    @Override
+    public void delete(byte[] path) {
+      nodes.remove(Hex.toHexString(path));
+    }
+  }
+}
