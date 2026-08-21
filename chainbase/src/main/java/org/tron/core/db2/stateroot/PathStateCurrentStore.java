@@ -5,7 +5,6 @@ import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.util.Arrays;
-import java.util.Locale;
 import java.util.Objects;
 import org.tron.core.db2.stateroot.PathStateRootMetadata.Kind;
 
@@ -113,8 +112,7 @@ public final class PathStateCurrentStore {
   }
 
   private Path layerPath(long blockNumber, byte[] blockHash) {
-    String directory = String.format(Locale.ROOT, "%020d-%s", blockNumber, hex(blockHash));
-    return manifest.getLayersDirectory().resolve(directory).resolve(METADATA_FILE);
+    return manifest.getLayerDirectory(blockNumber, blockHash).resolve(METADATA_FILE);
   }
 
   private static PathStateRootMetadata requireKind(PathStateRootMetadata metadata, Kind kind) {
@@ -151,12 +149,4 @@ public final class PathStateCurrentStore {
     return Arrays.equals(left.encode(), right.encode());
   }
 
-  private static String hex(byte[] value) {
-    StringBuilder encoded = new StringBuilder(value.length * 2);
-    for (byte current : value) {
-      encoded.append(Character.forDigit(current >>> 4 & 0xf, 16));
-      encoded.append(Character.forDigit(current & 0xf, 16));
-    }
-    return encoded.toString();
-  }
 }
