@@ -83,16 +83,16 @@ public class ArchiveTargetMutationPlanBuilderTest {
             new ArchiveParticipantMutationBatch(incompleteTarget, Phase.P66_ON,
                 Collections.emptyList())));
 
-    List<String> oldExact27 = new ArrayList<>(participants());
-    oldExact27.add("abi");
-    Collections.sort(oldExact27);
-    HistoryCommitMarker oldTarget = marker(1, oldExact27);
+    List<String> abiExcludedExact26 = new ArrayList<>(participants());
+    abiExcludedExact26.remove("abi");
+    HistoryCommitMarker oldTarget = marker(1, abiExcludedExact26);
     assertThrows(ArchivePersistenceException.class,
         () -> new ArchiveTargetMutationPlanBuilder().build(oldTarget,
             new ArchiveParticipantMutationBatch(oldTarget, Phase.P66_ON,
                 Collections.emptyList())));
 
     List<String> v2OnlyExact25 = new ArrayList<>(participants());
+    v2OnlyExact25.remove("abi");
     v2OnlyExact25.remove("asset-issue");
     HistoryCommitMarker v2OnlyTarget = marker(1, v2OnlyExact25);
     assertThrows(ArchivePersistenceException.class,

@@ -17,7 +17,8 @@ import java.util.UUID;
  * Ordered history body/index/marker writer. A marker is the durable history boundary H; reader
  * visibility R is a separate recovery authority and is not yet integrated into this prototype.
  */
-public final class ArchiveHistoryWriter implements DurableBlockReverseDiffSink, Closeable {
+public final class ArchiveHistoryWriter
+    implements DurableBlockReverseDiffSink, CommittedHistoryAuthority, Closeable {
 
   static final int MAX_RESTART_TAIL_RECORDS = 1024;
 
@@ -133,15 +134,35 @@ public final class ArchiveHistoryWriter implements DurableBlockReverseDiffSink, 
   }
 
   public synchronized HistoryCommitMarker committedHead() {
-    return commits.head();
+    return head();
   }
 
   synchronized HistoryCommitMarker committedMarker(long epoch) {
-    HistoryCommitMarker marker = commits.get(epoch);
+    HistoryCommitMarker marker = get(epoch);
     if (marker == null) {
       return null;
     }
     return commitCodec.decode(commitCodec.encode(marker));
+  }
+
+  @Override
+  public synchronized HistoryCommitMarker head() {
+    return commits.head();
+  }
+
+  @Override
+  public synchronized HistoryCommitMarker get(long epoch) {
+    return commits.get(epoch);
+  }
+
+  @Override
+  public synchronized long firstEpoch() {
+    return commits.firstEpoch();
+  }
+
+  @Override
+  public synchronized HistoryCoverage coverage() {
+    return commits.coverage();
   }
 
   @Override
@@ -153,8 +174,8 @@ public final class ArchiveHistoryWriter implements DurableBlockReverseDiffSink, 
   }
 
   @Override
-  public DurableHistoryMarkerRangeReceipt createMarkerRangeReceipt(int maxMarkers) {
-    return new DurableHistoryMarkerRangeReceipt(this, maxMarkers);
+  public DurableHistoryMarkerRangeEvidence createMarkerRangeEvidence(int maxMarkers) {
+    return new DurableHistoryMarkerRangeEvidence(this, maxMarkers);
   }
 
   @Override

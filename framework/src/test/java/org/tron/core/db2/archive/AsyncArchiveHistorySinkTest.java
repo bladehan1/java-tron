@@ -59,8 +59,8 @@ public class AsyncArchiveHistorySinkTest {
   }
 
   @Test
-  public void createsReceiptFromTheSameDurableWriterAuthority() throws Exception {
-    Path archive = temporaryFolder.newFolder("async-receipt").toPath();
+  public void createsEvidenceFromTheSameDurableWriterAuthority() throws Exception {
+    Path archive = temporaryFolder.newFolder("async-evidence").toPath();
     ArchiveHistoryWriter writer = new ArchiveHistoryWriter(archive, 4096,
         ArchiveStoreScope.getStateDatabases());
     try (AsyncArchiveHistorySink sink = new AsyncArchiveHistorySink(writer, 1)) {
@@ -68,11 +68,11 @@ public class AsyncArchiveHistorySinkTest {
       sink.accept(committed);
       sink.awaitCommitted(1);
 
-      List<HistoryCommitMarker> receipt = sink.createMarkerRangeReceipt(1)
+      List<HistoryCommitMarker> evidence = sink.createMarkerRangeEvidence(1)
           .read(Collections.singletonList(committed.getMeta()));
 
-      assertEquals(1, receipt.size());
-      assertEquals(committed.getMeta(), receipt.get(0).getMeta());
+      assertEquals(1, evidence.size());
+      assertEquals(committed.getMeta(), evidence.get(0).getMeta());
     }
   }
 

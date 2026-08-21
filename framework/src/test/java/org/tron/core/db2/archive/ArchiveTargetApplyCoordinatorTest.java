@@ -3,10 +3,13 @@ package org.tron.core.db2.archive;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
+import com.google.protobuf.ByteString;
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -22,8 +25,11 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.tron.core.db2.archive.ArchiveProgressEnvelope.Kind;
+import org.tron.core.db2.archive.ArchiveRecoveryPlanner.ActionType;
+import org.tron.core.db2.archive.ArchiveRecoveryPlanner.RecoveryPlan;
 import org.tron.core.db2.archive.ArchiveTargetApplyCoordinator.Stage;
 import org.tron.core.db2.archive.P66AccountAssetCodec.Phase;
+import org.tron.protos.Protocol.Account;
 
 public class ArchiveTargetApplyCoordinatorTest {
 
@@ -121,6 +127,192 @@ public class ArchiveTargetApplyCoordinatorTest {
     }
   }
 
+  @Test
+  public void p66PlansRecoverOnlyRemainingNativeParticipantAfterFreshReopen() throws Exception {
+    for (Phase phase : Arrays.asList(Phase.P66_ACTIVATION, Phase.P66_ON)) {
+      for (boolean failAfterAccount : Arrays.asList(false, true)) {
+        String boundary = failAfterAccount ? "after-account" : "after-checkpoint";
+        try (Fixture fixture = fixture("p66-" + phase.name().toLowerCase() + "-" + boundary)) {
+          byte[] address = accountAddress(7);
+          byte[] accountValue = canonicalAccount(address,
+              phase == Phase.P66_ACTIVATION ? 2_000L : 3_000L);
+          byte[] assetKey = new P66AccountAssetCodec().assetPhysicalKey(address, "1000007");
+          byte[] assetValue = ByteBuffer.allocate(Long.BYTES)
+              .putLong(phase == Phase.P66_ACTIVATION ? 30L : 40L).array();
+          Map<String, List<ArchiveParticipantMutation>> mutations =
+              p66Mutations(address, accountValue, assetKey, assetValue);
+          ArchiveTargetApplyCoordinator.FaultHook failure = (stage, participant) -> {
+            if (!failAfterAccount && stage == Stage.AFTER_CHECKPOINT
+                || failAfterAccount && stage == Stage.AFTER_PARTICIPANT
+                && "account".equals(participant)) {
+              throw new IOException("injected " + boundary);
+            }
+          };
+
+          try (HistoryCommitStore history = fixture.openHistory()) {
+            ArchiveTargetApplyCoordinator coordinator = new ArchiveTargetApplyCoordinator(history,
+                fixture.checkpointPath, fixture.engines(), fixture.readerPath, PARTICIPANTS,
+                action -> action.run(), failure, temporary -> { });
+            assertThrows(IOException.class,
+                () -> coordinator.apply(1, phase, mutations, () -> { }));
+          }
+
+          ArchiveTargetMutationPlan durablePlan =
+              new ArchiveTargetMutationPlanFile(fixture.checkpointPath).loadRequired();
+          byte[] planDigest = durablePlan.digest();
+          assertEquals(phase, durablePlan.getTargetPhase());
+          assertArrayEquals(hash(1), durablePlan.getTarget().getBlockHash());
+          assertArrayEquals(planDigest, fixture.checkpoint().getMutationPlanDigest());
+
+          fixture.reopenParticipants();
+          AtomicInteger refreshes = new AtomicInteger();
+          RecoveryPlan recoveryPlan;
+          try (ArchiveParticipantRecoveryStorage recovery =
+              new ArchiveParticipantRecoveryStorage(fixture.archive, 4096,
+                  fixture.checkpointPath, fixture.engines(), fixture.readerPath, PARTICIPANTS,
+                  action -> action.run(), refreshes::incrementAndGet)) {
+            recoveryPlan = new ArchiveRecoveryExecutor(recovery).recover();
+          }
+
+          List<String> replayed = new ArrayList<>();
+          recoveryPlan.getActions().stream()
+              .filter(action -> action.getType() == ActionType.REPLAY_PARTICIPANT)
+              .forEach(action -> replayed.add(action.getParticipant()));
+          assertEquals(failAfterAccount
+              ? Collections.singletonList("account-asset") : PARTICIPANTS, replayed);
+          assertEquals(ActionType.PUBLISH_READER_HEAD,
+              recoveryPlan.getActions().get(recoveryPlan.getActions().size() - 1).getType());
+          assertEquals(1, refreshes.get());
+          assertArrayEquals(accountValue, fixture.account.get(address));
+          assertArrayEquals(assetValue, fixture.asset.get(assetKey));
+          assertP66Authority(fixture, planDigest);
+          assertFalse(Files.exists(
+              new ArchiveTargetMutationPlanFile(fixture.checkpointPath).getPath()));
+
+          fixture.reopenParticipants();
+          try (ArchiveParticipantRecoveryStorage fixed =
+              new ArchiveParticipantRecoveryStorage(fixture.archive, 4096,
+                  fixture.checkpointPath, fixture.engines(), fixture.readerPath, PARTICIPANTS)) {
+            assertEquals(0, new ArchiveRecoveryExecutor(fixed).recover().getActions().size());
+          }
+          assertArrayEquals(accountValue, fixture.account.get(address));
+          assertArrayEquals(assetValue, fixture.asset.get(assetKey));
+          assertP66Authority(fixture, planDigest);
+        }
+      }
+    }
+  }
+
+  @Test
+  public void p66ReaderDurableCrashReopenRetiresPlanWithoutBusinessReplay() throws Exception {
+    for (Phase phase : Arrays.asList(Phase.P66_ACTIVATION, Phase.P66_ON)) {
+      try (Fixture fixture = fixture("p66-reader-durable-" + phase.name().toLowerCase())) {
+        P66Vector vector = p66Vector(phase);
+        try (HistoryCommitStore history = fixture.openHistory()) {
+          ArchiveTargetApplyCoordinator coordinator = new ArchiveTargetApplyCoordinator(history,
+              fixture.checkpointPath, fixture.engines(), fixture.readerPath, PARTICIPANTS,
+              action -> action.run(), failAt(Stage.AFTER_READER,
+                  "injected after durable reader publication"), temporary -> { });
+          assertThrows(IOException.class,
+              () -> coordinator.apply(1, phase, vector.mutations, () -> { }));
+        }
+
+        ArchiveTargetMutationPlan durablePlan =
+            new ArchiveTargetMutationPlanFile(fixture.checkpointPath).loadRequired();
+        byte[] planDigest = durablePlan.digest();
+        assertEquals(phase, durablePlan.getTargetPhase());
+        assertP66BusinessAndAuthority(fixture, vector, planDigest);
+
+        fixture.reopenParticipants();
+        AtomicInteger refreshes = new AtomicInteger();
+        try (ArchiveParticipantRecoveryStorage recovery =
+            new ArchiveParticipantRecoveryStorage(fixture.archive, 4096,
+                fixture.checkpointPath, fixture.engines(), fixture.readerPath, PARTICIPANTS,
+                action -> action.run(), refreshes::incrementAndGet)) {
+          assertEquals(0, new ArchiveRecoveryExecutor(recovery).recover().getActions().size());
+        }
+        assertEquals(0, refreshes.get());
+        assertFalse(Files.exists(
+            new ArchiveTargetMutationPlanFile(fixture.checkpointPath).getPath()));
+        assertP66BusinessAndAuthority(fixture, vector, planDigest);
+
+        fixture.reopenParticipants();
+        try (ArchiveParticipantRecoveryStorage fixed =
+            new ArchiveParticipantRecoveryStorage(fixture.archive, 4096,
+                fixture.checkpointPath, fixture.engines(), fixture.readerPath, PARTICIPANTS)) {
+          assertEquals(0, new ArchiveRecoveryExecutor(fixed).recover().getActions().size());
+        }
+        assertP66BusinessAndAuthority(fixture, vector, planDigest);
+      }
+    }
+  }
+
+  @Test
+  public void p66RecoveryCrashReopenReplaysOnlySecondNativeParticipant() throws Exception {
+    for (Phase phase : Arrays.asList(Phase.P66_ACTIVATION, Phase.P66_ON)) {
+      try (Fixture fixture = fixture("p66-recovery-crash-" + phase.name().toLowerCase())) {
+        P66Vector vector = p66Vector(phase);
+        try (HistoryCommitStore history = fixture.openHistory()) {
+          ArchiveTargetApplyCoordinator coordinator = new ArchiveTargetApplyCoordinator(history,
+              fixture.checkpointPath, fixture.engines(), fixture.readerPath, PARTICIPANTS,
+              action -> action.run(), failAt(Stage.AFTER_CHECKPOINT,
+                  "injected after checkpoint"), temporary -> { });
+          assertThrows(IOException.class,
+              () -> coordinator.apply(1, phase, vector.mutations, () -> { }));
+        }
+        ArchiveTargetMutationPlan durablePlan =
+            new ArchiveTargetMutationPlanFile(fixture.checkpointPath).loadRequired();
+        byte[] planDigest = durablePlan.digest();
+        assertEquals(phase, durablePlan.getTargetPhase());
+
+        fixture.reopenParticipants();
+        try (ArchiveParticipantRecoveryStorage recovery =
+            new ArchiveParticipantRecoveryStorage(fixture.archive, 4096,
+                fixture.checkpointPath, fixture.engines(), fixture.readerPath, PARTICIPANTS)) {
+          assertThrows(ArchivePersistenceException.class,
+              () -> new ArchiveRecoveryExecutor(recovery, action -> {
+                if (action.getType() == ActionType.REPLAY_PARTICIPANT
+                    && "account".equals(action.getParticipant())) {
+                  throw new IOException("injected after recovered account");
+                }
+              }).recover());
+        }
+        assertArrayEquals(vector.accountValue, fixture.account.get(vector.address));
+        assertNull(fixture.asset.get(vector.assetKey));
+        assertEquals(1L, fixture.account.loadProgress().getEpoch());
+        assertEquals(0L, fixture.asset.loadProgress().getEpoch());
+        assertEquals(0L, fixture.reader().getEpoch());
+        assertArrayEquals(planDigest,
+            fixture.account.loadProgress().getMutationPlanDigest());
+
+        fixture.reopenParticipants();
+        RecoveryPlan recoveryPlan;
+        try (ArchiveParticipantRecoveryStorage recovery =
+            new ArchiveParticipantRecoveryStorage(fixture.archive, 4096,
+                fixture.checkpointPath, fixture.engines(), fixture.readerPath, PARTICIPANTS)) {
+          recoveryPlan = new ArchiveRecoveryExecutor(recovery).recover();
+        }
+        assertEquals(2, recoveryPlan.getActions().size());
+        assertEquals(ActionType.REPLAY_PARTICIPANT,
+            recoveryPlan.getActions().get(0).getType());
+        assertEquals("account-asset", recoveryPlan.getActions().get(0).getParticipant());
+        assertEquals(ActionType.PUBLISH_READER_HEAD,
+            recoveryPlan.getActions().get(1).getType());
+        assertP66BusinessAndAuthority(fixture, vector, planDigest);
+        assertFalse(Files.exists(
+            new ArchiveTargetMutationPlanFile(fixture.checkpointPath).getPath()));
+
+        fixture.reopenParticipants();
+        try (ArchiveParticipantRecoveryStorage fixed =
+            new ArchiveParticipantRecoveryStorage(fixture.archive, 4096,
+                fixture.checkpointPath, fixture.engines(), fixture.readerPath, PARTICIPANTS)) {
+          assertEquals(0, new ArchiveRecoveryExecutor(fixed).recover().getActions().size());
+        }
+        assertP66BusinessAndAuthority(fixture, vector, planDigest);
+      }
+    }
+  }
+
   private Fixture fixture(String name) throws Exception {
     return new Fixture(temporaryFolder.newFolder(name).toPath());
   }
@@ -132,6 +324,68 @@ public class ArchiveTargetApplyCoordinatorTest {
     plans.put("account-asset", Collections.singletonList(
         ArchiveParticipantMutation.put(bytes("normal"), bytes("account-asset"))));
     return plans;
+  }
+
+  private static Map<String, List<ArchiveParticipantMutation>> p66Mutations(byte[] address,
+      byte[] accountValue, byte[] assetKey, byte[] assetValue) {
+    Map<String, List<ArchiveParticipantMutation>> mutations = new LinkedHashMap<>();
+    mutations.put("account", Collections.singletonList(
+        ArchiveParticipantMutation.put(address, accountValue)));
+    mutations.put("account-asset", Collections.singletonList(
+        ArchiveParticipantMutation.put(assetKey, assetValue)));
+    return mutations;
+  }
+
+  private static byte[] accountAddress(int suffix) {
+    byte[] address = new byte[21];
+    address[0] = 0x41;
+    address[20] = (byte) suffix;
+    return address;
+  }
+
+  private static byte[] canonicalAccount(byte[] address, long balance) {
+    return Account.newBuilder().setAddress(ByteString.copyFrom(address))
+        .setAssetOptimized(true).setBalance(balance).build().toByteArray();
+  }
+
+  private static P66Vector p66Vector(Phase phase) {
+    byte[] address = accountAddress(7);
+    byte[] accountValue = canonicalAccount(address,
+        phase == Phase.P66_ACTIVATION ? 2_000L : 3_000L);
+    byte[] assetKey = new P66AccountAssetCodec().assetPhysicalKey(address, "1000007");
+    byte[] assetValue = ByteBuffer.allocate(Long.BYTES)
+        .putLong(phase == Phase.P66_ACTIVATION ? 30L : 40L).array();
+    return new P66Vector(address, accountValue, assetKey, assetValue,
+        p66Mutations(address, accountValue, assetKey, assetValue));
+  }
+
+  private static void assertP66BusinessAndAuthority(Fixture fixture, P66Vector vector,
+      byte[] planDigest) throws IOException {
+    assertArrayEquals(vector.accountValue, fixture.account.get(vector.address));
+    assertArrayEquals(vector.assetValue, fixture.asset.get(vector.assetKey));
+    assertP66Authority(fixture, planDigest);
+  }
+
+  private static void assertP66Authority(Fixture fixture, byte[] planDigest) throws IOException {
+    ArchiveProgressEnvelope checkpoint = fixture.checkpoint();
+    ArchiveProgressEnvelope reader = fixture.reader();
+    assertEquals(1L, checkpoint.getEpoch());
+    assertEquals(1L, reader.getEpoch());
+    assertArrayEquals(hash(1), checkpoint.getBlockHash());
+    assertArrayEquals(hash(1), reader.getBlockHash());
+    assertArrayEquals(planDigest, checkpoint.getMutationPlanDigest());
+    assertArrayEquals(planDigest, fixture.account.loadProgress().getMutationPlanDigest());
+    assertArrayEquals(planDigest, fixture.asset.loadProgress().getMutationPlanDigest());
+    assertArrayEquals(planDigest, reader.getMutationPlanDigest());
+  }
+
+  private static ArchiveTargetApplyCoordinator.FaultHook failAt(Stage expected,
+      String message) {
+    return (stage, participant) -> {
+      if (stage == expected) {
+        throw new IOException(message);
+      }
+    };
   }
 
   private static void failAfterStage(FailurePoint point, Stage stage, String participant)
@@ -168,12 +422,29 @@ public class ArchiveTargetApplyCoordinatorTest {
     }
   }
 
+  private static final class P66Vector {
+    private final byte[] address;
+    private final byte[] accountValue;
+    private final byte[] assetKey;
+    private final byte[] assetValue;
+    private final Map<String, List<ArchiveParticipantMutation>> mutations;
+
+    private P66Vector(byte[] address, byte[] accountValue, byte[] assetKey, byte[] assetValue,
+        Map<String, List<ArchiveParticipantMutation>> mutations) {
+      this.address = address;
+      this.accountValue = accountValue;
+      this.assetKey = assetKey;
+      this.assetValue = assetValue;
+      this.mutations = mutations;
+    }
+  }
+
   private static final class Fixture implements AutoCloseable {
     private final Path archive;
     private final Path checkpointPath;
     private final Path readerPath;
-    private final LevelDbArchiveParticipant account;
-    private final RocksDbArchiveParticipant asset;
+    private LevelDbArchiveParticipant account;
+    private RocksDbArchiveParticipant asset;
     private final ArchiveProgressEnvelopeCodec codec = new ArchiveProgressEnvelopeCodec();
 
     private Fixture(Path archive) throws Exception {
@@ -185,12 +456,31 @@ public class ArchiveTargetApplyCoordinatorTest {
           global(Kind.APPLY_CHECKPOINT, markers.get(0)));
       new ArchiveProgressFile(readerPath, codec).store(
           global(Kind.READER_VISIBLE, markers.get(0)));
-      account = new LevelDbArchiveParticipant(
-          archive.resolve("participants/account"), "account", PARTICIPANTS);
-      asset = new RocksDbArchiveParticipant(
-          archive.resolve("participants/account-asset"), "account-asset", PARTICIPANTS);
+      openParticipants();
       account.apply(Collections.emptyList(), participant("account", markers.get(0)));
       asset.apply(Collections.emptyList(), participant("account-asset", markers.get(0)));
+    }
+
+    private void reopenParticipants() throws IOException {
+      closeParticipants();
+      openParticipants();
+    }
+
+    private void openParticipants() throws IOException {
+      account = new LevelDbArchiveParticipant(
+          archive.resolve("participants/account"), "account", PARTICIPANTS);
+      try {
+        asset = new RocksDbArchiveParticipant(
+            archive.resolve("participants/account-asset"), "account-asset", PARTICIPANTS);
+      } catch (IOException | RuntimeException failure) {
+        account.close();
+        throw failure;
+      }
+    }
+
+    private void closeParticipants() throws IOException {
+      asset.close();
+      account.close();
     }
 
     private HistoryCommitStore openHistory() throws IOException {
@@ -214,8 +504,7 @@ public class ArchiveTargetApplyCoordinatorTest {
 
     @Override
     public void close() throws IOException {
-      asset.close();
-      account.close();
+      closeParticipants();
     }
   }
 

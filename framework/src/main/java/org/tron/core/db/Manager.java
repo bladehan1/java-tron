@@ -115,13 +115,10 @@ import org.tron.core.db.api.EnergyPriceHistoryLoader;
 import org.tron.core.db.api.MigrateTurkishKeyHelper;
 import org.tron.core.db.api.MoveAbiHelper;
 import org.tron.core.db2.ISession;
-import org.tron.core.db2.archive.AccountAssetArchiveProjector;
 import org.tron.core.db2.archive.ArchiveHistoryWriter;
-import org.tron.core.db2.archive.ArchiveStoreScope;
-import org.tron.core.db2.archive.AsyncArchiveHistorySink;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
 import org.tron.core.db2.archive.HistoricalAccountBalanceReader;
-import org.tron.core.db2.archive.SnapshotOldValueCollector;
+import org.tron.core.db2.archive.StateArchiveRuntimeOwner;
 import org.tron.core.db2.core.Chainbase;
 import org.tron.core.db2.core.SnapshotManager;
 import org.tron.core.exception.AccountResourceInsufficientException;
@@ -198,6 +195,8 @@ public class Manager {
   private static final int SLEEP_FOR_WAIT_LOCK = 10;
   @Getter
   private ArchiveHistoryWriter archiveHistoryWriter;
+  @Getter
+  private StateArchiveRuntimeOwner stateArchiveRuntime;
   private static final int NO_BLOCK_WAITING_LOCK = 0;
   private final int shieldedTransInPendingMaxCounts =
       Args.getInstance().getShieldedTransInPendingMaxCounts();
@@ -621,43 +620,43 @@ public class Manager {
 
   private void initStateArchive() {
     org.tron.core.config.args.Storage storage = Args.getInstance().getStorage();
+    Path archiveDirectory = Paths.get(Args.getInstance().getOutputDirectory(),
+        storage.getStateArchiveDirectory()).normalize();
+    StateArchiveBasePreflight.requireRecoverable(storage.isStateArchiveEnabled(),
+        archiveDirectory);
     if (!storage.isStateArchiveEnabled()) {
       return;
     }
     if (!(revokingStore instanceof SnapshotManager)) {
       throw new IllegalStateException("State archive requires SnapshotManager");
     }
-    Path archiveDirectory = Paths.get(Args.getInstance().getOutputDirectory(),
-        storage.getStateArchiveDirectory()).normalize();
+    StateArchiveRuntimeOwner recovered = null;
     try {
-      ArchiveHistoryWriter writer = new ArchiveHistoryWriter(archiveDirectory,
-          storage.getStateArchiveMaxSegmentSize(), ArchiveStoreScope.getStateDatabases());
-      BlockSnapshotMeta archiveHead = writer.committedHeadMeta();
+      recovered = StateArchiveRuntimeOwner.recover((SnapshotManager) revokingStore,
+          archiveDirectory, storage.getStateArchiveMaxSegmentSize(), storage.getDbEngine());
+      BlockSnapshotMeta archiveHead = recovered.getRecoveredHead();
       if (archiveHead != null
           && (archiveHead.getBlockNumber()
           != getDynamicPropertiesStore().getLatestBlockHeaderNumber()
           || !Arrays.equals(archiveHead.getBlockHash(),
           getDynamicPropertiesStore().getLatestBlockHeaderHash().getBytes()))) {
-        writer.close();
         throw new IllegalStateException(
             "State archive committed head differs from the persisted state root");
       }
-      AsyncArchiveHistorySink sink = new AsyncArchiveHistorySink(writer,
-          storage.getStateArchiveQueueCapacity());
-      AccountAssetArchiveProjector projector = new AccountAssetArchiveProjector();
-      ((SnapshotManager) revokingStore).installArchiveCollector(
-          new SnapshotOldValueCollector(projector,
-              accountKey -> chainBaseManager.getAccountAssetStore().prefixQuery(accountKey),
-              () -> getDynamicPropertiesStore().supportAllowAccountAssetOptimization()), sink);
-      archiveHistoryWriter = writer;
-      if (archiveHead != null) {
-        ((SnapshotManager) revokingStore).markArchiveReadableThrough(archiveHead.getEpoch());
+      stateArchiveRuntime = recovered;
+      recovered = null;
+      logger.info("State archive startup recovered: directory={}, head={}, actions={}, engine={}",
+          archiveDirectory, archiveHead.getBlockNumber(),
+          stateArchiveRuntime.getStartupRecoveryActionCount(), storage.getDbEngine());
+    } catch (java.io.IOException | RuntimeException failure) {
+      if (recovered != null) {
+        try {
+          recovered.close();
+        } catch (java.io.IOException | RuntimeException closeFailure) {
+          failure.addSuppressed(closeFailure);
+        }
       }
-      logger.info("Experimental state archive enabled: directory={}, maxSegmentSize={}, queue={}",
-          archiveDirectory, storage.getStateArchiveMaxSegmentSize(),
-          storage.getStateArchiveQueueCapacity());
-    } catch (java.io.IOException failure) {
-      throw new IllegalStateException("Failed to initialize experimental state archive", failure);
+      throw new IllegalStateException("Failed to recover State Archive startup", failure);
     }
   }
 
@@ -2746,9 +2745,23 @@ public class Manager {
     stopFilterProcessThread();
     stopValidateSignThread();
     rewardViCalService.stop();
+    closeStateArchive();
     chainBaseManager.shutdown();
     revokingStore.shutdown();
     session.reset();
+  }
+
+  private void closeStateArchive() {
+    StateArchiveRuntimeOwner runtime = stateArchiveRuntime;
+    if (runtime == null) {
+      return;
+    }
+    try {
+      runtime.close();
+      stateArchiveRuntime = null;
+    } catch (java.io.IOException failure) {
+      throw new IllegalStateException("Failed to close State Archive runtime", failure);
+    }
   }
 
   private static class ValidateSignTask implements Callable<Boolean> {

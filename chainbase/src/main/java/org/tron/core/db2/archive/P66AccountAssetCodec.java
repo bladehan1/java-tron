@@ -58,15 +58,38 @@ public final class P66AccountAssetCodec {
     if (!phase.directAssetsEnabled()) {
       throw new ArchivePersistenceException("P66-off state must not contain direct asset rows");
     }
-    byte[] address = requireAddress(accountAddress);
-    byte[] token = requireTokenId(tokenId);
-    byte[] key = ByteBuffer.allocate(address.length + token.length)
-        .put(address)
-        .put(token)
-        .array();
+    byte[] key = assetPhysicalKey(accountAddress, tokenId);
     PostValue value = balance == 0 ? PostValue.absent()
         : PostValue.present(ByteBuffer.allocate(BALANCE_LENGTH).putLong(balance).array());
     return new AssetRow(key, value);
+  }
+
+  /** Builds the exact direct-row physical key while rejecting non-canonical token identities. */
+  public byte[] assetPhysicalKey(byte[] accountAddress, String tokenId) {
+    byte[] address = requireAddress(accountAddress);
+    byte[] token = requireTokenId(tokenId);
+    return ByteBuffer.allocate(address.length + token.length)
+        .put(address)
+        .put(token)
+        .array();
+  }
+
+  /** Decodes an Account and verifies that it is canonical for the target P66 phase. */
+  public Account decodeCanonicalAccount(Phase phase, byte[] physicalAccountKey,
+      byte[] canonicalAccountValue) {
+    Objects.requireNonNull(phase, "phase");
+    byte[] accountKey = requireAddress(physicalAccountKey);
+    Account account = parseAccount(canonicalAccountValue);
+    requireAccountAddress(accountKey, account);
+    if (phase.directAssetsEnabled()) {
+      if (!account.getAssetOptimized() || !account.getAssetMap().isEmpty()
+          || !account.getAssetV2Map().isEmpty()) {
+        throw new ArchivePersistenceException("P66-on durable Account layout is mixed");
+      }
+    } else if (account.getAssetOptimized()) {
+      throw new ArchivePersistenceException("P66-off durable Account layout is mixed");
+    }
+    return account;
   }
 
   /** Decodes a PRESENT direct row and rejects the non-canonical stored zero representation. */
@@ -89,21 +112,16 @@ public final class P66AccountAssetCodec {
       byte[] canonicalAccountValue, List<AssetRow> directRows) {
     Objects.requireNonNull(phase, "phase");
     byte[] accountKey = requireAddress(physicalAccountKey);
-    Account account = parseAccount(canonicalAccountValue);
-    requireAccountAddress(accountKey, account);
+    decodeCanonicalAccount(phase, accountKey, canonicalAccountValue);
     List<AssetRow> rows = new ArrayList<>(Objects.requireNonNull(directRows, "directRows"));
     if (rows.contains(null)) {
       throw new ArchivePersistenceException("Canonical AccountAsset rows contain null");
     }
     if (!phase.directAssetsEnabled()) {
-      if (account.getAssetOptimized() || !rows.isEmpty()) {
+      if (!rows.isEmpty()) {
         throw new ArchivePersistenceException("P66-off durable layout is mixed");
       }
       return;
-    }
-    if (!account.getAssetOptimized() || !account.getAssetMap().isEmpty()
-        || !account.getAssetV2Map().isEmpty()) {
-      throw new ArchivePersistenceException("P66-on durable Account layout is mixed");
     }
     byte[] previous = null;
     for (AssetRow row : rows) {

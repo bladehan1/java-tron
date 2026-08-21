@@ -16,7 +16,7 @@ import org.tron.core.db2.archive.ArchiveRecoveryExecutor.RecoverySnapshot;
 /** Advances one standalone normal target through C, mixed D, latest refresh, and R. */
 public final class ArchiveTargetApplyCoordinator {
 
-  private final HistoryCommitStore history;
+  private final CommittedHistoryAuthority history;
   private final ArchiveProgressFile checkpointFile;
   private final ArchiveTargetMutationPlanFile mutationPlanFile;
   private final Map<String, ArchiveParticipant> participantEngines;
@@ -25,14 +25,14 @@ public final class ArchiveTargetApplyCoordinator {
   private final ArchiveReaderPublicationGate publicationGate;
   private final FaultHook faultHook;
 
-  public ArchiveTargetApplyCoordinator(HistoryCommitStore history, Path checkpointPath,
+  public ArchiveTargetApplyCoordinator(CommittedHistoryAuthority history, Path checkpointPath,
       Map<String, ? extends ArchiveParticipant> participantEngines, Path readerVisiblePath,
       List<String> participants, ArchiveStateBarrier barrier) {
     this(history, checkpointPath, participantEngines, readerVisiblePath, participants, barrier,
         (stage, participant) -> { }, temporary -> { }, (stage, path) -> { });
   }
 
-  ArchiveTargetApplyCoordinator(HistoryCommitStore history, Path checkpointPath,
+  ArchiveTargetApplyCoordinator(CommittedHistoryAuthority history, Path checkpointPath,
       Map<String, ? extends ArchiveParticipant> participantEngines, Path readerVisiblePath,
       List<String> participants, ArchiveStateBarrier barrier, FaultHook faultHook,
       ArchiveProgressFile.FaultHook publicationFaultHook) {
@@ -40,7 +40,7 @@ public final class ArchiveTargetApplyCoordinator {
         faultHook, publicationFaultHook, (stage, path) -> { });
   }
 
-  ArchiveTargetApplyCoordinator(HistoryCommitStore history, Path checkpointPath,
+  ArchiveTargetApplyCoordinator(CommittedHistoryAuthority history, Path checkpointPath,
       Map<String, ? extends ArchiveParticipant> participantEngines, Path readerVisiblePath,
       List<String> participants, ArchiveStateBarrier barrier, FaultHook faultHook,
       ArchiveProgressFile.FaultHook publicationFaultHook,

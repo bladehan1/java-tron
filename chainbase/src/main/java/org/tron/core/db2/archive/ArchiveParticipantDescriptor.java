@@ -14,10 +14,10 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
-/** Approved archive participant identity with stable Store IDs and reserved tombstones. */
+/** Approved archive participant identity with stable Store IDs. */
 final class ArchiveParticipantDescriptor {
 
-  static final String FORMAT_ID = "archive-state/exact-26-abi-tombstone/v1";
+  static final String FORMAT_ID = "archive-state/exact-27-abi-retained/v1";
   static final int ABI_STORE_ID = 1;
 
   private static final ArchiveParticipantDescriptor CURRENT =
@@ -31,6 +31,7 @@ final class ArchiveParticipantDescriptor {
 
   private ArchiveParticipantDescriptor() {
     LinkedHashMap<Integer, String> stores = new LinkedHashMap<>();
+    stores.put(ABI_STORE_ID, "abi");
     stores.put(2, "accountid-index");
     stores.put(3, "account-index");
     stores.put(4, "account");
@@ -59,9 +60,7 @@ final class ArchiveParticipantDescriptor {
     stores.put(27, "IncrementalMerkleTree");
     activeByStoreId = Collections.unmodifiableMap(stores);
 
-    LinkedHashMap<Integer, String> tombstones = new LinkedHashMap<>();
-    tombstones.put(ABI_STORE_ID, "abi");
-    tombstonesByStoreId = Collections.unmodifiableMap(tombstones);
+    tombstonesByStoreId = Collections.emptyMap();
 
     activeDatabases = Collections.unmodifiableSet(
         new LinkedHashSet<>(activeByStoreId.values()));
@@ -136,13 +135,13 @@ final class ArchiveParticipantDescriptor {
       expected.add(storeId);
     }
     if (!allIds.equals(new LinkedHashSet<>(expected))
-        || activeDatabases.size() != 26
-        || !tombstonesByStoreId.equals(
-            Collections.singletonMap(ABI_STORE_ID, "abi"))
+        || activeDatabases.size() != 27
+        || !tombstonesByStoreId.isEmpty()
         || !Collections.disjoint(activeDatabases, excludedDatabases)
+        || !activeDatabases.contains("abi")
         || !activeDatabases.containsAll(
             Arrays.asList("asset-issue", "asset-issue-v2"))) {
-      throw new IllegalStateException("Invalid exact-26 archive participant descriptor");
+      throw new IllegalStateException("Invalid exact-27 archive participant descriptor");
     }
   }
 }

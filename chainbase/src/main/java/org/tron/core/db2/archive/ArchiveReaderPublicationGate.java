@@ -16,7 +16,7 @@ import org.tron.core.db2.archive.ArchiveProgressEnvelope.Kind;
 /** Publishes reader-visible R only after fresh H/C/D identity convergence under one barrier. */
 public final class ArchiveReaderPublicationGate {
 
-  private final HistoryCommitStore history;
+  private final CommittedHistoryAuthority history;
   private final ProgressSource checkpointSource;
   private final Map<String, ArchiveParticipantProgressSource> participantSources;
   private final Path readerVisiblePath;
@@ -25,7 +25,7 @@ public final class ArchiveReaderPublicationGate {
   private final List<String> participants;
   private final ArchiveStateBarrier barrier;
 
-  public ArchiveReaderPublicationGate(HistoryCommitStore history,
+  public ArchiveReaderPublicationGate(CommittedHistoryAuthority history,
       ProgressSource checkpointSource,
       Map<String, ? extends ArchiveParticipantProgressSource> participantSources,
       Path readerVisiblePath, List<String> participants, ArchiveStateBarrier barrier) {
@@ -33,7 +33,7 @@ public final class ArchiveReaderPublicationGate {
         temporary -> { });
   }
 
-  ArchiveReaderPublicationGate(HistoryCommitStore history,
+  ArchiveReaderPublicationGate(CommittedHistoryAuthority history,
       ProgressSource checkpointSource,
       Map<String, ? extends ArchiveParticipantProgressSource> participantSources,
       Path readerVisiblePath, List<String> participants, ArchiveStateBarrier barrier,
@@ -56,7 +56,7 @@ public final class ArchiveReaderPublicationGate {
     this.barrier = Objects.requireNonNull(barrier, "barrier");
   }
 
-  public static ArchiveReaderPublicationGate forFiles(HistoryCommitStore history,
+  public static ArchiveReaderPublicationGate forFiles(CommittedHistoryAuthority history,
       Path checkpointPath, Map<String, Path> participantPaths, Path readerVisiblePath,
       List<String> participants, ArchiveStateBarrier barrier) {
     Objects.requireNonNull(checkpointPath, "checkpointPath");
