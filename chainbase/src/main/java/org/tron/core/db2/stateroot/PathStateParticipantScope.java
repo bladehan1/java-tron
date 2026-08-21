@@ -13,9 +13,9 @@ import java.util.Set;
 /**
  * Fail-closed participant registry for one path-state root format.
  *
- * <p>TASK-016 has approved ABI and both AssetIssue stores for inclusion, while the complete
- * execution-state exact-set remains an H1-L1 gate. This class therefore validates the supplied
- * immutable scope and the three mandatory names without inventing the remaining registry.
+ * <p>The current exact-set is defined by {@link PathStateParticipantDescriptor}. This lower-level
+ * class still accepts a supplied immutable scope so standalone trie tests do not imply an approved
+ * per-Store canonical value format before that separate gate is complete.
  */
 public final class PathStateParticipantScope {
 
