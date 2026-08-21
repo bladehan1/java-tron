@@ -98,6 +98,28 @@ public class PathMerkleTrieTest {
     assertThrows(NullPointerException.class, () -> trie.delete(null));
   }
 
+  @Test
+  public void detectsMissingCorruptAndDirtyCommittedNodes() {
+    InMemoryPathNodeStore corruptStore = new InMemoryPathNodeStore();
+    PathMerkleTrie corruptTrie = new PathMerkleTrie(corruptStore);
+    corruptTrie.put(filledKey(0x55), value("value"));
+    corruptTrie.rootHash();
+    corruptTrie.verifyNodeStore();
+    corruptStore.nodes.put("", new byte[]{1});
+    assertThrows(IllegalStateException.class, corruptTrie::verifyNodeStore);
+
+    InMemoryPathNodeStore missingStore = new InMemoryPathNodeStore();
+    PathMerkleTrie missingTrie = new PathMerkleTrie(missingStore);
+    missingTrie.put(filledKey(0x66), value("value"));
+    missingTrie.rootHash();
+    missingStore.nodes.remove("");
+    assertThrows(IllegalStateException.class, missingTrie::verifyNodeStore);
+
+    PathMerkleTrie dirtyTrie = new PathMerkleTrie(new InMemoryPathNodeStore());
+    dirtyTrie.put(filledKey(0x77), value("value"));
+    assertThrows(IllegalStateException.class, dirtyTrie::verifyNodeStore);
+  }
+
   private static byte[] referenceRoot(byte[][] keys, byte[][] values) {
     TrieImpl reference = new TrieImpl();
     reference.setAsync(false);
