@@ -7,7 +7,10 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
 import java.util.Objects;
 import org.iq80.leveldb.DB;
 import org.iq80.leveldb.WriteOptions;
@@ -57,13 +60,23 @@ final class PathStateNativeNodeStore implements Closeable {
   }
 
   synchronized void put(byte[] key, byte[] value) {
-    requireOpen();
-    delegate.put(nonEmpty(key, "key"), nonEmpty(value, "value"));
+    writeBatch(Collections.singletonList(BatchMutation.put(key, value)));
   }
 
   synchronized void delete(byte[] key) {
+    writeBatch(Collections.singletonList(BatchMutation.delete(key)));
+  }
+
+  synchronized void writeBatch(List<BatchMutation> mutations) {
     requireOpen();
-    delegate.delete(nonEmpty(key, "key"));
+    List<BatchMutation> owned = new ArrayList<>(Objects.requireNonNull(mutations, "mutations"));
+    if (owned.isEmpty()) {
+      throw new IllegalArgumentException("path-state native batch must not be empty");
+    }
+    for (int index = 0; index < owned.size(); index++) {
+      owned.set(index, new BatchMutation(Objects.requireNonNull(owned.get(index), "mutation")));
+    }
+    delegate.writeBatch(owned);
   }
 
   Path getDirectory() {
@@ -100,9 +113,7 @@ final class PathStateNativeNodeStore implements Closeable {
 
     byte[] get(byte[] key);
 
-    void put(byte[] key, byte[] value);
-
-    void delete(byte[] key);
+    void writeBatch(List<BatchMutation> mutations);
   }
 
   private static final class LevelDelegate implements Delegate {
@@ -121,13 +132,19 @@ final class PathStateNativeNodeStore implements Closeable {
     }
 
     @Override
-    public void put(byte[] key, byte[] value) {
-      database.put(key, value, syncWrites);
-    }
-
-    @Override
-    public void delete(byte[] key) {
-      database.delete(key, syncWrites);
+    public void writeBatch(List<BatchMutation> mutations) {
+      try (org.iq80.leveldb.WriteBatch batch = database.createWriteBatch()) {
+        for (BatchMutation mutation : mutations) {
+          if (mutation.value == null) {
+            batch.delete(mutation.key);
+          } else {
+            batch.put(mutation.key, mutation.value);
+          }
+        }
+        database.write(batch, syncWrites);
+      } catch (IOException failure) {
+        throw new IllegalStateException("failed to apply path-state LevelDB node batch", failure);
+      }
     }
 
     @Override
@@ -164,20 +181,18 @@ final class PathStateNativeNodeStore implements Closeable {
     }
 
     @Override
-    public void put(byte[] key, byte[] value) {
-      try {
-        database.put(syncWrites, key, value);
+    public void writeBatch(List<BatchMutation> mutations) {
+      try (org.rocksdb.WriteBatch batch = new org.rocksdb.WriteBatch()) {
+        for (BatchMutation mutation : mutations) {
+          if (mutation.value == null) {
+            batch.delete(mutation.key);
+          } else {
+            batch.put(mutation.key, mutation.value);
+          }
+        }
+        database.write(syncWrites, batch);
       } catch (RocksDBException failure) {
-        throw new IllegalStateException("failed to write path-state RocksDB node", failure);
-      }
-    }
-
-    @Override
-    public void delete(byte[] key) {
-      try {
-        database.delete(syncWrites, key);
-      } catch (RocksDBException failure) {
-        throw new IllegalStateException("failed to delete path-state RocksDB node", failure);
+        throw new IllegalStateException("failed to apply path-state RocksDB node batch", failure);
       }
     }
 
@@ -186,6 +201,29 @@ final class PathStateNativeNodeStore implements Closeable {
       syncWrites.close();
       database.close();
       options.close();
+    }
+  }
+
+  static final class BatchMutation {
+
+    private final byte[] key;
+    private final byte[] value;
+
+    private BatchMutation(byte[] key, byte[] value) {
+      this.key = nonEmpty(key, "key");
+      this.value = value == null ? null : nonEmpty(value, "value");
+    }
+
+    private BatchMutation(BatchMutation mutation) {
+      this(mutation.key, mutation.value);
+    }
+
+    static BatchMutation put(byte[] key, byte[] value) {
+      return new BatchMutation(key, Objects.requireNonNull(value, "value"));
+    }
+
+    static BatchMutation delete(byte[] key) {
+      return new BatchMutation(key, null);
     }
   }
 }

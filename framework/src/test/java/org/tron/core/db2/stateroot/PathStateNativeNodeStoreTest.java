@@ -64,11 +64,16 @@ public class PathStateNativeNodeStoreTest {
   public void baseStoreSetCreatesExact27PlusSuperAndPersistsRootNodes() throws Exception {
     PathStateStoreManifest manifest = manifest("base-set", Engine.ROCKSDB);
     byte[] rootHash;
+    PathStateRootMetadata progress;
     try (PathStateNodeStoreSet stores = PathStateNodeStoreSet.openBase(manifest)) {
       PathStateRoot root = stores.createRoot();
       root.apply(Collections.singletonList(
           PathStateMutation.put("proposal", new byte[]{1}, new byte[]{2})));
       rootHash = root.rootHash();
+      progress = PathStateRootMetadata.base(100, bytes(1), bytes(2), 300,
+          P66Phase.P66_ON, manifest.getIdentityDigest(), rootHash, bytes(3));
+      stores.commit(progress);
+      assertArrayEquals(progress.encode(), stores.getProgress().encode());
       root.verifyNodeStores();
       assertThrows(IllegalStateException.class, stores::createRoot);
     }
@@ -79,6 +84,31 @@ public class PathStateNativeNodeStoreTest {
       assertNotNull(nodes.get(namespaceRootKey(21)));
       assertNotNull(nodes.get(namespaceRootKey(0)));
       assertEquals(32, rootHash.length);
+    }
+    try (PathStateNodeStoreSet reopened = PathStateNodeStoreSet.openBase(manifest)) {
+      assertArrayEquals(progress.encode(), reopened.getProgress().encode());
+      assertThrows(IllegalStateException.class, reopened::createRoot);
+    }
+  }
+
+  @Test
+  public void rejectedProgressDoesNotFlushPendingNodes() throws Exception {
+    PathStateStoreManifest manifest = manifest("rejected-progress", Engine.ROCKSDB);
+    try (PathStateNodeStoreSet stores = PathStateNodeStoreSet.openBase(manifest)) {
+      PathStateRoot root = stores.createRoot();
+      root.apply(Collections.singletonList(
+          PathStateMutation.put("proposal", new byte[]{1}, new byte[]{2})));
+      root.rootHash();
+      PathStateRootMetadata mismatch = PathStateRootMetadata.base(100, bytes(1), bytes(2), 300,
+          P66Phase.P66_ON, manifest.getIdentityDigest(), bytes(9), bytes(3));
+      assertThrows(IllegalArgumentException.class, () -> stores.commit(mismatch));
+      assertNull(stores.getProgress());
+    }
+
+    try (PathStateNativeNodeStore nodes = PathStateNativeNodeStore.open(
+        manifest.getBaseDirectory().resolve("nodes"), Engine.ROCKSDB)) {
+      assertNull(nodes.get(namespaceRootKey(21)));
+      assertNull(nodes.get(namespaceRootKey(0)));
     }
   }
 
@@ -123,13 +153,22 @@ public class PathStateNativeNodeStoreTest {
   }
 
   private byte[] rootFor(PathStateStoreManifest manifest) throws Exception {
+    byte[] stateRoot;
+    PathStateRootMetadata progress;
     try (PathStateNodeStoreSet stores = PathStateNodeStoreSet.openBase(manifest)) {
       PathStateRoot root = stores.createRoot();
       root.apply(Arrays.asList(
           PathStateMutation.put("proposal", new byte[]{1}, new byte[]{2}),
           PathStateMutation.put("account", new byte[]{3}, new byte[]{4})));
-      return root.rootHash();
+      stateRoot = root.rootHash();
+      progress = PathStateRootMetadata.base(100, bytes(1), bytes(2), 300,
+          P66Phase.P66_ON, manifest.getIdentityDigest(), stateRoot, bytes(3));
+      stores.commit(progress);
     }
+    try (PathStateNodeStoreSet reopened = PathStateNodeStoreSet.openBase(manifest)) {
+      assertArrayEquals(progress.encode(), reopened.getProgress().encode());
+    }
+    return stateRoot;
   }
 
   private PathStateStoreManifest manifest(String name, Engine engine) throws Exception {
