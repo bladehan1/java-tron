@@ -1,6 +1,7 @@
 package org.tron.core.db2.archive;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
@@ -11,19 +12,67 @@ import static org.mockito.Mockito.when;
 
 import java.io.Closeable;
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.OptionalLong;
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
 import org.tron.core.db2.archive.ArchiveReadSnapshot.PinnedHistory;
 import org.tron.core.db2.archive.ArchiveReadSnapshot.PinnedLatestState;
 import org.tron.core.db2.archive.ArchiveRuntimeQueryGate.Lease;
+import org.tron.core.db2.archive.P66AccountAssetCodec.Phase;
 import org.tron.core.db2.archive.StateArchiveRuntimeOwner.State;
 import org.tron.core.db2.core.SnapshotManager;
 
 public class StateArchiveRuntimeOwnerTest {
+
+  @Rule
+  public TemporaryFolder temporaryFolder = new TemporaryFolder();
+
+  @Test
+  public void freshBootstrapPublishesRecoverableExact27FixedPoint() throws Exception {
+    for (String engine : Arrays.asList("LEVELDB", "ROCKSDB")) {
+      Path parent = temporaryFolder.newFolder("bootstrap-" + engine.toLowerCase()).toPath();
+      Path archive = parent.resolve("state-archive");
+      BlockSnapshotMeta head = BlockSnapshotMeta.forBlock(123, hash(123), hash(122), 456_000L);
+      SnapshotManager snapshots = new SnapshotManager("");
+
+      try (StateArchiveRuntimeOwner owner = StateArchiveRuntimeOwner.bootstrapAndRecover(
+          snapshots, archive, 4096, engine, head, Phase.P66_ON)) {
+        assertEquals(head, owner.getRecoveredHead());
+        assertEquals(0, owner.getStartupRecoveryActionCount());
+        assertEquals(State.RECOVERED, owner.getState());
+      }
+
+      assertTrue(Files.isRegularFile(archive.resolve("MANIFEST")));
+      assertTrue(Files.isRegularFile(archive.resolve("progress/checkpoint.progress")));
+      assertTrue(Files.isRegularFile(archive.resolve("progress/reader.progress")));
+      try (java.util.stream.Stream<Path> entries = Files.list(parent)) {
+        assertFalse(entries.anyMatch(path -> path.getFileName().toString()
+            .startsWith(".state-archive.bootstrap-")));
+      }
+      try (StateArchiveRuntimeOwner reopened = StateArchiveRuntimeOwner.recover(
+          snapshots, archive, 4096, engine)) {
+        assertEquals(head, reopened.getRecoveredHead());
+        assertEquals(0, reopened.getStartupRecoveryActionCount());
+      }
+      try (ArchiveHistoryWriter writer = new ArchiveHistoryWriter(
+          archive, 4096, ArchiveStoreScope.getStateDatabases())) {
+        byte[] address = new byte[21];
+        assertThrows(IllegalArgumentException.class,
+            () -> writer.readAccountAt(122, address, null));
+        assertFalse(writer.readAccountAt(123, address, null).isPresent());
+      }
+      assertThrows(ArchivePersistenceException.class,
+          () -> StateArchiveRuntimeOwner.bootstrapAndRecover(snapshots, archive, 4096,
+              engine, head, Phase.P66_ON));
+    }
+  }
 
   @Test
   public void activeQueryStopsCloseAfterDetachAndDrainedRetryClosesInOrder()
@@ -136,6 +185,12 @@ public class StateArchiveRuntimeOwnerTest {
     when(history.getHeadHash()).thenReturn(hash);
     when(history.getAuthoritativePrefixDigest()).thenReturn(new byte[0]);
     return ArchiveReadSnapshot.pin(0, 0, hash, serving, latest, history);
+  }
+
+  private static byte[] hash(int suffix) {
+    byte[] hash = new byte[32];
+    hash[31] = (byte) suffix;
+    return hash;
   }
 
   private static final class Fixture {

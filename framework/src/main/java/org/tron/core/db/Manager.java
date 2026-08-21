@@ -118,9 +118,12 @@ import org.tron.core.db2.ISession;
 import org.tron.core.db2.archive.AccountAssetArchiveProjector;
 import org.tron.core.db2.archive.AccountAssetBlockProjectionBridge;
 import org.tron.core.db2.archive.AccountAssetBlockProjectionBridge.TargetAssetOptimization;
+import org.tron.core.db2.archive.ArchiveFormatAdmissionValidator.Result;
+import org.tron.core.db2.archive.ArchiveFormatAdmissionValidator.Status;
 import org.tron.core.db2.archive.ArchiveHistoryWriter;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
 import org.tron.core.db2.archive.HistoricalAccountBalanceReader;
+import org.tron.core.db2.archive.P66AccountAssetCodec.Phase;
 import org.tron.core.db2.archive.SnapshotOldValueCollector;
 import org.tron.core.db2.archive.StateArchiveRuntimeOwner;
 import org.tron.core.db2.core.Chainbase;
@@ -626,7 +629,7 @@ public class Manager {
     org.tron.core.config.args.Storage storage = Args.getInstance().getStorage();
     Path archiveDirectory = Paths.get(Args.getInstance().getOutputDirectory(),
         storage.getStateArchiveDirectory()).normalize();
-    StateArchiveBasePreflight.requireRecoverable(storage.isStateArchiveEnabled(),
+    Result admission = StateArchiveBasePreflight.requireAdmitted(storage.isStateArchiveEnabled(),
         archiveDirectory);
     if (!storage.isStateArchiveEnabled()) {
       return;
@@ -636,8 +639,23 @@ public class Manager {
     }
     StateArchiveRuntimeOwner recovered = null;
     try {
-      recovered = StateArchiveRuntimeOwner.recover((SnapshotManager) revokingStore,
-          archiveDirectory, storage.getStateArchiveMaxSegmentSize(), storage.getDbEngine());
+      if (admission.getStatus() == Status.EMPTY_NEW) {
+        long headNumber = getDynamicPropertiesStore().getLatestBlockHeaderNumber();
+        BlockCapsule headBlock = chainBaseManager.getBlockByNum(headNumber);
+        BlockSnapshotMeta baseHead = BlockSnapshotMeta.forBlock(headNumber,
+            getDynamicPropertiesStore().getLatestBlockHeaderHash().getBytes(),
+            headBlock.getParentHash().getBytes(), headBlock.getTimeStamp());
+        Phase phase = getDynamicPropertiesStore().supportAllowAssetOptimization()
+            ? Phase.P66_ON : Phase.P66_OFF;
+        recovered = StateArchiveRuntimeOwner.bootstrapAndRecover(
+            (SnapshotManager) revokingStore, archiveDirectory,
+            storage.getStateArchiveMaxSegmentSize(), storage.getDbEngine(), baseHead, phase);
+        logger.info("State archive fresh baseline published: directory={}, head={}",
+            archiveDirectory, headNumber);
+      } else {
+        recovered = StateArchiveRuntimeOwner.recover((SnapshotManager) revokingStore,
+            archiveDirectory, storage.getStateArchiveMaxSegmentSize(), storage.getDbEngine());
+      }
       BlockSnapshotMeta archiveHead = recovered.getRecoveredHead();
       if (archiveHead != null
           && (archiveHead.getBlockNumber()
@@ -659,7 +677,8 @@ public class Manager {
       logger.info("State archive runtime attached: directory={}, head={}, actions={}, engine={}",
           archiveDirectory, archiveHead.getBlockNumber(),
           stateArchiveRuntime.getStartupRecoveryActionCount(), storage.getDbEngine());
-    } catch (java.io.IOException | RuntimeException failure) {
+    } catch (java.io.IOException | BadItemException | ItemNotFoundException
+        | RuntimeException failure) {
       if (recovered != null) {
         try {
           recovered.close();
