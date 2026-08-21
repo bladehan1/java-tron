@@ -65,6 +65,44 @@ public final class PathStateCurrentStore {
     return current();
   }
 
+  /** Atomically switches CURRENT to an exact durable ancestor inside the reversible window. */
+  public synchronized PathStateRootMetadata switchToAncestor(PathStateRootMetadata target,
+      PathStateLayerLimits limits) throws IOException {
+    return switchToAncestor(target, limits, temporary -> { });
+  }
+
+  synchronized PathStateRootMetadata switchToAncestor(PathStateRootMetadata target,
+      PathStateLayerLimits limits, PathStateMetadataFile.FaultHook faultHook) throws IOException {
+    PathStateRootMetadata admittedTarget = Objects.requireNonNull(target, "target");
+    PathStateLayerLimits admittedLimits = Objects.requireNonNull(limits, "limits");
+    requireFormat(admittedTarget);
+    PathStateRootMetadata head = current();
+    if (same(head, admittedTarget)) {
+      verifyTargetState(admittedTarget);
+      return head;
+    }
+    if (admittedTarget.getBlockNumber() >= head.getBlockNumber()) {
+      throw new IOException("path-state canonical switch target is not an ancestor");
+    }
+
+    PathStateRootMetadata base = requireKind(PathStateMetadataFile.load(basePath()), Kind.BASE);
+    requireFormat(base);
+    PathStateRootMetadata cursor = head;
+    for (int depth = 1; depth <= admittedLimits.getMaxLayers(); depth++) {
+      cursor = parentOf(cursor, base);
+      if (same(cursor, admittedTarget)) {
+        verifyTargetState(admittedTarget);
+        PathStateMetadataFile.replaceCurrent(currentPath, admittedTarget,
+            Objects.requireNonNull(faultHook, "faultHook"));
+        return current();
+      }
+      if (cursor.getKind() == Kind.BASE) {
+        break;
+      }
+    }
+    throw new IOException("path-state canonical switch exceeds the reversible window");
+  }
+
   /** Loads CURRENT and verifies that every referenced layer reaches the single durable base. */
   public synchronized PathStateRootMetadata current() throws IOException {
     PathStateRootMetadata base = requireKind(PathStateMetadataFile.load(basePath()), Kind.BASE);
@@ -113,6 +151,38 @@ public final class PathStateCurrentStore {
 
   private Path layerPath(long blockNumber, byte[] blockHash) {
     return manifest.getLayerDirectory(blockNumber, blockHash).resolve(METADATA_FILE);
+  }
+
+  private PathStateRootMetadata parentOf(PathStateRootMetadata child,
+      PathStateRootMetadata base) throws IOException {
+    if (child.getKind() != Kind.LAYER || child.getBlockNumber() == 0) {
+      throw new IOException("path-state canonical switch reached an invalid parent boundary");
+    }
+    PathStateRootMetadata parent;
+    if (base.getBlockNumber() == child.getBlockNumber() - 1) {
+      parent = base;
+    } else {
+      parent = requireKind(PathStateMetadataFile.load(
+          layerPath(child.getBlockNumber() - 1, child.getParentHash())), Kind.LAYER);
+      requireFormat(parent);
+    }
+    requireChild(parent, child);
+    return parent;
+  }
+
+  private void verifyTargetState(PathStateRootMetadata target) throws IOException {
+    Path owner = target.getKind() == Kind.BASE ? manifest.getBaseDirectory()
+        : manifest.getLayerDirectory(target.getBlockNumber(), target.getBlockHash());
+    PathStateRootMetadata progress = PathStateNodeStoreSet.loadProgress(owner, manifest);
+    if (progress == null || !same(target, progress)) {
+      throw new IOException("path-state canonical switch target has invalid native progress");
+    }
+    try (PathStateNodeStoreSet stores = PathStateNodeStoreSet.openPublished(manifest, target)) {
+      PathStateRoot root = stores.createRoot();
+      root.verifyNodeStores();
+    } catch (IllegalArgumentException | IllegalStateException e) {
+      throw new IOException("path-state canonical switch target is corrupt", e);
+    }
   }
 
   private static PathStateRootMetadata requireKind(PathStateRootMetadata metadata, Kind kind) {
