@@ -2,6 +2,7 @@ package org.tron.core.db2.stateroot;
 
 import java.io.Closeable;
 import java.io.IOException;
+import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Objects;
@@ -46,14 +47,31 @@ public final class PathStateLayer implements Closeable {
       PathStateRootMetadata parent, long blockNumber, byte[] blockHash, byte[] parentHash,
       long timestamp, P66Phase phase, byte[] transitionDigest) throws IOException {
     return begin(manifest, parent, blockNumber, blockHash, parentHash, timestamp, phase,
-        transitionDigest, stage -> { });
+        transitionDigest, PathStateLayerLimits.defaults());
+  }
+
+  public static PathStateLayer begin(PathStateStoreManifest manifest,
+      PathStateRootMetadata parent, long blockNumber, byte[] blockHash, byte[] parentHash,
+      long timestamp, P66Phase phase, byte[] transitionDigest, PathStateLayerLimits limits)
+      throws IOException {
+    return begin(manifest, parent, blockNumber, blockHash, parentHash, timestamp, phase,
+        transitionDigest, limits, stage -> { });
   }
 
   static PathStateLayer begin(PathStateStoreManifest manifest,
       PathStateRootMetadata parent, long blockNumber, byte[] blockHash, byte[] parentHash,
       long timestamp, P66Phase phase, byte[] transitionDigest,
       PathStateLayerPublication.FaultHook faultHook) throws IOException {
+    return begin(manifest, parent, blockNumber, blockHash, parentHash, timestamp, phase,
+        transitionDigest, PathStateLayerLimits.defaults(), faultHook);
+  }
+
+  static PathStateLayer begin(PathStateStoreManifest manifest,
+      PathStateRootMetadata parent, long blockNumber, byte[] blockHash, byte[] parentHash,
+      long timestamp, P66Phase phase, byte[] transitionDigest, PathStateLayerLimits limits,
+      PathStateLayerPublication.FaultHook faultHook) throws IOException {
     PathStateStoreManifest admitted = Objects.requireNonNull(manifest, "manifest");
+    PathStateLayerLimits admittedLimits = Objects.requireNonNull(limits, "limits");
     PathStateRootMetadata admittedParent = Objects.requireNonNull(parent, "parent");
     PathStateCurrentStore currentStore = new PathStateCurrentStore(admitted);
     requireSame(admittedParent, currentStore.current(),
@@ -66,6 +84,8 @@ public final class PathStateLayer implements Closeable {
     PathStateRootMetadata identity = PathStateRootMetadata.layer(blockNumber, blockHash,
         parentHash, timestamp, phase, admitted.getIdentityDigest(),
         admittedParent.getStateRoot(), admittedParent.getStateRoot(), transitionDigest);
+    Path layerDirectory = admitted.getLayerDirectory(blockNumber, blockHash);
+    admittedLimits.verifyCanBegin(admitted, layerDirectory);
     try (PathStateNodeStoreSet parentStores =
         PathStateNodeStoreSet.openPublished(admitted, admittedParent)) {
       PathStateRoot parentRoot = parentStores.createRoot();
@@ -74,7 +94,8 @@ public final class PathStateLayer implements Closeable {
         PathStateRoot childRoot = childStores.createRootFrom(parentStores.leafRecords(),
             parentRoot.rootHash());
         return new PathStateLayer(admitted,
-            new PathStateLayerPublication(admitted, faultHook), childStores, childRoot,
+            new PathStateLayerPublication(admitted, admittedLimits, faultHook),
+            childStores, childRoot,
             admittedParent, blockNumber, blockHash, parentHash, timestamp, phase,
             transitionDigest);
       } catch (RuntimeException failure) {
