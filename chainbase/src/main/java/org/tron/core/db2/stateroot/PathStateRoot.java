@@ -117,7 +117,16 @@ public final class PathStateRoot {
     return records;
   }
 
+  synchronized void initializeLeaves(Collection<LeafRecord> records, byte[] expectedRoot) {
+    restoreLeaves(records, expectedRoot, true);
+  }
+
   synchronized void restoreLeaves(Collection<LeafRecord> records, byte[] expectedRoot) {
+    restoreLeaves(records, expectedRoot, false);
+  }
+
+  private void restoreLeaves(Collection<LeafRecord> records, byte[] expectedRoot,
+      boolean initialize) {
     Map<Integer, PathStateParticipant> participants = new LinkedHashMap<>();
     Map<Integer, List<PathMerkleTrie.LeafEntry>> leaves = new LinkedHashMap<>();
     for (PathStateParticipant participant : scope.getParticipants()) {
@@ -136,14 +145,22 @@ public final class PathStateRoot {
     List<PathMerkleTrie.LeafEntry> superLeaves = new ArrayList<>();
     for (PathStateParticipant participant : scope.getParticipants()) {
       PathMerkleTrie trie = participantTries.get(participant.getDbName());
-      trie.restoreLeaves(leaves.get(participant.getStoreId()));
+      if (initialize) {
+        trie.initializeLeaves(leaves.get(participant.getStoreId()));
+      } else {
+        trie.restoreLeaves(leaves.get(participant.getStoreId()));
+      }
       byte[] storeRoot = trie.rootHash();
       superLeaves.add(new PathMerkleTrie.LeafEntry(
           PathStateCommitmentCodec.superLeafKey(participant.getStoreId()),
           PathStateCommitmentCodec.superLeafValue(participant.getStoreId(),
               participant.getDbName(), participant.getStoreFormatVersion(), storeRoot)));
     }
-    superTrie.restoreLeaves(superLeaves);
+    if (initialize) {
+      superTrie.initializeLeaves(superLeaves);
+    } else {
+      superTrie.restoreLeaves(superLeaves);
+    }
     byte[] restoredRoot = superTrie.rootHash();
     if (!Arrays.equals(restoredRoot, Objects.requireNonNull(expectedRoot, "expectedRoot"))) {
       throw new IllegalStateException("restored path-state root differs from durable progress");

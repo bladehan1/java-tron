@@ -1,0 +1,133 @@
+package org.tron.core.db2.stateroot;
+
+import java.io.Closeable;
+import java.io.IOException;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Objects;
+import org.tron.core.db2.stateroot.PathStateCanonicalizer.P66Phase;
+
+/** One writable, current-only path-state layer derived from the published canonical parent. */
+public final class PathStateLayer implements Closeable {
+
+  private final PathStateStoreManifest manifest;
+  private final PathStateCurrentStore currentStore;
+  private final PathStateNodeStoreSet stores;
+  private final PathStateRoot root;
+  private final PathStateRootMetadata parent;
+  private final long blockNumber;
+  private final byte[] blockHash;
+  private final byte[] parentHash;
+  private final long timestamp;
+  private final P66Phase phase;
+  private final byte[] transitionDigest;
+  private PathStateRootMetadata prepared;
+  private boolean persisted;
+  private PathStateRootMetadata committed;
+
+  private PathStateLayer(PathStateStoreManifest manifest, PathStateCurrentStore currentStore,
+      PathStateNodeStoreSet stores, PathStateRoot root, PathStateRootMetadata parent,
+      long blockNumber, byte[] blockHash, byte[] parentHash, long timestamp, P66Phase phase,
+      byte[] transitionDigest) {
+    this.manifest = manifest;
+    this.currentStore = currentStore;
+    this.stores = stores;
+    this.root = root;
+    this.parent = parent;
+    this.blockNumber = blockNumber;
+    this.blockHash = copy32(blockHash, "blockHash");
+    this.parentHash = copy32(parentHash, "parentHash");
+    this.timestamp = timestamp;
+    this.phase = Objects.requireNonNull(phase, "phase");
+    this.transitionDigest = copy32(transitionDigest, "transitionDigest");
+  }
+
+  /** Begins a child layer only when the supplied parent is the exact verified CURRENT record. */
+  public static PathStateLayer begin(PathStateStoreManifest manifest,
+      PathStateRootMetadata parent, long blockNumber, byte[] blockHash, byte[] parentHash,
+      long timestamp, P66Phase phase, byte[] transitionDigest) throws IOException {
+    PathStateStoreManifest admitted = Objects.requireNonNull(manifest, "manifest");
+    PathStateRootMetadata admittedParent = Objects.requireNonNull(parent, "parent");
+    PathStateCurrentStore currentStore = new PathStateCurrentStore(admitted);
+    requireSame(admittedParent, currentStore.current(),
+        "path-state layer parent is not CURRENT");
+    if (blockNumber != admittedParent.getBlockNumber() + 1
+        || !Arrays.equals(parentHash, admittedParent.getBlockHash())) {
+      throw new IOException("path-state layer identity does not extend CURRENT");
+    }
+
+    PathStateRootMetadata identity = PathStateRootMetadata.layer(blockNumber, blockHash,
+        parentHash, timestamp, phase, admitted.getIdentityDigest(),
+        admittedParent.getStateRoot(), admittedParent.getStateRoot(), transitionDigest);
+    try (PathStateNodeStoreSet parentStores =
+        PathStateNodeStoreSet.openPublished(admitted, admittedParent)) {
+      PathStateRoot parentRoot = parentStores.createRoot();
+      PathStateNodeStoreSet childStores = PathStateNodeStoreSet.beginLayer(admitted, identity);
+      try {
+        PathStateRoot childRoot = childStores.createRootFrom(parentStores.leafRecords(),
+            parentRoot.rootHash());
+        return new PathStateLayer(admitted, currentStore, childStores, childRoot, admittedParent,
+            blockNumber, blockHash, parentHash, timestamp, phase, transitionDigest);
+      } catch (RuntimeException failure) {
+        try {
+          childStores.close();
+        } catch (IOException closeFailure) {
+          failure.addSuppressed(closeFailure);
+        }
+        throw failure;
+      }
+    }
+  }
+
+  public synchronized void apply(Collection<PathStateMutation> mutations) {
+    requireUncommitted();
+    root.apply(mutations);
+  }
+
+  /** Persists this layer's nodes/leaves/progress before publishing metadata and CURRENT. */
+  public synchronized PathStateRootMetadata commit() throws IOException {
+    if (committed != null) {
+      return committed;
+    }
+    if (prepared == null) {
+      prepared = PathStateRootMetadata.layer(blockNumber, blockHash, parentHash, timestamp, phase,
+          manifest.getIdentityDigest(), parent.getStateRoot(), root.rootHash(), transitionDigest);
+    }
+    if (!persisted) {
+      stores.commit(prepared);
+      persisted = true;
+    }
+    committed = currentStore.appendLayer(prepared);
+    return committed;
+  }
+
+  public synchronized byte[] rootHash() {
+    return root.rootHash();
+  }
+
+  @Override
+  public synchronized void close() throws IOException {
+    stores.close();
+  }
+
+  private void requireUncommitted() {
+    if (prepared != null) {
+      throw new IllegalStateException("path-state layer is already frozen for commit");
+    }
+  }
+
+  private static void requireSame(PathStateRootMetadata expected,
+      PathStateRootMetadata actual, String error) throws IOException {
+    if (!Arrays.equals(expected.encode(), actual.encode())) {
+      throw new IOException(error);
+    }
+  }
+
+  private static byte[] copy32(byte[] value, String name) {
+    byte[] copy = Arrays.copyOf(Objects.requireNonNull(value, name), value.length);
+    if (copy.length != PathStateRootMetadata.DIGEST_LENGTH) {
+      throw new IllegalArgumentException(name + " must be exactly 32 bytes");
+    }
+    return copy;
+  }
+}
