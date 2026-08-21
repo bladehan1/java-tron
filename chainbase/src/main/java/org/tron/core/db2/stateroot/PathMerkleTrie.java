@@ -2,6 +2,7 @@ package org.tron.core.db2.stateroot;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
@@ -76,6 +77,36 @@ public final class PathMerkleTrie {
 
   public synchronized int size() {
     return leaves.size();
+  }
+
+  synchronized List<LeafEntry> leafEntries() {
+    List<LeafEntry> entries = new ArrayList<>(leaves.size());
+    for (Map.Entry<BytesKey, byte[]> entry : leaves.entrySet()) {
+      entries.add(new LeafEntry(entry.getKey().copy(), entry.getValue()));
+    }
+    return entries;
+  }
+
+  /** Restores current leaves and verifies their complete path-node set without repairing it. */
+  synchronized void restoreLeaves(Collection<LeafEntry> entries) {
+    if (!leaves.isEmpty() || !committedPaths.isEmpty() || dirty) {
+      throw new IllegalStateException("path trie is not empty before leaf restoration");
+    }
+    for (LeafEntry entry : Objects.requireNonNull(entries, "entries")) {
+      LeafEntry present = Objects.requireNonNull(entry, "entry");
+      if (leaves.put(secureKey(present.secureKey),
+          nonEmpty(present.encodedValue, "encodedValue")) != null) {
+        throw new IllegalArgumentException("duplicate restored path-state leaf");
+      }
+    }
+    Map<BytesKey, byte[]> expectedNodes = buildCurrentNodes();
+    for (Map.Entry<BytesKey, byte[]> entry : expectedNodes.entrySet()) {
+      if (!Arrays.equals(nodeStore.get(entry.getKey().bytes), entry.getValue())) {
+        throw new IllegalStateException("restored leaves do not match persisted path nodes");
+      }
+    }
+    committedPaths.addAll(expectedNodes.keySet());
+    rootHash = rootHash(expectedNodes);
   }
 
   /** Verifies every path owned by the current committed node set without repairing corruption. */
@@ -299,6 +330,27 @@ public final class PathMerkleTrie {
     private Leaf(byte[] nibbles, byte[] value) {
       this.nibbles = nibbles;
       this.value = value;
+    }
+  }
+
+  static final class LeafEntry {
+
+    private final byte[] secureKey;
+    private final byte[] encodedValue;
+
+    LeafEntry(byte[] secureKey, byte[] encodedValue) {
+      this.secureKey = Arrays.copyOf(Objects.requireNonNull(secureKey, "secureKey"),
+          secureKey.length);
+      this.encodedValue = Arrays.copyOf(Objects.requireNonNull(encodedValue, "encodedValue"),
+          encodedValue.length);
+    }
+
+    byte[] getSecureKey() {
+      return Arrays.copyOf(secureKey, secureKey.length);
+    }
+
+    byte[] getEncodedValue() {
+      return Arrays.copyOf(encodedValue, encodedValue.length);
     }
   }
 
