@@ -168,6 +168,47 @@ public class StateArchiveManagerStartupIntegrationTest {
   }
 
   @Test
+  public void managerRunsMultiTargetNormalFlushThroughExact27FixedPoint() throws Exception {
+    for (String engine : Arrays.asList("LEVELDB", "ROCKSDB")) {
+      Path output = temporaryFolder.newFolder("multi-target-" + engine.toLowerCase()).toPath();
+      Path archive = output.resolve("state-archive");
+      HistoryCommitMarker head = initializeRecoverableTail(archive, engine);
+      SnapshotFixture fixture = snapshotFixture();
+      SnapshotManager snapshots = fixture.snapshots;
+      Manager manager = manager(snapshots, head);
+
+      withArchiveConfig(output, engine, true, () -> invoke(manager, "initStateArchive"));
+
+      byte[] key = new byte[]{3, 1, 5};
+      BlockSnapshotMeta target = null;
+      for (int epoch = 7; epoch <= 8; epoch++) {
+        target = new BlockSnapshotMeta(epoch, epoch, hash(epoch),
+            hash(epoch - 1), epoch * 1_000L);
+        try (ISession block = snapshots.buildSession()) {
+          fixture.databases.get("proposal").put(key, new byte[]{(byte) epoch});
+          block.commit(target);
+        }
+      }
+      setField(snapshots, "flushCount", 2);
+
+      snapshots.flushPending();
+
+      assertEquals(target, manager.getStateArchiveRuntime().verifyNormalWriteFixedPoint());
+      assertTrue(fixture.databases.values().stream()
+          .allMatch(database -> database.getHead() instanceof SnapshotRoot));
+      invoke(manager, "closeStateArchive");
+      assertNativeParticipantsReopen(archive, engine, PARTICIPANTS);
+      try (Closeable participant = (Closeable) openParticipant(archive, engine, "proposal")) {
+        byte[] value = engine.equals("ROCKSDB")
+            ? ((RocksDbArchiveParticipant) participant).get(key)
+            : ((LevelDbArchiveParticipant) participant).get(key);
+        assertArrayEquals(new byte[]{8}, value);
+      }
+      snapshots.shutdown();
+    }
+  }
+
+  @Test
   public void partialParticipantOpenRollsBackAndPreservesFailureEvidence() throws Exception {
     for (String engine : Arrays.asList("LEVELDB", "ROCKSDB")) {
       Path output = temporaryFolder.newFolder("partial-" + engine.toLowerCase()).toPath();

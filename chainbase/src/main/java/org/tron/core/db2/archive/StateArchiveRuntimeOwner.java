@@ -264,7 +264,7 @@ public final class StateArchiveRuntimeOwner implements Closeable {
           checkpoint, participantEngines, reader, new ArrayList<>(participantEngines.keySet()),
           snapshotManager::withArchiveStateBarrier);
       candidate = new ArchiveRuntimeAttachment(collector, projectionPreparer, asyncSink,
-          (payloads, refresh) -> publishOneTarget(coordinator, payloads, refresh));
+          (payloads, refresh) -> publishTargets(coordinator, payloads, refresh));
       snapshotManager.attachArchiveRuntime(candidate);
       attached = true;
       attachment = candidate;
@@ -482,17 +482,28 @@ public final class StateArchiveRuntimeOwner implements Closeable {
     requireUnique(unique, sink, "sink");
   }
 
-  private static void publishOneTarget(ArchiveTargetApplyCoordinator coordinator,
+  private static void publishTargets(ArchiveTargetApplyCoordinator coordinator,
       List<ArchiveBlockForwardPayload> payloads,
       ArchiveStateBarrier.ArchiveStateAction refresh) throws IOException {
-    if (payloads.size() != 1) {
-      throw new ArchivePersistenceException(
-          "S1 archive runtime requires one forward payload per normal flush");
+    if (payloads.isEmpty()) {
+      throw new ArchivePersistenceException("Archive normal flush has no forward payload");
     }
-    ArchiveBlockForwardPayload payload = payloads.get(0);
-    ArchiveParticipantMutationBatch batch = new ArchiveParticipantMutationBatchCollector(
-        payload.getAccountAssetManifest()).collect(payload.getMarker(), payload.getView());
-    coordinator.apply(batch, refresh);
+    BlockSnapshotMeta previous = null;
+    for (ArchiveBlockForwardPayload payload : payloads) {
+      BlockSnapshotMeta current = Objects.requireNonNull(payload, "forward payload").getMeta();
+      if (previous != null && (current.getEpoch() != previous.getEpoch() + 1
+          || current.getBlockNumber() != previous.getBlockNumber() + 1
+          || !java.util.Arrays.equals(current.getParentHash(), previous.getBlockHash()))) {
+        throw new ArchivePersistenceException(
+            "Archive normal flush forward payloads are not contiguous");
+      }
+      previous = current;
+    }
+    for (ArchiveBlockForwardPayload payload : payloads) {
+      ArchiveParticipantMutationBatch batch = new ArchiveParticipantMutationBatchCollector(
+          payload.getAccountAssetManifest()).collect(payload.getMarker(), payload.getView());
+      coordinator.apply(batch, refresh);
+    }
   }
 
   private static void requireAuthority(ArchiveProgressEnvelope envelope, Kind kind,
