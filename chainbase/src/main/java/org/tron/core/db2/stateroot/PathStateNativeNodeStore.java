@@ -85,6 +85,11 @@ final class PathStateNativeNodeStore implements Closeable {
     return delegate.scanPrefix(nonEmpty(prefix, "prefix"));
   }
 
+  synchronized List<KeyValue> scanAll() {
+    requireOpen();
+    return delegate.scanAll();
+  }
+
   Path getDirectory() {
     return directory;
   }
@@ -122,6 +127,8 @@ final class PathStateNativeNodeStore implements Closeable {
     void writeBatch(List<BatchMutation> mutations);
 
     List<KeyValue> scanPrefix(byte[] prefix);
+
+    List<KeyValue> scanAll();
   }
 
   private static final class LevelDelegate implements Delegate {
@@ -169,6 +176,21 @@ final class PathStateNativeNodeStore implements Closeable {
         }
       } catch (IOException failure) {
         throw new IllegalStateException("failed to scan path-state LevelDB nodes", failure);
+      }
+      return entries;
+    }
+
+    @Override
+    public List<KeyValue> scanAll() {
+      List<KeyValue> entries = new ArrayList<>();
+      try (org.iq80.leveldb.DBIterator iterator = database.iterator()) {
+        iterator.seekToFirst();
+        while (iterator.hasNext()) {
+          Map.Entry<byte[], byte[]> entry = iterator.next();
+          entries.add(new KeyValue(entry.getKey(), entry.getValue()));
+        }
+      } catch (IOException failure) {
+        throw new IllegalStateException("failed to scan all path-state LevelDB nodes", failure);
       }
       return entries;
     }
@@ -234,6 +256,22 @@ final class PathStateNativeNodeStore implements Closeable {
         iterator.status();
       } catch (RocksDBException failure) {
         throw new IllegalStateException("failed to scan path-state RocksDB nodes", failure);
+      }
+      return entries;
+    }
+
+    @Override
+    public List<KeyValue> scanAll() {
+      List<KeyValue> entries = new ArrayList<>();
+      try (org.rocksdb.RocksIterator iterator = database.newIterator()) {
+        iterator.seekToFirst();
+        while (iterator.isValid()) {
+          entries.add(new KeyValue(iterator.key(), iterator.value()));
+          iterator.next();
+        }
+        iterator.status();
+      } catch (RocksDBException failure) {
+        throw new IllegalStateException("failed to scan all path-state RocksDB nodes", failure);
       }
       return entries;
     }

@@ -21,6 +21,9 @@ public final class PathStateNodeStoreSet implements Closeable {
   private static final byte[] PROGRESS_KEY = new byte[]{
       (byte) 0xff, (byte) 0xff, (byte) 0xff, (byte) 0xff,
       'p', 'r', 'o', 'g', 'r', 'e', 's', 's'};
+  private static final byte[] LOGICAL_BYTES_KEY = new byte[]{
+      (byte) 0xff, (byte) 0xff, (byte) 0xff, (byte) 0xff,
+      'l', 'o', 'g', 'i', 'c', 'a', 'l', '-', 'b', 'y', 't', 'e', 's'};
   private static final int LEAF_DOMAIN = -2;
   private static final byte[] LEAF_PREFIX = ByteBuffer.allocate(Integer.BYTES)
       .putInt(LEAF_DOMAIN).array();
@@ -38,6 +41,7 @@ public final class PathStateNodeStoreSet implements Closeable {
   private final PathStateRootMetadata expectedMetadata;
   private final boolean sealed;
   private PathStateRootMetadata progress;
+  private Long logicalBytes;
   private PathStateRoot root;
   private boolean rootClaimed;
   private boolean closed;
@@ -55,6 +59,10 @@ public final class PathStateNodeStoreSet implements Closeable {
     nativeStore = PathStateNativeNodeStore.open(this.directory, manifest.getEngine());
     try {
       progress = decodeProgress(nativeStore.get(PROGRESS_KEY));
+      logicalBytes = decodeLogicalBytes(nativeStore.get(LOGICAL_BYTES_KEY));
+      if ((progress == null) != (logicalBytes == null)) {
+        throw new IOException("path-state native progress and logical bytes marker differ");
+      }
       if (progress != null) {
         requireProgressIdentity(progress);
       } else if (kind == Kind.BASE && expectedMetadata != null) {
@@ -189,11 +197,7 @@ public final class PathStateNodeStoreSet implements Closeable {
       throw new IllegalStateException("path-state node database set has no trie owner");
     }
     PathStateRootMetadata next = Objects.requireNonNull(metadata, "metadata");
-    requireProgressIdentity(next);
-    byte[] currentRoot = root.rootHash();
-    if (!Arrays.equals(currentRoot, next.getStateRoot())) {
-      throw new IllegalArgumentException("path-state progress root does not match trie root");
-    }
+    long nextLogicalBytes = projectedLogicalBytes(next);
     List<PathStateNativeNodeStore.BatchMutation> mutations =
         new ArrayList<>(pending.size() + persistedLeaves.size() + 1);
     for (Map.Entry<BytesKey, byte[]> entry : pending.entrySet()) {
@@ -215,11 +219,45 @@ public final class PathStateNodeStoreSet implements Closeable {
       }
     }
     mutations.add(PathStateNativeNodeStore.BatchMutation.put(PROGRESS_KEY, next.encode()));
+    mutations.add(PathStateNativeNodeStore.BatchMutation.put(LOGICAL_BYTES_KEY,
+        ByteBuffer.allocate(Long.BYTES).putLong(nextLogicalBytes).array()));
     nativeStore.writeBatch(mutations);
     pending.clear();
     persistedLeaves.clear();
     persistedLeaves.putAll(nextLeaves);
     progress = next;
+    logicalBytes = nextLogicalBytes;
+  }
+
+  synchronized long projectedLogicalBytes(PathStateRootMetadata metadata) throws IOException {
+    requireOpen();
+    if (root == null) {
+      throw new IllegalStateException("path-state node database set has no trie owner");
+    }
+    PathStateRootMetadata next = Objects.requireNonNull(metadata, "metadata");
+    requireProgressIdentity(next);
+    if (!Arrays.equals(root.rootHash(), next.getStateRoot())) {
+      throw new IllegalArgumentException("path-state progress root does not match trie root");
+    }
+    long total = logicalBytes == null ? 0 : logicalBytes;
+    for (Map.Entry<BytesKey, byte[]> entry : pending.entrySet()) {
+      byte[] key = entry.getKey().copy();
+      total = replaceLogicalEntry(total, key, nativeStore.get(key), entry.getValue());
+    }
+    Map<BytesKey, byte[]> nextLeaves = leafMap(root.leafRecords());
+    for (Map.Entry<BytesKey, byte[]> entry : persistedLeaves.entrySet()) {
+      if (!nextLeaves.containsKey(entry.getKey())) {
+        total = replaceLogicalEntry(total, entry.getKey().copy(), entry.getValue(), null);
+      }
+    }
+    for (Map.Entry<BytesKey, byte[]> entry : nextLeaves.entrySet()) {
+      byte[] previous = persistedLeaves.get(entry.getKey());
+      if (!Arrays.equals(previous, entry.getValue())) {
+        total = replaceLogicalEntry(total, entry.getKey().copy(), previous, entry.getValue());
+      }
+    }
+    return replaceLogicalEntry(total, PROGRESS_KEY,
+        progress == null ? null : progress.encode(), next.encode());
   }
 
   public synchronized PathStateRootMetadata getProgress() {
@@ -239,6 +277,40 @@ public final class PathStateNodeStoreSet implements Closeable {
     try (PathStateNativeNodeStore store = PathStateNativeNodeStore.open(nodes,
         Objects.requireNonNull(manifest, "manifest").getEngine())) {
       return decodeProgress(store.get(PROGRESS_KEY));
+    }
+  }
+
+  static Long loadLogicalBytes(Path ownerDirectory, PathStateStoreManifest manifest)
+      throws IOException {
+    Path nodes = Objects.requireNonNull(ownerDirectory, "ownerDirectory").resolve(NODES_DIRECTORY);
+    if (!Files.exists(nodes, LinkOption.NOFOLLOW_LINKS)) {
+      return null;
+    }
+    if (!Files.isDirectory(nodes, LinkOption.NOFOLLOW_LINKS) || Files.isSymbolicLink(nodes)) {
+      throw new IOException("path-state node database is not a direct directory: " + nodes);
+    }
+    try (PathStateNativeNodeStore store = PathStateNativeNodeStore.open(nodes,
+        Objects.requireNonNull(manifest, "manifest").getEngine())) {
+      Long expected = decodeLogicalBytes(store.get(LOGICAL_BYTES_KEY));
+      if (expected == null) {
+        return null;
+      }
+      long actual = 0;
+      try {
+        for (PathStateNativeNodeStore.KeyValue entry : store.scanAll()) {
+          byte[] key = entry.getKey();
+          if (!Arrays.equals(key, LOGICAL_BYTES_KEY)) {
+            actual = Math.addExact(actual,
+                Math.addExact(key.length, entry.getValue().length));
+          }
+        }
+      } catch (ArithmeticException overflow) {
+        throw new IOException("path-state logical bytes verification overflow", overflow);
+      }
+      if (actual != expected) {
+        throw new IOException("path-state logical bytes marker does not match native entries");
+      }
+      return expected;
     }
   }
 
@@ -345,6 +417,32 @@ public final class PathStateNodeStoreSet implements Closeable {
       return PathStateRootMetadata.decode(encoded);
     } catch (IllegalArgumentException invalid) {
       throw new IOException("path-state native progress is corrupt", invalid);
+    }
+  }
+
+  private static Long decodeLogicalBytes(byte[] encoded) throws IOException {
+    if (encoded == null) {
+      return null;
+    }
+    if (encoded.length != Long.BYTES) {
+      throw new IOException("path-state logical bytes marker is corrupt");
+    }
+    long value = ByteBuffer.wrap(encoded).getLong();
+    if (value < 0) {
+      throw new IOException("path-state logical bytes marker is negative");
+    }
+    return value;
+  }
+
+  private static long replaceLogicalEntry(long total, byte[] key, byte[] previous, byte[] next)
+      throws IOException {
+    try {
+      long adjusted = previous == null ? total
+          : Math.subtractExact(total, Math.addExact(key.length, previous.length));
+      return next == null ? adjusted
+          : Math.addExact(adjusted, Math.addExact(key.length, next.length));
+    } catch (ArithmeticException overflow) {
+      throw new IOException("path-state logical bytes overflow", overflow);
     }
   }
 
