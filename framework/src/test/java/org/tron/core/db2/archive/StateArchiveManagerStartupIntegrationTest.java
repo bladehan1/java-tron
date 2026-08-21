@@ -6,6 +6,7 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
+import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -29,6 +30,7 @@ import org.junit.rules.TemporaryFolder;
 import org.tron.common.parameter.CommonParameter;
 import org.tron.common.utils.Sha256Hash;
 import org.tron.core.ChainBaseManager;
+import org.tron.core.capsule.BlockCapsule;
 import org.tron.core.config.args.Storage;
 import org.tron.core.db.Manager;
 import org.tron.core.db.common.DbSourceInter;
@@ -50,6 +52,44 @@ public class StateArchiveManagerStartupIntegrationTest {
 
   @Rule
   public TemporaryFolder temporaryFolder = new TemporaryFolder();
+
+  @Test
+  public void managerBootstrapsFreshBaseAndContinuesNormalFlush() throws Exception {
+    for (String engine : Arrays.asList("LEVELDB", "ROCKSDB")) {
+      Path output = temporaryFolder.newFolder("fresh-manager-" + engine.toLowerCase()).toPath();
+      Path archive = output.resolve("state-archive");
+      BlockSnapshotMeta head = new BlockSnapshotMeta(6, 6, hash(6), hash(5), 6_000L);
+      SnapshotFixture fixture = snapshotFixture();
+      SnapshotManager snapshots = fixture.snapshots;
+      Manager manager = manager(snapshots, head);
+
+      withArchiveConfig(output, engine, true, () -> invoke(manager, "initStateArchive"));
+
+      assertEquals(State.RUNNING, manager.getStateArchiveRuntime().getState());
+      assertEquals(head, manager.getStateArchiveRuntime().getRecoveredHead());
+      assertEquals(0, manager.getStateArchiveRuntime().getStartupRecoveryActionCount());
+      assertTrue(Files.isRegularFile(archive.resolve("MANIFEST")));
+
+      byte[] key = new byte[]{2, 7, 1, 8};
+      BlockSnapshotMeta target = new BlockSnapshotMeta(7, 7, hash(7), hash(6), 7_000L);
+      try (ISession block = snapshots.buildSession()) {
+        fixture.databases.get("proposal").put(key, new byte[]{7});
+        block.commit(target);
+      }
+      setField(snapshots, "flushCount", 1);
+      snapshots.flushPending();
+      assertEquals(target, manager.getStateArchiveRuntime().verifyNormalWriteFixedPoint());
+      try (PersistentServingKeyIndexGeneration serving = manager.getArchiveHistoryWriter()
+          .buildServingGeneration(output.resolve("serving-" + engine.toLowerCase()), "fresh")) {
+        assertEquals(6, serving.getIndexedFrom());
+        assertEquals(7, serving.getIndexedThrough());
+      }
+
+      invoke(manager, "closeStateArchive");
+      assertNativeParticipantsReopen(archive, engine, PARTICIPANTS);
+      snapshots.shutdown();
+    }
+  }
 
   @Test
   public void managerRunsTwoNormalFlushTargetsThroughExact27FixedPoint() throws Exception {
@@ -139,12 +179,21 @@ public class StateArchiveManagerStartupIntegrationTest {
 
   private static Manager manager(SnapshotManager snapshots, HistoryCommitMarker head)
       throws Exception {
+    return manager(snapshots, head.getMeta());
+  }
+
+  private static Manager manager(SnapshotManager snapshots, BlockSnapshotMeta head)
+      throws Exception {
     DynamicPropertiesStore properties = mock(DynamicPropertiesStore.class);
-    when(properties.getLatestBlockHeaderNumber()).thenReturn(head.getMeta().getBlockNumber());
+    when(properties.getLatestBlockHeaderNumber()).thenReturn(head.getBlockNumber());
     when(properties.getLatestBlockHeaderHash())
-        .thenReturn(Sha256Hash.wrap(head.getMeta().getBlockHash()));
+        .thenReturn(Sha256Hash.wrap(head.getBlockHash()));
     ChainBaseManager chainBase = mock(ChainBaseManager.class);
     when(chainBase.getDynamicPropertiesStore()).thenReturn(properties);
+    BlockCapsule headBlock = mock(BlockCapsule.class);
+    when(headBlock.getParentHash()).thenReturn(Sha256Hash.wrap(head.getParentHash()));
+    when(headBlock.getTimeStamp()).thenReturn(head.getTimestamp());
+    when(chainBase.getBlockByNum(head.getBlockNumber())).thenReturn(headBlock);
     ChainBaseManager.init(chainBase);
     Manager manager = new Manager();
     setField(manager, "revokingStore", snapshots);

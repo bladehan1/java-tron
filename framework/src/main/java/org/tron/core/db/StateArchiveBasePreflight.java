@@ -12,14 +12,14 @@ final class StateArchiveBasePreflight {
   private StateArchiveBasePreflight() {
   }
 
-  static void requireAdmitted(boolean enabled, Path archiveDirectory) {
+  static Result requireAdmitted(boolean enabled, Path archiveDirectory) {
     if (!enabled) {
-      return;
+      return null;
     }
     Result result = ArchiveFormatAdmissionValidator.inspect(
         Objects.requireNonNull(archiveDirectory, "archiveDirectory"));
     if (result.getStatus() == Status.EMPTY_NEW || result.getStatus() == Status.CURRENT_BASE) {
-      return;
+      return result;
     }
     throw new IllegalStateException("State archive base requires quarantine: "
         + result.getReason() + ": " + result.getDetail());
