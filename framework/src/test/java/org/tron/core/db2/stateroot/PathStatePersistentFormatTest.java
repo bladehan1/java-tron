@@ -79,7 +79,7 @@ public class PathStatePersistentFormatTest {
   @Test
   public void baseMetadataRoundTripsWithoutInventingAParentRoot() {
     PathStateRootMetadata base = PathStateRootMetadata.base(100, bytes(1), bytes(33), 9000,
-        P66Phase.P66_ACTIVATION, bytes(65), bytes(97));
+        P66Phase.P66_ACTIVATION, bytes(17), bytes(65), bytes(97));
 
     PathStateRootMetadata decoded = PathStateRootMetadata.decode(base.encode());
 
@@ -89,14 +89,14 @@ public class PathStatePersistentFormatTest {
     assertNull(decoded.getParentStateRoot());
     assertArrayEquals(bytes(65), decoded.getStateRoot());
     assertEquals(
-        "c4bfd4fac0a8b536c6350270b63f9937a789fec846331b8c21bc6f5d7d183757",
+        "ab8833ebb7c43812cd6f041aae7796da3c97c51ae3c8890636d2d6b45a471e0d",
         ByteArray.toHexString(Hashing.sha256().hashBytes(base.encode()).asBytes()));
   }
 
   @Test
   public void layerMetadataBindsParentRootAndTransitionDigest() {
     PathStateRootMetadata layer = PathStateRootMetadata.layer(101, bytes(2), bytes(1), 12000,
-        P66Phase.P66_ON, bytes(65), bytes(66), bytes(98));
+        P66Phase.P66_ON, bytes(17), bytes(65), bytes(66), bytes(98));
 
     PathStateRootMetadata decoded = PathStateRootMetadata.decode(layer.encode());
 
@@ -111,22 +111,27 @@ public class PathStatePersistentFormatTest {
   public void metadataRejectsKindAmbiguityAndCorruption() {
     assertThrows(IllegalArgumentException.class,
         () -> PathStateRootMetadata.layer(1, bytes(1), bytes(2), 3, P66Phase.P66_ON,
-            null, bytes(3), bytes(4)));
+            bytes(17), null, bytes(3), bytes(4)));
     byte[] encoded = PathStateRootMetadata.base(1, bytes(1), bytes(2), 3, P66Phase.P66_OFF,
-        bytes(3), bytes(4)).encode();
+        bytes(17), bytes(3), bytes(4)).encode();
     encoded[encoded.length - 1] ^= 1;
     assertThrows(IllegalArgumentException.class, () -> PathStateRootMetadata.decode(encoded));
   }
 
   @Test
   public void metadataOwnsAllByteArrays() {
+    byte[] format = bytes(17);
     byte[] root = bytes(65);
     PathStateRootMetadata metadata = PathStateRootMetadata.base(1, bytes(1), bytes(2), 3,
-        P66Phase.P66_ON, root, bytes(97));
+        P66Phase.P66_ON, format, root, bytes(97));
+    format[0] = 0;
     root[0] = 0;
+    byte[] returnedFormat = metadata.getFormatDigest();
     byte[] returned = metadata.getStateRoot();
+    returnedFormat[0] = 0;
     returned[0] = 0;
 
+    assertArrayEquals(bytes(17), metadata.getFormatDigest());
     assertArrayEquals(bytes(65), metadata.getStateRoot());
   }
 

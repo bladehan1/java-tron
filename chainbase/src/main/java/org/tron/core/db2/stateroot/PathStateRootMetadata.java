@@ -27,12 +27,13 @@ public final class PathStateRootMetadata {
   private final byte[] parentHash;
   private final long timestamp;
   private final P66Phase phase;
+  private final byte[] formatDigest;
   private final byte[] parentStateRoot;
   private final byte[] stateRoot;
   private final byte[] payloadDigest;
 
   private PathStateRootMetadata(Kind kind, long blockNumber, byte[] blockHash, byte[] parentHash,
-      long timestamp, P66Phase phase, byte[] parentStateRoot, byte[] stateRoot,
+      long timestamp, P66Phase phase, byte[] formatDigest, byte[] parentStateRoot, byte[] stateRoot,
       byte[] payloadDigest) {
     if (blockNumber < 0) {
       throw new IllegalArgumentException("blockNumber must not be negative");
@@ -43,6 +44,7 @@ public final class PathStateRootMetadata {
     this.parentHash = copy32(parentHash, "parentHash");
     this.timestamp = timestamp;
     this.phase = Objects.requireNonNull(phase, "phase");
+    this.formatDigest = copy32(formatDigest, "formatDigest");
     this.parentStateRoot = parentStateRoot == null ? null
         : copy32(parentStateRoot, "parentStateRoot");
     this.stateRoot = copy32(stateRoot, "stateRoot");
@@ -57,17 +59,18 @@ public final class PathStateRootMetadata {
 
   /** Creates metadata for a rebuilt or compacted durable base. */
   public static PathStateRootMetadata base(long blockNumber, byte[] blockHash, byte[] parentHash,
-      long timestamp, P66Phase phase, byte[] stateRoot, byte[] sourceDigest) {
+      long timestamp, P66Phase phase, byte[] formatDigest, byte[] stateRoot,
+      byte[] sourceDigest) {
     return new PathStateRootMetadata(Kind.BASE, blockNumber, blockHash, parentHash, timestamp,
-        phase, null, stateRoot, sourceDigest);
+        phase, formatDigest, null, stateRoot, sourceDigest);
   }
 
   /** Creates metadata for one immutable reversible transition above a parent root. */
   public static PathStateRootMetadata layer(long blockNumber, byte[] blockHash, byte[] parentHash,
-      long timestamp, P66Phase phase, byte[] parentStateRoot, byte[] stateRoot,
-      byte[] transitionDigest) {
+      long timestamp, P66Phase phase, byte[] formatDigest, byte[] parentStateRoot,
+      byte[] stateRoot, byte[] transitionDigest) {
     return new PathStateRootMetadata(Kind.LAYER, blockNumber, blockHash, parentHash, timestamp,
-        phase, parentStateRoot, stateRoot, transitionDigest);
+        phase, formatDigest, parentStateRoot, stateRoot, transitionDigest);
   }
 
   public Kind getKind() {
@@ -94,6 +97,10 @@ public final class PathStateRootMetadata {
     return phase;
   }
 
+  public byte[] getFormatDigest() {
+    return Arrays.copyOf(formatDigest, formatDigest.length);
+  }
+
   public byte[] getParentStateRoot() {
     return parentStateRoot == null ? null : Arrays.copyOf(parentStateRoot, parentStateRoot.length);
   }
@@ -116,6 +123,7 @@ public final class PathStateRootMetadata {
       output.writeShort(0);
       output.writeInt(0);
       writeString(output, PathStateParticipantDescriptor.SCOPE_ID);
+      output.write(formatDigest);
       output.writeByte(kind.tag);
       output.writeLong(blockNumber);
       output.write(blockHash);
@@ -163,6 +171,7 @@ public final class PathStateRootMetadata {
       if (!PathStateParticipantDescriptor.SCOPE_ID.equals(readString(input))) {
         throw new IllegalArgumentException("path-state metadata scope mismatch");
       }
+      byte[] formatDigest = read32(input);
       Kind kind = Kind.fromTag(input.readUnsignedByte());
       long blockNumber = input.readLong();
       byte[] blockHash = read32(input);
@@ -182,7 +191,7 @@ public final class PathStateRootMetadata {
         throw new IllegalArgumentException("path-state metadata payload mismatch");
       }
       return new PathStateRootMetadata(kind, blockNumber, blockHash, parentHash, timestamp, phase,
-          parentRoot, stateRoot, digest);
+          formatDigest, parentRoot, stateRoot, digest);
     } catch (IOException invalid) {
       throw new IllegalArgumentException("path-state metadata is truncated", invalid);
     }
