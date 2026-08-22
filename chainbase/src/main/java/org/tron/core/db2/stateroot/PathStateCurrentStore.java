@@ -4,7 +4,10 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
 import java.util.Objects;
 import org.tron.core.db2.stateroot.PathStateRootMetadata.Kind;
 
@@ -19,7 +22,7 @@ public final class PathStateCurrentStore {
   public static final String METADATA_FILE = "METADATA";
   public static final String CURRENT_FILE = "CURRENT";
 
-  private static final int MAX_VALIDATION_LAYERS = 65_536;
+  static final int MAX_VALIDATION_LAYERS = 65_536;
 
   private final PathStateStoreManifest manifest;
   private final Path currentPath;
@@ -66,20 +69,32 @@ public final class PathStateCurrentStore {
   }
 
   /** Atomically switches CURRENT to an exact durable ancestor inside the reversible window. */
-  public synchronized PathStateRootMetadata switchToAncestor(PathStateRootMetadata target,
+  synchronized PathStateRootMetadata switchToAncestor(PathStateRootMetadata target,
       PathStateLayerLimits limits) throws IOException {
     return switchToAncestor(target, limits, temporary -> { });
   }
 
   synchronized PathStateRootMetadata switchToAncestor(PathStateRootMetadata target,
       PathStateLayerLimits limits, PathStateMetadataFile.FaultHook faultHook) throws IOException {
+    List<PathStateRootMetadata> suffix = layersAboveAncestor(target, limits);
+    PathStateRootMetadata admittedTarget = Objects.requireNonNull(target, "target");
+    if (suffix.isEmpty()) {
+      return current();
+    }
+    PathStateMetadataFile.replaceCurrent(currentPath, admittedTarget,
+        Objects.requireNonNull(faultHook, "faultHook"));
+    return current();
+  }
+
+  synchronized List<PathStateRootMetadata> layersAboveAncestor(PathStateRootMetadata target,
+      PathStateLayerLimits limits) throws IOException {
     PathStateRootMetadata admittedTarget = Objects.requireNonNull(target, "target");
     PathStateLayerLimits admittedLimits = Objects.requireNonNull(limits, "limits");
     requireFormat(admittedTarget);
     PathStateRootMetadata head = current();
     if (same(head, admittedTarget)) {
       verifyTargetState(admittedTarget);
-      return head;
+      return Collections.emptyList();
     }
     if (admittedTarget.getBlockNumber() >= head.getBlockNumber()) {
       throw new IOException("path-state canonical switch target is not an ancestor");
@@ -87,14 +102,14 @@ public final class PathStateCurrentStore {
 
     PathStateRootMetadata base = requireKind(PathStateMetadataFile.load(basePath()), Kind.BASE);
     requireFormat(base);
+    List<PathStateRootMetadata> suffix = new ArrayList<>();
     PathStateRootMetadata cursor = head;
     for (int depth = 1; depth <= admittedLimits.getMaxLayers(); depth++) {
+      suffix.add(cursor);
       cursor = parentOf(cursor, base);
       if (same(cursor, admittedTarget)) {
         verifyTargetState(admittedTarget);
-        PathStateMetadataFile.replaceCurrent(currentPath, admittedTarget,
-            Objects.requireNonNull(faultHook, "faultHook"));
-        return current();
+        return Collections.unmodifiableList(suffix);
       }
       if (cursor.getKind() == Kind.BASE) {
         break;
