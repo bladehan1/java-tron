@@ -31,6 +31,19 @@ final class PathStateMetadataFile {
     }
   }
 
+  static byte[] loadImmutableBytes(Path path, int maxLength) throws IOException {
+    Path target = Objects.requireNonNull(path, "path");
+    if (!Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS)) {
+      throw new IOException("path-state immutable record is missing or not a regular file: "
+          + target);
+    }
+    long length = Files.size(target);
+    if (length <= 0 || length > maxLength) {
+      throw new IOException("path-state immutable record length is invalid: " + target);
+    }
+    return Files.readAllBytes(target);
+  }
+
   /** Publishes once; an exact existing record is an idempotent retry, not a rewrite. */
   static void publishImmutable(Path path, PathStateRootMetadata metadata) throws IOException {
     Path target = Objects.requireNonNull(path, "path");
@@ -40,6 +53,19 @@ final class PathStateMetadataFile {
       return;
     }
     publish(target, encoded, false, temporary -> { });
+  }
+
+  static void publishImmutableBytes(Path path, byte[] encoded) throws IOException {
+    Path target = Objects.requireNonNull(path, "path");
+    byte[] value = Arrays.copyOf(Objects.requireNonNull(encoded, "encoded"), encoded.length);
+    if (value.length == 0) {
+      throw new IllegalArgumentException("path-state immutable record must not be empty");
+    }
+    if (Files.exists(target, LinkOption.NOFOLLOW_LINKS)) {
+      requireExactBytes(target, value);
+      return;
+    }
+    publish(target, value, false, temporary -> { });
   }
 
   static void replaceCurrent(Path path, PathStateRootMetadata metadata) throws IOException {
@@ -77,6 +103,13 @@ final class PathStateMetadataFile {
     }
     if (!Arrays.equals(expected, actual)) {
       throw new IOException("immutable path-state metadata identity mismatch: " + path);
+    }
+  }
+
+  private static void requireExactBytes(Path path, byte[] expected) throws IOException {
+    if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)
+        || !Arrays.equals(expected, Files.readAllBytes(path))) {
+      throw new IOException("immutable path-state record identity mismatch: " + path);
     }
   }
 
@@ -118,7 +151,7 @@ final class PathStateMetadataFile {
     }
   }
 
-  private static void syncDirectory(Path directory) throws IOException {
+  static void syncDirectory(Path directory) throws IOException {
     try (FileChannel channel = FileChannel.open(directory, StandardOpenOption.READ)) {
       channel.force(true);
     }
