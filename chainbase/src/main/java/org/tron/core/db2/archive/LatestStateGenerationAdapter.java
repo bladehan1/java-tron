@@ -82,7 +82,7 @@ public final class LatestStateGenerationAdapter implements PinnedLatestStateFact
       return capable(dbName, level.getSnapshotSourceIdentity(), (blockNumber, blockHash) -> {
         LevelDbDataSourceImpl.PinnedSnapshot pinned = level.pinSnapshot();
         return snapshot(dbName, pinned.getSourceIdentity(), blockNumber, blockHash,
-            pinned::get, pinned::close);
+            pinned::get, pinned::range, pinned::close);
       });
     }
     if (source instanceof RocksDbDataSourceImpl) {
@@ -90,7 +90,7 @@ public final class LatestStateGenerationAdapter implements PinnedLatestStateFact
       return capable(dbName, rocks.getSnapshotSourceIdentity(), (blockNumber, blockHash) -> {
         RocksDbDataSourceImpl.PinnedSnapshot pinned = rocks.pinSnapshot();
         return snapshot(dbName, pinned.getSourceIdentity(), blockNumber, blockHash,
-            pinned::get, pinned::close);
+            pinned::get, pinned::range, pinned::close);
       });
     }
     throw new ArchivePersistenceException(
@@ -118,7 +118,7 @@ public final class LatestStateGenerationAdapter implements PinnedLatestStateFact
   }
 
   private static StoreSnapshot snapshot(String dbName, String sourceIdentity, long blockNumber,
-      byte[] blockHash, PointReader reader, CloseableAction close) {
+      byte[] blockHash, PointReader reader, RangeReader rangeReader, CloseableAction close) {
     byte[] expectedHash = Arrays.copyOf(blockHash, blockHash.length);
     return new StoreSnapshot() {
       @Override
@@ -144,6 +144,12 @@ public final class LatestStateGenerationAdapter implements PinnedLatestStateFact
       @Override
       public byte[] get(byte[] physicalRawKey) {
         return reader.get(physicalRawKey);
+      }
+
+      @Override
+      public List<Map.Entry<byte[], byte[]>> range(byte[] lowerInclusive,
+          byte[] upperExclusive, int maxEntries) {
+        return rangeReader.range(lowerInclusive, upperExclusive, maxEntries);
       }
 
       @Override
@@ -274,6 +280,11 @@ public final class LatestStateGenerationAdapter implements PinnedLatestStateFact
     byte[] getBlockHash();
 
     byte[] get(byte[] physicalRawKey) throws IOException;
+
+    default List<Map.Entry<byte[], byte[]>> range(byte[] lowerInclusive, byte[] upperExclusive,
+        int maxEntries) throws IOException {
+      throw new UnsupportedOperationException("Pinned Store range is unsupported");
+    }
   }
 
   @FunctionalInterface
@@ -284,6 +295,12 @@ public final class LatestStateGenerationAdapter implements PinnedLatestStateFact
   @FunctionalInterface
   private interface PointReader {
     byte[] get(byte[] key);
+  }
+
+  @FunctionalInterface
+  private interface RangeReader {
+    List<Map.Entry<byte[], byte[]>> range(byte[] lowerInclusive, byte[] upperExclusive,
+        int maxEntries);
   }
 
   @FunctionalInterface
@@ -336,10 +353,31 @@ public final class LatestStateGenerationAdapter implements PinnedLatestStateFact
     }
 
     @Override
-    public List<HistoricalRangeOverlay.Entry> range(String dbName, byte[] lowerInclusive,
-        byte[] upperExclusive) {
-      throw new UnsupportedOperationException(
-          "Latest-generation range is outside the Phase 1 point-query scope");
+    public synchronized List<HistoricalRangeOverlay.Entry> range(String dbName,
+        byte[] lowerInclusive, byte[] upperExclusive, int maxEntries) throws IOException {
+      ensureOpen();
+      if (!"account-asset".equals(dbName) || maxEntries <= 0
+          || maxEntries == Integer.MAX_VALUE) {
+        throw new UnsupportedOperationException(
+            "Latest-generation range is limited to bounded account-asset queries");
+      }
+      StoreSnapshot snapshot = snapshots.get(dbName);
+      if (snapshot == null) {
+        throw new ArchivePersistenceException(
+            "Database is outside pinned latest generation: " + dbName);
+      }
+      int scanLimit = maxEntries == Integer.MAX_VALUE ? Integer.MAX_VALUE : maxEntries + 1;
+      List<Map.Entry<byte[], byte[]>> raw = snapshot.range(
+          lowerInclusive, upperExclusive, scanLimit);
+      if (raw.size() > maxEntries) {
+        throw new ArchiveQueryLimitExceededException(
+            "latest AccountAsset candidate-key budget exceeded");
+      }
+      List<HistoricalRangeOverlay.Entry> result = new ArrayList<>(raw.size());
+      for (Map.Entry<byte[], byte[]> entry : raw) {
+        result.add(new HistoricalRangeOverlay.Entry(entry.getKey(), entry.getValue()));
+      }
+      return Collections.unmodifiableList(result);
     }
 
     @Override

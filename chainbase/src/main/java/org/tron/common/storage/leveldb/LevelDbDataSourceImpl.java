@@ -18,8 +18,10 @@ package org.tron.common.storage.leveldb;
 import static org.fusesource.leveldbjni.JniDBFactory.factory;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
 import com.google.common.primitives.Bytes;
+import com.google.common.primitives.UnsignedBytes;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -548,6 +550,36 @@ public class LevelDbDataSourceImpl extends DbStat implements DbSourceInter<byte[
         throw new IllegalStateException("LevelDB snapshot lease is closed");
       }
       return pinnedDatabase.get(key, readOptions);
+    }
+
+    /** Returns at most {@code maxEntries} rows from this pinned lexical range. */
+    public synchronized List<Map.Entry<byte[], byte[]>> range(byte[] lowerInclusive,
+        byte[] upperExclusive, int maxEntries) {
+      if (closed) {
+        throw new IllegalStateException("LevelDB snapshot lease is closed");
+      }
+      if (lowerInclusive == null || maxEntries <= 0) {
+        throw new IllegalArgumentException("Invalid LevelDB snapshot range");
+      }
+      List<Map.Entry<byte[], byte[]>> result = new ArrayList<>();
+      try (DBIterator iterator = pinnedDatabase.iterator(readOptions)) {
+        iterator.seek(lowerInclusive);
+        while (iterator.hasNext() && result.size() < maxEntries) {
+          Map.Entry<byte[], byte[]> entry = iterator.next();
+          if (upperExclusive != null
+              && UnsignedBytes.lexicographicalComparator().compare(entry.getKey(),
+              upperExclusive) >= 0) {
+            break;
+          }
+          result.add(Maps.immutableEntry(
+              Arrays.copyOf(entry.getKey(), entry.getKey().length),
+              Arrays.copyOf(entry.getValue(), entry.getValue().length)));
+        }
+      } catch (IOException failure) {
+        throw new RuntimeException("Failed to read pinned LevelDB range " + dataBaseName,
+            failure);
+      }
+      return Collections.unmodifiableList(result);
     }
 
     public String getSourceIdentity() {

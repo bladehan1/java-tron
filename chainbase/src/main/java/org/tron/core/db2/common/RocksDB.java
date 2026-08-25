@@ -4,6 +4,7 @@ import com.google.common.collect.Maps;
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import lombok.Getter;
 import org.tron.common.parameter.CommonParameter;
@@ -91,6 +92,12 @@ public class RocksDB implements DB<byte[], byte[]>, Flusher, SnapshotCapableStor
       @Override
       public byte[] get(byte[] physicalRawKey) {
         return pinned.get(physicalRawKey);
+      }
+
+      @Override
+      public List<Map.Entry<byte[], byte[]>> range(byte[] lowerInclusive,
+          byte[] upperExclusive, int maxEntries) {
+        return pinned.range(lowerInclusive, upperExclusive, maxEntries);
       }
 
       @Override

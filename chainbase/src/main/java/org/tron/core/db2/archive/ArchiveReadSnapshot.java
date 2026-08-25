@@ -109,7 +109,7 @@ public final class ArchiveReadSnapshot implements Closeable {
       throws IOException {
     ensureOpen();
     List<Entry> pinnedLatest = latest.range(dbName, range.getLowerInclusive(),
-        range.getUpperExclusive());
+        range.getUpperExclusive(), limits.getMaxCandidateKeys());
     if (pinnedLatest == null) {
       throw new IllegalStateException("Pinned latest range returned null");
     }
@@ -248,7 +248,8 @@ public final class ArchiveReadSnapshot implements Closeable {
 
     OldValue get(String dbName, byte[] physicalRawKey) throws IOException;
 
-    List<Entry> range(String dbName, byte[] lowerInclusive, byte[] upperExclusive)
+    List<Entry> range(String dbName, byte[] lowerInclusive, byte[] upperExclusive,
+        int maxEntries)
         throws IOException;
   }
 

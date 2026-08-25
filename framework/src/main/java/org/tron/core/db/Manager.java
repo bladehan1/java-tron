@@ -122,6 +122,7 @@ import org.tron.core.db2.archive.ArchiveHistoryWriter;
 import org.tron.core.db2.archive.ArchiveStoreScope;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
 import org.tron.core.db2.archive.HistoricalAccountAssetBalanceResolver;
+import org.tron.core.db2.archive.HistoricalAccountAssetPrefixResolver;
 import org.tron.core.db2.archive.HistoricalAccountBalanceReader;
 import org.tron.core.db2.archive.OldValue;
 import org.tron.core.db2.archive.SnapshotOldValueCollector;
@@ -740,6 +741,23 @@ public class Manager {
     } catch (java.io.IOException failure) {
       throw new org.tron.core.db2.archive.ArchivePersistenceException(
           "Failed to resolve request-owned historical AccountAsset snapshot", failure);
+    }
+  }
+
+  /** Resolves one bounded P66-aware historical TRC10 balance prefix per request generation. */
+  public HistoricalAccountAssetPrefixResolver.Result getArchiveAccountAssets(
+      long blockNumber, byte[] address, HistoricalAccountAssetPrefixResolver.Limits limits) {
+    StateArchiveRuntimeOwner runtime = stateArchiveRuntime;
+    if (runtime == null) {
+      throw new IllegalStateException("Experimental state archive is disabled");
+    }
+    try (org.tron.core.db2.archive.ArchiveRuntimeQueryGate.Lease lease =
+        runtime.pinHistoricalState(blockNumber)) {
+      return new HistoricalAccountAssetPrefixResolver().resolve(
+          lease.getSnapshot(), address, limits);
+    } catch (java.io.IOException failure) {
+      throw new org.tron.core.db2.archive.ArchivePersistenceException(
+          "Failed to resolve request-owned historical AccountAsset prefix", failure);
     }
   }
 

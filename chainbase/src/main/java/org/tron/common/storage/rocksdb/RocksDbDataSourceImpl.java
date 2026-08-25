@@ -1,8 +1,10 @@
 package org.tron.common.storage.rocksdb;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
 import com.google.common.primitives.Bytes;
+import com.google.common.primitives.UnsignedBytes;
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -525,6 +527,38 @@ public class RocksDbDataSourceImpl extends DbStat implements DbSourceInter<byte[
       } catch (RocksDBException e) {
         throw new RuntimeException(dataBaseName, e);
       }
+    }
+
+    /** Returns at most {@code maxEntries} rows from this pinned lexical range. */
+    public synchronized List<Map.Entry<byte[], byte[]>> range(byte[] lowerInclusive,
+        byte[] upperExclusive, int maxEntries) {
+      if (closed) {
+        throw new IllegalStateException("RocksDB snapshot lease is closed");
+      }
+      if (lowerInclusive == null || maxEntries <= 0) {
+        throw new IllegalArgumentException("Invalid RocksDB snapshot range");
+      }
+      List<Map.Entry<byte[], byte[]>> result = new ArrayList<>();
+      try (RocksIterator iterator = pinnedDatabase.newIterator(readOptions)) {
+        iterator.seek(lowerInclusive);
+        while (iterator.isValid() && result.size() < maxEntries) {
+          byte[] key = iterator.key();
+          if (upperExclusive != null
+              && UnsignedBytes.lexicographicalComparator().compare(key, upperExclusive) >= 0) {
+            break;
+          }
+          byte[] value = iterator.value();
+          result.add(Maps.immutableEntry(
+              Arrays.copyOf(key, key.length),
+              Arrays.copyOf(value, value.length)));
+          iterator.next();
+        }
+        iterator.status();
+      } catch (RocksDBException failure) {
+        throw new RuntimeException("Failed to read pinned RocksDB range " + dataBaseName,
+            failure);
+      }
+      return Collections.unmodifiableList(result);
     }
 
     public String getSourceIdentity() {

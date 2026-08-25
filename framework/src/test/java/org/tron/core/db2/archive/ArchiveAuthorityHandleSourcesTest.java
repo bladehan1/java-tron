@@ -167,7 +167,7 @@ public class ArchiveAuthorityHandleSourcesTest {
 
     @Override
     public List<HistoricalRangeOverlay.Entry> range(String dbName, byte[] lowerInclusive,
-        byte[] upperExclusive) {
+        byte[] upperExclusive, int maxEntries) {
       throw new AssertionError("Admission must not scan latest business data");
     }
 
