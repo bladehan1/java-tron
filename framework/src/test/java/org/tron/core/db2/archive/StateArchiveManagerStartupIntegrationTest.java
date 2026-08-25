@@ -38,6 +38,8 @@ import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.mockito.ArgumentCaptor;
 import org.tron.common.parameter.CommonParameter;
+import org.tron.common.storage.leveldb.LevelDbDataSourceImpl;
+import org.tron.common.storage.rocksdb.RocksDbDataSourceImpl;
 import org.tron.common.utils.Sha256Hash;
 import org.tron.core.ChainBaseManager;
 import org.tron.core.capsule.BlockCapsule;
@@ -49,10 +51,13 @@ import org.tron.core.db.common.DbSourceInter;
 import org.tron.core.db2.ISession;
 import org.tron.core.db2.archive.LatestStateGenerationAdapter.SnapshotCapableStore;
 import org.tron.core.db2.archive.LatestStateGenerationAdapter.StoreSnapshot;
+import org.tron.core.db2.archive.StateArchiveRuntimeOwner.ReadableStateStage;
 import org.tron.core.db2.archive.StateArchiveRuntimeOwner.ServingIndexStage;
 import org.tron.core.db2.archive.StateArchiveRuntimeOwner.State;
 import org.tron.core.db2.common.DB;
 import org.tron.core.db2.common.Flusher;
+import org.tron.core.db2.common.LevelDB;
+import org.tron.core.db2.common.RocksDB;
 import org.tron.core.db2.common.WrappedByteArray;
 import org.tron.core.db2.core.Chainbase;
 import org.tron.core.db2.core.SnapshotManager;
@@ -483,6 +488,238 @@ public class StateArchiveManagerStartupIntegrationTest {
       withArchiveConfig(output, engine, true,
           () -> runSupplementalP66Scenario(output, engine));
     }
+  }
+
+  @Test
+  public void postRefreshFailuresReopenNativeSupplementalP66FixedPoint() throws Exception {
+    for (String engine : Arrays.asList("LEVELDB", "ROCKSDB")) {
+      for (ReadableStateStage failureStage : ReadableStateStage.values()) {
+        Path output = temporaryFolder.newFolder("post-refresh-p66-"
+            + engine.toLowerCase() + "-" + failureStage.name().toLowerCase()).toPath();
+        withArchiveConfig(output, engine, true,
+            () -> runPostRefreshP66Failure(output, engine, failureStage));
+      }
+    }
+  }
+
+  private void runPostRefreshP66Failure(Path output, String engine,
+      ReadableStateStage failureStage) throws Exception {
+    Path archive = output.resolve("state-archive");
+    BlockSnapshotMeta base = new BlockSnapshotMeta(6, 6, hash(6), hash(5), 6_000L);
+    SnapshotFixture fixture = snapshotFixtureWithoutAccountAsset(Collections.emptyMap());
+    AtomicLong targetOptimization = new AtomicLong();
+    AtomicReference<ReadableStateStage> armed = new AtomicReference<>();
+    TestAccountAssetStore accountAssetStore = new TestAccountAssetStore();
+    Manager manager = manager(fixture.snapshots, base, accountAssetStore, targetOptimization);
+    setField(manager, "stateArchiveReadableStateFaultHook",
+        (StateArchiveRuntimeOwner.ReadableStateFaultHook) stage -> {
+          if (stage == armed.get() && armed.compareAndSet(stage, null)) {
+            throw new IOException("injected readable-state failure at " + stage);
+          }
+        });
+    byte[] address = archiveAddress(12);
+    String tokenId = "1000012";
+    byte[] directKey = new P66AccountAssetCodec().assetPhysicalKey(address, tokenId);
+    fixture.databases.get("properties").put(
+        HistoricalAccountAssetBalanceResolver.proposal66PhysicalKey(), longValue(0));
+    fixture.databases.get("account").put(address,
+        assetAccount(address, false, tokenId, 20));
+    invoke(manager, "initStateArchive");
+
+    targetOptimization.set(1);
+    BlockSnapshotMeta activation = new BlockSnapshotMeta(7, 7, hash(7), hash(6), 7_000L);
+    try (ISession block = fixture.snapshots.buildSession()) {
+      fixture.databases.get("properties").put(
+          HistoricalAccountAssetBalanceResolver.proposal66PhysicalKey(), longValue(1));
+      fixture.databases.get("account").put(address,
+          assetAccount(address, false, tokenId, 30));
+      block.commit(activation);
+    }
+    setField(fixture.snapshots, "flushCount", 1);
+    fixture.snapshots.flushPending();
+    assertEquals(activation, manager.getStateArchiveRuntime().verifyNormalWriteFixedPoint());
+
+    BlockSnapshotMeta target = new BlockSnapshotMeta(8, 8, hash(8), hash(7), 8_000L);
+    try (ISession block = fixture.snapshots.buildSession()) {
+      fixture.databases.get("account").put(address,
+          assetAccount(address, true, tokenId, 40));
+      block.commit(target);
+    }
+    setField(fixture.snapshots, "flushCount", 1);
+    armed.set(failureStage);
+    assertThrows(org.tron.core.exception.TronError.class, fixture.snapshots::flushPending);
+
+    assertEquals(target, manager.getArchiveHistoryWriter().committedHeadMeta());
+    assertEquals(activation.getEpoch(), fixture.snapshots.getArchiveReadableEpoch());
+    assertArrayEquals(longValue(40), accountAssetStore.get(directKey));
+    assertTrue(fixture.databases.values().stream()
+        .allMatch(database -> database.getHead() instanceof SnapshotRoot));
+    assertThrows(ArchivePersistenceException.class,
+        () -> manager.getArchiveAccountAssetBalance(7, address, tokenId));
+    assertThrows(ArchivePersistenceException.class,
+        () -> manager.getArchiveAccountAssetBalance(8, address, tokenId));
+    Map<String, byte[]> historyAuthority = historyAuthoritySnapshot(archive);
+
+    @SuppressWarnings("unchecked")
+    ArgumentCaptor<Map<byte[], byte[]>> checkpoints = ArgumentCaptor.forClass(Map.class);
+    verify(fixture.checkpoint, times(2)).updateByBatch(checkpoints.capture());
+    Map<byte[], byte[]> recoveredCheckpoint = checkpoints.getAllValues().get(1);
+    invoke(manager, "closeStateArchive");
+    fixture.snapshots.shutdown();
+    accountAssetStore.getDbSource().closeDB();
+    assertHistoryAuthorityEquals(historyAuthority, archive);
+
+    SnapshotFixture restarted = snapshotFixtureWithoutAccountAsset(recoveredCheckpoint);
+    TestAccountAssetStore reopenedAccountAssetStore = new TestAccountAssetStore();
+    Manager restartedManager = manager(restarted.snapshots, target, reopenedAccountAssetStore,
+        targetOptimization);
+    invokeCheckpointRecovery(restarted.snapshots, restarted.checkpoint);
+    invoke(restartedManager, "initStateArchive");
+    assertEquals(0, restartedManager.getStateArchiveRuntime().getStartupRecoveryActionCount());
+    assertEquals(target,
+        restartedManager.getStateArchiveRuntime().verifyNormalWriteFixedPoint());
+    assertAccountAsset(restartedManager, 6, address, tokenId,
+        P66AccountAssetCodec.Phase.P66_OFF, true, 20);
+    assertAccountAsset(restartedManager, 7, address, tokenId,
+        P66AccountAssetCodec.Phase.P66_ON, true, 30);
+    assertAccountAsset(restartedManager, 8, address, tokenId,
+        P66AccountAssetCodec.Phase.P66_ON, true, 40);
+    assertArrayEquals(longValue(40), reopenedAccountAssetStore.get(directKey));
+    assertEquals(1, countGenerationDirectories(archive));
+    assertHistoryAuthorityEquals(historyAuthority, archive);
+
+    ArchiveRuntimeQueryGate.Lease active =
+        restartedManager.getStateArchiveRuntime().pinHistoricalState(8);
+    assertThrows(IllegalStateException.class,
+        () -> invoke(restartedManager, "closeStateArchive"));
+    active.close();
+    invoke(restartedManager, "closeStateArchive");
+    restarted.snapshots.shutdown();
+    reopenedAccountAssetStore.getDbSource().closeDB();
+
+    SnapshotFixture secondRestart = snapshotFixtureWithoutAccountAsset(recoveredCheckpoint);
+    TestAccountAssetStore secondAccountAssetStore = new TestAccountAssetStore();
+    Manager secondManager = manager(secondRestart.snapshots, target, secondAccountAssetStore,
+        targetOptimization);
+    invokeCheckpointRecovery(secondRestart.snapshots, secondRestart.checkpoint);
+    invoke(secondManager, "initStateArchive");
+    assertEquals(0, secondManager.getStateArchiveRuntime().getStartupRecoveryActionCount());
+    assertEquals(target, secondManager.getStateArchiveRuntime().verifyNormalWriteFixedPoint());
+    assertAccountAsset(secondManager, 8, address, tokenId,
+        P66AccountAssetCodec.Phase.P66_ON, true, 40);
+    assertHistoryAuthorityEquals(historyAuthority, archive);
+    assertEquals("LEVELDB".equals(engine), secondAccountAssetStore.getDbSource()
+        instanceof org.tron.common.storage.leveldb.LevelDbDataSourceImpl);
+    assertEquals("ROCKSDB".equals(engine), secondAccountAssetStore.getDbSource()
+        instanceof org.tron.common.storage.rocksdb.RocksDbDataSourceImpl);
+    invoke(secondManager, "closeStateArchive");
+    secondRestart.snapshots.shutdown();
+    secondAccountAssetStore.getDbSource().closeDB();
+  }
+
+  @Test
+  public void allNativeExact27StoresReopenWithStableIdentityAndHistory() throws Exception {
+    for (String engine : Arrays.asList("LEVELDB", "ROCKSDB")) {
+      Path output = temporaryFolder.newFolder("all-native-exact27-"
+          + engine.toLowerCase()).toPath();
+      withArchiveConfig(output, engine, true,
+          () -> runAllNativeExact27Scenario(output, engine));
+    }
+  }
+
+  private void runAllNativeExact27Scenario(Path output, String engine) throws Exception {
+    Path archive = output.resolve("state-archive");
+    BlockSnapshotMeta base = new BlockSnapshotMeta(6, 6, hash(6), hash(5), 6_000L);
+    SnapshotFixture fixture = nativeSnapshotFixture(output, engine, Collections.emptyMap());
+    AtomicLong targetOptimization = new AtomicLong();
+    TestAccountAssetStore accountAssetStore = new TestAccountAssetStore();
+    Manager manager = manager(fixture.snapshots, base, accountAssetStore, targetOptimization);
+    byte[] address = archiveAddress(13);
+    String tokenId = "1000013";
+    byte[] directKey = new P66AccountAssetCodec().assetPhysicalKey(address, tokenId);
+    seedNativeExact27(fixture.databases, 6);
+    fixture.databases.get("properties").put(
+        HistoricalAccountAssetBalanceResolver.proposal66PhysicalKey(), longValue(0));
+    fixture.databases.get("account").put(address,
+        assetAccount(address, false, tokenId, 20));
+    Map<String, String> sourceIdentities = sourceIdentities(fixture, accountAssetStore);
+    invoke(manager, "initStateArchive");
+
+    BlockSnapshotMeta target = null;
+    for (int epoch = 7; epoch <= 8; epoch++) {
+      targetOptimization.set(1);
+      target = new BlockSnapshotMeta(epoch, epoch, hash(epoch), hash(epoch - 1),
+          epoch * 1_000L);
+      try (ISession block = fixture.snapshots.buildSession()) {
+        mutateNativeExact27(fixture.databases, epoch);
+        if (epoch == 7) {
+          fixture.databases.get("properties").put(
+              HistoricalAccountAssetBalanceResolver.proposal66PhysicalKey(), longValue(1));
+          fixture.databases.get("account").put(address,
+              assetAccount(address, false, tokenId, 30));
+        } else {
+          fixture.databases.get("account").put(address,
+              assetAccount(address, true, tokenId, 40));
+        }
+        block.commit(target);
+      }
+      setField(fixture.snapshots, "flushCount", 1);
+      fixture.snapshots.flushPending();
+      assertEquals(target, manager.getStateArchiveRuntime().verifyNormalWriteFixedPoint());
+    }
+
+    assertNativeExact27History(manager, address, directKey);
+    assertAccountAsset(manager, 6, address, tokenId,
+        P66AccountAssetCodec.Phase.P66_OFF, true, 20);
+    assertAccountAsset(manager, 7, address, tokenId,
+        P66AccountAssetCodec.Phase.P66_ON, true, 30);
+    assertAccountAsset(manager, 8, address, tokenId,
+        P66AccountAssetCodec.Phase.P66_ON, true, 40);
+    @SuppressWarnings("unchecked")
+    ArgumentCaptor<Map<byte[], byte[]>> checkpoints = ArgumentCaptor.forClass(Map.class);
+    verify(fixture.checkpoint, times(2)).updateByBatch(checkpoints.capture());
+    Map<byte[], byte[]> recoveredCheckpoint = checkpoints.getAllValues().get(1);
+    invoke(manager, "closeStateArchive");
+    fixture.snapshots.shutdown();
+    closeNativeStores(fixture);
+    accountAssetStore.getDbSource().closeDB();
+
+    SnapshotFixture restarted = nativeSnapshotFixture(output, engine, recoveredCheckpoint);
+    TestAccountAssetStore reopenedAccountAssetStore = new TestAccountAssetStore();
+    assertEquals(sourceIdentities, sourceIdentities(restarted, reopenedAccountAssetStore));
+    Manager restartedManager = manager(restarted.snapshots, target, reopenedAccountAssetStore,
+        targetOptimization);
+    invokeCheckpointRecovery(restarted.snapshots, restarted.checkpoint);
+    invoke(restartedManager, "initStateArchive");
+    assertEquals(0, restartedManager.getStateArchiveRuntime().getStartupRecoveryActionCount());
+    assertEquals(target,
+        restartedManager.getStateArchiveRuntime().verifyNormalWriteFixedPoint());
+    assertNativeExact27History(restartedManager, address, directKey);
+    assertAccountAsset(restartedManager, 6, address, tokenId,
+        P66AccountAssetCodec.Phase.P66_OFF, true, 20);
+    assertAccountAsset(restartedManager, 7, address, tokenId,
+        P66AccountAssetCodec.Phase.P66_ON, true, 30);
+    assertAccountAsset(restartedManager, 8, address, tokenId,
+        P66AccountAssetCodec.Phase.P66_ON, true, 40);
+    invoke(restartedManager, "closeStateArchive");
+    restarted.snapshots.shutdown();
+    closeNativeStores(restarted);
+    reopenedAccountAssetStore.getDbSource().closeDB();
+
+    SnapshotFixture secondRestart = nativeSnapshotFixture(output, engine, recoveredCheckpoint);
+    TestAccountAssetStore secondAccountAssetStore = new TestAccountAssetStore();
+    assertEquals(sourceIdentities, sourceIdentities(secondRestart, secondAccountAssetStore));
+    Manager secondManager = manager(secondRestart.snapshots, target, secondAccountAssetStore,
+        targetOptimization);
+    invokeCheckpointRecovery(secondRestart.snapshots, secondRestart.checkpoint);
+    invoke(secondManager, "initStateArchive");
+    assertEquals(0, secondManager.getStateArchiveRuntime().getStartupRecoveryActionCount());
+    assertEquals(target, secondManager.getStateArchiveRuntime().verifyNormalWriteFixedPoint());
+    assertNativeExact27History(secondManager, address, directKey);
+    invoke(secondManager, "closeStateArchive");
+    secondRestart.snapshots.shutdown();
+    closeNativeStores(secondRestart);
+    secondAccountAssetStore.getDbSource().closeDB();
   }
 
   private void runSupplementalP66Scenario(Path output, String engine) throws Exception {
@@ -920,7 +1157,57 @@ public class StateArchiveManagerStartupIntegrationTest {
         ignored -> checkpointEntries.entrySet().iterator());
     when(checkpoint.getDbSource()).thenReturn(checkpointDb);
     snapshots.setCheckTmpStore(checkpoint);
-    return new SnapshotFixture(snapshots, databases, checkpointOnly, checkpoint);
+    return new SnapshotFixture(snapshots, databases, checkpointOnly, checkpoint,
+        Collections.emptyMap());
+  }
+
+  private static SnapshotFixture nativeSnapshotFixture(Path output, String engine,
+      Map<byte[], byte[]> checkpointEntries) {
+    if (CommonParameter.getInstance().getStorage() == null) {
+      CommonParameter.getInstance().storage = new Storage();
+    }
+    SnapshotManager snapshots = new SnapshotManager("");
+    Map<String, Chainbase> databases = new LinkedHashMap<>();
+    Map<String, SnapshotCapableStore> nativeStores = new LinkedHashMap<>();
+    for (String participant : PARTICIPANTS) {
+      if (AccountAssetArchiveProjector.ACCOUNT_ASSET_DB.equals(participant)) {
+        continue;
+      }
+      DB<byte[], byte[]> nativeStore = openNativeStore(output, engine, participant);
+      Chainbase database = new Chainbase(new SnapshotRoot(nativeStore));
+      snapshots.add(database);
+      databases.put(participant, database);
+      nativeStores.put(participant, (SnapshotCapableStore) nativeStore);
+    }
+    Map<String, Chainbase> checkpointOnly = new LinkedHashMap<>();
+    for (String name : Arrays.asList("block", "block-index")) {
+      DB<byte[], byte[]> nativeStore = openNativeStore(output, engine, name);
+      Chainbase database = new Chainbase(new SnapshotRoot(nativeStore));
+      snapshots.add(database);
+      checkpointOnly.put(name, database);
+      nativeStores.put(name, (SnapshotCapableStore) nativeStore);
+    }
+    snapshots.enable();
+    snapshots.setUnChecked(false);
+    CheckTmpStore checkpoint = mock(CheckTmpStore.class);
+    @SuppressWarnings("unchecked")
+    DbSourceInter<byte[]> checkpointDb = mock(DbSourceInter.class);
+    when(checkpointDb.iterator()).thenAnswer(
+        ignored -> checkpointEntries.entrySet().iterator());
+    when(checkpoint.getDbSource()).thenReturn(checkpointDb);
+    snapshots.setCheckTmpStore(checkpoint);
+    return new SnapshotFixture(snapshots, databases, checkpointOnly, checkpoint, nativeStores);
+  }
+
+  private static DB<byte[], byte[]> openNativeStore(Path output, String engine, String name) {
+    if ("LEVELDB".equals(engine)) {
+      return new LevelDB(new LevelDbDataSourceImpl(output.toString(), name));
+    }
+    if ("ROCKSDB".equals(engine)) {
+      return new RocksDB(new RocksDbDataSourceImpl(
+          output.resolve("database").toString(), name));
+    }
+    throw new IllegalArgumentException("Unsupported native fixture engine: " + engine);
   }
 
   private static SnapshotFixture snapshotFixtureWithoutAccountAsset(
@@ -950,6 +1237,32 @@ public class StateArchiveManagerStartupIntegrationTest {
     try (java.util.stream.Stream<Path> entries =
         Files.list(archive.resolve("serving-index").resolve("generations"))) {
       return entries.filter(Files::isDirectory).count();
+    }
+  }
+
+  private static Map<String, byte[]> historyAuthoritySnapshot(Path archive) throws IOException {
+    Map<String, byte[]> snapshot = new LinkedHashMap<>();
+    for (String relative : Arrays.asList("MANIFEST", "bootstrap.anchor",
+        "history.scan-anchor", "state_history.idx", "commits/commit.log")) {
+      Path file = archive.resolve(relative);
+      snapshot.put(relative, Files.readAllBytes(file));
+    }
+    try (java.util.stream.Stream<Path> segments = Files.list(archive.resolve("history"))) {
+      Iterator<Path> ordered = segments.filter(Files::isRegularFile).sorted().iterator();
+      while (ordered.hasNext()) {
+        Path file = ordered.next();
+        snapshot.put("history/" + file.getFileName(), Files.readAllBytes(file));
+      }
+    }
+    return snapshot;
+  }
+
+  private static void assertHistoryAuthorityEquals(Map<String, byte[]> expected, Path archive)
+      throws IOException {
+    Map<String, byte[]> actual = historyAuthoritySnapshot(archive);
+    assertEquals(expected.keySet(), actual.keySet());
+    for (String relative : expected.keySet()) {
+      assertArrayEquals(relative, expected.get(relative), actual.get(relative));
     }
   }
 
@@ -1137,6 +1450,106 @@ public class StateArchiveManagerStartupIntegrationTest {
     }
   }
 
+  private static void seedNativeExact27(Map<String, Chainbase> databases, int epoch) {
+    int storeIndex = 0;
+    for (String dbName : PARTICIPANTS) {
+      if (!AccountAssetArchiveProjector.ACCOUNT_ASSET_DB.equals(dbName)
+          && !"account".equals(dbName)) {
+        databases.get(dbName).put(nativeExactKey(dbName, storeIndex),
+            nativeExactValue(epoch, storeIndex));
+      }
+      storeIndex++;
+    }
+  }
+
+  private static void mutateNativeExact27(Map<String, Chainbase> databases, int epoch) {
+    int storeIndex = 0;
+    for (String dbName : PARTICIPANTS) {
+      if (!AccountAssetArchiveProjector.ACCOUNT_ASSET_DB.equals(dbName)
+          && !"account".equals(dbName)) {
+        Chainbase database = databases.get(dbName);
+        if (epoch == 7 || storeIndex % 3 == 0) {
+          database.put(nativeExactKey(dbName, storeIndex), nativeExactValue(epoch, storeIndex));
+        } else if (storeIndex % 3 == 1) {
+          database.delete(nativeExactKey(dbName, storeIndex));
+        } else {
+          database.put(nativeExactKey(dbName, storeIndex), nativeExactValue(7, storeIndex));
+        }
+      }
+      storeIndex++;
+    }
+  }
+
+  private static void assertNativeExact27History(Manager manager, byte[] address,
+      byte[] directKey) {
+    for (int epoch = 6; epoch <= 8; epoch++) {
+      int storeIndex = 0;
+      for (String dbName : PARTICIPANTS) {
+        if (!AccountAssetArchiveProjector.ACCOUNT_ASSET_DB.equals(dbName)
+            && !"account".equals(dbName)) {
+          byte[] expected;
+          if (epoch == 6) {
+            expected = nativeExactValue(6, storeIndex);
+          } else if (epoch == 7 || storeIndex % 3 == 0) {
+            expected = nativeExactValue(epoch, storeIndex);
+          } else if (storeIndex % 3 == 1) {
+            expected = null;
+          } else {
+            expected = nativeExactValue(7, storeIndex);
+          }
+          assertHistoricalValue(manager, epoch, dbName, nativeExactKey(dbName, storeIndex),
+              expected);
+        }
+        storeIndex++;
+      }
+      assertTrue(manager.getArchiveStateValue(epoch, "account", address).isPresent());
+      assertHistoricalValue(manager, epoch, AccountAssetArchiveProjector.ACCOUNT_ASSET_DB,
+          directKey, epoch == 6 ? null : longValue(epoch == 7 ? 30 : 40));
+    }
+  }
+
+  private static byte[] nativeExactKey(String dbName, int storeIndex) {
+    if ("market_pair_price_to_order".equals(dbName)) {
+      return org.tron.core.capsule.utils.MarketUtils.createPairPriceKey(
+          "100".getBytes(StandardCharsets.UTF_8),
+          "200".getBytes(StandardCharsets.UTF_8), 1000L + storeIndex, 2000L);
+    }
+    return new byte[]{(byte) 0xc1, (byte) storeIndex};
+  }
+
+  private static byte[] nativeExactValue(int epoch, int storeIndex) {
+    return new byte[]{(byte) 0xd1, (byte) epoch, (byte) storeIndex};
+  }
+
+  private static Map<String, String> sourceIdentities(SnapshotFixture fixture,
+      AccountAssetStore accountAssetStore) {
+    Map<String, String> identities = new LinkedHashMap<>();
+    for (Map.Entry<String, SnapshotCapableStore> entry : fixture.nativeStores.entrySet()) {
+      identities.put(entry.getKey(), entry.getValue().getSourceIdentity());
+    }
+    DbSourceInter<byte[]> source = accountAssetStore.getDbSource();
+    if (source instanceof LevelDbDataSourceImpl) {
+      identities.put(AccountAssetArchiveProjector.ACCOUNT_ASSET_DB,
+          ((LevelDbDataSourceImpl) source).getSnapshotSourceIdentity());
+    } else if (source instanceof RocksDbDataSourceImpl) {
+      identities.put(AccountAssetArchiveProjector.ACCOUNT_ASSET_DB,
+          ((RocksDbDataSourceImpl) source).getSnapshotSourceIdentity());
+    } else {
+      throw new IllegalArgumentException("AccountAsset Store is not native");
+    }
+    return identities;
+  }
+
+  private static void closeNativeStores(SnapshotFixture fixture) {
+    for (SnapshotCapableStore store : fixture.nativeStores.values()) {
+      if (store instanceof LevelDB) {
+        ((LevelDB) store).getDb().closeDB();
+      } else if (store instanceof RocksDB) {
+        ((RocksDB) store).getDb().closeDB();
+      }
+    }
+  }
+
   private static void assertExact27History(Manager manager, int targetEpoch) {
     int storeIndex = 0;
     for (String dbName : PARTICIPANTS) {
@@ -1211,13 +1624,16 @@ public class StateArchiveManagerStartupIntegrationTest {
     private final Map<String, Chainbase> databases;
     private final Map<String, Chainbase> checkpointOnly;
     private final CheckTmpStore checkpoint;
+    private final Map<String, SnapshotCapableStore> nativeStores;
 
     private SnapshotFixture(SnapshotManager snapshots, Map<String, Chainbase> databases,
-        Map<String, Chainbase> checkpointOnly, CheckTmpStore checkpoint) {
+        Map<String, Chainbase> checkpointOnly, CheckTmpStore checkpoint,
+        Map<String, SnapshotCapableStore> nativeStores) {
       this.snapshots = snapshots;
       this.databases = databases;
       this.checkpointOnly = checkpointOnly;
       this.checkpoint = checkpoint;
+      this.nativeStores = nativeStores;
     }
   }
 
