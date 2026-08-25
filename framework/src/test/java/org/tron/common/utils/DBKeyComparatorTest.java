@@ -49,6 +49,20 @@ public class DBKeyComparatorTest {
     Assert.assertFalse(MarketUtils.pairKeyIsEqual(pairPriceKey1, pairPriceKey2));
   }
 
+  @Test
+  public void shortInternalKeysUseDeterministicUnsignedOrdering() {
+    byte[] empty = new byte[0];
+    byte[] shortKey = new byte[]{1, (byte) 0xff};
+    byte[] valid = MarketUtils.createPairPriceKey(
+        ByteArray.fromString("100"), ByteArray.fromString("200"), 1000L, 2000L);
+
+    Assert.assertEquals(0, MarketComparator.comparePriceKey(empty, empty));
+    Assert.assertEquals(-1, MarketComparator.comparePriceKey(empty, shortKey));
+    Assert.assertEquals(1, MarketComparator.comparePriceKey(shortKey, empty));
+    Assert.assertTrue(MarketComparator.comparePriceKey(shortKey, valid) < 0);
+    Assert.assertTrue(MarketComparator.comparePriceKey(valid, shortKey) > 0);
+  }
+
 
 
 }

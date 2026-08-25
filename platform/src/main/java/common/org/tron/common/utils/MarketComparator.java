@@ -5,9 +5,14 @@ import java.math.BigInteger;
 public class MarketComparator {
 
   public static final int TOKEN_ID_LENGTH = Long.toString(Long.MAX_VALUE).getBytes().length; // 19
+  private static final int PRICE_KEY_LENGTH = TOKEN_ID_LENGTH * 2 + Long.BYTES * 2;
 
 
   public static int comparePriceKey(byte[] o1, byte[] o2) {
+    if (o1 == null || o2 == null
+        || o1.length < PRICE_KEY_LENGTH || o2.length < PRICE_KEY_LENGTH) {
+      return compareUnsigned(o1, o2);
+    }
     //compare pair
     byte[] pair1 = new byte[TOKEN_ID_LENGTH * 2];
     byte[] pair2 = new byte[TOKEN_ID_LENGTH * 2];
