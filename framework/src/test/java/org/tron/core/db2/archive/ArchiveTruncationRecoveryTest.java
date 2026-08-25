@@ -53,7 +53,7 @@ public class ArchiveTruncationRecoveryTest {
           });
       assertThrows(IOException.class, recovery::recover);
 
-      ArchiveRestartCheckpoint checkpoint = ArchiveRestartCheckpoint.load(archive,
+      ArchiveHistoryScanAnchor checkpoint = ArchiveHistoryScanAnchor.load(archive,
           new HistoryCommitMarkerCodec());
       long expectedCheckpoint = failedStage == Stage.COMMIT_SHRUNK ? 12 : 10;
       assertEquals(expectedCheckpoint, checkpoint.getMarker().getMeta().getEpoch());
@@ -67,7 +67,7 @@ public class ArchiveTruncationRecoveryTest {
   public void intentPreReplaceCrashNeverShrinksCommittedAuthority() throws Exception {
     Path archive = temporaryFolder.newFolder("intent-pre-replace").toPath();
     initialize(archive);
-    ArchiveRestartCheckpoint checkpoint = ArchiveRestartCheckpoint.load(archive,
+    ArchiveHistoryScanAnchor checkpoint = ArchiveHistoryScanAnchor.load(archive,
         new HistoryCommitMarkerCodec());
     try (HistorySegmentStore bodies = new HistorySegmentStore(
         archive, new BlockHistoryCodec(), 4096, checkpoint);
@@ -119,13 +119,13 @@ public class ArchiveTruncationRecoveryTest {
       index.sync();
       commits.commitAll(markers);
       head = commits.head();
-      ArchiveRestartCheckpoint.persist(archive, commits.firstEpoch(), commits.size(),
+      ArchiveHistoryScanAnchor.persist(archive, commits.firstEpoch(), commits.size(),
           commits.getRecordLength(), head, new HistoryCommitMarkerCodec());
     }
   }
 
   private static void prepare(Path archive) throws Exception {
-    ArchiveRestartCheckpoint checkpoint = ArchiveRestartCheckpoint.load(archive,
+    ArchiveHistoryScanAnchor checkpoint = ArchiveHistoryScanAnchor.load(archive,
         new HistoryCommitMarkerCodec());
     try (HistorySegmentStore bodies = new HistorySegmentStore(
         archive, new BlockHistoryCodec(), 4096, checkpoint);
@@ -145,7 +145,7 @@ public class ArchiveTruncationRecoveryTest {
 
   private static void assertHeads(Path archive, long checkpointEpoch, long commitEpoch,
       long indexEpoch, long bodyEpoch) throws Exception {
-    ArchiveRestartCheckpoint checkpoint = ArchiveRestartCheckpoint.load(archive,
+    ArchiveHistoryScanAnchor checkpoint = ArchiveHistoryScanAnchor.load(archive,
         new HistoryCommitMarkerCodec());
     assertEquals(checkpointEpoch, checkpoint.getMarker().getMeta().getEpoch());
     try (HistorySegmentStore bodies = new HistorySegmentStore(

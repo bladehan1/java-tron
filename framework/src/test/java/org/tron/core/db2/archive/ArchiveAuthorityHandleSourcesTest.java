@@ -23,7 +23,7 @@ public class ArchiveAuthorityHandleSourcesTest {
   public TemporaryFolder temporaryFolder = new TemporaryFolder();
 
   @Test
-  public void persistentAndNativeHandlesProduceReadyAndReleaseEveryPin() throws Exception {
+  public void persistentAndReadOnlyHandlesProduceReadyAndReleaseEveryPin() throws Exception {
     try (Fixture fixture = new Fixture(temporaryFolder.newFolder("ready").toPath(), false)) {
       ArchiveAuthoritySnapshotCollector collector = new ArchiveAuthoritySnapshotCollector(
           fixture.sources, fixture.sources, fixture.sources, fixture.sources);
@@ -59,8 +59,6 @@ public class ArchiveAuthorityHandleSourcesTest {
     private final HistorySegmentStore bodies;
     private final HistoryIndexStore index;
     private final HistoryCommitStore history;
-    private final LevelDbArchiveParticipant level;
-    private final RocksDbArchiveParticipant rocks;
     private final PersistentServingKeyIndexCatalog catalog;
     private final AtomicInteger latestOpened = new AtomicInteger();
     private final AtomicInteger latestClosed = new AtomicInteger();
@@ -93,22 +91,11 @@ public class ArchiveAuthorityHandleSourcesTest {
       new ArchiveProgressFile(checkpointPath, progressCodec).store(checkpoint);
       new ArchiveProgressFile(readerPath, progressCodec).store(reader);
 
-      level = new LevelDbArchiveParticipant(root.resolve("level-abi"), "abi", participants);
-      rocks = new RocksDbArchiveParticipant(root.resolve("rocks-account"), "account",
-          participants);
       Map<String, ArchiveParticipantProgressSource> participantSources = new LinkedHashMap<>();
       for (String participant : participants) {
         ArchiveProgressEnvelope participantProgress = progress(
             ArchiveProgressEnvelope.Kind.PARTICIPANT_PROGRESS, participant, marker);
-        if ("abi".equals(participant)) {
-          level.apply(Collections.emptyList(), participantProgress);
-          participantSources.put(participant, level);
-        } else if ("account".equals(participant)) {
-          rocks.apply(Collections.emptyList(), participantProgress);
-          participantSources.put(participant, rocks);
-        } else {
-          participantSources.put(participant, () -> participantProgress);
-        }
+        participantSources.put(participant, () -> participantProgress);
       }
 
       Path shadow = root.resolve("serving-shadow");
@@ -134,8 +121,6 @@ public class ArchiveAuthorityHandleSourcesTest {
       } catch (IOException closeFailure) {
         failure = closeFailure;
       }
-      rocks.close();
-      level.close();
       history.close();
       index.close();
       bodies.close();

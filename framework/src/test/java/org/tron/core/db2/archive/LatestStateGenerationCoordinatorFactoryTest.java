@@ -77,6 +77,29 @@ public class LatestStateGenerationCoordinatorFactoryTest {
   }
 
   @Test
+  public void combinesSnapshotManagerStoresWithSupplementalAccountAsset() throws Exception {
+    Registry registry = registry(false);
+    DB<byte[], byte[]> accountAsset = registry.engines.get(
+        AccountAssetArchiveProjector.ACCOUNT_ASSET_DB);
+    registry.manager.getDbs().removeIf(database ->
+        AccountAssetArchiveProjector.ACCOUNT_ASSET_DB.equals(database.getDbName()));
+    ArchiveProgressEnvelope authority = new ArchiveProgressEnvelope(Kind.READER_VISIBLE, null, 1,
+        hash(1), new byte[16], new byte[32], registry.participants);
+
+    try (LatestStateGenerationCoordinator coordinator =
+            LatestStateGenerationCoordinatorFactory.create(registry.manager,
+                java.util.Collections.singletonMap(
+                    AccountAssetArchiveProjector.ACCOUNT_ASSET_DB,
+                    (LatestStateGenerationAdapter.SnapshotCapableStore) accountAsset),
+                () -> authority);
+        LatestStateGenerationCoordinator.Candidate candidate =
+            coordinator.acquire("generation-supplemental")) {
+      assertEquals(ArchiveStoreScope.getStateDatabases().size(), totalPins(registry));
+    }
+    assertEquals(ArchiveStoreScope.getStateDatabases().size(), totalCloses(registry));
+  }
+
+  @Test
   public void rejectsMissingDuplicateAndNonCapableStateRoots() throws Exception {
     Path readerVisible = temporaryFolder.newFile("invalid-reader-visible").toPath();
     Registry missing = registry(false);
