@@ -504,7 +504,19 @@ public final class StateArchiveRuntimeOwner implements Closeable {
       ArchiveHistoryWriter writer) throws IOException {
     Path root = archiveDirectory.resolve("serving-index");
     if (Files.exists(root, LinkOption.NOFOLLOW_LINKS)) {
-      return PersistentServingKeyIndexCatalog.open(root, this::afterCatalogStage);
+      PersistentServingKeyIndexCatalog catalog =
+          PersistentServingKeyIndexCatalog.open(root, this::afterCatalogStage);
+      try {
+        upgradeServingRangeIndex(writer, catalog);
+        return catalog;
+      } catch (IOException | RuntimeException failure) {
+        try {
+          catalog.close();
+        } catch (IOException | RuntimeException closeFailure) {
+          failure.addSuppressed(closeFailure);
+        }
+        throw failure;
+      }
     }
     String generationId = generationId(writer.committedHeadMeta());
     Path shadow = archiveDirectory.resolve(".serving-index-build-" + UUID.randomUUID());
@@ -513,6 +525,28 @@ public final class StateArchiveRuntimeOwner implements Closeable {
       // The catalog reopens and validates the immutable generation before publishing it.
     }
     return PersistentServingKeyIndexCatalog.create(root, shadow, this::afterCatalogStage);
+  }
+
+  private void upgradeServingRangeIndex(ArchiveHistoryWriter writer,
+      PersistentServingKeyIndexCatalog catalog) throws IOException {
+    String expected = catalog.getCurrentGenerationId();
+    byte[] latestSourceIdentityDigest;
+    try (PersistentServingKeyIndexGeneration current = catalog.pin()) {
+      if (current.supportsRangeQueries()) {
+        return;
+      }
+      latestSourceIdentityDigest = current.getLatestSourceIdentityDigest();
+    }
+    BlockSnapshotMeta target = writer.committedHeadMeta();
+    Path shadow = archiveDirectory.resolve(".serving-index-build-" + UUID.randomUUID());
+    try (PersistentServingKeyIndexGeneration candidate = writer.buildServingGeneration(shadow,
+        generationId(target), latestSourceIdentityDigest)) {
+      validateServingGeneration(writer, candidate, target);
+    }
+    if (!catalog.publish(expected, shadow)) {
+      throw new ArchivePersistenceException(
+          "Serving index catalog changed during range-index upgrade");
+    }
   }
 
   private synchronized void publishServingIndex(ArchiveHistoryWriter writer,

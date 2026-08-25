@@ -33,9 +33,10 @@ import org.rocksdb.WriteOptions;
 public final class PersistentServingKeyIndexGeneration implements ServingKeyIndex {
 
   private static final int MAGIC = 0x534b4947; // SKIG
-  private static final short VERSION = 3;
+  private static final short VERSION = 4;
   private static final int MAX_MANIFEST_SIZE = 1024 * 1024;
   private static final byte DATA_PREFIX = 1;
+  private static final byte RANGE_DATA_PREFIX = 2;
   private static final byte[] PRESENT = new byte[]{1};
   private static final String MANIFEST = "generation.meta";
   private static final String MANIFEST_TEMP = "generation.meta.tmp";
@@ -114,6 +115,7 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
           for (HistoryIndexRecord.KeyGroup group : record.getGroups()) {
             for (byte[] key : group.getKeys()) {
               batch.put(dataKey(group.getDbName(), key, meta.getEpoch()), PRESENT);
+              batch.put(rangeDataKey(group.getDbName(), key, meta.getEpoch()), PRESENT);
               keyChanges++;
             }
           }
@@ -134,7 +136,8 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
       buildOptions.close();
     }
 
-    Descriptor descriptor = new Descriptor(scopeIdentity, generationId, baseEpoch, previousEpoch,
+    Descriptor descriptor = new Descriptor(VERSION, scopeIdentity, generationId, baseEpoch,
+        previousEpoch,
         previousHash, sourceDigest.digest(), latestSourceIdentityDigest, participants, keyChanges);
     persistDescriptor(directory, descriptor);
     HistorySegmentStore.syncDirectory(directory);
@@ -178,11 +181,65 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
   }
 
   @Override
-  public List<ServingKeyIndexGeneration.ChangedKey> changesInRange(String dbName,
+  public synchronized List<ServingKeyIndexGeneration.ChangedKey> changesInRange(String dbName,
       byte[] lowerInclusive, byte[] upperExclusive, long targetBlock, long upperBound,
-      int maxChangedKeys) {
-    throw new UnsupportedOperationException(
-        "Persistent generic range serving is outside the Phase 1 point-query scope");
+      int maxChangedKeys) throws IOException {
+    ensureOpen();
+    Objects.requireNonNull(dbName, "dbName");
+    Objects.requireNonNull(lowerInclusive, "lowerInclusive");
+    if (maxChangedKeys <= 0) {
+      throw new IllegalArgumentException("maxChangedKeys must be positive");
+    }
+    if (upperExclusive != null
+        && BlockReverseDiff.compareUnsigned(lowerInclusive, upperExclusive) > 0) {
+      throw new IllegalArgumentException("lowerInclusive must not exceed upperExclusive");
+    }
+    if (!supportsRangeQueries()) {
+      throw new ArchivePersistenceException(
+          "Serving index generation must be upgraded before range queries");
+    }
+    validateCoverage(dbName, targetBlock, upperBound);
+    if (targetBlock == Long.MAX_VALUE) {
+      return Collections.emptyList();
+    }
+
+    byte[] databasePrefix = rangeDatabasePrefix(dbName);
+    List<ServingKeyIndexGeneration.ChangedKey> result = new ArrayList<>();
+    try (RocksIterator iterator = database.newIterator()) {
+      iterator.seek(concat(databasePrefix, encodeRangeRawKey(lowerInclusive)));
+      while (iterator.isValid()) {
+        RangeDataKey found = decodeRangeDataKey(iterator.key(), databasePrefix);
+        if (found == null) {
+          break;
+        }
+        if (upperExclusive != null
+            && BlockReverseDiff.compareUnsigned(found.rawKey, upperExclusive) >= 0) {
+          break;
+        }
+        if (found.epoch <= targetBlock) {
+          iterator.seek(rangeDataKey(dbName, found.rawKey, targetBlock + 1));
+          if (!iterator.isValid()) {
+            break;
+          }
+          RangeDataKey candidate = decodeRangeDataKey(iterator.key(), databasePrefix);
+          if (candidate == null || !Arrays.equals(candidate.rawKey, found.rawKey)) {
+            continue;
+          }
+          found = candidate;
+        }
+        if (found.epoch <= upperBound) {
+          if (result.size() == maxChangedKeys) {
+            throw new ArchiveQueryLimitExceededException("changed-key budget exceeded");
+          }
+          result.add(new ServingKeyIndexGeneration.ChangedKey(found.rawKey, found.epoch));
+        }
+        iterator.seek(rangeAfterRawKey(databasePrefix, found.rawKey));
+      }
+      iterator.status();
+    } catch (RocksDBException failure) {
+      throw new IOException("Failed to scan serving index generation", failure);
+    }
+    return Collections.unmodifiableList(result);
   }
 
   @Override
@@ -236,6 +293,10 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
     return false;
   }
 
+  public boolean supportsRangeQueries() {
+    return descriptor.formatVersion >= VERSION;
+  }
+
   Path getDirectory() {
     return directory;
   }
@@ -279,6 +340,81 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
     return ByteBuffer.allocate(1 + Integer.BYTES + database.length + Integer.BYTES + rawKey.length)
         .put(DATA_PREFIX).putInt(database.length).put(database).putInt(rawKey.length).put(rawKey)
         .array();
+  }
+
+  private static byte[] rangeDataKey(String dbName, byte[] rawKey, long epoch) {
+    if (epoch < 0) {
+      throw new IllegalArgumentException("Serving index epoch must not be negative");
+    }
+    byte[] databasePrefix = rangeDatabasePrefix(dbName);
+    byte[] encodedKey = encodeRangeRawKey(rawKey);
+    return ByteBuffer.allocate(databasePrefix.length + encodedKey.length + 2 + Long.BYTES)
+        .put(databasePrefix).put(encodedKey).put((byte) 0).put((byte) 0).putLong(epoch).array();
+  }
+
+  private static byte[] rangeDatabasePrefix(String dbName) {
+    byte[] name = dbName.getBytes(StandardCharsets.UTF_8);
+    return ByteBuffer.allocate(1 + Integer.BYTES + name.length)
+        .put(RANGE_DATA_PREFIX).putInt(name.length).put(name).array();
+  }
+
+  private static byte[] encodeRangeRawKey(byte[] rawKey) {
+    ByteArrayOutputStream encoded = new ByteArrayOutputStream(rawKey.length);
+    for (byte value : rawKey) {
+      encoded.write(value);
+      if (value == 0) {
+        encoded.write(0xff);
+      }
+    }
+    return encoded.toByteArray();
+  }
+
+  private static byte[] rangeAfterRawKey(byte[] databasePrefix, byte[] rawKey) {
+    byte[] encoded = encodeRangeRawKey(rawKey);
+    return ByteBuffer.allocate(databasePrefix.length + encoded.length + 2)
+        .put(databasePrefix).put(encoded).put((byte) 0).put((byte) 1).array();
+  }
+
+  private static RangeDataKey decodeRangeDataKey(byte[] key, byte[] databasePrefix) {
+    if (!startsWith(key, databasePrefix) || key.length < databasePrefix.length + 2 + Long.BYTES) {
+      return null;
+    }
+    ByteArrayOutputStream rawKey = new ByteArrayOutputStream();
+    int cursor = databasePrefix.length;
+    int epochOffset = key.length - Long.BYTES;
+    while (cursor < epochOffset) {
+      byte value = key[cursor++];
+      if (value != 0) {
+        rawKey.write(value);
+      } else if (cursor < epochOffset && key[cursor] == (byte) 0xff) {
+        rawKey.write(0);
+        cursor++;
+      } else if (cursor < epochOffset && key[cursor] == 0) {
+        cursor++;
+        if (cursor != epochOffset) {
+          return null;
+        }
+        return new RangeDataKey(rawKey.toByteArray(),
+            ByteBuffer.wrap(key, epochOffset, Long.BYTES).getLong());
+      } else {
+        return null;
+      }
+    }
+    return null;
+  }
+
+  private static byte[] concat(byte[] left, byte[] right) {
+    return ByteBuffer.allocate(left.length + right.length).put(left).put(right).array();
+  }
+
+  private static final class RangeDataKey {
+    private final byte[] rawKey;
+    private final long epoch;
+
+    private RangeDataKey(byte[] rawKey, long epoch) {
+      this.rawKey = rawKey;
+      this.epoch = epoch;
+    }
   }
 
   private static boolean startsWith(byte[] value, byte[] prefix) {
@@ -462,7 +598,7 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
         throw new IllegalArgumentException("Unsupported serving index manifest");
       }
       short version = input.readShort();
-      if (version != VERSION || input.readShort() != 0) {
+      if ((version != VERSION && version != VERSION - 1) || input.readShort() != 0) {
         throw new IllegalArgumentException("Unsupported serving index manifest");
       }
       String scopeIdentity = input.readUTF();
@@ -492,14 +628,15 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
       if (!scopeIdentity.equals(ArchiveParticipantDescriptor.scopeIdentity(sorted))) {
         throw new IllegalArgumentException("Serving index manifest scope identity mismatch");
       }
-      return new Descriptor(scopeIdentity, generationId, from, through, headHash, sourceDigest,
-          latestSourceIdentityDigest, sorted, keyChanges);
+      return new Descriptor(version, scopeIdentity, generationId, from, through, headHash,
+          sourceDigest, latestSourceIdentityDigest, sorted, keyChanges);
     } catch (IOException invalid) {
       throw new IllegalArgumentException("Serving index manifest is truncated", invalid);
     }
   }
 
   private static final class Descriptor {
+    private final short formatVersion;
     private final String scopeIdentity;
     private final String generationId;
     private final long indexedFrom;
@@ -510,10 +647,12 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
     private final List<String> participants;
     private final long keyChanges;
 
-    private Descriptor(String scopeIdentity, String generationId, long indexedFrom,
+    private Descriptor(short formatVersion, String scopeIdentity, String generationId,
+        long indexedFrom,
         long indexedThrough,
         byte[] headHash, byte[] sourceDigest, byte[] latestSourceIdentityDigest,
         List<String> participants, long keyChanges) {
+      this.formatVersion = formatVersion;
       this.scopeIdentity = scopeIdentity;
       this.generationId = generationId;
       this.indexedFrom = indexedFrom;

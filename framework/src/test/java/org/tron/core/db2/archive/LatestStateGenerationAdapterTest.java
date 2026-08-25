@@ -52,7 +52,7 @@ public class LatestStateGenerationAdapterTest {
       assertArrayEquals(bytes("old"), pinned.get("account", bytes("key")).getValue());
       assertArrayEquals(expectedDigest, pinned.getSourceIdentityDigest());
       assertThrows(UnsupportedOperationException.class,
-          () -> pinned.range("account", new byte[0], null));
+          () -> pinned.range("account", new byte[0], null, 1));
     }
     assertEquals(1, account.closedSnapshots.get());
     assertEquals(1, properties.closedSnapshots.get());

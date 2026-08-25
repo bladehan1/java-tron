@@ -624,7 +624,7 @@ public class ArchiveReadSnapshotTest {
 
     @Override
     public List<HistoricalRangeOverlay.Entry> range(String dbName, byte[] lowerInclusive,
-        byte[] upperExclusive) {
+        byte[] upperExclusive, int maxEntries) {
       List<HistoricalRangeOverlay.Entry> result = new ArrayList<>();
       Map<String, byte[]> rows = scopedValues == null ? values
           : scopedValues.getOrDefault(dbName, Collections.emptyMap());
