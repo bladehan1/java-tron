@@ -25,7 +25,6 @@ import org.junit.rules.TemporaryFolder;
 import org.tron.core.db2.archive.ArchiveReadSnapshot.PinnedHistory;
 import org.tron.core.db2.archive.ArchiveReadSnapshot.PinnedLatestState;
 import org.tron.core.db2.archive.ArchiveRuntimeQueryGate.Lease;
-import org.tron.core.db2.archive.P66AccountAssetCodec.Phase;
 import org.tron.core.db2.archive.StateArchiveRuntimeOwner.State;
 import org.tron.core.db2.core.SnapshotManager;
 
@@ -43,21 +42,22 @@ public class StateArchiveRuntimeOwnerTest {
       SnapshotManager snapshots = new SnapshotManager("");
 
       try (StateArchiveRuntimeOwner owner = StateArchiveRuntimeOwner.bootstrapAndRecover(
-          snapshots, archive, 4096, engine, head, Phase.P66_ON)) {
+          snapshots, archive, 4096, head)) {
         assertEquals(head, owner.getRecoveredHead());
         assertEquals(0, owner.getStartupRecoveryActionCount());
         assertEquals(State.RECOVERED, owner.getState());
       }
 
       assertTrue(Files.isRegularFile(archive.resolve("MANIFEST")));
-      assertTrue(Files.isRegularFile(archive.resolve("progress/checkpoint.progress")));
-      assertTrue(Files.isRegularFile(archive.resolve("progress/reader.progress")));
+      assertTrue(Files.isRegularFile(archive.resolve("bootstrap.anchor")));
+      assertFalse(Files.exists(archive.resolve("progress")));
+      assertFalse(Files.exists(archive.resolve("participants")));
       try (java.util.stream.Stream<Path> entries = Files.list(parent)) {
         assertFalse(entries.anyMatch(path -> path.getFileName().toString()
             .startsWith(".state-archive.bootstrap-")));
       }
       try (StateArchiveRuntimeOwner reopened = StateArchiveRuntimeOwner.recover(
-          snapshots, archive, 4096, engine)) {
+          snapshots, archive, 4096)) {
         assertEquals(head, reopened.getRecoveredHead());
         assertEquals(0, reopened.getStartupRecoveryActionCount());
       }
@@ -70,7 +70,7 @@ public class StateArchiveRuntimeOwnerTest {
       }
       assertThrows(ArchivePersistenceException.class,
           () -> StateArchiveRuntimeOwner.bootstrapAndRecover(snapshots, archive, 4096,
-              engine, head, Phase.P66_ON));
+              head));
     }
   }
 
@@ -162,8 +162,7 @@ public class StateArchiveRuntimeOwnerTest {
   }
 
   private static ArchiveRuntimeAttachment attachment(DurableBlockReverseDiffSink sink) {
-    return new ArchiveRuntimeAttachment(mock(OldValueCollector.class),
-        mock(ArchiveBlockProjectionPreparer.class), sink);
+    return new ArchiveRuntimeAttachment(mock(OldValueCollector.class), sink);
   }
 
   private static ArchiveReadSnapshot snapshot() throws IOException {

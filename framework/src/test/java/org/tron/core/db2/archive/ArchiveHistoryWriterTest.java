@@ -229,21 +229,43 @@ public class ArchiveHistoryWriterTest {
   }
 
   @Test
-  public void scansOnlyTailAfterAStaleRestartCheckpoint() throws Exception {
+  public void scansOnlyTailAfterAStaleHistoryScanAnchor() throws Exception {
     Path archive = temporaryFolder.newFolder("stale-checkpoint").toPath();
     byte[] checkpointAtOne;
     try (ArchiveHistoryWriter writer = new ArchiveHistoryWriter(archive, 4096, databases())) {
       writer.accept(diff(1));
-      checkpointAtOne = Files.readAllBytes(archive.resolve("restart.checkpoint"));
+      checkpointAtOne = Files.readAllBytes(archive.resolve("history.scan-anchor"));
       writer.accept(diff(2));
     }
-    Files.write(archive.resolve("restart.checkpoint"), checkpointAtOne);
+    Files.write(archive.resolve("history.scan-anchor"), checkpointAtOne);
 
     try (ArchiveHistoryWriter reopened = new ArchiveHistoryWriter(archive, 4096, databases())) {
       assertEquals(2, reopened.committedHead().getMeta().getEpoch());
       assertEquals(6, reopened.getStartupScannedRecords());
       assertEquals(diff(2).getMeta(), reopened.readCommitted(2).getMeta());
     }
+  }
+
+  @Test
+  public void isolatesLegacyRestartCheckpointFromNewScanAnchor() throws Exception {
+    Path archive = temporaryFolder.newFolder("legacy-checkpoint-isolation").toPath();
+    HistoryCommitMarkerCodec codec = new HistoryCommitMarkerCodec();
+    try (ArchiveHistoryWriter writer = new ArchiveHistoryWriter(archive, 4096, databases())) {
+      writer.accept(diff(1));
+    }
+    ArchiveHistoryScanAnchor anchor = ArchiveHistoryScanAnchor.load(archive, codec);
+    ArchiveRestartCheckpoint.persist(archive, anchor.getFirstEpoch(), anchor.getRecordCount(),
+        anchor.getCommitRecordLength(), anchor.getMarker(), codec);
+    Files.delete(archive.resolve("history.scan-anchor"));
+
+    assertTrue(Files.exists(archive.resolve("restart.checkpoint")));
+    assertNull(ArchiveHistoryScanAnchor.load(archive, codec));
+
+    try (ArchiveHistoryWriter writer = new ArchiveHistoryWriter(archive, 4096, databases())) {
+      assertEquals(1, writer.committedHead().getMeta().getEpoch());
+    }
+    assertTrue(Files.exists(archive.resolve("restart.checkpoint")));
+    assertTrue(Files.exists(archive.resolve("history.scan-anchor")));
   }
 
   @Test
@@ -299,12 +321,12 @@ public class ArchiveHistoryWriterTest {
   }
 
   @Test
-  public void failsClosedOnCorruptRestartCheckpoint() throws Exception {
+  public void failsClosedOnCorruptHistoryScanAnchor() throws Exception {
     Path archive = temporaryFolder.newFolder("corrupt-checkpoint").toPath();
     try (ArchiveHistoryWriter writer = new ArchiveHistoryWriter(archive, 4096, databases())) {
       writer.accept(diff(1));
     }
-    Path checkpoint = archive.resolve("restart.checkpoint");
+    Path checkpoint = archive.resolve("history.scan-anchor");
     byte[] encoded = Files.readAllBytes(checkpoint);
     encoded[encoded.length - 1] ^= 1;
     Files.write(checkpoint, encoded);
@@ -314,7 +336,7 @@ public class ArchiveHistoryWriterTest {
   }
 
   @Test
-  public void completesPreparedTruncationBeforeLoadingRestartCheckpoint() throws Exception {
+  public void completesPreparedTruncationBeforeLoadingHistoryScanAnchor() throws Exception {
     Path archive = temporaryFolder.newFolder("writer-truncation-recovery").toPath();
     initializeHistory(archive, 3);
     prepareTruncation(archive, 2);
@@ -340,7 +362,7 @@ public class ArchiveHistoryWriterTest {
         archive, 4096, databases())) {
       assertEquals(2, reopened.committedHead().getMeta().getEpoch());
     }
-    ArchiveRestartCheckpoint checkpoint = ArchiveRestartCheckpoint.load(archive,
+    ArchiveHistoryScanAnchor checkpoint = ArchiveHistoryScanAnchor.load(archive,
         new HistoryCommitMarkerCodec());
     assertEquals(2, checkpoint.getMarker().getMeta().getEpoch());
     try (AccountChangeIndex index = new AccountChangeIndex(
@@ -438,13 +460,13 @@ public class ArchiveHistoryWriterTest {
       bodies.sync();
       index.sync();
       commits.commitAll(markers);
-      ArchiveRestartCheckpoint.persist(archive, commits.firstEpoch(), commits.size(),
+      ArchiveHistoryScanAnchor.persist(archive, commits.firstEpoch(), commits.size(),
           commits.getRecordLength(), commits.head(), new HistoryCommitMarkerCodec());
     }
   }
 
   private static void prepareTruncation(Path archive, long targetEpoch) throws Exception {
-    ArchiveRestartCheckpoint checkpoint = ArchiveRestartCheckpoint.load(archive,
+    ArchiveHistoryScanAnchor checkpoint = ArchiveHistoryScanAnchor.load(archive,
         new HistoryCommitMarkerCodec());
     try (HistorySegmentStore bodies = new HistorySegmentStore(
         archive, new BlockHistoryCodec(), 4096, checkpoint);
