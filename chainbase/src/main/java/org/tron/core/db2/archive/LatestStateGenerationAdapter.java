@@ -13,6 +13,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.TreeMap;
+import org.tron.common.storage.leveldb.LevelDbDataSourceImpl;
+import org.tron.common.storage.rocksdb.RocksDbDataSourceImpl;
+import org.tron.core.db.common.DbSourceInter;
 import org.tron.core.db2.archive.ArchiveReadSnapshot.PinnedLatestState;
 import org.tron.core.db2.archive.ArchiveReadSnapshot.PinnedLatestStateFactory;
 import org.tron.core.db2.common.DB;
@@ -64,6 +67,90 @@ public final class LatestStateGenerationAdapter implements PinnedLatestStateFact
       capable.put(entry.getKey(), (SnapshotCapableStore) entry.getValue());
     }
     return new LatestStateGenerationAdapter(participants, capable);
+  }
+
+  /** Adapts one out-of-registry native Store to the same stable snapshot contract. */
+  public static SnapshotCapableStore fromDataSource(String dbName,
+      DbSourceInter<byte[]> source) throws ArchivePersistenceException {
+    Objects.requireNonNull(dbName, "dbName");
+    Objects.requireNonNull(source, "source");
+    if (!dbName.equals(source.getDBName())) {
+      throw new ArchivePersistenceException("Supplemental latest Store name mismatch: " + dbName);
+    }
+    if (source instanceof LevelDbDataSourceImpl) {
+      LevelDbDataSourceImpl level = (LevelDbDataSourceImpl) source;
+      return capable(dbName, level.getSnapshotSourceIdentity(), (blockNumber, blockHash) -> {
+        LevelDbDataSourceImpl.PinnedSnapshot pinned = level.pinSnapshot();
+        return snapshot(dbName, pinned.getSourceIdentity(), blockNumber, blockHash,
+            pinned::get, pinned::close);
+      });
+    }
+    if (source instanceof RocksDbDataSourceImpl) {
+      RocksDbDataSourceImpl rocks = (RocksDbDataSourceImpl) source;
+      return capable(dbName, rocks.getSnapshotSourceIdentity(), (blockNumber, blockHash) -> {
+        RocksDbDataSourceImpl.PinnedSnapshot pinned = rocks.pinSnapshot();
+        return snapshot(dbName, pinned.getSourceIdentity(), blockNumber, blockHash,
+            pinned::get, pinned::close);
+      });
+    }
+    throw new ArchivePersistenceException(
+        "Supplemental latest Store lacks a supported native snapshot engine: " + dbName);
+  }
+
+  private static SnapshotCapableStore capable(String dbName, String sourceIdentity,
+      SnapshotFactory factory) {
+    return new SnapshotCapableStore() {
+      @Override
+      public String getDbName() {
+        return dbName;
+      }
+
+      @Override
+      public String getSourceIdentity() {
+        return sourceIdentity;
+      }
+
+      @Override
+      public StoreSnapshot pin(long blockNumber, byte[] blockHash) throws IOException {
+        return factory.pin(blockNumber, blockHash);
+      }
+    };
+  }
+
+  private static StoreSnapshot snapshot(String dbName, String sourceIdentity, long blockNumber,
+      byte[] blockHash, PointReader reader, CloseableAction close) {
+    byte[] expectedHash = Arrays.copyOf(blockHash, blockHash.length);
+    return new StoreSnapshot() {
+      @Override
+      public String getDbName() {
+        return dbName;
+      }
+
+      @Override
+      public String getSourceIdentity() {
+        return sourceIdentity;
+      }
+
+      @Override
+      public long getBlockNumber() {
+        return blockNumber;
+      }
+
+      @Override
+      public byte[] getBlockHash() {
+        return Arrays.copyOf(expectedHash, expectedHash.length);
+      }
+
+      @Override
+      public byte[] get(byte[] physicalRawKey) {
+        return reader.get(physicalRawKey);
+      }
+
+      @Override
+      public void close() throws IOException {
+        close.close();
+      }
+    };
   }
 
   @Override
@@ -187,6 +274,21 @@ public final class LatestStateGenerationAdapter implements PinnedLatestStateFact
     byte[] getBlockHash();
 
     byte[] get(byte[] physicalRawKey) throws IOException;
+  }
+
+  @FunctionalInterface
+  private interface SnapshotFactory {
+    StoreSnapshot pin(long blockNumber, byte[] blockHash) throws IOException;
+  }
+
+  @FunctionalInterface
+  private interface PointReader {
+    byte[] get(byte[] key);
+  }
+
+  @FunctionalInterface
+  private interface CloseableAction {
+    void close() throws IOException;
   }
 
   private static final class PinnedGeneration implements PinnedLatestState {

@@ -45,12 +45,12 @@ public final class HistoryCommitStore implements Closeable, CommittedHistoryAuth
   }
 
   HistoryCommitStore(Path archiveDirectory, HistoryCommitMarkerCodec codec,
-      ArchiveRestartCheckpoint checkpoint) throws IOException {
+      ArchiveHistoryScanAnchor checkpoint) throws IOException {
     this(archiveDirectory, codec, checkpoint, ignored -> { });
   }
 
   HistoryCommitStore(Path archiveDirectory, HistoryCommitMarkerCodec codec,
-      ArchiveRestartCheckpoint checkpoint, DirectorySync postForceHook) throws IOException {
+      ArchiveHistoryScanAnchor checkpoint, DirectorySync postForceHook) throws IOException {
     this.directory = archiveDirectory.resolve("commits");
     this.logPath = directory.resolve(FILE_NAME);
     this.codec = codec;
@@ -223,7 +223,7 @@ public final class HistoryCommitStore implements Closeable, CommittedHistoryAuth
     return startupScannedRecords;
   }
 
-  private void scanAndRepairTruncatedTail(ArchiveRestartCheckpoint checkpoint)
+  private void scanAndRepairTruncatedTail(ArchiveHistoryScanAnchor checkpoint)
       throws IOException {
     long offset = 0;
     HistoryCommitMarker previous = null;
@@ -237,13 +237,13 @@ public final class HistoryCommitStore implements Closeable, CommittedHistoryAuth
       long checkpointOffset = (count - 1) * (long) expectedLength;
       if (checkpointOffset < 0 || checkpointOffset + expectedLength > size) {
         throw new ArchivePersistenceException(
-            "Restart checkpoint is outside the committed history log");
+            "History scan anchor is outside the committed history log");
       }
       byte[] checkpointRecord = read(checkpointOffset, expectedLength);
       startupScannedRecords++;
       if (!java.util.Arrays.equals(checkpointRecord, checkpoint.getEncodedMarker())) {
         throw new ArchivePersistenceException(
-            "Restart checkpoint does not match the committed history log");
+            "History scan anchor does not match the committed history log");
       }
       previous = codec.decode(checkpointRecord);
       offset = checkpointOffset + expectedLength;

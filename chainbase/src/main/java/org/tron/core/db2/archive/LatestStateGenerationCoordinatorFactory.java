@@ -9,8 +9,6 @@ import java.util.TreeMap;
 import java.util.TreeSet;
 import org.tron.core.db2.archive.LatestStateGenerationAdapter.SnapshotCapableStore;
 import org.tron.core.db2.common.DB;
-import org.tron.core.db2.common.LevelDB;
-import org.tron.core.db2.common.RocksDB;
 import org.tron.core.db2.core.Chainbase;
 import org.tron.core.db2.core.Snapshot;
 import org.tron.core.db2.core.SnapshotManager;
@@ -24,8 +22,25 @@ public final class LatestStateGenerationCoordinatorFactory {
 
   public static LatestStateGenerationCoordinator create(SnapshotManager manager,
       Path readerVisiblePath) throws ArchivePersistenceException {
-    Objects.requireNonNull(manager, "manager");
     Objects.requireNonNull(readerVisiblePath, "readerVisiblePath");
+    ArchiveProgressFile readerVisible = new ArchiveProgressFile(readerVisiblePath,
+        new ArchiveProgressEnvelopeCodec());
+    return create(manager, readerVisible::load);
+  }
+
+  public static LatestStateGenerationCoordinator create(SnapshotManager manager,
+      LatestStateGenerationCoordinator.AuthorityReader authorityReader)
+      throws ArchivePersistenceException {
+    return create(manager, java.util.Collections.emptyMap(), authorityReader);
+  }
+
+  public static LatestStateGenerationCoordinator create(SnapshotManager manager,
+      Map<String, SnapshotCapableStore> supplementalStores,
+      LatestStateGenerationCoordinator.AuthorityReader authorityReader)
+      throws ArchivePersistenceException {
+    Objects.requireNonNull(manager, "manager");
+    Objects.requireNonNull(supplementalStores, "supplementalStores");
+    Objects.requireNonNull(authorityReader, "authorityReader");
     List<Chainbase> registered = new ArrayList<>(manager.getDbs());
     try {
       ArchiveStoreScope.validate(registered);
@@ -41,9 +56,9 @@ public final class LatestStateGenerationCoordinatorFactory {
       }
     }
     TreeSet<String> expected = new TreeSet<>(ArchiveStoreScope.getStateDatabases());
-    if (!stateDatabases.keySet().equals(expected)) {
+    if (!expected.containsAll(stateDatabases.keySet())) {
       throw new ArchivePersistenceException(
-          "SnapshotManager archive state Store set is incomplete or unexpected");
+          "SnapshotManager archive state Store set is unexpected");
     }
 
     TreeMap<String, SnapshotCapableStore> stores = new TreeMap<>();
@@ -54,19 +69,29 @@ public final class LatestStateGenerationCoordinatorFactory {
             "Archive state Store does not resolve to SnapshotRoot: " + entry.getKey());
       }
       DB<byte[], byte[]> engine = ((SnapshotRoot) root).getDb();
-      if (!(engine instanceof LevelDB || engine instanceof RocksDB)
-          || !(engine instanceof SnapshotCapableStore)
+      if (!(engine instanceof SnapshotCapableStore)
           || !entry.getKey().equals(engine.getDbName())) {
         throw new ArchivePersistenceException(
             "Archive state Store root lacks a supported snapshot engine: " + entry.getKey());
       }
       stores.put(entry.getKey(), (SnapshotCapableStore) engine);
     }
+    for (Map.Entry<String, SnapshotCapableStore> entry : supplementalStores.entrySet()) {
+      SnapshotCapableStore store = Objects.requireNonNull(entry.getValue(),
+          "supplemental Store");
+      if (!entry.getKey().equals(store.getDbName())
+          || stores.putIfAbsent(entry.getKey(), store) != null) {
+        throw new ArchivePersistenceException(
+            "Duplicate or mismatched supplemental latest Store: " + entry.getKey());
+      }
+    }
+    if (!stores.keySet().equals(expected)) {
+      throw new ArchivePersistenceException(
+          "SnapshotManager plus supplemental archive Store set is incomplete or unexpected");
+    }
 
     List<String> participants = new ArrayList<>(stores.keySet());
-    ArchiveProgressFile readerVisible = new ArchiveProgressFile(readerVisiblePath,
-        new ArchiveProgressEnvelopeCodec());
     return new LatestStateGenerationCoordinator(participants, stores,
-        manager::withArchiveStateBarrier, readerVisible::load);
+        manager::withArchiveStateBarrier, authorityReader);
   }
 }

@@ -7,9 +7,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Iterator;
 import java.util.List;
-import java.util.NoSuchElementException;
 import java.util.Set;
 import java.util.UUID;
 
@@ -46,7 +44,7 @@ public final class ArchiveHistoryWriter
     this.participatingDatabases.sort(String::compareTo);
     this.manifest = new ArchiveBaseManifest(archiveDirectory, this.participatingDatabases);
     new ArchiveTruncationRecovery(archiveDirectory, maxSegmentSize).recover();
-    ArchiveRestartCheckpoint checkpoint = ArchiveRestartCheckpoint.load(archiveDirectory,
+    ArchiveHistoryScanAnchor checkpoint = ArchiveHistoryScanAnchor.load(archiveDirectory,
         commitCodec);
     this.bodies = new HistorySegmentStore(archiveDirectory, new BlockHistoryCodec(),
         maxSegmentSize, checkpoint);
@@ -54,19 +52,20 @@ public final class ArchiveHistoryWriter
     this.commits = new HistoryCommitStore(archiveDirectory, commitCodec, checkpoint);
     this.hook = hook;
     recoverPreparedSuffix();
-    persistRestartCheckpoint();
+    persistHistoryScanAnchor();
     if (commits.head() != null) {
       manifest.ensureBase(commits.get(commits.firstEpoch()).getMeta());
     }
     this.accountIndex = new AccountChangeIndex(archiveDirectory.resolve("account-change-index"));
+    HistoryCommitMarker bootstrap;
     try {
       catchUpAccountIndex();
+      bootstrap = ArchiveBootstrapAnchor.loadAndValidateIfPresent(
+          archiveDirectory, this, this.participatingDatabases);
     } catch (IOException | RuntimeException failure) {
       closeAfterFailedConstruction(failure);
       throw failure;
     }
-    HistoryCommitMarker bootstrap = ArchiveBootstrapAnchor.loadAndValidateIfPresent(
-        archiveDirectory, this, this.participatingDatabases);
     this.bootstrapFloor = bootstrap == null ? null : bootstrap.getMeta().getEpoch();
   }
 
@@ -112,7 +111,7 @@ public final class ArchiveHistoryWriter
         HistoryCommitMarker previous = commits.get(meta.getEpoch() - 1);
         accountIndex.revert(reverted, previous == null ? null : previous.getMeta());
         commits.removeHead(meta);
-        persistRestartCheckpoint();
+        persistHistoryScanAnchor();
         previous = commits.head();
         index.truncateAfter(previous == null ? null : previous.getIndexLocation(), commits.size());
         bodies.truncateAfter(previous == null ? null : previous.getHistoryLocation(),
@@ -162,6 +161,10 @@ public final class ArchiveHistoryWriter
   @Override
   public synchronized long firstEpoch() {
     return commits.firstEpoch();
+  }
+
+  Path getArchiveDirectory() {
+    return archiveDirectory;
   }
 
   @Override
@@ -242,38 +245,49 @@ public final class ArchiveHistoryWriter
   public synchronized PersistentServingKeyIndexGeneration buildServingGeneration(
       Path shadowDirectory, String generationId, byte[] latestSourceIdentityDigest)
       throws IOException {
+    ServingSource source = servingSource();
+    return PersistentServingKeyIndexGeneration.build(shadowDirectory, generationId,
+        source.baseEpoch, source.baseHash, source.committed, index::read,
+        participatingDatabases, latestSourceIdentityDigest);
+  }
+
+  /** Recomputes the exact all-Store serving source identity without writing a generation. */
+  public synchronized ServingKeyIndexGeneration buildServingIdentity(String generationId)
+      throws IOException {
+    ServingSource source = servingSource();
+    return ServingKeyIndexGeneration.rebuild(generationId, source.baseEpoch, source.baseHash,
+        source.committed, index::read, participatingDatabases,
+        ServingKeyIndexGeneration.IndexLayout.prototypeDefaults());
+  }
+
+  private ServingSource servingSource() {
     HistoryCommitMarker first = commits.head() == null ? null : commits.get(commits.firstEpoch());
     if (first == null) {
       throw new IllegalStateException("Cannot build a serving generation from empty history");
     }
     long firstEpoch = bootstrapFloor == null ? commits.firstEpoch() : bootstrapFloor + 1;
     long lastEpoch = commits.head().getMeta().getEpoch();
-    if (firstEpoch > lastEpoch) {
-      throw new IllegalStateException(
-          "Cannot build a serving generation before post-bootstrap history exists");
+    List<HistoryCommitMarker> committed = new ArrayList<>();
+    for (long epoch = firstEpoch; epoch <= lastEpoch; epoch++) {
+      committed.add(commits.get(epoch));
     }
-    Iterable<HistoryCommitMarker> committed = () -> new Iterator<HistoryCommitMarker>() {
-      private long nextEpoch = firstEpoch;
-
-      @Override
-      public boolean hasNext() {
-        return nextEpoch <= lastEpoch;
-      }
-
-      @Override
-      public HistoryCommitMarker next() {
-        if (!hasNext()) {
-          throw new NoSuchElementException();
-        }
-        return commits.get(nextEpoch++);
-      }
-    };
     long baseEpoch = firstEpoch - 1;
     byte[] baseHash = bootstrapFloor == null
         ? first.getMeta().getParentHash() : first.getMeta().getBlockHash();
-    return PersistentServingKeyIndexGeneration.build(shadowDirectory, generationId,
-        baseEpoch, baseHash, committed, index::read,
-        participatingDatabases, latestSourceIdentityDigest);
+    return new ServingSource(baseEpoch, baseHash, committed);
+  }
+
+  private static final class ServingSource {
+    private final long baseEpoch;
+    private final byte[] baseHash;
+    private final List<HistoryCommitMarker> committed;
+
+    private ServingSource(long baseEpoch, byte[] baseHash,
+        List<HistoryCommitMarker> committed) {
+      this.baseEpoch = baseEpoch;
+      this.baseHash = baseHash;
+      this.committed = committed;
+    }
   }
 
   long getStartupScannedRecords() {
@@ -281,13 +295,13 @@ public final class ArchiveHistoryWriter
         + commits.getStartupScannedRecords();
   }
 
-  private void persistRestartCheckpoint() throws IOException {
+  private void persistHistoryScanAnchor() throws IOException {
     HistoryCommitMarker head = commits.head();
     if (head != null) {
-      ArchiveRestartCheckpoint.persist(archiveDirectory, commits.firstEpoch(), commits.size(),
+      ArchiveHistoryScanAnchor.persist(archiveDirectory, commits.firstEpoch(), commits.size(),
           commits.getRecordLength(), head, commitCodec);
     } else {
-      Files.deleteIfExists(archiveDirectory.resolve("restart.checkpoint"));
+      Files.deleteIfExists(archiveDirectory.resolve("history.scan-anchor"));
       HistorySegmentStore.syncDirectory(archiveDirectory);
     }
   }
@@ -319,7 +333,7 @@ public final class ArchiveHistoryWriter
       previousEpoch = diff.getMeta().getEpoch();
     }
     commits.commitAll(markers);
-    persistRestartCheckpoint();
+    persistHistoryScanAnchor();
   }
 
   private void validateNext(BlockSnapshotMeta previous, BlockSnapshotMeta meta) {

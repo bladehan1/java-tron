@@ -9,7 +9,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
-import org.tron.core.db2.archive.AccountAssetForwardProjector.AssetMutation;
 import org.tron.core.db2.archive.P66AccountAssetCodec.AssetRow;
 import org.tron.core.db2.archive.P66AccountAssetCodec.DecodedAssetRow;
 import org.tron.core.db2.archive.P66AccountAssetCodec.Phase;
@@ -58,14 +57,14 @@ public final class AccountAssetArchiveProjector {
     assetKeys.addAll(oldAssets.keySet());
     assetKeys.addAll(postAssets.keySet());
     List<BlockReverseDiff.Entry> reverseAssets = new ArrayList<>();
-    List<AssetMutation> forwardAssets = new ArrayList<>();
+    List<AssetRow> changedAssetRows = new ArrayList<>();
     for (WrappedByteArray assetKey : assetKeys) {
       byte[] oldValue = oldAssets.get(assetKey);
       byte[] postValue = postAssets.get(assetKey);
       if (!Arrays.equals(oldValue, postValue)) {
         reverseAssets.add(new BlockReverseDiff.Entry(assetKey.getBytes(),
             OldValue.fromNullable(oldValue)));
-        forwardAssets.add(new AssetMutation(assetKey.getBytes(), postValue == null
+        changedAssetRows.add(new AssetRow(assetKey.getBytes(), postValue == null
             ? BlockChangeView.PostValue.absent()
             : BlockChangeView.PostValue.present(postValue)));
       }
@@ -78,14 +77,10 @@ public final class AccountAssetArchiveProjector {
         ? BlockChangeView.PostValue.absent()
         : BlockChangeView.PostValue.present(canonicalAccount(accountKey, postAccount, projectPost));
     if (canonicalPost.isPresent()) {
-      List<AssetRow> rows = new ArrayList<>(forwardAssets.size());
-      for (AssetMutation mutation : forwardAssets) {
-        rows.add(new AssetRow(mutation.getPhysicalRawKey(), mutation.getPostValue()));
-      }
       codec.requireCanonicalLayout(phase(postAccount, projectPost),
-          accountKey, canonicalPost.getValue(), rows);
+          accountKey, canonicalPost.getValue(), changedAssetRows);
     }
-    return new Projection(canonicalOld, canonicalPost, reverseAssets, forwardAssets);
+    return new Projection(canonicalOld, canonicalPost, reverseAssets);
   }
 
   boolean requiresOldPhysicalAssets(byte[] rawOld, BlockChangeView.PostValue rawPost) {
@@ -168,14 +163,12 @@ public final class AccountAssetArchiveProjector {
     final OldValue oldAccount;
     final BlockChangeView.PostValue postAccount;
     final List<BlockReverseDiff.Entry> reverseAssets;
-    final List<AssetMutation> forwardAssets;
 
     private Projection(OldValue oldAccount, BlockChangeView.PostValue postAccount,
-        List<BlockReverseDiff.Entry> reverseAssets, List<AssetMutation> forwardAssets) {
+        List<BlockReverseDiff.Entry> reverseAssets) {
       this.oldAccount = oldAccount;
       this.postAccount = postAccount;
       this.reverseAssets = Collections.unmodifiableList(new ArrayList<>(reverseAssets));
-      this.forwardAssets = Collections.unmodifiableList(new ArrayList<>(forwardAssets));
     }
   }
 }

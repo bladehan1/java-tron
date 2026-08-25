@@ -69,6 +69,32 @@ public final class PersistentServingKeyIndexCatalog implements Closeable {
 
   public static PersistentServingKeyIndexCatalog create(Path root, Path initialShadow,
       ArchiveProgressEnvelope readerVisible) throws IOException {
+    return createInternal(root, initialShadow, readerVisible);
+  }
+
+  public static PersistentServingKeyIndexCatalog create(Path root, Path initialShadow)
+      throws IOException {
+    return createInternal(root, initialShadow, null);
+  }
+
+  static PersistentServingKeyIndexCatalog create(Path root, Path initialShadow,
+      FaultHook faultHook) throws IOException {
+    Objects.requireNonNull(faultHook, "faultHook");
+    Objects.requireNonNull(root, "root");
+    if (Files.exists(root.resolve(CURRENT))) {
+      throw new IllegalArgumentException("Serving index catalog already exists");
+    }
+    Files.createDirectories(root.resolve(GENERATIONS));
+    PersistentServingKeyIndexCatalog catalog =
+        new PersistentServingKeyIndexCatalog(root, null, faultHook);
+    if (!catalog.publishInternal(null, initialShadow, null)) {
+      throw new IllegalStateException("Failed to publish initial serving generation");
+    }
+    return catalog;
+  }
+
+  private static PersistentServingKeyIndexCatalog createInternal(Path root, Path initialShadow,
+      ArchiveProgressEnvelope readerVisible) throws IOException {
     Objects.requireNonNull(root, "root");
     if (Files.exists(root.resolve(CURRENT))) {
       throw new IllegalArgumentException("Serving index catalog already exists");
@@ -76,7 +102,7 @@ public final class PersistentServingKeyIndexCatalog implements Closeable {
     Files.createDirectories(root.resolve(GENERATIONS));
     PersistentServingKeyIndexCatalog catalog =
         new PersistentServingKeyIndexCatalog(root, null, stage -> { });
-    if (!catalog.publish(null, initialShadow, readerVisible)) {
+    if (!catalog.publishInternal(null, initialShadow, readerVisible)) {
       throw new IllegalStateException("Failed to publish initial serving generation");
     }
     return catalog;
@@ -84,6 +110,15 @@ public final class PersistentServingKeyIndexCatalog implements Closeable {
 
   /** Pins one immutable RocksDB handle and holds its generation refcount until close. */
   public synchronized PersistentServingKeyIndexGeneration pin(
+      ArchiveProgressEnvelope readerVisible) throws IOException {
+    return pinInternal(readerVisible);
+  }
+
+  public synchronized PersistentServingKeyIndexGeneration pin() throws IOException {
+    return pinInternal(null);
+  }
+
+  private PersistentServingKeyIndexGeneration pinInternal(
       ArchiveProgressEnvelope readerVisible) throws IOException {
     ensureOpen();
     if (currentId == null) {
@@ -100,7 +135,9 @@ public final class PersistentServingKeyIndexCatalog implements Closeable {
       throw failure;
     }
     try {
-      validateReaderVisibility(pinned, readerVisible);
+      if (readerVisible != null) {
+        validateReaderVisibility(pinned, readerVisible);
+      }
       return pinned;
     } catch (RuntimeException failure) {
       pinned.close();
@@ -111,7 +148,17 @@ public final class PersistentServingKeyIndexCatalog implements Closeable {
   /** Atomically publishes a completed shadow generation if {@code expectedId} is still current. */
   public synchronized boolean publish(String expectedId, Path shadow,
       ArchiveProgressEnvelope readerVisible) throws IOException {
+    return publishInternal(expectedId, shadow, readerVisible);
+  }
+
+  public synchronized boolean publish(String expectedId, Path shadow) throws IOException {
+    return publishInternal(expectedId, shadow, null);
+  }
+
+  private boolean publishInternal(String expectedId, Path shadow,
+      ArchiveProgressEnvelope readerVisible) throws IOException {
     ensureOpen();
+    discoverRetired();
     if (!Objects.equals(expectedId, currentId)) {
       return false;
     }
@@ -120,7 +167,9 @@ public final class PersistentServingKeyIndexCatalog implements Closeable {
     long replacementThrough;
     try (PersistentServingKeyIndexGeneration replacement =
         PersistentServingKeyIndexGeneration.open(shadow)) {
-      validateReaderVisibility(replacement, readerVisible);
+      if (readerVisible != null) {
+        validateReaderVisibility(replacement, readerVisible);
+      }
       replacementId = replacement.getGenerationId();
       replacementFrom = replacement.getIndexedFrom();
       replacementThrough = replacement.getIndexedThrough();
@@ -148,11 +197,13 @@ public final class PersistentServingKeyIndexCatalog implements Closeable {
     HistorySegmentStore.syncDirectory(generations);
     faultHook.afterDurableStage(PublicationStage.GENERATION_INSTALLED);
     persistCurrent(replacementId);
-    faultHook.afterDurableStage(PublicationStage.CURRENT_PUBLISHED);
     String previous = currentId;
     currentId = replacementId;
     if (previous != null) {
       retired.add(previous);
+    }
+    faultHook.afterDurableStage(PublicationStage.CURRENT_PUBLISHED);
+    if (previous != null) {
       reapIfUnused(previous);
     }
     return true;

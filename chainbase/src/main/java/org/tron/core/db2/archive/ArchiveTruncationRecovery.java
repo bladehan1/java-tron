@@ -37,7 +37,7 @@ public final class ArchiveTruncationRecovery {
     }
     shrinkCommitLog(intent);
     faultHook.afterDurableStage(Stage.COMMIT_SHRUNK);
-    ArchiveRestartCheckpoint checkpoint = intent.persistCheckpoint(archiveDirectory, markerCodec);
+    ArchiveHistoryScanAnchor checkpoint = intent.persistCheckpoint(archiveDirectory, markerCodec);
     faultHook.afterDurableStage(Stage.CHECKPOINT_PUBLISHED);
 
     try (HistoryIndexStore index = new HistoryIndexStore(
