@@ -5,7 +5,6 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
-import org.tron.core.db2.archive.AccountAssetPreparedBlockPayloadOwner.FrozenBatch;
 
 /** Bounded authoritative marker evidence for one exact frozen flush range. */
 public final class DurableHistoryMarkerRangeEvidence {
@@ -26,11 +25,6 @@ public final class DurableHistoryMarkerRangeEvidence {
     }
     this.maxMarkers = maxMarkers;
     participants = ArchiveParticipantDescriptor.current().getParticipants();
-  }
-
-  public List<ArchiveBlockForwardPayload> seal(FrozenBatch batch) {
-    FrozenBatch target = Objects.requireNonNull(batch, "batch");
-    return target.seal(read(target.getExpectedMetas()));
   }
 
   public List<HistoryCommitMarker> read(List<BlockSnapshotMeta> expectedMetas) {

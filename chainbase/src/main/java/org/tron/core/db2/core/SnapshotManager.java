@@ -36,15 +36,12 @@ import org.tron.common.utils.StorageUtils;
 import org.tron.core.db.RevokingDatabase;
 import org.tron.core.db.TronDatabase;
 import org.tron.core.db2.ISession;
-import org.tron.core.db2.archive.AccountAssetBlockProjectionBridge.PreparedBlockProjection;
-import org.tron.core.db2.archive.AccountAssetPreparedBlockPayloadOwner;
-import org.tron.core.db2.archive.AccountAssetPreparedBlockPayloadOwner.FrozenBatch;
-import org.tron.core.db2.archive.ArchiveBlockForwardPayload;
-import org.tron.core.db2.archive.ArchiveBlockProjectionPreparer;
 import org.tron.core.db2.archive.ArchivePersistenceException;
 import org.tron.core.db2.archive.ArchiveRuntimeAttachment;
 import org.tron.core.db2.archive.ArchiveStateBarrier.ArchiveStateAction;
 import org.tron.core.db2.archive.ArchiveStoreScope;
+import org.tron.core.db2.archive.ArchiveWalBinding;
+import org.tron.core.db2.archive.ArchiveWalBindingCodec;
 import org.tron.core.db2.archive.BlockChangeView;
 import org.tron.core.db2.archive.BlockReverseDiff;
 import org.tron.core.db2.archive.BlockReverseDiffSink;
@@ -104,16 +101,13 @@ public class SnapshotManager implements RevokingDatabase {
   private int checkpointVersion = 1;   // default v1
 
   private OldValueCollector oldValueCollector;
-  private ArchiveBlockProjectionPreparer archiveBlockProjectionPreparer;
   private ArchiveRuntimeAttachment archiveRuntimeAttachment;
-  private final Map<BlockSnapshotMeta, AccountAssetPreparedBlockPayloadOwner>
-      archiveForwardPayloadOwners = new HashMap<>();
-  private FrozenBatch pendingArchiveForwardFlush;
-  private List<ArchiveBlockForwardPayload> sealedArchiveForwardFlush;
-  private Long submittedArchiveForwardHistoryEpoch;
+  private Long submittedArchiveHistoryEpoch;
   private BlockReverseDiffSink blockReverseDiffSink;
   @Getter
   private volatile long archiveReadableEpoch = -1;
+  private volatile ArchiveWalBinding latestArchiveWalBinding;
+  private volatile ArchiveWalBinding recoveredArchiveWalBinding;
 
   public SnapshotManager(String checkpointPath) {
   }
@@ -269,50 +263,21 @@ public class SnapshotManager implements RevokingDatabase {
     }
 
     BlockReverseDiff reverseDiff = null;
-    AccountAssetPreparedBlockPayloadOwner forwardOwner = null;
-    PreparedBlockProjection projection = null;
-    boolean forwardOwnerAttached = false;
-    try {
-      if (archiveBlockProjectionPreparer != null) {
-        if (archiveForwardPayloadOwners.containsKey(meta)) {
-          throw new IllegalStateException("Archive forward payload owner already exists: " + meta);
-        }
-        BlockChangeView view = BlockChangeView.capture(meta, dbs);
-        projection = Objects.requireNonNull(
-            archiveBlockProjectionPreparer.prepare(view),
-            "archive projection preparer returned null");
-        forwardOwner = new AccountAssetPreparedBlockPayloadOwner(meta);
-        forwardOwner.attach(projection);
-        forwardOwnerAttached = true;
-        reverseDiff = forwardOwner.getReverseDiff();
-      } else if (oldValueCollector != null) {
-        reverseDiff = Objects.requireNonNull(
-            oldValueCollector.collect(BlockChangeView.capture(meta, dbs)),
-            "archive collector returned null");
-      }
-
-      dbs.forEach(db -> {
-        if (db.getHead().isOptimized()) {
-          db.getHead().reloadToMem();
-        }
-      });
-    } catch (RuntimeException | Error failure) {
-      if (forwardOwnerAttached) {
-        forwardOwner.discard();
-      } else if (projection != null) {
-        projection.abort();
-      }
-      throw failure;
+    if (oldValueCollector != null) {
+      reverseDiff = Objects.requireNonNull(
+          oldValueCollector.collect(BlockChangeView.capture(meta, dbs)),
+          "archive collector returned null");
     }
 
-    // All fallible work is complete. From here the prepared payload is owned by the block layer;
-    // fastPop/reorg can discard it without touching durable archive state.
+    dbs.forEach(db -> {
+      if (db.getHead().isOptimized()) {
+        db.getHead().reloadToMem();
+      }
+    });
+
     for (Chainbase db : dbs) {
       ((SnapshotImpl) db.getHead()).attachArchiveBlock(meta,
           ArchiveStoreScope.isStateDatabase(db.getDbName()) ? reverseDiff : null);
-    }
-    if (forwardOwner != null) {
-      archiveForwardPayloadOwners.put(meta, forwardOwner);
     }
     --activeSession;
   }
@@ -359,19 +324,6 @@ public class SnapshotManager implements RevokingDatabase {
     blockReverseDiffSink = Objects.requireNonNull(sink, "sink");
   }
 
-  /** Enables shared reverse/forward preparation; absent by default and installed independently. */
-  public synchronized void installArchiveProjectionPreparer(
-      ArchiveBlockProjectionPreparer preparer) {
-    ArchiveStoreScope.validate(dbs);
-    if (archiveRuntimeAttachment != null) {
-      throw new IllegalStateException("Borrowed archive runtime is already attached");
-    }
-    if (oldValueCollector == null || blockReverseDiffSink == null) {
-      throw new IllegalStateException("Archive collector must be installed before its preparer");
-    }
-    archiveBlockProjectionPreparer = Objects.requireNonNull(preparer, "preparer");
-  }
-
   /** Atomically installs one borrowed archive runtime bundle after store registration. */
   public synchronized void attachArchiveRuntime(ArchiveRuntimeAttachment attachment) {
     ArchiveStoreScope.validate(dbs);
@@ -379,12 +331,10 @@ public class SnapshotManager implements RevokingDatabase {
     if (archiveRuntimeAttachment != null) {
       throw new IllegalStateException("Archive runtime is already attached");
     }
-    if (oldValueCollector != null || archiveBlockProjectionPreparer != null
-        || blockReverseDiffSink != null) {
+    if (oldValueCollector != null || blockReverseDiffSink != null) {
       throw new IllegalStateException("Legacy archive collaborators are already installed");
     }
     oldValueCollector = candidate.getCollector();
-    archiveBlockProjectionPreparer = candidate.getProjectionPreparer();
     blockReverseDiffSink = candidate.getSink();
     archiveRuntimeAttachment = candidate;
   }
@@ -399,148 +349,12 @@ public class SnapshotManager implements RevokingDatabase {
     if (archiveRuntimeAttachment != candidate) {
       throw new IllegalStateException("Cannot detach a foreign archive runtime");
     }
-    abortArchiveForwardPayloads();
     archiveRuntimeAttachment = null;
     oldValueCollector = null;
-    archiveBlockProjectionPreparer = null;
     blockReverseDiffSink = null;
+    submittedArchiveHistoryEpoch = null;
     archiveReadableEpoch = -1;
     return candidate;
-  }
-
-  /** Visible for lifecycle verification until the flush freeze coordinator consumes this registry. */
-  public synchronized int getArchiveForwardPayloadOwnerCount() {
-    return archiveForwardPayloadOwners.size();
-  }
-
-  /** Visible for lifecycle verification until the flush freeze coordinator consumes this registry. */
-  public synchronized boolean hasArchiveForwardPayloadOwner(BlockSnapshotMeta meta) {
-    return archiveForwardPayloadOwners.containsKey(Objects.requireNonNull(meta, "meta"));
-  }
-
-  /** Atomically transfers the exact oldest flush range from the registry to one pending owner. */
-  public synchronized FrozenBatch freezeArchiveForwardFlushRange() {
-    if (pendingArchiveForwardFlush != null) {
-      return pendingArchiveForwardFlush;
-    }
-    if (sealedArchiveForwardFlush != null) {
-      throw new IllegalStateException("Archive forward flush is sealed and awaiting claim");
-    }
-    if (archiveBlockProjectionPreparer == null) {
-      throw new IllegalStateException("Archive projection preparer is not installed");
-    }
-    List<BlockSnapshotMeta> topology = stateLayerMetas();
-    if (flushCount <= 0 || flushCount > topology.size()) {
-      throw new IllegalStateException("Archive forward flush range is empty or exceeds topology");
-    }
-    java.util.Set<BlockSnapshotMeta> unique = new java.util.LinkedHashSet<>(topology);
-    if (unique.size() != topology.size()) {
-      throw new IllegalStateException("Archive state topology contains duplicate block metadata");
-    }
-    BlockSnapshotMeta previous = null;
-    for (BlockSnapshotMeta current : topology) {
-      if (previous != null && (current.getEpoch() != previous.getEpoch() + 1
-          || current.getBlockNumber() != previous.getBlockNumber() + 1
-          || !Arrays.equals(current.getParentHash(), previous.getBlockHash()))) {
-        throw new IllegalStateException("Archive state topology is not contiguous");
-      }
-      previous = current;
-    }
-    if (!archiveForwardPayloadOwners.keySet().equals(unique)) {
-      throw new IllegalStateException("Archive forward owner registry does not match topology");
-    }
-    for (BlockSnapshotMeta meta : topology) {
-      AccountAssetPreparedBlockPayloadOwner owner = archiveForwardPayloadOwners.get(meta);
-      if (owner == null || !owner.isAttachedTo(meta)) {
-        throw new IllegalStateException("Archive forward owner is missing or not attached");
-      }
-    }
-
-    List<BlockSnapshotMeta> range = new ArrayList<>(topology.subList(0, flushCount));
-    List<AccountAssetPreparedBlockPayloadOwner> owners = new ArrayList<>(range.size());
-    for (BlockSnapshotMeta meta : range) {
-      owners.add(archiveForwardPayloadOwners.get(meta));
-    }
-
-    FrozenBatch frozen = AccountAssetPreparedBlockPayloadOwner.freezeContiguous(owners);
-    for (BlockSnapshotMeta meta : range) {
-      archiveForwardPayloadOwners.remove(meta);
-    }
-    pendingArchiveForwardFlush = frozen;
-    return frozen;
-  }
-
-  public synchronized boolean hasPendingArchiveForwardFlush() {
-    return pendingArchiveForwardFlush != null || sealedArchiveForwardFlush != null;
-  }
-
-  /** Seals the pending range with an externally validated exact marker list. */
-  public synchronized void sealPendingArchiveForwardFlush(List<HistoryCommitMarker> markers) {
-    FrozenBatch pending = requirePendingArchiveForwardFlush();
-    List<ArchiveBlockForwardPayload> sealed = pending.seal(markers);
-    sealedArchiveForwardFlush = sealed;
-    pendingArchiveForwardFlush = null;
-  }
-
-  /** Reads exact durable marker evidence and seals the same pending range. */
-  public synchronized void sealPendingArchiveForwardFlush(
-      DurableHistoryMarkerRangeEvidence evidence) {
-    FrozenBatch pending = requirePendingArchiveForwardFlush();
-    List<ArchiveBlockForwardPayload> sealed = Objects.requireNonNull(evidence, "evidence")
-        .seal(pending);
-    sealedArchiveForwardFlush = sealed;
-    pendingArchiveForwardFlush = null;
-  }
-
-  /** Transfers the sealed ordered payloads exactly once and clears manager ownership. */
-  public synchronized List<ArchiveBlockForwardPayload> claimArchiveForwardFlushPayloads() {
-    if (sealedArchiveForwardFlush == null) {
-      throw new IllegalStateException("Archive forward flush is not sealed");
-    }
-    List<ArchiveBlockForwardPayload> claimed = sealedArchiveForwardFlush;
-    sealedArchiveForwardFlush = null;
-    return claimed;
-  }
-
-  private FrozenBatch requirePendingArchiveForwardFlush() {
-    if (sealedArchiveForwardFlush != null) {
-      throw new IllegalStateException("Archive forward flush is already sealed");
-    }
-    if (pendingArchiveForwardFlush == null) {
-      throw new IllegalStateException("Archive forward flush range is not frozen");
-    }
-    return pendingArchiveForwardFlush;
-  }
-
-  private List<BlockSnapshotMeta> stateLayerMetas() {
-    List<BlockSnapshotMeta> reference = null;
-    for (Chainbase db : dbs) {
-      if (!ArchiveStoreScope.isStateDatabase(db.getDbName())) {
-        continue;
-      }
-      List<BlockSnapshotMeta> candidate = new ArrayList<>();
-      Snapshot head = db.getHead();
-      Snapshot next = db.getHead().getRoot();
-      while (next != head) {
-        next = next.getNext();
-        if (!Snapshot.isImpl(next)) {
-          throw new IllegalStateException("Archive state topology is missing a snapshot layer");
-        }
-        BlockSnapshotMeta meta = ((SnapshotImpl) next).getBlockSnapshotMeta();
-        if (meta == null) {
-          throw new IllegalStateException("Archive state topology contains an unbound layer");
-        }
-        candidate.add(meta);
-      }
-      if (reference != null && !reference.equals(candidate)) {
-        throw new IllegalStateException("Block metadata differs across state database topology");
-      }
-      reference = candidate;
-    }
-    if (reference == null) {
-      throw new IllegalStateException("Archive mode has no state database topology");
-    }
-    return reference;
   }
 
   /** Runs latest-state snapshot acquisition inside the canonical apply/flush monitor. */
@@ -582,48 +396,10 @@ public class SnapshotManager implements RevokingDatabase {
       throw new RevokingStoreIllegalStateException(
           String.format("there is not snapshot to be popped, current: %d", size));
     }
-    BlockSnapshotMeta poppedMeta = currentStateHeadBlockMeta();
-    if ((pendingArchiveForwardFlush != null && pendingArchiveForwardFlush.contains(poppedMeta))
-        || sealedArchiveForwardFlushContains(poppedMeta)) {
-      throw new IllegalStateException("Cannot pop a block owned by pending archive flush");
-    }
-    if (poppedMeta != null) {
-      AccountAssetPreparedBlockPayloadOwner owner = archiveForwardPayloadOwners.get(poppedMeta);
-      if (owner != null) {
-        owner.discard();
-        archiveForwardPayloadOwners.remove(poppedMeta);
-      }
+    if (submittedArchiveHistoryEpoch != null) {
+      throw new IllegalStateException("Cannot pop while archive history flush is pending");
     }
     pop();
-  }
-
-  private BlockSnapshotMeta currentStateHeadBlockMeta() {
-    BlockSnapshotMeta current = null;
-    for (Chainbase db : dbs) {
-      if (!ArchiveStoreScope.isStateDatabase(db.getDbName()) || !Snapshot.isImpl(db.getHead())) {
-        continue;
-      }
-      BlockSnapshotMeta candidate = ((SnapshotImpl) db.getHead()).getBlockSnapshotMeta();
-      if (candidate != null && current != null && !current.equals(candidate)) {
-        throw new IllegalStateException("Current block metadata differs across state databases");
-      }
-      if (candidate != null) {
-        current = candidate;
-      }
-    }
-    return current;
-  }
-
-  private boolean sealedArchiveForwardFlushContains(BlockSnapshotMeta meta) {
-    if (sealedArchiveForwardFlush == null || meta == null) {
-      return false;
-    }
-    for (ArchiveBlockForwardPayload payload : sealedArchiveForwardFlush) {
-      if (meta.equals(payload.getMeta())) {
-        return true;
-      }
-    }
-    return false;
   }
 
   public synchronized void enable() {
@@ -664,33 +440,15 @@ public class SnapshotManager implements RevokingDatabase {
   }
 
   private synchronized Closeable prepareArchiveShutdown() {
-    abortArchiveForwardPayloads();
+    submittedArchiveHistoryEpoch = null;
     if (archiveRuntimeAttachment != null) {
       archiveRuntimeAttachment = null;
       oldValueCollector = null;
-      archiveBlockProjectionPreparer = null;
       blockReverseDiffSink = null;
       archiveReadableEpoch = -1;
       return null;
     }
     return blockReverseDiffSink instanceof Closeable ? (Closeable) blockReverseDiffSink : null;
-  }
-
-  private synchronized void abortArchiveForwardPayloads() {
-    if (pendingArchiveForwardFlush != null) {
-      pendingArchiveForwardFlush.abortIfFrozen();
-      pendingArchiveForwardFlush = null;
-    }
-    sealedArchiveForwardFlush = null;
-    submittedArchiveForwardHistoryEpoch = null;
-    for (Map.Entry<BlockSnapshotMeta, AccountAssetPreparedBlockPayloadOwner> entry
-        : archiveForwardPayloadOwners.entrySet()) {
-      AccountAssetPreparedBlockPayloadOwner owner = entry.getValue();
-      if (owner != null && owner.isAttachedTo(entry.getKey())) {
-        owner.discard();
-      }
-    }
-    archiveForwardPayloadOwners.clear();
   }
 
   public void updateSolidity(int hops) {
@@ -782,19 +540,32 @@ public class SnapshotManager implements RevokingDatabase {
     if (force || shouldBeRefreshed()) {
       try {
         long start = System.currentTimeMillis();
-        Long archiveEpoch = publishArchiveHistoryForFlush();
+        ArchiveWalBinding archiveBinding = publishArchiveHistoryForFlush();
         if (!isV2Open()) {
           deleteCheckpoint();
         }
-        createCheckpoint();
+        createCheckpoint(archiveBinding);
 
         long checkPointEnd = System.currentTimeMillis();
-        if (!publishArchiveForwardStateForFlush()) {
-          refresh();
+        if (archiveBinding != null && archiveRuntimeAttachment != null) {
+          try {
+            archiveRuntimeAttachment.publishCommittedPrefix(archiveBinding.getLast());
+          } catch (IOException | RuntimeException failure) {
+            throw new TronDBException("Archive committed-prefix publication failed", failure);
+          }
         }
-        if (archiveEpoch != null) {
-          archiveReadableEpoch = archiveEpoch;
-          ((DurableBlockReverseDiffSink) blockReverseDiffSink).releaseThrough(archiveEpoch);
+        refresh();
+        if (archiveBinding != null && archiveRuntimeAttachment != null) {
+          try {
+            archiveRuntimeAttachment.publishReadableState(archiveBinding.getLast());
+          } catch (IOException | RuntimeException failure) {
+            throw new TronDBException("Archive readable-state publication failed", failure);
+          }
+        }
+        if (archiveBinding != null) {
+          ((DurableBlockReverseDiffSink) blockReverseDiffSink)
+              .releaseThrough(archiveBinding.getLast().getEpoch());
+          submittedArchiveHistoryEpoch = null;
         }
         flushCount = 0;
         logger.info("Flush cost: {} ms, create checkpoint cost: {} ms, refresh cost: {} ms.",
@@ -810,15 +581,13 @@ public class SnapshotManager implements RevokingDatabase {
     }
   }
 
-  private Long publishArchiveHistoryForFlush() {
+  private ArchiveWalBinding publishArchiveHistoryForFlush() {
     if (oldValueCollector == null) {
       return null;
     }
     if (!(blockReverseDiffSink instanceof DurableBlockReverseDiffSink)) {
       throw new TronDBException("Archive sink cannot prove durable history before checkpoint");
     }
-    FrozenBatch frozenForward = archiveBlockProjectionPreparer == null
-        ? null : freezeArchiveForwardFlushRange();
     Chainbase stateDatabase = dbs.stream()
         .filter(db -> ArchiveStoreScope.isStateDatabase(db.getDbName()))
         .findFirst()
@@ -852,47 +621,29 @@ public class SnapshotManager implements RevokingDatabase {
     try {
       DurableBlockReverseDiffSink durableSink =
           (DurableBlockReverseDiffSink) blockReverseDiffSink;
-      if (frozenForward == null || submittedArchiveForwardHistoryEpoch == null) {
+      if (submittedArchiveHistoryEpoch == null) {
         durableSink.acceptAll(prepared);
-        if (frozenForward != null) {
-          submittedArchiveForwardHistoryEpoch = last.getEpoch();
-        }
-      } else if (submittedArchiveForwardHistoryEpoch.longValue() != last.getEpoch()) {
+        submittedArchiveHistoryEpoch = last.getEpoch();
+      } else if (submittedArchiveHistoryEpoch.longValue() != last.getEpoch()) {
         throw new ArchivePersistenceException(
-            "Submitted archive history target does not match frozen forward range");
+            "Submitted archive history target does not match the pending flush range");
       }
       durableSink.awaitCommitted(last.getEpoch());
-      if (frozenForward != null) {
-        DurableHistoryMarkerRangeEvidence evidence =
-            durableSink.createMarkerRangeEvidence(prepared.size());
-        sealPendingArchiveForwardFlush(evidence);
-        submittedArchiveForwardHistoryEpoch = null;
-      }
+      List<BlockSnapshotMeta> expectedMetas = prepared.stream()
+          .map(BlockReverseDiff::getMeta).collect(Collectors.toList());
+      DurableHistoryMarkerRangeEvidence evidence =
+          durableSink.createMarkerRangeEvidence(prepared.size());
+      return ArchiveWalBinding.fromMarkers(evidence.read(expectedMetas));
     } catch (RuntimeException e) {
       throw new TronDBException("Archive history durability gate failed", e);
     }
-    return last.getEpoch();
-  }
-
-  private boolean publishArchiveForwardStateForFlush() {
-    ArchiveRuntimeAttachment runtime = archiveRuntimeAttachment;
-    if (runtime == null || !runtime.hasForwardFlushPublisher()) {
-      return false;
-    }
-    List<ArchiveBlockForwardPayload> payloads = claimArchiveForwardFlushPayloads();
-    try {
-      runtime.publishForwardFlush(payloads, this::refreshOneArchiveTarget);
-      return true;
-    } catch (IOException | RuntimeException failure) {
-      throw new TronDBException("Archive forward publication failed", failure);
-    }
-  }
-
-  private void refreshOneArchiveTarget() {
-    refresh(1);
   }
 
   public void createCheckpoint() {
+    createCheckpoint(null);
+  }
+
+  private void createCheckpoint(ArchiveWalBinding archiveBinding) {
     TronDatabase<byte[]> checkPointStore = null;
     try {
       Map<WrappedByteArray, WrappedByteArray> batch = new HashMap<>();
@@ -922,6 +673,10 @@ public class SnapshotManager implements RevokingDatabase {
           }
         }
       }
+      if (archiveBinding != null) {
+        batch.put(WrappedByteArray.of(ArchiveWalBinding.getCheckpointKey()),
+            WrappedByteArray.of(new ArchiveWalBindingCodec().encode(archiveBinding)));
+      }
       if (isV2Open()) {
         String dbName = String.valueOf(System.currentTimeMillis());
         checkPointStore = getCheckpointDB(dbName);
@@ -932,6 +687,7 @@ public class SnapshotManager implements RevokingDatabase {
       checkPointStore.updateByBatch(batch.entrySet().stream()
               .map(e -> Maps.immutableEntry(e.getKey().getBytes(), e.getValue().getBytes()))
               .collect(HashMap::new, (m, k) -> m.put(k.getKey(), k.getValue()), HashMap::putAll));
+      latestArchiveWalBinding = archiveBinding;
 
     } catch (Exception e) {
       throw new TronDBException(e);
@@ -1007,6 +763,7 @@ public class SnapshotManager implements RevokingDatabase {
   // ensure run this method first after process start.
   @Override
   public void check() {
+    recoveredArchiveWalBinding = null;
     if (!isV2Open()) {
       List<String> cpList = getCheckpointList();
       if (cpList != null && cpList.size() != 0) {
@@ -1050,21 +807,46 @@ public class SnapshotManager implements RevokingDatabase {
         continue;
       }
       TronDatabase<byte[]> checkPointV2Store = getCheckpointDB(cp);
-      recover(checkPointV2Store);
-      checkPointV2Store.close();
+      try {
+        recover(checkPointV2Store);
+      } finally {
+        checkPointV2Store.close();
+      }
     }
     logger.info("checkpoint v2 recover success");
     unChecked = false;
   }
 
   private void recover(TronDatabase<byte[]> tronDatabase) {
+    List<Map.Entry<byte[], byte[]>> entries = new ArrayList<>();
+    ArchiveWalBinding recoveredBinding = null;
+    for (Map.Entry<byte[], byte[]> entry : tronDatabase.getDbSource()) {
+      byte[] key = Arrays.copyOf(entry.getKey(), entry.getKey().length);
+      byte[] value = Arrays.copyOf(entry.getValue(), entry.getValue().length);
+      if (ArchiveWalBinding.isCheckpointKey(key)) {
+        if (recoveredBinding != null) {
+          throw new ArchivePersistenceException(
+              "Checkpoint contains duplicate Archive WAL bindings");
+        }
+        try {
+          recoveredBinding = new ArchiveWalBindingCodec().decode(value);
+        } catch (IllegalArgumentException invalid) {
+          throw new ArchivePersistenceException(
+              "Checkpoint Archive WAL binding is corrupt", invalid);
+        }
+      }
+      entries.add(Maps.immutableEntry(key, value));
+    }
     Map<String, Chainbase> dbMap = dbs.stream()
         .map(db -> Maps.immutableEntry(db.getDbName(), db))
         .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
     advance();
-    for (Map.Entry<byte[], byte[]> e: tronDatabase.getDbSource()) {
+    for (Map.Entry<byte[], byte[]> e : entries) {
       byte[] key = e.getKey();
       byte[] value = e.getValue();
+      if (ArchiveWalBinding.isCheckpointKey(key)) {
+        continue;
+      }
       String db = simpleDecode(key);
       if (dbMap.get(db) == null) {
         continue;
@@ -1085,6 +867,17 @@ public class SnapshotManager implements RevokingDatabase {
 
     dbs.forEach(db -> db.getHead().getRoot().merge(db.getHead()));
     retreat();
+    if (recoveredBinding != null) {
+      recoveredArchiveWalBinding = recoveredBinding;
+    }
+  }
+
+  public ArchiveWalBinding getLatestArchiveWalBinding() {
+    return latestArchiveWalBinding;
+  }
+
+  public ArchiveWalBinding getRecoveredArchiveWalBinding() {
+    return recoveredArchiveWalBinding;
   }
 
   private boolean isV2Open() {

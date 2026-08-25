@@ -28,7 +28,7 @@ public final class HistoryIndexStore implements Closeable {
   }
 
   HistoryIndexStore(Path archiveDirectory, HistoryIndexCodec codec,
-      ArchiveRestartCheckpoint checkpoint) throws IOException {
+      ArchiveHistoryScanAnchor checkpoint) throws IOException {
     this.archiveDirectory = archiveDirectory;
     this.indexPath = archiveDirectory.resolve("state_history.idx");
     this.codec = codec;
@@ -125,7 +125,7 @@ public final class HistoryIndexStore implements Closeable {
     return startupScannedRecords;
   }
 
-  private ScanResult scan(ArchiveRestartCheckpoint checkpoint) throws IOException {
+  private ScanResult scan(ArchiveHistoryScanAnchor checkpoint) throws IOException {
     long recordCount = 0;
     ScannedIndexRecord head = null;
     Long invalidOffset = null;
@@ -139,7 +139,7 @@ public final class HistoryIndexStore implements Closeable {
       startupScannedRecords++;
       if (!marker.getMeta().equals(record.getMeta())) {
         throw new ArchivePersistenceException(
-            "Restart checkpoint does not match the history index");
+            "History scan anchor does not match the history index");
       }
       recordCount = checkpoint.getRecordCount();
       head = new ScannedIndexRecord(record, location);

@@ -1,60 +1,53 @@
 package org.tron.core.db2.archive;
 
-import java.io.IOException;
-import java.util.List;
 import java.util.Objects;
 
 /** Borrowed archive runtime collaborators installed into SnapshotManager as one unit. */
 public final class ArchiveRuntimeAttachment {
 
   private final OldValueCollector collector;
-  private final ArchiveBlockProjectionPreparer projectionPreparer;
   private final DurableBlockReverseDiffSink sink;
-  private final ForwardFlushPublisher forwardFlushPublisher;
+  private final ArchiveCommittedPrefixPublisher committedPrefixPublisher;
+  private final ArchiveCommittedPrefixPublisher readableStatePublisher;
 
   public ArchiveRuntimeAttachment(OldValueCollector collector,
-      ArchiveBlockProjectionPreparer projectionPreparer, DurableBlockReverseDiffSink sink) {
-    this(collector, projectionPreparer, sink, null);
+      DurableBlockReverseDiffSink sink) {
+    this(collector, sink, null, null);
   }
 
   public ArchiveRuntimeAttachment(OldValueCollector collector,
-      ArchiveBlockProjectionPreparer projectionPreparer, DurableBlockReverseDiffSink sink,
-      ForwardFlushPublisher forwardFlushPublisher) {
+      DurableBlockReverseDiffSink sink,
+      ArchiveCommittedPrefixPublisher committedPrefixPublisher) {
+    this(collector, sink, committedPrefixPublisher, null);
+  }
+
+  public ArchiveRuntimeAttachment(OldValueCollector collector,
+      DurableBlockReverseDiffSink sink,
+      ArchiveCommittedPrefixPublisher committedPrefixPublisher,
+      ArchiveCommittedPrefixPublisher readableStatePublisher) {
     this.collector = Objects.requireNonNull(collector, "collector");
-    this.projectionPreparer = Objects.requireNonNull(projectionPreparer, "projectionPreparer");
     this.sink = Objects.requireNonNull(sink, "sink");
-    this.forwardFlushPublisher = forwardFlushPublisher;
+    this.committedPrefixPublisher = committedPrefixPublisher;
+    this.readableStatePublisher = readableStatePublisher;
   }
 
   public OldValueCollector getCollector() {
     return collector;
   }
 
-  public ArchiveBlockProjectionPreparer getProjectionPreparer() {
-    return projectionPreparer;
-  }
-
   public DurableBlockReverseDiffSink getSink() {
     return sink;
   }
 
-  public boolean hasForwardFlushPublisher() {
-    return forwardFlushPublisher != null;
-  }
-
-  public void publishForwardFlush(List<ArchiveBlockForwardPayload> payloads,
-      ArchiveStateBarrier.ArchiveStateAction refresh) throws IOException {
-    if (forwardFlushPublisher == null) {
-      throw new IllegalStateException("Archive runtime has no forward flush publisher");
+  public void publishCommittedPrefix(BlockSnapshotMeta target) throws java.io.IOException {
+    if (committedPrefixPublisher != null) {
+      committedPrefixPublisher.publish(Objects.requireNonNull(target, "target"));
     }
-    forwardFlushPublisher.publish(payloads, refresh);
   }
 
-  /** Publishes one frozen normal-flush range target-by-target through C/D, refresh and R. */
-  @FunctionalInterface
-  public interface ForwardFlushPublisher {
-
-    void publish(List<ArchiveBlockForwardPayload> payloads,
-        ArchiveStateBarrier.ArchiveStateAction refresh) throws IOException;
+  public void publishReadableState(BlockSnapshotMeta target) throws java.io.IOException {
+    if (readableStatePublisher != null) {
+      readableStatePublisher.publish(Objects.requireNonNull(target, "target"));
+    }
   }
 }

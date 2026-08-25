@@ -36,7 +36,7 @@ public final class HistorySegmentStore implements Closeable {
   }
 
   HistorySegmentStore(Path archiveDirectory, BlockHistoryCodec codec, long maxSegmentSize,
-      ArchiveRestartCheckpoint checkpoint) throws IOException {
+      ArchiveHistoryScanAnchor checkpoint) throws IOException {
     if (maxSegmentSize <= 0) {
       throw new IllegalArgumentException("maxSegmentSize must be positive");
     }
@@ -149,7 +149,7 @@ public final class HistorySegmentStore implements Closeable {
     return startupScannedRecords;
   }
 
-  private ScanResult scan(ArchiveRestartCheckpoint checkpoint) throws IOException {
+  private ScanResult scan(ArchiveHistoryScanAnchor checkpoint) throws IOException {
     long recordCount = 0;
     ScannedRecord head = null;
     InvalidTail invalidTail = null;
@@ -163,7 +163,7 @@ public final class HistorySegmentStore implements Closeable {
       startupScannedRecords++;
       if (!marker.getMeta().equals(diff.getMeta())) {
         throw new ArchivePersistenceException(
-            "Restart checkpoint does not match the history body");
+            "History scan anchor does not match the history body");
       }
       recordCount = checkpoint.getRecordCount();
       head = new ScannedRecord(diff, marker.getHistoryLocation());
