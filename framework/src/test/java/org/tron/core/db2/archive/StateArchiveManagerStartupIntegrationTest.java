@@ -12,6 +12,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.google.common.hash.Hashing;
 import com.google.protobuf.ByteString;
 import java.io.IOException;
 import java.lang.reflect.Field;
@@ -451,6 +452,10 @@ public class StateArchiveManagerStartupIntegrationTest {
         () -> manager.getArchiveAccountAssetBalance(10, orphanAddress, tokenId));
     assertThrows(ArchivePersistenceException.class,
         () -> manager.getArchiveAccountAssetBalance(10, mixedAddress, tokenId));
+    assertThrows(ArchivePersistenceException.class,
+        () -> manager.getArchiveAccountAssets(10, orphanAddress, prefixLimits()));
+    assertThrows(ArchivePersistenceException.class,
+        () -> manager.getArchiveAccountAssets(10, mixedAddress, prefixLimits()));
     assertAccountAsset(manager, 11, orphanAddress, tokenId,
         P66AccountAssetCodec.Phase.P66_ON, false, 0);
     assertAccountAsset(manager, 11, mixedAddress, tokenId,
@@ -475,6 +480,10 @@ public class StateArchiveManagerStartupIntegrationTest {
         () -> restartedManager.getArchiveAccountAssetBalance(10, orphanAddress, tokenId));
     assertThrows(ArchivePersistenceException.class,
         () -> restartedManager.getArchiveAccountAssetBalance(10, mixedAddress, tokenId));
+    assertThrows(ArchivePersistenceException.class,
+        () -> restartedManager.getArchiveAccountAssets(10, orphanAddress, prefixLimits()));
+    assertThrows(ArchivePersistenceException.class,
+        () -> restartedManager.getArchiveAccountAssets(10, mixedAddress, prefixLimits()));
     invoke(restartedManager, "closeStateArchive");
     restarted.snapshots.shutdown();
   }
@@ -739,6 +748,8 @@ public class StateArchiveManagerStartupIntegrationTest {
     invoke(manager, "initStateArchive");
     assertAccountAsset(manager, 6, address, tokenId,
         P66AccountAssetCodec.Phase.P66_OFF, true, 20);
+    assertAccountAssetPrefix(manager, 6, address, tokenId,
+        P66AccountAssetCodec.Phase.P66_OFF, true, 20);
     assertFalse(accountAssetStore.has(directKey));
 
     BlockSnapshotMeta target = null;
@@ -779,6 +790,8 @@ public class StateArchiveManagerStartupIntegrationTest {
       assertEquals(target, manager.getStateArchiveRuntime().verifyNormalWriteFixedPoint());
       if (epoch < 9) {
         assertArrayEquals(longValue(epoch == 7 ? 30 : 40), accountAssetStore.get(directKey));
+        assertAccountAssetPrefix(manager, epoch, address, tokenId,
+            P66AccountAssetCodec.Phase.P66_ON, true, epoch == 7 ? 30 : 40);
       } else {
         assertFalse(accountAssetStore.has(directKey));
       }
@@ -792,6 +805,14 @@ public class StateArchiveManagerStartupIntegrationTest {
         P66AccountAssetCodec.Phase.P66_ON, true, 40);
     assertAccountAsset(manager, 9, address, tokenId,
         P66AccountAssetCodec.Phase.P66_ON, false, 0);
+    assertAccountAssetPrefix(manager, 6, address, tokenId,
+        P66AccountAssetCodec.Phase.P66_OFF, true, 20);
+    assertAccountAssetPrefix(manager, 7, address, tokenId,
+        P66AccountAssetCodec.Phase.P66_ON, true, 30);
+    assertAccountAssetPrefix(manager, 8, address, tokenId,
+        P66AccountAssetCodec.Phase.P66_ON, true, 40);
+    assertAccountAssetPrefix(manager, 9, address, tokenId,
+        P66AccountAssetCodec.Phase.P66_ON, false, 0);
     @SuppressWarnings("unchecked")
     ArgumentCaptor<Map<byte[], byte[]>> checkpoints = ArgumentCaptor.forClass(Map.class);
     verify(fixture.checkpoint, times(3)).updateByBatch(checkpoints.capture());
@@ -799,6 +820,30 @@ public class StateArchiveManagerStartupIntegrationTest {
     invoke(manager, "closeStateArchive");
     fixture.snapshots.shutdown();
     accountAssetStore.getDbSource().closeDB();
+    assertEquals(1, countGenerationDirectories(archive));
+    downgradeOnlyServingGenerationToV3(archive);
+
+    SnapshotFixture interrupted = snapshotFixtureWithoutAccountAsset(recoveredCheckpoint);
+    TestAccountAssetStore interruptedAccountAssetStore = new TestAccountAssetStore();
+    Manager interruptedManager = manager(interrupted.snapshots, target,
+        interruptedAccountAssetStore, targetOptimization);
+    interrupted.databases.get("properties").put(
+        HistoricalAccountAssetBalanceResolver.proposal66PhysicalKey(), longValue(1));
+    invokeCheckpointRecovery(interrupted.snapshots, interrupted.checkpoint);
+    AtomicReference<ServingIndexStage> upgradeFailure =
+        new AtomicReference<>(ServingIndexStage.GENERATION_INSTALLED);
+    setField(interruptedManager, "stateArchiveServingIndexFaultHook",
+        (StateArchiveRuntimeOwner.ServingIndexFaultHook) stage -> {
+          if (stage == upgradeFailure.get() && upgradeFailure.compareAndSet(stage, null)) {
+            throw new IOException("injected v3 range-index upgrade failure");
+          }
+        });
+    assertThrows(IllegalStateException.class,
+        () -> invoke(interruptedManager, "initStateArchive"));
+    assertNull(interruptedManager.getStateArchiveRuntime());
+    interrupted.snapshots.shutdown();
+    interruptedAccountAssetStore.getDbSource().closeDB();
+    assertEquals(2, countGenerationDirectories(archive));
 
     SnapshotFixture restarted = snapshotFixtureWithoutAccountAsset(recoveredCheckpoint);
     targetOptimization.set(1);
@@ -817,7 +862,16 @@ public class StateArchiveManagerStartupIntegrationTest {
         P66AccountAssetCodec.Phase.P66_ON, true, 40);
     assertAccountAsset(restartedManager, 9, address, tokenId,
         P66AccountAssetCodec.Phase.P66_ON, false, 0);
+    assertAccountAssetPrefix(restartedManager, 6, address, tokenId,
+        P66AccountAssetCodec.Phase.P66_OFF, true, 20);
+    assertAccountAssetPrefix(restartedManager, 7, address, tokenId,
+        P66AccountAssetCodec.Phase.P66_ON, true, 30);
+    assertAccountAssetPrefix(restartedManager, 8, address, tokenId,
+        P66AccountAssetCodec.Phase.P66_ON, true, 40);
+    assertAccountAssetPrefix(restartedManager, 9, address, tokenId,
+        P66AccountAssetCodec.Phase.P66_ON, false, 0);
     assertFalse(reopenedAccountAssetStore.has(directKey));
+    assertServingGenerationSupportsRange(archive);
     assertEquals("LEVELDB".equals(engine), reopenedAccountAssetStore.getDbSource()
         instanceof org.tron.common.storage.leveldb.LevelDbDataSourceImpl);
     assertEquals("ROCKSDB".equals(engine), reopenedAccountAssetStore.getDbSource()
@@ -1240,6 +1294,30 @@ public class StateArchiveManagerStartupIntegrationTest {
     }
   }
 
+  private static void downgradeOnlyServingGenerationToV3(Path archive) throws IOException {
+    Path generations = archive.resolve("serving-index").resolve("generations");
+    Path generation;
+    try (java.util.stream.Stream<Path> entries = Files.list(generations)) {
+      generation = entries.filter(Files::isDirectory).findFirst()
+          .orElseThrow(() -> new IOException("Serving generation is missing"));
+    }
+    Path manifest = generation.resolve("generation.meta");
+    byte[] encoded = Files.readAllBytes(manifest);
+    ByteBuffer.wrap(encoded).putShort(4, (short) 3);
+    int payloadLength = encoded.length - Integer.BYTES;
+    int checksum = Hashing.crc32c().hashBytes(encoded, 0, payloadLength).asInt();
+    ByteBuffer.wrap(encoded, payloadLength, Integer.BYTES).putInt(checksum);
+    Files.write(manifest, encoded);
+  }
+
+  private static void assertServingGenerationSupportsRange(Path archive) throws IOException {
+    try (PersistentServingKeyIndexCatalog catalog =
+        PersistentServingKeyIndexCatalog.open(archive.resolve("serving-index"));
+        PersistentServingKeyIndexGeneration generation = catalog.pin()) {
+      assertTrue(generation.supportsRangeQueries());
+    }
+  }
+
   private static Map<String, byte[]> historyAuthoritySnapshot(Path archive) throws IOException {
     Map<String, byte[]> snapshot = new LinkedHashMap<>();
     for (String relative : Arrays.asList("MANIFEST", "bootstrap.anchor",
@@ -1406,6 +1484,35 @@ public class StateArchiveManagerStartupIntegrationTest {
         P66AccountAssetCodec.Phase.P66_ON, true, 40);
     assertAccountAsset(manager, 9, address, tokenId,
         P66AccountAssetCodec.Phase.P66_ON, false, 0);
+    assertAccountAssetPrefix(manager, 6, address, tokenId,
+        P66AccountAssetCodec.Phase.P66_OFF, true, 20);
+    assertAccountAssetPrefix(manager, 6, absentAddress, tokenId,
+        P66AccountAssetCodec.Phase.P66_OFF, false, 0);
+    assertAccountAssetPrefix(manager, 7, address, tokenId,
+        P66AccountAssetCodec.Phase.P66_ON, true, 30);
+    assertAccountAssetPrefix(manager, 8, address, tokenId,
+        P66AccountAssetCodec.Phase.P66_ON, true, 40);
+    assertAccountAssetPrefix(manager, 9, address, tokenId,
+        P66AccountAssetCodec.Phase.P66_ON, false, 0);
+  }
+
+  private static void assertAccountAssetPrefix(Manager manager, int targetEpoch, byte[] address,
+      String tokenId, P66AccountAssetCodec.Phase phase, boolean present, long balance) {
+    HistoricalAccountAssetPrefixResolver.Result result = manager.getArchiveAccountAssets(
+        targetEpoch, address, prefixLimits());
+    assertEquals(targetEpoch, result.getBlockNumber());
+    assertArrayEquals(address, result.getAddress());
+    assertEquals(phase, result.getPhase());
+    assertEquals(present, result.isAccountPresent());
+    assertEquals(present ? 1 : 0, result.getBalances().size());
+    if (present) {
+      assertEquals(tokenId, result.getBalances().get(0).getTokenId());
+      assertEquals(balance, result.getBalances().get(0).getBalance());
+    }
+  }
+
+  private static HistoricalAccountAssetPrefixResolver.Limits prefixLimits() {
+    return new HistoricalAccountAssetPrefixResolver.Limits(10, 10, 10, 64, 8, 1_000);
   }
 
   private static void assertAccountAsset(Manager manager, int targetEpoch, byte[] address,
@@ -1763,6 +1870,34 @@ public class StateArchiveManagerStartupIntegrationTest {
         public byte[] get(byte[] physicalRawKey) {
           byte[] value = pinned.get(WrappedByteArray.of(physicalRawKey));
           return value == null ? null : Arrays.copyOf(value, value.length);
+        }
+
+        @Override
+        public List<Map.Entry<byte[], byte[]>> range(byte[] lowerInclusive,
+            byte[] upperExclusive, int maxEntries) {
+          if (lowerInclusive == null || maxEntries <= 0) {
+            throw new IllegalArgumentException("Invalid memory snapshot range");
+          }
+          List<Map.Entry<byte[], byte[]>> entries = new ArrayList<>();
+          pinned.forEach((key, value) -> entries.add(new AbstractMap.SimpleImmutableEntry<>(
+              key.getBytes(), Arrays.copyOf(value, value.length))));
+          entries.sort((left, right) ->
+              BlockReverseDiff.compareUnsigned(left.getKey(), right.getKey()));
+          List<Map.Entry<byte[], byte[]>> result = new ArrayList<>();
+          for (Map.Entry<byte[], byte[]> entry : entries) {
+            if (BlockReverseDiff.compareUnsigned(entry.getKey(), lowerInclusive) < 0) {
+              continue;
+            }
+            if (upperExclusive != null
+                && BlockReverseDiff.compareUnsigned(entry.getKey(), upperExclusive) >= 0) {
+              break;
+            }
+            if (result.size() == maxEntries) {
+              break;
+            }
+            result.add(entry);
+          }
+          return Collections.unmodifiableList(result);
         }
 
         @Override

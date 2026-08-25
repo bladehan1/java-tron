@@ -71,12 +71,61 @@ public class PersistentServingKeyIndexGenerationTest {
 
       try (PersistentServingKeyIndexGeneration reopened =
           PersistentServingKeyIndexGeneration.open(generationPath)) {
+        assertTrue(reopened.supportsRangeQueries());
         assertEquals(ArchiveParticipantDescriptor.scopeIdentity(PARTICIPANTS),
             reopened.getScopeIdentity());
         assertArrayEquals(hash(77), reopened.getLatestSourceIdentityDigest());
         assertEquals(3, change(reopened, "account", bytes("hot"), 2, 3));
-        assertThrows(UnsupportedOperationException.class,
-            () -> reopened.changesInRange("account", new byte[0], null, 0, 3, 10));
+        List<ServingKeyIndexGeneration.ChangedKey> changed = reopened.changesInRange(
+            "account", bytes("h"), bytes("z"), 0, 3, 10);
+        assertEquals(1, changed.size());
+        assertArrayEquals(bytes("hot"), changed.get(0).getKey());
+        assertEquals(1, changed.get(0).getFirstChangeBlock());
+        assertThrows(ArchiveQueryLimitExceededException.class,
+            () -> reopened.changesInRange("account", new byte[0], null, 0, 3, 1));
+      }
+
+      byte[] legacyRangeManifest = Files.readAllBytes(generationPath.resolve("generation.meta"));
+      ByteBuffer.wrap(legacyRangeManifest).putShort(4, (short) 3);
+      refreshChecksum(legacyRangeManifest);
+      Files.write(generationPath.resolve("generation.meta"), legacyRangeManifest);
+      try (PersistentServingKeyIndexGeneration legacyRange =
+          PersistentServingKeyIndexGeneration.open(generationPath)) {
+        assertFalse(legacyRange.supportsRangeQueries());
+        assertThrows(ArchivePersistenceException.class,
+            () -> legacyRange.changesInRange("account", new byte[0], null, 0, 3, 10));
+      }
+    }
+  }
+
+  @Test
+  public void rangeIndexPreservesUnsignedBinaryKeyOrderAndPrefixBoundaries() throws Exception {
+    Path root = temporaryFolder.newFolder("persistent-binary-range").toPath();
+    try (Fixture fixture = new Fixture(root.resolve("authoritative"))) {
+      byte[] zero = new byte[]{0};
+      byte[] zeroZero = new byte[]{0, 0};
+      byte[] zeroFf = new byte[]{0, (byte) 0xff};
+      byte[] one = new byte[]{1};
+      fixture.append(1, group("account", zero, zeroZero, zeroFf, one,
+          new byte[]{(byte) 0xff}));
+      fixture.sync();
+
+      try (PersistentServingKeyIndexGeneration generation =
+          PersistentServingKeyIndexGeneration.build(root.resolve("generation"), "binary", 0,
+              hash(0), fixture.markers, fixture.index::read, PARTICIPANTS)) {
+        List<ServingKeyIndexGeneration.ChangedKey> changed = generation.changesInRange(
+            "account", zero, one, 0, 1, 10);
+        assertEquals(3, changed.size());
+        assertArrayEquals(zero, changed.get(0).getKey());
+        assertArrayEquals(zeroZero, changed.get(1).getKey());
+        assertArrayEquals(zeroFf, changed.get(2).getKey());
+
+        List<ServingKeyIndexGeneration.ChangedKey> strictUpper = generation.changesInRange(
+            "account", zero, zeroFf, 0, 1, 10);
+        assertEquals(2, strictUpper.size());
+        assertArrayEquals(zero, strictUpper.get(0).getKey());
+        assertArrayEquals(zeroZero, strictUpper.get(1).getKey());
+        assertTrue(generation.changesInRange("account", zero, one, 1, 1, 10).isEmpty());
       }
     }
   }
@@ -479,7 +528,7 @@ public class PersistentServingKeyIndexGenerationTest {
 
       @Override
       public List<HistoricalRangeOverlay.Entry> range(String dbName, byte[] lowerInclusive,
-          byte[] upperExclusive) {
+          byte[] upperExclusive, int maxEntries) {
         return Collections.emptyList();
       }
 

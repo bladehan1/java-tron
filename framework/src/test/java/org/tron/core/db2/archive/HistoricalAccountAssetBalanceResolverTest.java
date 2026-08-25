@@ -405,7 +405,7 @@ public class HistoricalAccountAssetBalanceResolverTest {
 
         @Override
         public List<HistoricalRangeOverlay.Entry> range(String dbName, byte[] lower,
-            byte[] upper) {
+            byte[] upper, int maxEntries) {
           List<HistoricalRangeOverlay.Entry> result = new ArrayList<>();
           for (Value value : values) {
             if (value.dbName.equals(dbName)

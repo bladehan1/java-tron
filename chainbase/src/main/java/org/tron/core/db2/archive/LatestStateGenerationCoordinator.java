@@ -350,9 +350,9 @@ public final class LatestStateGenerationCoordinator
 
     @Override
     public List<HistoricalRangeOverlay.Entry> range(String dbName, byte[] lowerInclusive,
-        byte[] upperExclusive) {
-      throw new UnsupportedOperationException(
-          "Latest-generation range is outside the Phase 1 point-query scope");
+        byte[] upperExclusive, int maxEntries) throws IOException {
+      ensureOpen();
+      return generation.root.range(dbName, lowerInclusive, upperExclusive, maxEntries);
     }
 
     @Override

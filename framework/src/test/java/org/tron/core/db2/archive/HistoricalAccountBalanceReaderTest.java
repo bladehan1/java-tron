@@ -89,7 +89,7 @@ public class HistoricalAccountBalanceReaderTest {
 
       @Override
       public java.util.List<HistoricalRangeOverlay.Entry> range(String dbName, byte[] lower,
-          byte[] upper) {
+          byte[] upper, int maxEntries) {
         return Collections.emptyList();
       }
 

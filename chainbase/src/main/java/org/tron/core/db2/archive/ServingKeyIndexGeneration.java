@@ -271,7 +271,7 @@ public final class ServingKeyIndexGeneration implements ServingKeyIndex {
     private final byte[] key;
     private final long firstChangeBlock;
 
-    private ChangedKey(byte[] key, long firstChangeBlock) {
+    ChangedKey(byte[] key, long firstChangeBlock) {
       this.key = Arrays.copyOf(key, key.length);
       this.firstChangeBlock = firstChangeBlock;
     }

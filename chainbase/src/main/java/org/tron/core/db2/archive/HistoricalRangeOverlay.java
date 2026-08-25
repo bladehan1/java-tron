@@ -107,6 +107,10 @@ public final class HistoricalRangeOverlay {
       this.maxCandidateKeys = maxCandidateKeys;
       this.maxResults = maxResults;
     }
+
+    int getMaxCandidateKeys() {
+      return maxCandidateKeys;
+    }
   }
 
   public static final class KeyRange {
