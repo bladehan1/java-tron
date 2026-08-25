@@ -54,14 +54,14 @@ public class ArchiveParticipantDescriptorTest {
   }
 
   @Test
-  public void manifestBindsApprovedScopeAndRejectsLegacyVersion() throws Exception {
+  public void manifestBindsApprovedScopeAndRejectsLegacyVersions() throws Exception {
     List<String> participants = ArchiveParticipantDescriptor.current().getParticipants();
     Path archive = temporaryFolder.newFolder("exact-27-manifest").toPath();
     ArchiveBaseManifest manifest = new ArchiveBaseManifest(archive, participants);
     manifest.ensureBase(meta(1));
 
     byte[] encoded = Files.readAllBytes(archive.resolve("MANIFEST"));
-    assertEquals(2, ByteBuffer.wrap(encoded, Integer.BYTES, Short.BYTES).getShort());
+    assertEquals(3, ByteBuffer.wrap(encoded, Integer.BYTES, Short.BYTES).getShort());
     new ArchiveBaseManifest(archive, participants);
 
     List<String> abiExcludedExact26 = new ArrayList<>(participants);
@@ -69,7 +69,7 @@ public class ArchiveParticipantDescriptorTest {
     assertThrows(ArchivePersistenceException.class,
         () -> new ArchiveBaseManifest(archive, abiExcludedExact26));
 
-    ByteBuffer.wrap(encoded).putShort(Integer.BYTES, (short) 1);
+    ByteBuffer.wrap(encoded).putShort(Integer.BYTES, (short) 2);
     byte[] payload = Arrays.copyOf(encoded, encoded.length - Integer.BYTES);
     ByteBuffer.wrap(encoded, encoded.length - Integer.BYTES, Integer.BYTES)
         .putInt(Hashing.crc32c().hashBytes(payload).asInt());
