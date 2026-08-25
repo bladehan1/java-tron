@@ -116,14 +116,14 @@ import org.tron.core.db.api.MigrateTurkishKeyHelper;
 import org.tron.core.db.api.MoveAbiHelper;
 import org.tron.core.db2.ISession;
 import org.tron.core.db2.archive.AccountAssetArchiveProjector;
-import org.tron.core.db2.archive.AccountAssetBlockProjectionBridge;
-import org.tron.core.db2.archive.AccountAssetBlockProjectionBridge.TargetAssetOptimization;
 import org.tron.core.db2.archive.ArchiveFormatAdmissionValidator.Result;
 import org.tron.core.db2.archive.ArchiveFormatAdmissionValidator.Status;
 import org.tron.core.db2.archive.ArchiveHistoryWriter;
+import org.tron.core.db2.archive.ArchiveStoreScope;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
+import org.tron.core.db2.archive.HistoricalAccountAssetBalanceResolver;
 import org.tron.core.db2.archive.HistoricalAccountBalanceReader;
-import org.tron.core.db2.archive.P66AccountAssetCodec.Phase;
+import org.tron.core.db2.archive.OldValue;
 import org.tron.core.db2.archive.SnapshotOldValueCollector;
 import org.tron.core.db2.archive.StateArchiveRuntimeOwner;
 import org.tron.core.db2.core.Chainbase;
@@ -204,6 +204,8 @@ public class Manager {
   private ArchiveHistoryWriter archiveHistoryWriter;
   @Getter
   private StateArchiveRuntimeOwner stateArchiveRuntime;
+  private StateArchiveRuntimeOwner.ServingIndexFaultHook stateArchiveServingIndexFaultHook =
+      stage -> { };
   private static final int NO_BLOCK_WAITING_LOCK = 0;
   private final int shieldedTransInPendingMaxCounts =
       Args.getInstance().getShieldedTransInPendingMaxCounts();
@@ -639,22 +641,22 @@ public class Manager {
     }
     StateArchiveRuntimeOwner recovered = null;
     try {
+      long headNumber = getDynamicPropertiesStore().getLatestBlockHeaderNumber();
+      BlockCapsule headBlock = chainBaseManager.getBlockByNum(headNumber);
+      BlockSnapshotMeta canonicalHead = BlockSnapshotMeta.forBlock(headNumber,
+          getDynamicPropertiesStore().getLatestBlockHeaderHash().getBytes(),
+          headBlock.getParentHash().getBytes(), headBlock.getTimeStamp());
       if (admission.getStatus() == Status.EMPTY_NEW) {
-        long headNumber = getDynamicPropertiesStore().getLatestBlockHeaderNumber();
-        BlockCapsule headBlock = chainBaseManager.getBlockByNum(headNumber);
-        BlockSnapshotMeta baseHead = BlockSnapshotMeta.forBlock(headNumber,
-            getDynamicPropertiesStore().getLatestBlockHeaderHash().getBytes(),
-            headBlock.getParentHash().getBytes(), headBlock.getTimeStamp());
-        Phase phase = getDynamicPropertiesStore().supportAllowAssetOptimization()
-            ? Phase.P66_ON : Phase.P66_OFF;
         recovered = StateArchiveRuntimeOwner.bootstrapAndRecover(
             (SnapshotManager) revokingStore, archiveDirectory,
-            storage.getStateArchiveMaxSegmentSize(), storage.getDbEngine(), baseHead, phase);
+            storage.getStateArchiveMaxSegmentSize(), canonicalHead,
+            stateArchiveServingIndexFaultHook);
         logger.info("State archive fresh baseline published: directory={}, head={}",
             archiveDirectory, headNumber);
       } else {
         recovered = StateArchiveRuntimeOwner.recover((SnapshotManager) revokingStore,
-            archiveDirectory, storage.getStateArchiveMaxSegmentSize(), storage.getDbEngine());
+            archiveDirectory, storage.getStateArchiveMaxSegmentSize(),
+            stateArchiveServingIndexFaultHook);
       }
       BlockSnapshotMeta archiveHead = recovered.getRecoveredHead();
       if (archiveHead != null
@@ -665,13 +667,30 @@ public class Manager {
         throw new IllegalStateException(
             "State archive committed head differs from the persisted state root");
       }
-      AccountAssetBlockProjectionBridge bridge = new AccountAssetBlockProjectionBridge(
-          new AccountAssetArchiveProjector(),
-          accountKey -> getAccountAssetStore().prefixQuery(accountKey));
-      archiveHistoryWriter = recovered.attachNormalWriter(new SnapshotOldValueCollector(),
-          view -> bridge.prepare(view, TargetAssetOptimization.forTarget(view.getMeta(),
-              getDynamicPropertiesStore().supportAllowAssetOptimization())),
-          storage.getStateArchiveQueueCapacity());
+      java.util.Map<String,
+          org.tron.core.db2.archive.LatestStateGenerationAdapter.SnapshotCapableStore>
+          supplementalStores = java.util.Collections.emptyMap();
+      SnapshotOldValueCollector archiveCollector = new SnapshotOldValueCollector();
+      boolean accountAssetRegistered = ((SnapshotManager) revokingStore).getDbs().stream()
+          .anyMatch(database -> AccountAssetArchiveProjector.ACCOUNT_ASSET_DB
+              .equals(database.getDbName()));
+      if (!accountAssetRegistered) {
+        AccountAssetStore accountAssetStore = chainBaseManager.getAccountAssetStore();
+        if (accountAssetStore == null) {
+          throw new IllegalStateException("State archive requires account-asset Store");
+        }
+        supplementalStores = java.util.Collections.singletonMap(
+            AccountAssetArchiveProjector.ACCOUNT_ASSET_DB,
+            org.tron.core.db2.archive.LatestStateGenerationAdapter.fromDataSource(
+                AccountAssetArchiveProjector.ACCOUNT_ASSET_DB,
+                accountAssetStore.getDbSource()));
+        archiveCollector = new SnapshotOldValueCollector(
+            new AccountAssetArchiveProjector(), accountAssetStore::prefixQuery,
+            SnapshotOldValueCollector::resolveTargetAssetOptimization);
+      }
+      archiveHistoryWriter = recovered.attachNormalWriter(archiveCollector,
+          storage.getStateArchiveQueueCapacity(), canonicalHead,
+          supplementalStores);
       stateArchiveRuntime = recovered;
       recovered = null;
       logger.info("State archive runtime attached: directory={}, head={}, actions={}, engine={}",
@@ -692,24 +711,58 @@ public class Manager {
 
   public HistoricalAccountBalanceReader.Result getArchiveAccountBalance(long blockNumber,
       byte[] address) throws ItemNotFoundException, BadItemException {
-    ArchiveHistoryWriter writer = archiveHistoryWriter;
-    if (writer == null) {
+    StateArchiveRuntimeOwner runtime = stateArchiveRuntime;
+    if (runtime == null) {
       throw new IllegalStateException("Experimental state archive is disabled");
     }
-    BlockSnapshotMeta archiveHead = writer.committedHeadMeta();
-    if (archiveHead == null
-        || ((SnapshotManager) revokingStore).getArchiveReadableEpoch() != archiveHead.getEpoch()) {
-      throw new IllegalStateException("State archive has no readable committed root");
+    try (org.tron.core.db2.archive.ArchiveRuntimeQueryGate.Lease lease =
+        runtime.pinHistoricalState(blockNumber)) {
+      return HistoricalAccountBalanceReader.read(lease.getSnapshot(), address);
+    } catch (java.io.IOException failure) {
+      throw new org.tron.core.db2.archive.ArchivePersistenceException(
+          "Failed to read request-owned historical account snapshot", failure);
     }
-    AccountCapsule rootAccount;
-    try {
-      rootAccount = chainBaseManager.getAccountStore().getFromRoot(address);
-    } catch (ItemNotFoundException missing) {
-      rootAccount = null;
+  }
+
+  /** Resolves one P66-aware historical TRC10 balance from a single request generation. */
+  public HistoricalAccountAssetBalanceResolver.Result getArchiveAccountAssetBalance(
+      long blockNumber, byte[] address, String tokenId) {
+    StateArchiveRuntimeOwner runtime = stateArchiveRuntime;
+    if (runtime == null) {
+      throw new IllegalStateException("Experimental state archive is disabled");
     }
-    org.tron.core.db2.archive.OldValue value = writer.readAccountAt(blockNumber, address,
-        rootAccount == null ? null : rootAccount.getData());
-    return HistoricalAccountBalanceReader.decode(blockNumber, address, value);
+    try (org.tron.core.db2.archive.ArchiveRuntimeQueryGate.Lease lease =
+        runtime.pinHistoricalState(blockNumber)) {
+      return new HistoricalAccountAssetBalanceResolver().resolve(
+          lease.getSnapshot(), address, tokenId);
+    } catch (java.io.IOException failure) {
+      throw new org.tron.core.db2.archive.ArchivePersistenceException(
+          "Failed to resolve request-owned historical AccountAsset snapshot", failure);
+    }
+  }
+
+  /** Reads one physical key from an exact versioned State Store at a historical block. */
+  public OldValue getArchiveStateValue(long blockNumber, String dbName, byte[] physicalRawKey) {
+    if (!ArchiveStoreScope.isStateDatabase(dbName)) {
+      throw new IllegalArgumentException("Not a versioned archive state database: " + dbName);
+    }
+    Objects.requireNonNull(physicalRawKey, "physicalRawKey");
+    StateArchiveRuntimeOwner runtime = stateArchiveRuntime;
+    if (runtime == null) {
+      throw new IllegalStateException("Experimental state archive is disabled");
+    }
+    try (org.tron.core.db2.archive.ArchiveRuntimeQueryGate.Lease lease =
+        runtime.pinHistoricalState(blockNumber)) {
+      return lease.getSnapshot().get(dbName, physicalRawKey);
+    } catch (java.io.IOException failure) {
+      throw new org.tron.core.db2.archive.ArchivePersistenceException(
+          "Failed to read request-owned historical State Store snapshot", failure);
+    }
+  }
+
+  /** Tests one physical key without opening range or cross-Store iteration semantics. */
+  public boolean hasArchiveStateValue(long blockNumber, String dbName, byte[] physicalRawKey) {
+    return getArchiveStateValue(blockNumber, dbName, physicalRawKey).isPresent();
   }
 
   /**

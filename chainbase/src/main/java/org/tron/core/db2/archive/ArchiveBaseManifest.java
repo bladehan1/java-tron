@@ -22,7 +22,7 @@ import java.util.UUID;
 final class ArchiveBaseManifest {
 
   private static final int MAGIC = 0x54414d46; // TAMF
-  private static final short VERSION = 2;
+  private static final short VERSION = 3;
   private static final int MAX_LENGTH = 1024 * 1024;
 
   private final Path directory;

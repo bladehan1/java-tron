@@ -25,10 +25,10 @@ public final class PersistentCommittedHistoryReader
   private PersistentCommittedHistoryReader(Path archiveDirectory, long maxSegmentSize,
       PersistentServingKeyIndexGeneration serving) throws IOException {
     Objects.requireNonNull(serving, "serving");
-    ArchiveRestartCheckpoint checkpoint = ArchiveRestartCheckpoint.load(archiveDirectory,
+    ArchiveHistoryScanAnchor checkpoint = ArchiveHistoryScanAnchor.load(archiveDirectory,
         new HistoryCommitMarkerCodec());
     if (checkpoint == null) {
-      throw new ArchivePersistenceException("Archive restart checkpoint is missing");
+      throw new ArchivePersistenceException("Archive history scan anchor is missing");
     }
     HistorySegmentStore openedBodies = null;
     HistoryIndexStore openedIndex = null;

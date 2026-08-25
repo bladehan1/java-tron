@@ -88,9 +88,9 @@ final class ArchiveTruncationIntent {
     HistorySegmentStore.syncDirectory(archiveDirectory);
   }
 
-  ArchiveRestartCheckpoint persistCheckpoint(Path archiveDirectory,
+  ArchiveHistoryScanAnchor persistCheckpoint(Path archiveDirectory,
       HistoryCommitMarkerCodec markerCodec) throws IOException {
-    return ArchiveRestartCheckpoint.persist(archiveDirectory, firstEpoch, recordCount,
+    return ArchiveHistoryScanAnchor.persist(archiveDirectory, firstEpoch, recordCount,
         recordLength, marker, markerCodec);
   }
 

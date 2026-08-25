@@ -8,22 +8,31 @@ import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.IdentityHashMap;
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import org.tron.core.db2.archive.ArchiveProgressEnvelope.Kind;
-import org.tron.core.db2.archive.ArchiveRecoveryPlanner.RecoveryPlan;
-import org.tron.core.db2.archive.P66AccountAssetCodec.Phase;
 import org.tron.core.db2.core.SnapshotManager;
 
 /** Sole owner for exact-27 State Archive resources from recovered startup through shutdown. */
 public final class StateArchiveRuntimeOwner implements Closeable {
+
+  public enum ServingIndexStage {
+    BEFORE_BUILD,
+    GENERATION_INSTALLED,
+    CURRENT_PUBLISHED
+  }
+
+  @FunctionalInterface
+  public interface ServingIndexFaultHook {
+
+    void afterStage(ServingIndexStage stage) throws IOException;
+  }
 
   public enum State {
     RECOVERED,
@@ -37,13 +46,17 @@ public final class StateArchiveRuntimeOwner implements Closeable {
   private final Path archiveDirectory;
   private final long maxSegmentSize;
   private final List<Closeable> participants;
-  private final Map<String, ArchiveParticipant> participantEngines;
   private final BlockSnapshotMeta recoveredHead;
   private final int startupRecoveryActionCount;
+  private final ServingIndexFaultHook servingIndexFaultHook;
   private ArchiveRuntimeAttachment attachment;
   private ArchiveRuntimeQueryGate queryGate;
   private Closeable latestCoordinator;
   private Closeable servingCatalog;
+  private PersistentServingKeyIndexCatalog servingIndexCatalog;
+  private LatestStateGenerationCoordinator latestStateCoordinator;
+  private BlockSnapshotMeta latestAuthorityHead;
+  private volatile BlockSnapshotMeta readableHead;
   private Closeable sink;
   private ArchiveHistoryWriter historyWriter;
   private State state;
@@ -61,22 +74,25 @@ public final class StateArchiveRuntimeOwner implements Closeable {
     this.queryGate = Objects.requireNonNull(queryGate, "queryGate");
     this.latestCoordinator = Objects.requireNonNull(latestCoordinator, "latestCoordinator");
     this.servingCatalog = Objects.requireNonNull(servingCatalog, "servingCatalog");
+    this.servingIndexCatalog = null;
+    this.latestStateCoordinator = null;
+    this.latestAuthorityHead = null;
+    this.readableHead = null;
     if (!(attachment.getSink() instanceof Closeable)) {
       throw new IllegalArgumentException("Attached archive sink must be Closeable");
     }
     this.sink = (Closeable) attachment.getSink();
     this.participants = immutableParticipants(participants);
-    this.participantEngines = Collections.emptyMap();
     this.recoveredHead = null;
     this.startupRecoveryActionCount = 0;
+    this.servingIndexFaultHook = stage -> { };
     this.state = State.RUNNING;
     validateUniqueOwnership();
   }
 
   private StateArchiveRuntimeOwner(SnapshotManager snapshotManager,
-      Path archiveDirectory, long maxSegmentSize, List<? extends Closeable> participants,
-      Map<String, ? extends ArchiveParticipant> participantEngines,
-      BlockSnapshotMeta recoveredHead, int startupRecoveryActionCount) {
+      Path archiveDirectory, long maxSegmentSize, BlockSnapshotMeta recoveredHead,
+      int startupRecoveryActionCount, ServingIndexFaultHook servingIndexFaultHook) {
     this.snapshotManager = Objects.requireNonNull(snapshotManager, "snapshotManager");
     this.archiveDirectory = Objects.requireNonNull(archiveDirectory, "archiveDirectory");
     this.maxSegmentSize = maxSegmentSize;
@@ -84,87 +100,63 @@ public final class StateArchiveRuntimeOwner implements Closeable {
     this.queryGate = null;
     this.latestCoordinator = null;
     this.servingCatalog = null;
-    this.participants = immutableParticipants(participants);
-    this.participantEngines = immutableParticipantEngines(participantEngines);
+    this.servingIndexCatalog = null;
+    this.latestStateCoordinator = null;
+    this.latestAuthorityHead = null;
+    this.readableHead = null;
+    this.participants = Collections.emptyList();
     this.sink = null;
     this.recoveredHead = Objects.requireNonNull(recoveredHead, "recoveredHead");
     this.startupRecoveryActionCount = startupRecoveryActionCount;
+    this.servingIndexFaultHook = Objects.requireNonNull(servingIndexFaultHook,
+        "servingIndexFaultHook");
     this.state = State.RECOVERED;
   }
 
-  /**
-   * Opens the canonical exact-27 native participants and converges startup recovery before any
-   * normal archive producer is attached to {@link SnapshotManager}.
-   */
+  /** Opens and validates the committed history authority before normal writes are attached. */
   public static StateArchiveRuntimeOwner recover(SnapshotManager snapshotManager,
-      Path archiveDirectory, long maxSegmentSize, String databaseEngine) throws IOException {
+      Path archiveDirectory, long maxSegmentSize) throws IOException {
+    return recover(snapshotManager, archiveDirectory, maxSegmentSize, stage -> { });
+  }
+
+  public static StateArchiveRuntimeOwner recover(SnapshotManager snapshotManager,
+      Path archiveDirectory, long maxSegmentSize, ServingIndexFaultHook servingIndexFaultHook)
+      throws IOException {
     Objects.requireNonNull(snapshotManager, "snapshotManager");
     Path root = Objects.requireNonNull(archiveDirectory, "archiveDirectory");
-    String engine = Objects.requireNonNull(databaseEngine, "databaseEngine")
-        .toUpperCase(Locale.ROOT);
-    if (!"LEVELDB".equals(engine) && !"ROCKSDB".equals(engine)) {
-      throw new IllegalArgumentException("Unsupported State Archive database engine: " + engine);
+    HistoryCommitMarker head;
+    try (ArchiveHistoryWriter history = new ArchiveHistoryWriter(root, maxSegmentSize,
+        ArchiveStoreScope.getStateDatabases())) {
+      head = history.committedHead();
     }
-    List<String> names = ArchiveParticipantDescriptor.current().getParticipants();
-    Map<String, ArchiveParticipant> openedByName = new LinkedHashMap<>();
-    List<Closeable> opened = new ArrayList<>();
-    try {
-      for (String participant : names) {
-        Closeable nativeEngine = openParticipant(root.resolve("participants").resolve(participant),
-            participant, names, engine);
-        opened.add(nativeEngine);
-        openedByName.put(participant, (ArchiveParticipant) nativeEngine);
-      }
-      Path checkpoint = root.resolve("progress").resolve("checkpoint.progress");
-      Path reader = root.resolve("progress").resolve("reader.progress");
-      RecoveryPlan first;
-      HistoryCommitMarker head;
-      try (ArchiveParticipantRecoveryStorage recovery =
-          new ArchiveParticipantRecoveryStorage(root, maxSegmentSize, checkpoint,
-              openedByName, reader, names)) {
-        first = new ArchiveRecoveryExecutor(recovery).recover();
-        RecoveryPlan fixed = new ArchiveRecoveryExecutor(recovery).recover();
-        if (!fixed.getActions().isEmpty()) {
-          throw new ArchivePersistenceException(
-              "State Archive second startup recovery was not zero-action");
-        }
-        head = recovery.committedHead();
-      }
-      if (head == null) {
-        throw new ArchivePersistenceException("State Archive recovered H head is missing");
-      }
-      return new StateArchiveRuntimeOwner(snapshotManager, root, maxSegmentSize, opened,
-          openedByName, head.getMeta(), first.getActions().size());
-    } catch (IOException | RuntimeException failure) {
-      closeReverse(opened, failure);
-      throw failure;
+    if (head == null) {
+      throw new ArchivePersistenceException("State Archive recovered H head is missing");
     }
+    return new StateArchiveRuntimeOwner(snapshotManager, root, maxSegmentSize, head.getMeta(), 0,
+        servingIndexFaultHook);
   }
 
   /**
-   * Atomically establishes one empty-diff H/C/27D/R baseline at the persisted Chainbase head,
-   * then reopens it through the ordinary startup recovery path. The staging directory is never
-   * published until every durable authority is complete and independently recoverable.
+   * Atomically establishes one empty-diff H baseline at the persisted Chainbase head, then
+   * reopens it through the ordinary startup path. No legacy participant/progress path is created.
    */
   public static StateArchiveRuntimeOwner bootstrapAndRecover(SnapshotManager snapshotManager,
-      Path archiveDirectory, long maxSegmentSize, String databaseEngine,
-      BlockSnapshotMeta baseHead, Phase targetPhase) throws IOException {
+      Path archiveDirectory, long maxSegmentSize, BlockSnapshotMeta baseHead) throws IOException {
+    return bootstrapAndRecover(snapshotManager, archiveDirectory, maxSegmentSize, baseHead,
+        stage -> { });
+  }
+
+  public static StateArchiveRuntimeOwner bootstrapAndRecover(SnapshotManager snapshotManager,
+      Path archiveDirectory, long maxSegmentSize, BlockSnapshotMeta baseHead,
+      ServingIndexFaultHook servingIndexFaultHook) throws IOException {
     Objects.requireNonNull(snapshotManager, "snapshotManager");
     Path root = Objects.requireNonNull(archiveDirectory, "archiveDirectory");
     BlockSnapshotMeta head = Objects.requireNonNull(baseHead, "baseHead");
-    Phase phase = Objects.requireNonNull(targetPhase, "targetPhase");
     Path parent = Objects.requireNonNull(root.getParent(), "archive parent directory");
     requireEmptyBootstrapTarget(root);
     Files.createDirectories(parent);
     Path staging = parent.resolve("." + root.getFileName() + ".bootstrap-" + UUID.randomUUID());
-    String engine = Objects.requireNonNull(databaseEngine, "databaseEngine")
-        .toUpperCase(Locale.ROOT);
-    if (!"LEVELDB".equals(engine) && !"ROCKSDB".equals(engine)) {
-      throw new IllegalArgumentException("Unsupported State Archive database engine: " + engine);
-    }
-
-    List<String> names = ArchiveParticipantDescriptor.current().getParticipants();
-    List<Closeable> opened = new ArrayList<>();
+    List<String> names = storeNames();
     try {
       HistoryCommitMarker marker;
       try (ArchiveHistoryWriter writer = new ArchiveHistoryWriter(staging, maxSegmentSize,
@@ -173,35 +165,10 @@ public final class StateArchiveRuntimeOwner implements Closeable {
         marker = Objects.requireNonNull(writer.committedHead(), "bootstrap history head");
       }
 
-      Map<String, ArchiveParticipant> engines = new LinkedHashMap<>();
-      for (String participant : names) {
-        Closeable nativeEngine = openParticipant(
-            staging.resolve("participants").resolve(participant), participant, names, engine);
-        opened.add(nativeEngine);
-        engines.put(participant, (ArchiveParticipant) nativeEngine);
-      }
-      Map<String, List<ArchiveParticipantMutation>> emptyMutations = new LinkedHashMap<>();
-      for (String participant : names) {
-        emptyMutations.put(participant, Collections.emptyList());
-      }
-      ArchiveProgressEnvelope target = progress(Kind.APPLY_CHECKPOINT, null, marker, null, names);
-      byte[] planDigest = new ArchiveTargetMutationPlan(target,
-          P66AccountAssetCodec.FORMAT_ID, phase, emptyMutations).digest();
-      ArchiveBootstrapAnchor.store(staging, marker, planDigest, names);
-      ArchiveProgressEnvelopeCodec codec = new ArchiveProgressEnvelopeCodec();
-      new ArchiveProgressFile(staging.resolve("progress/checkpoint.progress"), codec)
-          .store(progress(Kind.APPLY_CHECKPOINT, null, marker, planDigest, names));
-      for (String participant : names) {
-        engines.get(participant).apply(Collections.emptyList(),
-            progress(Kind.PARTICIPANT_PROGRESS, participant, marker, planDigest, names));
-      }
-      new ArchiveProgressFile(staging.resolve("progress/reader.progress"), codec)
-          .store(progress(Kind.READER_VISIBLE, null, marker, planDigest, names));
-      closeReverseOrThrow(opened);
-      opened.clear();
+      ArchiveBootstrapAnchor.store(staging, marker, names);
 
       try (StateArchiveRuntimeOwner verified = recover(snapshotManager, staging,
-          maxSegmentSize, engine)) {
+          maxSegmentSize)) {
         if (!head.equals(verified.getRecoveredHead())
             || verified.getStartupRecoveryActionCount() != 0) {
           throw new ArchivePersistenceException(
@@ -218,9 +185,8 @@ public final class StateArchiveRuntimeOwner implements Closeable {
             "State Archive bootstrap requires atomic directory publication", failure);
       }
       HistorySegmentStore.syncDirectory(parent);
-      return recover(snapshotManager, root, maxSegmentSize, engine);
+      return recover(snapshotManager, root, maxSegmentSize, servingIndexFaultHook);
     } catch (IOException | RuntimeException failure) {
-      closeReverse(opened, failure);
       throw failure;
     }
   }
@@ -242,34 +208,59 @@ public final class StateArchiveRuntimeOwner implements Closeable {
 
   /** Continues this recovered owner into one atomically attached normal-write runtime. */
   public synchronized ArchiveHistoryWriter attachNormalWriter(OldValueCollector collector,
-      ArchiveBlockProjectionPreparer projectionPreparer, int queueCapacity) throws IOException {
+      int queueCapacity, BlockSnapshotMeta canonicalHead) throws IOException {
+    return attachNormalWriter(collector, queueCapacity, canonicalHead, Collections.emptyMap());
+  }
+
+  public synchronized ArchiveHistoryWriter attachNormalWriter(OldValueCollector collector,
+      int queueCapacity, BlockSnapshotMeta canonicalHead,
+      Map<String, LatestStateGenerationAdapter.SnapshotCapableStore> supplementalStores)
+      throws IOException {
     if (state != State.RECOVERED) {
       throw new IllegalStateException("State Archive owner is not recovered");
     }
     ArchiveHistoryWriter writer = null;
     AsyncArchiveHistorySink asyncSink = null;
+    PersistentServingKeyIndexCatalog catalog = null;
+    LatestStateGenerationCoordinator latest = null;
     ArchiveRuntimeAttachment candidate = null;
     boolean attached = false;
     try {
       writer = new ArchiveHistoryWriter(archiveDirectory, maxSegmentSize,
-          new java.util.LinkedHashSet<>(participantEngines.keySet()));
+          ArchiveStoreScope.getStateDatabases());
       if (!recoveredHead.equals(writer.committedHeadMeta())) {
         throw new ArchivePersistenceException(
             "Recovered archive head changed before normal writer attachment");
       }
+      ArchiveWalStartupValidator.requireFixedPoint(writer, canonicalHead,
+          snapshotManager.getRecoveredArchiveWalBinding(),
+          storeNames());
+      catalog = openOrCreateServingCatalog(writer);
+      validateServingIndex(writer, catalog, canonicalHead);
+      latest = LatestStateGenerationCoordinatorFactory.create(snapshotManager,
+          supplementalStores, this::readLatestAuthority);
+      restoreLatestState(writer, catalog, latest, canonicalHead);
       asyncSink = new AsyncArchiveHistorySink(writer, queueCapacity);
-      Path checkpoint = archiveDirectory.resolve("progress").resolve("checkpoint.progress");
-      Path reader = archiveDirectory.resolve("progress").resolve("reader.progress");
-      ArchiveTargetApplyCoordinator coordinator = new ArchiveTargetApplyCoordinator(writer,
-          checkpoint, participantEngines, reader, new ArrayList<>(participantEngines.keySet()),
-          snapshotManager::withArchiveStateBarrier);
-      candidate = new ArchiveRuntimeAttachment(collector, projectionPreparer, asyncSink,
-          (payloads, refresh) -> publishTargets(coordinator, payloads, refresh));
+      ArchiveHistoryWriter attachedWriter = writer;
+      PersistentServingKeyIndexCatalog attachedCatalog = catalog;
+      LatestStateGenerationCoordinator attachedLatest = latest;
+      candidate = new ArchiveRuntimeAttachment(collector, asyncSink,
+          target -> publishServingIndex(attachedWriter, attachedCatalog, target),
+          target -> publishReadableState(attachedWriter, attachedCatalog, attachedLatest, target));
       snapshotManager.attachArchiveRuntime(candidate);
       attached = true;
+      snapshotManager.markArchiveReadableThrough(canonicalHead.getEpoch());
+      validateReadableState(catalog, latest, canonicalHead);
       attachment = candidate;
       sink = asyncSink;
       historyWriter = writer;
+      servingIndexCatalog = catalog;
+      latestStateCoordinator = latest;
+      latestCoordinator = latest;
+      servingCatalog = catalog;
+      readableHead = canonicalHead;
+      queryGate = new ArchiveRuntimeQueryGate(new ArchiveGenerationCapsule(catalog,
+          archiveDirectory, maxSegmentSize, latest, this::readReadableAuthority));
       state = State.RUNNING;
       return writer;
     } catch (IOException | RuntimeException failure) {
@@ -289,6 +280,20 @@ public final class StateArchiveRuntimeOwner implements Closeable {
           failure.addSuppressed(closeFailure);
         }
       }
+      if (catalog != null) {
+        try {
+          catalog.close();
+        } catch (IOException | RuntimeException closeFailure) {
+          failure.addSuppressed(closeFailure);
+        }
+      }
+      if (latest != null) {
+        try {
+          latest.close();
+        } catch (IOException | RuntimeException closeFailure) {
+          failure.addSuppressed(closeFailure);
+        }
+      }
       throw failure;
     }
   }
@@ -300,39 +305,246 @@ public final class StateArchiveRuntimeOwner implements Closeable {
     return historyWriter;
   }
 
-  /** Machine-checks the current H=C=D[0..26]=R identity and retired mutation plan. */
+  /** Acquires one request-owned historical snapshot from the currently published fixed point. */
+  public synchronized ArchiveRuntimeQueryGate.Lease pinHistoricalState(long targetBlock)
+      throws IOException {
+    if (state != State.RUNNING || queryGate == null) {
+      throw new IllegalStateException("State Archive historical query runtime is not running");
+    }
+    return queryGate.pin(targetBlock);
+  }
+
+  /** Machine-checks the latest committed H against the last Chainbase WAL binding. */
   public synchronized BlockSnapshotMeta verifyNormalWriteFixedPoint() throws IOException {
     ArchiveHistoryWriter writer = getHistoryWriter();
     HistoryCommitMarker head = Objects.requireNonNull(writer.committedHead(),
         "archive history head");
-    List<String> names = new ArrayList<>(participantEngines.keySet());
-    Path checkpointPath = archiveDirectory.resolve("progress").resolve("checkpoint.progress");
-    if (new ArchiveTargetMutationPlanFile(checkpointPath).loadIfPresent() != null) {
-      throw new ArchivePersistenceException("Archive mutation plan is not retired");
+    ArchiveWalBinding binding = snapshotManager.getLatestArchiveWalBinding();
+    if (binding == null) {
+      binding = snapshotManager.getRecoveredArchiveWalBinding();
     }
-    ArchiveProgressEnvelopeCodec codec = new ArchiveProgressEnvelopeCodec();
-    ArchiveProgressEnvelope checkpoint = new ArchiveProgressFile(checkpointPath, codec).load();
-    ArchiveProgressEnvelope reader = new ArchiveProgressFile(
-        archiveDirectory.resolve("progress").resolve("reader.progress"), codec).load();
-    requireAuthority(checkpoint, Kind.APPLY_CHECKPOINT, null, head, names);
-    requireAuthority(reader, Kind.READER_VISIBLE, null, head, names);
-    if (!java.util.Arrays.equals(checkpoint.getMutationPlanDigest(),
-        reader.getMutationPlanDigest())) {
-      throw new ArchivePersistenceException("Archive C/R mutation-plan identity differs");
+    ArchiveWalStartupValidator.requireFixedPoint(writer, head.getMeta(),
+        binding, storeNames());
+    validateServingIndex(writer, requireServingIndexCatalog(), head.getMeta());
+    validateReadableState(requireServingIndexCatalog(), head.getMeta());
+    return head.getMeta();
+  }
+
+  private ArchiveProgressEnvelope readLatestAuthority() {
+    BlockSnapshotMeta target = latestAuthorityHead;
+    if (target == null) {
+      throw new ArchivePersistenceException("Latest-state authority is not being published");
     }
-    for (Map.Entry<String, ArchiveParticipant> entry : participantEngines.entrySet()) {
-      ArchiveProgressEnvelope progress = entry.getValue().loadProgress();
-      requireAuthority(progress, Kind.PARTICIPANT_PROGRESS, entry.getKey(), head, names);
-      if (!java.util.Arrays.equals(checkpoint.getMutationPlanDigest(),
-          progress.getMutationPlanDigest())) {
-        throw new ArchivePersistenceException(
-            "Archive participant mutation-plan identity differs: " + entry.getKey());
+    return new ArchiveProgressEnvelope(Kind.READER_VISIBLE, null, target.getEpoch(),
+        target.getBlockHash(), new byte[16], new byte[32], storeNames());
+  }
+
+  private synchronized void restoreLatestState(ArchiveHistoryWriter writer,
+      PersistentServingKeyIndexCatalog catalog, LatestStateGenerationCoordinator latest,
+      BlockSnapshotMeta target) throws IOException {
+    try (PersistentServingKeyIndexGeneration serving = catalog.pin()) {
+      validateServingGeneration(writer, serving, target);
+      if (serving.isLatestSourceIdentityBound()) {
+        publishExistingLatest(latest, serving, target);
+        return;
       }
     }
-    if (snapshotManager.getArchiveReadableEpoch() != head.getMeta().getEpoch()) {
-      throw new ArchivePersistenceException("SnapshotManager readable epoch differs from R");
+    bindAndPublishLatest(writer, catalog, latest, target);
+  }
+
+  private synchronized void publishReadableState(ArchiveHistoryWriter writer,
+      PersistentServingKeyIndexCatalog catalog, LatestStateGenerationCoordinator latest,
+      BlockSnapshotMeta target) throws IOException {
+    if (!target.equals(writer.committedHeadMeta())) {
+      throw new ArchivePersistenceException(
+          "Readable-state target differs from committed history head");
     }
-    return head.getMeta();
+    bindAndPublishLatest(writer, catalog, latest, target);
+    long previousReadable = snapshotManager.getArchiveReadableEpoch();
+    snapshotManager.markArchiveReadableThrough(target.getEpoch());
+    try {
+      validateReadableState(catalog, target);
+      readableHead = target;
+    } catch (IOException | RuntimeException failure) {
+      snapshotManager.markArchiveReadableThrough(previousReadable);
+      throw failure;
+    }
+  }
+
+  private void publishExistingLatest(LatestStateGenerationCoordinator latest,
+      PersistentServingKeyIndexGeneration serving, BlockSnapshotMeta target) throws IOException {
+    latestAuthorityHead = target;
+    try (LatestStateGenerationCoordinator.Candidate candidate =
+        latest.acquire(serving.getGenerationId())) {
+      if (!latest.publish(null, candidate, serving)) {
+        throw new ArchivePersistenceException("Latest-state startup publication changed");
+      }
+    } finally {
+      latestAuthorityHead = null;
+    }
+  }
+
+  private void bindAndPublishLatest(ArchiveHistoryWriter writer,
+      PersistentServingKeyIndexCatalog catalog, LatestStateGenerationCoordinator latest,
+      BlockSnapshotMeta target) throws IOException {
+    String generationId = generationId(target);
+    String expectedLatest = latest.getCurrentGenerationId();
+    latestAuthorityHead = target;
+    try (LatestStateGenerationCoordinator.Candidate candidate = latest.acquire(generationId)) {
+      Path shadow = archiveDirectory.resolve(".serving-index-build-" + UUID.randomUUID());
+      try (PersistentServingKeyIndexGeneration built = writer.buildServingGeneration(shadow,
+          generationId, candidate.getSourceIdentityDigest())) {
+        validateServingGeneration(writer, built, target);
+      }
+      String expectedServing = catalog.getCurrentGenerationId();
+      if (!catalog.publish(expectedServing, shadow)) {
+        throw new ArchivePersistenceException(
+            "Serving index catalog changed during latest-state publication");
+      }
+      try (PersistentServingKeyIndexGeneration serving = catalog.pin()) {
+        if (!latest.publish(expectedLatest, candidate, serving)) {
+          throw new ArchivePersistenceException("Latest-state generation changed during publish");
+        }
+      }
+    } finally {
+      latestAuthorityHead = null;
+    }
+  }
+
+  private void validateReadableState(PersistentServingKeyIndexCatalog catalog,
+      BlockSnapshotMeta target) throws IOException {
+    LatestStateGenerationCoordinator latest = latestStateCoordinator;
+    if (latest == null) {
+      throw new ArchivePersistenceException("Latest-state coordinator is not attached");
+    }
+    validateReadableState(catalog, latest, target);
+  }
+
+  private void validateReadableState(PersistentServingKeyIndexCatalog catalog,
+      LatestStateGenerationCoordinator latest, BlockSnapshotMeta target) throws IOException {
+    try (PersistentServingKeyIndexGeneration serving = catalog.pin()) {
+      if (!serving.isLatestSourceIdentityBound()
+          || !serving.getGenerationId().equals(latest.getCurrentGenerationId())
+          || serving.getIndexedThrough() != target.getEpoch()
+          || !Arrays.equals(serving.getHeadHash(), target.getBlockHash())
+          || snapshotManager.getArchiveReadableEpoch() != target.getEpoch()) {
+        throw new ArchivePersistenceException("Archive P/H/I/latest/R fixed point mismatch");
+      }
+    }
+  }
+
+  private ArchiveProgressEnvelope readReadableAuthority() throws IOException {
+    BlockSnapshotMeta head = readableHead;
+    ArchiveHistoryWriter writer = historyWriter;
+    PersistentServingKeyIndexCatalog catalog = servingIndexCatalog;
+    LatestStateGenerationCoordinator latest = latestStateCoordinator;
+    ArchiveWalBinding binding = snapshotManager.getLatestArchiveWalBinding();
+    if (binding == null) {
+      binding = snapshotManager.getRecoveredArchiveWalBinding();
+    }
+    BlockSnapshotMeta persisted = binding == null ? recoveredHead : binding.getLast();
+    if (head == null || writer == null || catalog == null || latest == null
+        || snapshotManager.getArchiveReadableEpoch() != head.getEpoch()
+        || !head.equals(writer.committedHeadMeta()) || !head.equals(persisted)) {
+      throw new ArchivePersistenceException(
+          "Archive historical query is outside the P/H/I/latest/R fixed point");
+    }
+    try (PersistentServingKeyIndexGeneration serving = catalog.pin()) {
+      if (!serving.isLatestSourceIdentityBound()
+          || !serving.getGenerationId().equals(latest.getCurrentGenerationId())
+          || serving.getIndexedThrough() != head.getEpoch()
+          || !Arrays.equals(serving.getHeadHash(), head.getBlockHash())) {
+        throw new ArchivePersistenceException(
+            "Archive historical query generation is outside readable R");
+      }
+    }
+    return new ArchiveProgressEnvelope(Kind.READER_VISIBLE, null, head.getEpoch(),
+        head.getBlockHash(), new byte[16], new byte[32], storeNames());
+  }
+
+  private PersistentServingKeyIndexCatalog openOrCreateServingCatalog(
+      ArchiveHistoryWriter writer) throws IOException {
+    Path root = archiveDirectory.resolve("serving-index");
+    if (Files.exists(root, LinkOption.NOFOLLOW_LINKS)) {
+      return PersistentServingKeyIndexCatalog.open(root, this::afterCatalogStage);
+    }
+    String generationId = generationId(writer.committedHeadMeta());
+    Path shadow = archiveDirectory.resolve(".serving-index-build-" + UUID.randomUUID());
+    try (PersistentServingKeyIndexGeneration ignored =
+        writer.buildServingGeneration(shadow, generationId)) {
+      // The catalog reopens and validates the immutable generation before publishing it.
+    }
+    return PersistentServingKeyIndexCatalog.create(root, shadow, this::afterCatalogStage);
+  }
+
+  private synchronized void publishServingIndex(ArchiveHistoryWriter writer,
+      PersistentServingKeyIndexCatalog catalog, BlockSnapshotMeta target) throws IOException {
+    BlockSnapshotMeta historyHead = writer.committedHeadMeta();
+    if (!target.equals(historyHead)) {
+      throw new ArchivePersistenceException(
+          "Serving index target differs from committed history head");
+    }
+    servingIndexFaultHook.afterStage(ServingIndexStage.BEFORE_BUILD);
+    String generationId = generationId(target);
+    Path shadow = archiveDirectory.resolve(".serving-index-build-" + UUID.randomUUID());
+    try (PersistentServingKeyIndexGeneration candidate =
+        writer.buildServingGeneration(shadow, generationId)) {
+      validateServingGeneration(writer, candidate, target);
+    }
+    String expected = catalog.getCurrentGenerationId();
+    if (!catalog.publish(expected, shadow)) {
+      throw new ArchivePersistenceException("Serving index catalog changed during publication");
+    }
+    validateServingIndex(writer, catalog, target);
+  }
+
+  private void afterCatalogStage(PersistentServingKeyIndexCatalog.PublicationStage stage)
+      throws IOException {
+    servingIndexFaultHook.afterStage(stage
+        == PersistentServingKeyIndexCatalog.PublicationStage.GENERATION_INSTALLED
+        ? ServingIndexStage.GENERATION_INSTALLED : ServingIndexStage.CURRENT_PUBLISHED);
+  }
+
+  private static String generationId(BlockSnapshotMeta target) {
+    return "h-" + target.getEpoch() + "-" + UUID.randomUUID();
+  }
+
+  private PersistentServingKeyIndexCatalog requireServingIndexCatalog() {
+    if (servingIndexCatalog == null) {
+      throw new IllegalStateException("State Archive serving index is not attached");
+    }
+    return servingIndexCatalog;
+  }
+
+  private static void validateServingIndex(ArchiveHistoryWriter writer,
+      PersistentServingKeyIndexCatalog catalog, BlockSnapshotMeta target) throws IOException {
+    try (PersistentServingKeyIndexGeneration pinned = catalog.pin()) {
+      validateServingGeneration(writer, pinned, target);
+    }
+  }
+
+  private static void validateServingGeneration(ArchiveHistoryWriter writer,
+      PersistentServingKeyIndexGeneration generation, BlockSnapshotMeta target)
+      throws IOException {
+    ServingKeyIndexGeneration expected = writer.buildServingIdentity("expected");
+    List<String> stores = storeNames();
+    if (generation.getIndexedFrom() != expected.getIndexedFrom()
+        || generation.getIndexedThrough() != target.getEpoch()
+        || expected.getIndexedThrough() != target.getEpoch()
+        || !Arrays.equals(generation.getHeadHash(), target.getBlockHash())
+        || !Arrays.equals(expected.getHeadHash(), target.getBlockHash())
+        || !Arrays.equals(generation.getAuthoritativePrefixDigest(),
+        expected.getAuthoritativePrefixDigest())
+        || !generation.getParticipatingDatabases().equals(stores)) {
+      throw new ArchivePersistenceException(
+          "Serving index generation differs from committed history authority");
+    }
+    for (String store : stores) {
+      if (!expected.getStoreCoverage(store).isPresent()) {
+        throw new ArchivePersistenceException(
+            "Serving index identity is missing Store coverage: " + store);
+      }
+    }
   }
 
   /** Quiesces, detaches and closes owned resources without waiting for active query leases. */
@@ -358,6 +570,7 @@ public final class StateArchiveRuntimeOwner implements Closeable {
     if (queryGate != null) {
       queryGate.quiesce();
     }
+    readableHead = null;
     if (!detached) {
       ArchiveRuntimeAttachment returned = snapshotManager.detachArchiveRuntime(attachment);
       if (returned != attachment) {
@@ -402,14 +615,6 @@ public final class StateArchiveRuntimeOwner implements Closeable {
     return failure;
   }
 
-  private static Closeable openParticipant(Path directory, String participant,
-      List<String> participants, String engine) throws IOException {
-    if ("ROCKSDB".equals(engine)) {
-      return new RocksDbArchiveParticipant(directory, participant, participants);
-    }
-    return new LevelDbArchiveParticipant(directory, participant, participants);
-  }
-
   private static void requireEmptyBootstrapTarget(Path root) throws IOException {
     if (!Files.exists(root, LinkOption.NOFOLLOW_LINKS)) {
       return;
@@ -425,32 +630,10 @@ public final class StateArchiveRuntimeOwner implements Closeable {
     }
   }
 
-  private static ArchiveProgressEnvelope progress(Kind kind, String participant,
-      HistoryCommitMarker marker, byte[] planDigest, List<String> participants) {
-    return new ArchiveProgressEnvelope(kind, participant, marker.getMeta().getEpoch(),
-        marker.getMeta().getBlockHash(), marker.getBatchId(),
-        marker.getHistoryLocation().getBodyDigest(), planDigest, participants);
-  }
-
-  private static void closeReverseOrThrow(List<Closeable> resources) throws IOException {
-    IOException failure = null;
-    while (!resources.isEmpty()) {
-      int index = resources.size() - 1;
-      failure = closeOwned("bootstrap participant " + index, resources.remove(index), failure);
-    }
-    if (failure != null) {
-      throw failure;
-    }
-  }
-
-  private static void closeReverse(List<? extends Closeable> resources, Exception failure) {
-    for (int i = resources.size() - 1; i >= 0; i--) {
-      try {
-        resources.get(i).close();
-      } catch (IOException | RuntimeException closeFailure) {
-        failure.addSuppressed(closeFailure);
-      }
-    }
+  private static List<String> storeNames() {
+    List<String> names = new ArrayList<>(ArchiveStoreScope.getStateDatabases());
+    Collections.sort(names);
+    return names;
   }
 
   private static List<Closeable> immutableParticipants(
@@ -463,15 +646,6 @@ public final class StateArchiveRuntimeOwner implements Closeable {
     return Collections.unmodifiableList(copy);
   }
 
-  private static Map<String, ArchiveParticipant> immutableParticipantEngines(
-      Map<String, ? extends ArchiveParticipant> engines) {
-    Map<String, ? extends ArchiveParticipant> source = Objects.requireNonNull(engines, "engines");
-    Map<String, ArchiveParticipant> copy = new LinkedHashMap<>();
-    source.forEach((name, engine) -> copy.put(Objects.requireNonNull(name, "participant name"),
-        Objects.requireNonNull(engine, "participant engine")));
-    return Collections.unmodifiableMap(copy);
-  }
-
   private void validateUniqueOwnership() {
     Set<Closeable> unique = Collections.newSetFromMap(new IdentityHashMap<Closeable, Boolean>());
     requireUnique(unique, latestCoordinator, "latestCoordinator");
@@ -480,40 +654,6 @@ public final class StateArchiveRuntimeOwner implements Closeable {
       requireUnique(unique, participants.get(i), "participant[" + i + "]");
     }
     requireUnique(unique, sink, "sink");
-  }
-
-  private static void publishTargets(ArchiveTargetApplyCoordinator coordinator,
-      List<ArchiveBlockForwardPayload> payloads,
-      ArchiveStateBarrier.ArchiveStateAction refresh) throws IOException {
-    if (payloads.isEmpty()) {
-      throw new ArchivePersistenceException("Archive normal flush has no forward payload");
-    }
-    BlockSnapshotMeta previous = null;
-    for (ArchiveBlockForwardPayload payload : payloads) {
-      BlockSnapshotMeta current = Objects.requireNonNull(payload, "forward payload").getMeta();
-      if (previous != null && (current.getEpoch() != previous.getEpoch() + 1
-          || current.getBlockNumber() != previous.getBlockNumber() + 1
-          || !java.util.Arrays.equals(current.getParentHash(), previous.getBlockHash()))) {
-        throw new ArchivePersistenceException(
-            "Archive normal flush forward payloads are not contiguous");
-      }
-      previous = current;
-    }
-    for (ArchiveBlockForwardPayload payload : payloads) {
-      ArchiveParticipantMutationBatch batch = new ArchiveParticipantMutationBatchCollector(
-          payload.getAccountAssetManifest()).collect(payload.getMarker(), payload.getView());
-      coordinator.apply(batch, refresh);
-    }
-  }
-
-  private static void requireAuthority(ArchiveProgressEnvelope envelope, Kind kind,
-      String participant, HistoryCommitMarker marker, List<String> participants) {
-    if (envelope == null) {
-      throw new ArchivePersistenceException("Missing archive authority: " + kind);
-    }
-    envelope.requireIdentity(kind, participant, marker.getMeta().getEpoch(),
-        marker.getMeta().getBlockHash(), marker.getBatchId(),
-        marker.getHistoryLocation().getBodyDigest(), participants);
   }
 
   private static void requireUnique(Set<Closeable> unique, Closeable resource, String name) {

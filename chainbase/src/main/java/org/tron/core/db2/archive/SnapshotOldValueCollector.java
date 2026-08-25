@@ -1,5 +1,6 @@
 package org.tron.core.db2.archive;
 
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -14,21 +15,28 @@ public final class SnapshotOldValueCollector implements OldValueCollector {
 
   private final AccountAssetArchiveProjector accountAssetProjector;
   private final AccountAssetOldPhysicalAssetsSource oldPhysicalAssetsSource;
-  private final BooleanSupplier optimizationEnabled;
+  private final TargetAssetOptimizationResolver targetAssetOptimizationResolver;
 
   public SnapshotOldValueCollector() {
-    this(null, null, null);
+    this(null, null, (TargetAssetOptimizationResolver) null);
   }
 
   public SnapshotOldValueCollector(AccountAssetArchiveProjector accountAssetProjector,
       AccountAssetOldPhysicalAssetsSource oldPhysicalAssetsSource,
       BooleanSupplier optimizationEnabled) {
+    this(accountAssetProjector, oldPhysicalAssetsSource, constant(optimizationEnabled));
+  }
+
+  public SnapshotOldValueCollector(AccountAssetArchiveProjector accountAssetProjector,
+      AccountAssetOldPhysicalAssetsSource oldPhysicalAssetsSource,
+      TargetAssetOptimizationResolver targetAssetOptimizationResolver) {
     this.accountAssetProjector = accountAssetProjector;
     this.oldPhysicalAssetsSource = oldPhysicalAssetsSource;
-    this.optimizationEnabled = optimizationEnabled;
+    this.targetAssetOptimizationResolver = targetAssetOptimizationResolver;
     if (accountAssetProjector != null) {
       Objects.requireNonNull(oldPhysicalAssetsSource, "oldPhysicalAssetsSource");
-      Objects.requireNonNull(optimizationEnabled, "optimizationEnabled");
+      Objects.requireNonNull(targetAssetOptimizationResolver,
+          "targetAssetOptimizationResolver");
     }
   }
 
@@ -37,7 +45,7 @@ public final class SnapshotOldValueCollector implements OldValueCollector {
     List<BlockReverseDiff.DbGroup> groups = new ArrayList<>();
     List<BlockReverseDiff.Entry> accountAssetEntries = new ArrayList<>();
     boolean targetAssetOptimizationEnabled = accountAssetProjector != null
-        && optimizationEnabled.getAsBoolean();
+        && targetAssetOptimizationResolver.isEnabled(view);
     for (BlockChangeView.DatabaseChanges database : view.getDatabases()) {
       List<BlockReverseDiff.Entry> entries = new ArrayList<>();
       for (BlockChangeView.Change change : database.getChanges()) {
@@ -74,10 +82,49 @@ public final class SnapshotOldValueCollector implements OldValueCollector {
     return new BlockReverseDiff(view.getMeta(), groups);
   }
 
+  /** Resolves proposal 66 from the same immutable target block view being projected. */
+  public static boolean resolveTargetAssetOptimization(BlockChangeView view) {
+    Objects.requireNonNull(view, "view");
+    byte[] propertyKey = HistoricalAccountAssetBalanceResolver.proposal66PhysicalKey();
+    for (BlockChangeView.DatabaseChanges database : view.getDatabases()) {
+      if (!HistoricalAccountAssetBalanceResolver.PROPERTIES_DATABASE.equals(
+          database.getDbName())) {
+        continue;
+      }
+      byte[] targetValue = database.getPrevious(propertyKey);
+      for (BlockChangeView.Change change : database.getChanges()) {
+        if (Arrays.equals(propertyKey, change.getKey())) {
+          targetValue = change.getPostValue().isPresent()
+              ? change.getPostValue().getValue() : null;
+        }
+      }
+      if (targetValue == null || targetValue.length != Long.BYTES) {
+        throw new ArchivePersistenceException(
+            "Target proposal-66 property must be exactly eight bytes");
+      }
+      long enabled = ByteBuffer.wrap(targetValue).getLong();
+      if (enabled != 0L && enabled != 1L) {
+        throw new ArchivePersistenceException("Target proposal-66 property must be 0 or 1");
+      }
+      return enabled == 1L;
+    }
+    throw new ArchivePersistenceException("Target proposal-66 properties Store is absent");
+  }
+
   private boolean sameLogicalValue(OldValue oldValue, BlockChangeView.PostValue postValue) {
     if (oldValue.isPresent() != postValue.isPresent()) {
       return false;
     }
     return !oldValue.isPresent() || Arrays.equals(oldValue.getValue(), postValue.getValue());
+  }
+
+  @FunctionalInterface
+  public interface TargetAssetOptimizationResolver {
+    boolean isEnabled(BlockChangeView view);
+  }
+
+  private static TargetAssetOptimizationResolver constant(BooleanSupplier supplier) {
+    BooleanSupplier checked = Objects.requireNonNull(supplier, "optimizationEnabled");
+    return view -> checked.getAsBoolean();
   }
 }
