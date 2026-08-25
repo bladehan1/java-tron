@@ -34,6 +34,18 @@ public final class StateArchiveRuntimeOwner implements Closeable {
     void afterStage(ServingIndexStage stage) throws IOException;
   }
 
+  public enum ReadableStateStage {
+    CANONICAL_REFRESHED,
+    LATEST_PUBLISHED,
+    READABLE_PUBLISHED
+  }
+
+  @FunctionalInterface
+  public interface ReadableStateFaultHook {
+
+    void afterStage(ReadableStateStage stage) throws IOException;
+  }
+
   public enum State {
     RECOVERED,
     RUNNING,
@@ -49,6 +61,7 @@ public final class StateArchiveRuntimeOwner implements Closeable {
   private final BlockSnapshotMeta recoveredHead;
   private final int startupRecoveryActionCount;
   private final ServingIndexFaultHook servingIndexFaultHook;
+  private final ReadableStateFaultHook readableStateFaultHook;
   private ArchiveRuntimeAttachment attachment;
   private ArchiveRuntimeQueryGate queryGate;
   private Closeable latestCoordinator;
@@ -86,13 +99,15 @@ public final class StateArchiveRuntimeOwner implements Closeable {
     this.recoveredHead = null;
     this.startupRecoveryActionCount = 0;
     this.servingIndexFaultHook = stage -> { };
+    this.readableStateFaultHook = stage -> { };
     this.state = State.RUNNING;
     validateUniqueOwnership();
   }
 
   private StateArchiveRuntimeOwner(SnapshotManager snapshotManager,
       Path archiveDirectory, long maxSegmentSize, BlockSnapshotMeta recoveredHead,
-      int startupRecoveryActionCount, ServingIndexFaultHook servingIndexFaultHook) {
+      int startupRecoveryActionCount, ServingIndexFaultHook servingIndexFaultHook,
+      ReadableStateFaultHook readableStateFaultHook) {
     this.snapshotManager = Objects.requireNonNull(snapshotManager, "snapshotManager");
     this.archiveDirectory = Objects.requireNonNull(archiveDirectory, "archiveDirectory");
     this.maxSegmentSize = maxSegmentSize;
@@ -110,6 +125,8 @@ public final class StateArchiveRuntimeOwner implements Closeable {
     this.startupRecoveryActionCount = startupRecoveryActionCount;
     this.servingIndexFaultHook = Objects.requireNonNull(servingIndexFaultHook,
         "servingIndexFaultHook");
+    this.readableStateFaultHook = Objects.requireNonNull(readableStateFaultHook,
+        "readableStateFaultHook");
     this.state = State.RECOVERED;
   }
 
@@ -122,6 +139,13 @@ public final class StateArchiveRuntimeOwner implements Closeable {
   public static StateArchiveRuntimeOwner recover(SnapshotManager snapshotManager,
       Path archiveDirectory, long maxSegmentSize, ServingIndexFaultHook servingIndexFaultHook)
       throws IOException {
+    return recover(snapshotManager, archiveDirectory, maxSegmentSize, servingIndexFaultHook,
+        stage -> { });
+  }
+
+  public static StateArchiveRuntimeOwner recover(SnapshotManager snapshotManager,
+      Path archiveDirectory, long maxSegmentSize, ServingIndexFaultHook servingIndexFaultHook,
+      ReadableStateFaultHook readableStateFaultHook) throws IOException {
     Objects.requireNonNull(snapshotManager, "snapshotManager");
     Path root = Objects.requireNonNull(archiveDirectory, "archiveDirectory");
     HistoryCommitMarker head;
@@ -133,7 +157,7 @@ public final class StateArchiveRuntimeOwner implements Closeable {
       throw new ArchivePersistenceException("State Archive recovered H head is missing");
     }
     return new StateArchiveRuntimeOwner(snapshotManager, root, maxSegmentSize, head.getMeta(), 0,
-        servingIndexFaultHook);
+        servingIndexFaultHook, readableStateFaultHook);
   }
 
   /**
@@ -149,6 +173,14 @@ public final class StateArchiveRuntimeOwner implements Closeable {
   public static StateArchiveRuntimeOwner bootstrapAndRecover(SnapshotManager snapshotManager,
       Path archiveDirectory, long maxSegmentSize, BlockSnapshotMeta baseHead,
       ServingIndexFaultHook servingIndexFaultHook) throws IOException {
+    return bootstrapAndRecover(snapshotManager, archiveDirectory, maxSegmentSize, baseHead,
+        servingIndexFaultHook, stage -> { });
+  }
+
+  public static StateArchiveRuntimeOwner bootstrapAndRecover(SnapshotManager snapshotManager,
+      Path archiveDirectory, long maxSegmentSize, BlockSnapshotMeta baseHead,
+      ServingIndexFaultHook servingIndexFaultHook,
+      ReadableStateFaultHook readableStateFaultHook) throws IOException {
     Objects.requireNonNull(snapshotManager, "snapshotManager");
     Path root = Objects.requireNonNull(archiveDirectory, "archiveDirectory");
     BlockSnapshotMeta head = Objects.requireNonNull(baseHead, "baseHead");
@@ -185,7 +217,8 @@ public final class StateArchiveRuntimeOwner implements Closeable {
             "State Archive bootstrap requires atomic directory publication", failure);
       }
       HistorySegmentStore.syncDirectory(parent);
-      return recover(snapshotManager, root, maxSegmentSize, servingIndexFaultHook);
+      return recover(snapshotManager, root, maxSegmentSize, servingIndexFaultHook,
+          readableStateFaultHook);
     } catch (IOException | RuntimeException failure) {
       throw failure;
     }
@@ -359,14 +392,19 @@ public final class StateArchiveRuntimeOwner implements Closeable {
       throw new ArchivePersistenceException(
           "Readable-state target differs from committed history head");
     }
+    readableStateFaultHook.afterStage(ReadableStateStage.CANONICAL_REFRESHED);
     bindAndPublishLatest(writer, catalog, latest, target);
+    readableStateFaultHook.afterStage(ReadableStateStage.LATEST_PUBLISHED);
     long previousReadable = snapshotManager.getArchiveReadableEpoch();
+    BlockSnapshotMeta previousReadableHead = readableHead;
     snapshotManager.markArchiveReadableThrough(target.getEpoch());
     try {
       validateReadableState(catalog, target);
       readableHead = target;
+      readableStateFaultHook.afterStage(ReadableStateStage.READABLE_PUBLISHED);
     } catch (IOException | RuntimeException failure) {
       snapshotManager.markArchiveReadableThrough(previousReadable);
+      readableHead = previousReadableHead;
       throw failure;
     }
   }
