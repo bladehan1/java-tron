@@ -206,6 +206,8 @@ public class Manager {
   private StateArchiveRuntimeOwner stateArchiveRuntime;
   private StateArchiveRuntimeOwner.ServingIndexFaultHook stateArchiveServingIndexFaultHook =
       stage -> { };
+  private StateArchiveRuntimeOwner.ReadableStateFaultHook stateArchiveReadableStateFaultHook =
+      stage -> { };
   private static final int NO_BLOCK_WAITING_LOCK = 0;
   private final int shieldedTransInPendingMaxCounts =
       Args.getInstance().getShieldedTransInPendingMaxCounts();
@@ -650,13 +652,13 @@ public class Manager {
         recovered = StateArchiveRuntimeOwner.bootstrapAndRecover(
             (SnapshotManager) revokingStore, archiveDirectory,
             storage.getStateArchiveMaxSegmentSize(), canonicalHead,
-            stateArchiveServingIndexFaultHook);
+            stateArchiveServingIndexFaultHook, stateArchiveReadableStateFaultHook);
         logger.info("State archive fresh baseline published: directory={}, head={}",
             archiveDirectory, headNumber);
       } else {
         recovered = StateArchiveRuntimeOwner.recover((SnapshotManager) revokingStore,
             archiveDirectory, storage.getStateArchiveMaxSegmentSize(),
-            stateArchiveServingIndexFaultHook);
+            stateArchiveServingIndexFaultHook, stateArchiveReadableStateFaultHook);
       }
       BlockSnapshotMeta archiveHead = recovered.getRecoveredHead();
       if (archiveHead != null
