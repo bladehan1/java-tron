@@ -389,6 +389,35 @@ public class ArchiveHistoryWriterTest {
   }
 
   @Test
+  public void plansServingIncrementOnlyFromDurableIThroughCommittedH() throws Exception {
+    Path archive = temporaryFolder.newFolder("writer-serving-increment").toPath();
+    try (ArchiveHistoryWriter writer = new ArchiveHistoryWriter(
+        archive, 4096, exactDatabases())) {
+      writer.acceptAll(Arrays.asList(diff(1), diff(2), diff(3)));
+
+      ServingIndexIncrementalPlan increment = writer.planServingIncrement(2, hash(2));
+      assertEquals(2, increment.getIndexedFrom());
+      assertEquals(3, increment.getIndexedThrough());
+      assertArrayEquals(hash(3), increment.getHeadHash());
+      assertEquals(27, increment.getChangesByDatabase().size());
+      assertEquals(1, increment.getChanges("account").size());
+      assertArrayEquals(bytes("key-3"),
+          increment.getChanges("account").get(0).getRawKey());
+      assertTrue(increment.getChanges("properties").isEmpty());
+
+      ServingIndexIncrementalPlan zeroAction = writer.planServingIncrement(3, hash(3));
+      assertEquals(3, zeroAction.getIndexedFrom());
+      assertEquals(3, zeroAction.getIndexedThrough());
+      assertTrue(zeroAction.getChangesByDatabase().values().stream().allMatch(List::isEmpty));
+
+      assertThrows(ArchivePersistenceException.class,
+          () -> writer.planServingIncrement(2, hash(99)));
+      assertThrows(ArchivePersistenceException.class,
+          () -> writer.planServingIncrement(4, hash(4)));
+    }
+  }
+
+  @Test
   public void exposesImmutableContiguousHistoryCoverageAcrossTailChanges() throws Exception {
     Path archive = temporaryFolder.newFolder("history-coverage").toPath();
     initializeHistory(archive, 3);
@@ -433,6 +462,10 @@ public class ArchiveHistoryWriterTest {
 
   private static Set<String> databases() {
     return new java.util.LinkedHashSet<>(Arrays.asList("account", "properties"));
+  }
+
+  private static Set<String> exactDatabases() {
+    return new java.util.LinkedHashSet<>(ArchiveStoreScope.getStateDatabases());
   }
 
   private static void assertCoverage(HistoryCoverage coverage, long firstEpoch,

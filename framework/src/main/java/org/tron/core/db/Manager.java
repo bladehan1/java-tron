@@ -727,6 +727,20 @@ public class Manager {
     }
   }
 
+  /** Measures the current experimental exact-only serving index at its readable fixed point. */
+  public StateArchiveRuntimeOwner.ServingIndexInspection inspectArchiveServingIndex() {
+    StateArchiveRuntimeOwner runtime = stateArchiveRuntime;
+    if (runtime == null) {
+      throw new IllegalStateException("Experimental state archive is disabled");
+    }
+    try {
+      return runtime.inspectServingIndex();
+    } catch (java.io.IOException failure) {
+      throw new org.tron.core.db2.archive.ArchivePersistenceException(
+          "Failed to inspect State Archive serving index", failure);
+    }
+  }
+
   /** Resolves one P66-aware historical TRC10 balance from a single request generation. */
   public HistoricalAccountAssetBalanceResolver.Result getArchiveAccountAssetBalance(
       long blockNumber, byte[] address, String tokenId) {

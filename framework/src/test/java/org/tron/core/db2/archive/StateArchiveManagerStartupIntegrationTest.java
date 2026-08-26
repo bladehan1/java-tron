@@ -7,6 +7,7 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -179,23 +180,28 @@ public class StateArchiveManagerStartupIntegrationTest {
       assertThrows(ArchivePersistenceException.class,
           () -> manager.getArchiveAccountBalance(6,
               new byte[HistoricalAccountBalanceReader.ADDRESS_LENGTH]));
-      assertTrue(fixture.databases.values().stream()
-          .allMatch(database -> database.getHead() instanceof org.tron.core.db2.core.SnapshotImpl));
+      assertThrows(ArchivePersistenceException.class, manager::inspectArchiveServingIndex);
+      assertTrue(fixture.databases.values().stream().allMatch(database ->
+          failureStage == ServingIndexStage.BEFORE_BUILD
+              ? database.getHead() instanceof org.tron.core.db2.core.SnapshotImpl
+              : database.getHead() instanceof SnapshotRoot));
 
-      snapshots.flushPending();
-
-      assertEquals(target, manager.getStateArchiveRuntime().verifyNormalWriteFixedPoint());
-      assertEquals(target.getEpoch(), snapshots.getArchiveReadableEpoch());
-      assertFalse(manager.getArchiveAccountBalance(7,
-          new byte[HistoricalAccountBalanceReader.ADDRESS_LENGTH]).isPresent());
-      assertServingFixedPoint(archive, target, 5);
-      assertEquals(1, countGenerationDirectories(archive));
-      assertTrue(fixture.databases.values().stream()
-          .allMatch(database -> database.getHead() instanceof SnapshotRoot));
+      if (failureStage == ServingIndexStage.BEFORE_BUILD) {
+        snapshots.flushPending();
+        assertEquals(target, manager.getStateArchiveRuntime().verifyNormalWriteFixedPoint());
+        assertEquals(target.getEpoch(), snapshots.getArchiveReadableEpoch());
+        assertFalse(manager.getArchiveAccountBalance(7,
+            new byte[HistoricalAccountBalanceReader.ADDRESS_LENGTH]).isPresent());
+        assertServingFixedPoint(archive, target, 5);
+        assertEquals(1, countGenerationDirectories(archive));
+        assertTrue(fixture.databases.values().stream()
+            .allMatch(database -> database.getHead() instanceof SnapshotRoot));
+      }
       @SuppressWarnings("unchecked")
       ArgumentCaptor<Map<byte[], byte[]>> checkpoints = ArgumentCaptor.forClass(Map.class);
-      verify(fixture.checkpoint, times(2)).updateByBatch(checkpoints.capture());
-      Map<byte[], byte[]> recoveredCheckpoint = checkpoints.getAllValues().get(1);
+      verify(fixture.checkpoint, atLeastOnce()).updateByBatch(checkpoints.capture());
+      Map<byte[], byte[]> recoveredCheckpoint = checkpoints.getAllValues()
+          .get(checkpoints.getAllValues().size() - 1);
 
       invoke(manager, "closeStateArchive");
       snapshots.shutdown();
@@ -817,11 +823,20 @@ public class StateArchiveManagerStartupIntegrationTest {
     ArgumentCaptor<Map<byte[], byte[]>> checkpoints = ArgumentCaptor.forClass(Map.class);
     verify(fixture.checkpoint, times(3)).updateByBatch(checkpoints.capture());
     Map<byte[], byte[]> recoveredCheckpoint = checkpoints.getAllValues().get(2);
+    Path legacyShadow = output.resolve("legacy-v3-shadow");
+    try (PersistentServingKeyIndexGeneration ignored = manager.getArchiveHistoryWriter()
+        .buildServingGeneration(legacyShadow, "legacy-v3")) {
+      // Published after the runtime releases its catalog ownership.
+    }
+    downgradeGenerationToV3(legacyShadow);
     invoke(manager, "closeStateArchive");
     fixture.snapshots.shutdown();
     accountAssetStore.getDbSource().closeDB();
     assertEquals(1, countGenerationDirectories(archive));
-    downgradeOnlyServingGenerationToV3(archive);
+    try (PersistentServingKeyIndexCatalog catalog =
+        PersistentServingKeyIndexCatalog.open(archive.resolve("serving-index"))) {
+      assertTrue(catalog.publish(catalog.getCurrentGenerationId(), legacyShadow));
+    }
 
     SnapshotFixture interrupted = snapshotFixtureWithoutAccountAsset(recoveredCheckpoint);
     TestAccountAssetStore interruptedAccountAssetStore = new TestAccountAssetStore();
@@ -912,6 +927,31 @@ public class StateArchiveManagerStartupIntegrationTest {
         snapshots.flushPending();
         assertEquals(target, manager.getStateArchiveRuntime().verifyNormalWriteFixedPoint());
         assertServingFixedPoint(archive, target, 5);
+        StateArchiveRuntimeOwner.ServingIndexInspection inspection =
+            manager.inspectArchiveServingIndex();
+        assertEquals(target, inspection.getReadableHead());
+        assertEquals(epoch - 1, inspection.getLastApply().getIndexedFrom());
+        assertEquals(epoch, inspection.getLastApply().getIndexedThrough());
+        assertEquals(1, inspection.getLastApply().getValidatedCommitCount());
+        assertEquals(Long.valueOf(1), inspection.getLastApply().getChangedEntriesByStore()
+            .get("proposal"));
+        assertEquals(Long.valueOf(0), inspection.getLastApply().getChangedEntriesByStore()
+            .get("abi"));
+        assertTrue(inspection.getLastApply().isGenerationCreated());
+        assertTrue(inspection.getLastApply().getElapsedNanos() > 0);
+        assertEquals(1, inspection.getLastApply().getChangedEntryCount());
+        assertTrue(inspection.getLastApply().isThroughputAvailable());
+        assertTrue(inspection.getLastApply().getChangedEntriesPerSecond() > 0);
+        assertTrue(inspection.getLastApply().getValidatedCommitsPerSecond() > 0);
+        assertEquals(0, inspection.getHistoryToServingBacklog());
+        assertEquals(27, inspection.getGeneration().getStores().size());
+        assertEquals(epoch, inspection.getGeneration().getIndexedThrough());
+        assertTrue(inspection.getGeneration().getApparentBytes() > 0);
+        assertTrue(inspection.getGeneration().getEngine().getEstimatedLiveDataBytes()
+            .isAvailable());
+        assertTrue(inspection.getGeneration().getEngine().getTotalSstBytes().isAvailable());
+        assertTrue(inspection.getGeneration().getEngine().getPendingCompactionBytes()
+            .isAvailable());
         setField(snapshots, "size", 0);
       }
 
@@ -958,6 +998,9 @@ public class StateArchiveManagerStartupIntegrationTest {
 
       assertEquals(target, manager.getStateArchiveRuntime().verifyNormalWriteFixedPoint());
       assertServingFixedPoint(archive, target, 5);
+      StateArchiveRuntimeOwner.ServingIndexInspection publishedInspection =
+          manager.inspectArchiveServingIndex();
+      String publishedGeneration = publishedInspection.getGeneration().getGenerationId();
       ArchiveWalBinding binding = snapshots.getLatestArchiveWalBinding();
       assertNotNull(binding);
       assertEquals(7, binding.getFirst().getEpoch());
@@ -1011,6 +1054,31 @@ public class StateArchiveManagerStartupIntegrationTest {
       assertEquals(restartHead,
           restartedManager.getStateArchiveRuntime().verifyNormalWriteFixedPoint());
       assertServingFixedPoint(archive, restartHead, 5);
+      StateArchiveRuntimeOwner.ServingIndexInspection restartedInspection =
+          restartedManager.inspectArchiveServingIndex();
+      assertEquals(publishedGeneration,
+          restartedInspection.getGeneration().getGenerationId());
+      assertEquals(restartHead.getEpoch(),
+          restartedInspection.getLastApply().getIndexedFrom());
+      assertEquals(restartHead.getEpoch(),
+          restartedInspection.getLastApply().getIndexedThrough());
+      assertEquals(0, restartedInspection.getLastApply().getValidatedCommitCount());
+      assertTrue(restartedInspection.getLastApply().getChangedEntriesByStore().values()
+          .stream().allMatch(changes -> changes == 0));
+      assertFalse(restartedInspection.getLastApply().isGenerationCreated());
+      assertEquals(0, restartedInspection.getHistoryToServingBacklog());
+      assertFalse(restartedInspection.getLastApply().isThroughputAvailable());
+      assertThrows(IllegalStateException.class,
+          () -> restartedInspection.getLastApply().getChangedEntriesPerSecond());
+      assertEngineMeasurementEquals(publishedInspection.getGeneration().getEngine()
+              .getEstimatedLiveDataBytes(),
+          restartedInspection.getGeneration().getEngine().getEstimatedLiveDataBytes());
+      assertEngineMeasurementEquals(publishedInspection.getGeneration().getEngine()
+              .getTotalSstBytes(),
+          restartedInspection.getGeneration().getEngine().getTotalSstBytes());
+      assertEngineMeasurementEquals(publishedInspection.getGeneration().getEngine()
+              .getPendingCompactionBytes(),
+          restartedInspection.getGeneration().getEngine().getPendingCompactionBytes());
       invoke(restartedManager, "closeStateArchive");
       restarted.snapshots.shutdown();
     }
@@ -1284,6 +1352,21 @@ public class StateArchiveManagerStartupIntegrationTest {
       assertArrayEquals(expected.getBlockHash(), generation.getHeadHash());
       assertEquals(PARTICIPANTS, generation.getParticipatingDatabases());
       assertTrue(generation.isLatestSourceIdentityBound());
+      assertTrue(generation.isExactOnlyFormat());
+      assertFalse(generation.supportsRangeQueries());
+      for (String participant : PARTICIPANTS) {
+        assertEquals(expected.getEpoch(), generation.getPersistentStoreCoverage(participant)
+            .getIndexedThrough());
+      }
+    }
+  }
+
+  private static void assertEngineMeasurementEquals(
+      PersistentServingKeyIndexGeneration.LongPropertyMeasurement expected,
+      PersistentServingKeyIndexGeneration.LongPropertyMeasurement actual) {
+    assertEquals(expected.isAvailable(), actual.isAvailable());
+    if (expected.isAvailable()) {
+      assertEquals(expected.getValue(), actual.getValue());
     }
   }
 
@@ -1294,13 +1377,7 @@ public class StateArchiveManagerStartupIntegrationTest {
     }
   }
 
-  private static void downgradeOnlyServingGenerationToV3(Path archive) throws IOException {
-    Path generations = archive.resolve("serving-index").resolve("generations");
-    Path generation;
-    try (java.util.stream.Stream<Path> entries = Files.list(generations)) {
-      generation = entries.filter(Files::isDirectory).findFirst()
-          .orElseThrow(() -> new IOException("Serving generation is missing"));
-    }
+  private static void downgradeGenerationToV3(Path generation) throws IOException {
     Path manifest = generation.resolve("generation.meta");
     byte[] encoded = Files.readAllBytes(manifest);
     ByteBuffer.wrap(encoded).putShort(4, (short) 3);
@@ -1314,7 +1391,8 @@ public class StateArchiveManagerStartupIntegrationTest {
     try (PersistentServingKeyIndexCatalog catalog =
         PersistentServingKeyIndexCatalog.open(archive.resolve("serving-index"));
         PersistentServingKeyIndexGeneration generation = catalog.pin()) {
-      assertTrue(generation.supportsRangeQueries());
+      assertTrue(generation.isExactOnlyFormat());
+      assertFalse(generation.supportsRangeQueries());
     }
   }
 
@@ -1498,17 +1576,11 @@ public class StateArchiveManagerStartupIntegrationTest {
 
   private static void assertAccountAssetPrefix(Manager manager, int targetEpoch, byte[] address,
       String tokenId, P66AccountAssetCodec.Phase phase, boolean present, long balance) {
-    HistoricalAccountAssetPrefixResolver.Result result = manager.getArchiveAccountAssets(
-        targetEpoch, address, prefixLimits());
-    assertEquals(targetEpoch, result.getBlockNumber());
-    assertArrayEquals(address, result.getAddress());
-    assertEquals(phase, result.getPhase());
-    assertEquals(present, result.isAccountPresent());
-    assertEquals(present ? 1 : 0, result.getBalances().size());
-    if (present) {
-      assertEquals(tokenId, result.getBalances().get(0).getTokenId());
-      assertEquals(balance, result.getBalances().get(0).getBalance());
-    }
+    assertNotNull(tokenId);
+    assertNotNull(phase);
+    assertTrue(present || balance == 0);
+    assertThrows(ArchivePersistenceException.class,
+        () -> manager.getArchiveAccountAssets(targetEpoch, address, prefixLimits()));
   }
 
   private static HistoricalAccountAssetPrefixResolver.Limits prefixLimits() {

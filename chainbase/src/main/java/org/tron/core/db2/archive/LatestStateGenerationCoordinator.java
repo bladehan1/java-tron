@@ -250,6 +250,10 @@ public final class LatestStateGenerationCoordinator
       return authority.getEpoch();
     }
 
+    public String getGenerationId() {
+      return generationId;
+    }
+
     public byte[] getBlockHash() {
       return authority.getBlockHash();
     }
