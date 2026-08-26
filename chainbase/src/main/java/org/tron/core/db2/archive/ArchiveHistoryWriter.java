@@ -251,6 +251,55 @@ public final class ArchiveHistoryWriter
         participatingDatabases, latestSourceIdentityDigest);
   }
 
+  /**
+   * Plans the exact-27 serving delta after durable I without scanning history before I.
+   *
+   * <p>The returned plan contains no persistent encoding. The caller must atomically apply and
+   * publish the complete plan before advancing durable serving authority.
+   */
+  public synchronized ServingIndexIncrementalPlan planServingIncrement(long indexedThrough,
+      byte[] indexedHeadHash) throws IOException {
+    HistoryCommitMarker head = commits.head();
+    if (head == null) {
+      throw new IllegalStateException("Cannot plan a serving increment from empty history");
+    }
+    long firstEpoch = commits.firstEpoch();
+    long baseEpoch = firstEpoch - 1;
+    byte[] expectedHash;
+    if (indexedThrough == baseEpoch) {
+      expectedHash = commits.get(firstEpoch).getMeta().getParentHash();
+    } else if (indexedThrough >= firstEpoch
+        && indexedThrough <= head.getMeta().getEpoch()) {
+      HistoryCommitMarker indexed = commits.get(indexedThrough);
+      if (indexed == null) {
+        throw new ArchivePersistenceException("Serving I is outside committed history");
+      }
+      expectedHash = indexed.getMeta().getBlockHash();
+    } else {
+      throw new ArchivePersistenceException("Serving I is outside committed history coverage");
+    }
+    if (!Arrays.equals(expectedHash, indexedHeadHash)) {
+      throw new ArchivePersistenceException("Serving I hash differs from committed history");
+    }
+
+    List<HistoryCommitMarker> suffix = new ArrayList<>();
+    for (long epoch = indexedThrough + 1; epoch <= head.getMeta().getEpoch(); epoch++) {
+      HistoryCommitMarker marker = commits.get(epoch);
+      if (marker == null) {
+        throw new ArchivePersistenceException("Committed history suffix contains a gap");
+      }
+      suffix.add(marker);
+    }
+    return ServingIndexIncrementalPlan.plan(indexedThrough, indexedHeadHash,
+        participatingDatabases, suffix, index::read);
+  }
+
+  /** Plans a deterministic v5 rebuild from the archive coverage base through current H. */
+  public synchronized ServingIndexIncrementalPlan planServingRebuild() throws IOException {
+    ServingSource source = servingSource();
+    return planServingIncrement(source.baseEpoch, source.baseHash);
+  }
+
   /** Recomputes the exact all-Store serving source identity without writing a generation. */
   public synchronized ServingKeyIndexGeneration buildServingIdentity(String generationId)
       throws IOException {
