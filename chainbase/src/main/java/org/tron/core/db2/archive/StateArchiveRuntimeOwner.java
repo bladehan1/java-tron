@@ -11,6 +11,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.IdentityHashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -72,6 +73,7 @@ public final class StateArchiveRuntimeOwner implements Closeable {
   private volatile BlockSnapshotMeta readableHead;
   private Closeable sink;
   private ArchiveHistoryWriter historyWriter;
+  private ServingIndexApplyStatistics lastServingApply;
   private State state;
   private boolean detached;
   private IOException terminalFailure;
@@ -91,6 +93,7 @@ public final class StateArchiveRuntimeOwner implements Closeable {
     this.latestStateCoordinator = null;
     this.latestAuthorityHead = null;
     this.readableHead = null;
+    this.lastServingApply = null;
     if (!(attachment.getSink() instanceof Closeable)) {
       throw new IllegalArgumentException("Attached archive sink must be Closeable");
     }
@@ -118,6 +121,7 @@ public final class StateArchiveRuntimeOwner implements Closeable {
     this.servingIndexCatalog = null;
     this.latestStateCoordinator = null;
     this.latestAuthorityHead = null;
+    this.lastServingApply = null;
     this.readableHead = null;
     this.participants = Collections.emptyList();
     this.sink = null;
@@ -273,6 +277,9 @@ public final class StateArchiveRuntimeOwner implements Closeable {
       latest = LatestStateGenerationCoordinatorFactory.create(snapshotManager,
           supplementalStores, this::readLatestAuthority);
       restoreLatestState(writer, catalog, latest, canonicalHead);
+      if (lastServingApply == null) {
+        lastServingApply = ServingIndexApplyStatistics.zeroAction(canonicalHead);
+      }
       asyncSink = new AsyncArchiveHistorySink(writer, queueCapacity);
       ArchiveHistoryWriter attachedWriter = writer;
       PersistentServingKeyIndexCatalog attachedCatalog = catalog;
@@ -363,6 +370,28 @@ public final class StateArchiveRuntimeOwner implements Closeable {
     return head.getMeta();
   }
 
+  /** Returns an explicit measured snapshot of the current reader-visible v5 serving index. */
+  public synchronized ServingIndexInspection inspectServingIndex() throws IOException {
+    BlockSnapshotMeta head = verifyNormalWriteFixedPoint();
+    PersistentServingKeyIndexCatalog catalog = requireServingIndexCatalog();
+    try (PersistentServingKeyIndexGeneration serving = catalog.pin()) {
+      PersistentServingKeyIndexGeneration.GenerationStatistics generation =
+          serving.inspectStatistics();
+      ServingIndexApplyStatistics apply = Objects.requireNonNull(lastServingApply,
+          "last serving apply statistics");
+      if (apply.getIndexedThrough() != head.getEpoch()) {
+        throw new ArchivePersistenceException(
+            "Serving inspection apply boundary differs from readable fixed point");
+      }
+      long backlog = head.getEpoch() - generation.getIndexedThrough();
+      if (backlog != 0) {
+        throw new ArchivePersistenceException(
+            "Serving inspection requires zero history-to-index backlog");
+      }
+      return new ServingIndexInspection(head, generation, apply, backlog);
+    }
+  }
+
   private ArchiveProgressEnvelope readLatestAuthority() {
     BlockSnapshotMeta target = latestAuthorityHead;
     if (target == null) {
@@ -425,27 +454,79 @@ public final class StateArchiveRuntimeOwner implements Closeable {
   private void bindAndPublishLatest(ArchiveHistoryWriter writer,
       PersistentServingKeyIndexCatalog catalog, LatestStateGenerationCoordinator latest,
       BlockSnapshotMeta target) throws IOException {
-    String generationId = generationId(target);
     String expectedLatest = latest.getCurrentGenerationId();
+    long started = System.nanoTime();
     latestAuthorityHead = target;
-    try (LatestStateGenerationCoordinator.Candidate candidate = latest.acquire(generationId)) {
-      Path shadow = archiveDirectory.resolve(".serving-index-build-" + UUID.randomUUID());
-      try (PersistentServingKeyIndexGeneration built = writer.buildServingGeneration(shadow,
-          generationId, candidate.getSourceIdentityDigest())) {
-        validateServingGeneration(writer, built, target);
-      }
-      String expectedServing = catalog.getCurrentGenerationId();
-      if (!catalog.publish(expectedServing, shadow)) {
-        throw new ArchivePersistenceException(
-            "Serving index catalog changed during latest-state publication");
-      }
-      try (PersistentServingKeyIndexGeneration serving = catalog.pin()) {
-        if (!latest.publish(expectedLatest, candidate, serving)) {
-          throw new ArchivePersistenceException("Latest-state generation changed during publish");
+    try (PersistentServingKeyIndexGeneration current = catalog.pin()) {
+      ServingIndexIncrementalPlan plan = writer.planServingIncrement(current.getIndexedThrough(),
+          current.getHeadHash());
+      boolean targetAlreadyIndexed = plan.getIndexedFrom() == plan.getIndexedThrough();
+      if (targetAlreadyIndexed && current.isLatestSourceIdentityBound()) {
+        try (LatestStateGenerationCoordinator.Candidate candidate =
+            latest.acquire(current.getGenerationId())) {
+          if (Arrays.equals(current.getLatestSourceIdentityDigest(),
+              candidate.getSourceIdentityDigest())) {
+            if (!latest.publish(expectedLatest, candidate, current)) {
+              throw new ArchivePersistenceException(
+                  "Latest-state generation changed during zero-action publish");
+            }
+            lastServingApply = ServingIndexApplyStatistics.from(plan, false,
+                System.nanoTime() - started);
+            return;
+          }
         }
+      }
+      try (LatestStateGenerationCoordinator.Candidate candidate =
+          latest.acquire(generationId(target))) {
+        publishServingAndLatest(catalog, latest, current, plan, candidate, expectedLatest,
+            target);
+        lastServingApply = ServingIndexApplyStatistics.from(plan, true,
+            System.nanoTime() - started);
       }
     } finally {
       latestAuthorityHead = null;
+    }
+  }
+
+  private void publishServingAndLatest(PersistentServingKeyIndexCatalog catalog,
+      LatestStateGenerationCoordinator latest, PersistentServingKeyIndexGeneration current,
+      ServingIndexIncrementalPlan plan, LatestStateGenerationCoordinator.Candidate candidate,
+      String expectedLatest, BlockSnapshotMeta target) throws IOException {
+    String generationId = candidate.getGenerationId();
+    Path shadow = archiveDirectory.resolve(".serving-index-build-" + UUID.randomUUID());
+    try (PersistentServingKeyIndexGeneration built = current.extendExact(shadow,
+        generationId, plan, candidate.getSourceIdentityDigest())) {
+      validateIncrementCandidate(current, plan, built, target);
+    }
+    String expectedServing = catalog.getCurrentGenerationId();
+    if (!catalog.publish(expectedServing, shadow)) {
+      throw new ArchivePersistenceException(
+          "Serving index catalog changed during latest-state publication");
+    }
+    try (PersistentServingKeyIndexGeneration serving = catalog.pin()) {
+      if (!latest.publish(expectedLatest, candidate, serving)) {
+        throw new ArchivePersistenceException("Latest-state generation changed during publish");
+      }
+    }
+  }
+
+  private static void validateIncrementCandidate(PersistentServingKeyIndexGeneration current,
+      ServingIndexIncrementalPlan plan, PersistentServingKeyIndexGeneration built,
+      BlockSnapshotMeta target) throws IOException {
+    if (!built.isExactOnlyFormat()
+        || built.getIndexedFrom() != current.getIndexedFrom()
+        || built.getIndexedThrough() != target.getEpoch()
+        || !Arrays.equals(built.getHeadHash(), target.getBlockHash())
+        || !built.getParticipatingDatabases().equals(storeNames())) {
+      throw new ArchivePersistenceException("Incremental serving candidate identity mismatch");
+    }
+    for (String store : storeNames()) {
+      PersistentServingKeyIndexGeneration.PersistentStoreCoverage coverage =
+          built.getPersistentStoreCoverage(store);
+      if (coverage.getIndexedThrough() != plan.getIndexedThrough()) {
+        throw new ArchivePersistenceException(
+            "Incremental serving candidate Store coverage mismatch: " + store);
+      }
     }
   }
 
@@ -507,7 +588,7 @@ public final class StateArchiveRuntimeOwner implements Closeable {
       PersistentServingKeyIndexCatalog catalog =
           PersistentServingKeyIndexCatalog.open(root, this::afterCatalogStage);
       try {
-        upgradeServingRangeIndex(writer, catalog);
+        upgradeServingExactIndex(writer, catalog);
         return catalog;
       } catch (IOException | RuntimeException failure) {
         try {
@@ -520,33 +601,66 @@ public final class StateArchiveRuntimeOwner implements Closeable {
     }
     String generationId = generationId(writer.committedHeadMeta());
     Path shadow = archiveDirectory.resolve(".serving-index-build-" + UUID.randomUUID());
+    ServingIndexIncrementalPlan plan = writer.planServingRebuild();
+    long started = System.nanoTime();
     try (PersistentServingKeyIndexGeneration ignored =
-        writer.buildServingGeneration(shadow, generationId)) {
+        PersistentServingKeyIndexGeneration.buildExact(shadow, generationId, plan,
+            new byte[32])) {
       // The catalog reopens and validates the immutable generation before publishing it.
     }
-    return PersistentServingKeyIndexCatalog.create(root, shadow, this::afterCatalogStage);
+    PersistentServingKeyIndexCatalog catalog = PersistentServingKeyIndexCatalog.create(root,
+        shadow, this::afterCatalogStage);
+    lastServingApply = ServingIndexApplyStatistics.from(plan, true,
+        System.nanoTime() - started);
+    return catalog;
   }
 
-  private void upgradeServingRangeIndex(ArchiveHistoryWriter writer,
+  private void upgradeServingExactIndex(ArchiveHistoryWriter writer,
       PersistentServingKeyIndexCatalog catalog) throws IOException {
     String expected = catalog.getCurrentGenerationId();
     byte[] latestSourceIdentityDigest;
+    BlockSnapshotMeta target = writer.committedHeadMeta();
     try (PersistentServingKeyIndexGeneration current = catalog.pin()) {
-      if (current.supportsRangeQueries()) {
+      if (current.isExactOnlyFormat()
+          && current.getIndexedThrough() == target.getEpoch()
+          && Arrays.equals(current.getHeadHash(), target.getBlockHash())) {
+        validateServingGeneration(writer, current, target);
         return;
       }
       latestSourceIdentityDigest = current.getLatestSourceIdentityDigest();
+      if (current.isExactOnlyFormat()) {
+        ServingIndexIncrementalPlan plan = writer.planServingIncrement(
+            current.getIndexedThrough(), current.getHeadHash());
+        long started = System.nanoTime();
+        Path shadow = archiveDirectory.resolve(".serving-index-build-" + UUID.randomUUID());
+        try (PersistentServingKeyIndexGeneration candidate = current.extendExact(shadow,
+            generationId(target), plan, latestSourceIdentityDigest)) {
+          validateIncrementCandidate(current, plan, candidate, target);
+        }
+        if (!catalog.publish(expected, shadow)) {
+          throw new ArchivePersistenceException(
+              "Serving index catalog changed during startup catch-up");
+        }
+        lastServingApply = ServingIndexApplyStatistics.from(plan, true,
+            System.nanoTime() - started);
+        return;
+      }
+      validateServingGeneration(writer, current, target);
     }
-    BlockSnapshotMeta target = writer.committedHeadMeta();
     Path shadow = archiveDirectory.resolve(".serving-index-build-" + UUID.randomUUID());
-    try (PersistentServingKeyIndexGeneration candidate = writer.buildServingGeneration(shadow,
-        generationId(target), latestSourceIdentityDigest)) {
+    ServingIndexIncrementalPlan plan = writer.planServingRebuild();
+    long started = System.nanoTime();
+    try (PersistentServingKeyIndexGeneration candidate =
+        PersistentServingKeyIndexGeneration.buildExact(shadow, generationId(target),
+            plan, latestSourceIdentityDigest)) {
       validateServingGeneration(writer, candidate, target);
     }
     if (!catalog.publish(expected, shadow)) {
       throw new ArchivePersistenceException(
-          "Serving index catalog changed during range-index upgrade");
+          "Serving index catalog changed during exact-index upgrade");
     }
+    lastServingApply = ServingIndexApplyStatistics.from(plan, true,
+        System.nanoTime() - started);
   }
 
   private synchronized void publishServingIndex(ArchiveHistoryWriter writer,
@@ -557,17 +671,13 @@ public final class StateArchiveRuntimeOwner implements Closeable {
           "Serving index target differs from committed history head");
     }
     servingIndexFaultHook.afterStage(ServingIndexStage.BEFORE_BUILD);
-    String generationId = generationId(target);
-    Path shadow = archiveDirectory.resolve(".serving-index-build-" + UUID.randomUUID());
-    try (PersistentServingKeyIndexGeneration candidate =
-        writer.buildServingGeneration(shadow, generationId)) {
-      validateServingGeneration(writer, candidate, target);
+    try (PersistentServingKeyIndexGeneration current = catalog.pin()) {
+      if (!current.isExactOnlyFormat() || current.getIndexedThrough() > target.getEpoch()) {
+        throw new ArchivePersistenceException(
+            "Serving index cannot increment from current durable I");
+      }
+      writer.planServingIncrement(current.getIndexedThrough(), current.getHeadHash());
     }
-    String expected = catalog.getCurrentGenerationId();
-    if (!catalog.publish(expected, shadow)) {
-      throw new ArchivePersistenceException("Serving index catalog changed during publication");
-    }
-    validateServingIndex(writer, catalog, target);
   }
 
   private void afterCatalogStage(PersistentServingKeyIndexCatalog.PublicationStage stage)
@@ -598,6 +708,24 @@ public final class StateArchiveRuntimeOwner implements Closeable {
   private static void validateServingGeneration(ArchiveHistoryWriter writer,
       PersistentServingKeyIndexGeneration generation, BlockSnapshotMeta target)
       throws IOException {
+    if (generation.isExactOnlyFormat()) {
+      ServingIndexIncrementalPlan expected = writer.planServingRebuild();
+      if (generation.getIndexedFrom() != expected.getIndexedFrom()
+          || generation.getIndexedThrough() != target.getEpoch()
+          || expected.getIndexedThrough() != target.getEpoch()
+          || !Arrays.equals(generation.getHeadHash(), target.getBlockHash())
+          || !Arrays.equals(expected.getHeadHash(), target.getBlockHash())
+          || !Arrays.equals(generation.getAuthoritativePrefixDigest(),
+          PersistentServingKeyIndexGeneration.sourceDigestForRebuild(expected))
+          || !generation.getParticipatingDatabases().equals(storeNames())) {
+        throw new ArchivePersistenceException(
+            "Exact serving index differs from committed history authority");
+      }
+      for (String store : storeNames()) {
+        generation.getPersistentStoreCoverage(store);
+      }
+      return;
+    }
     ServingKeyIndexGeneration expected = writer.buildServingIdentity("expected");
     List<String> stores = storeNames();
     if (generation.getIndexedFrom() != expected.getIndexedFrom()
@@ -615,6 +743,126 @@ public final class StateArchiveRuntimeOwner implements Closeable {
       if (!expected.getStoreCoverage(store).isPresent()) {
         throw new ArchivePersistenceException(
             "Serving index identity is missing Store coverage: " + store);
+      }
+    }
+  }
+
+  /** One fixed-point inspection result; collection performs no publication or mutation. */
+  public static final class ServingIndexInspection {
+    private final BlockSnapshotMeta readableHead;
+    private final PersistentServingKeyIndexGeneration.GenerationStatistics generation;
+    private final ServingIndexApplyStatistics lastApply;
+    private final long historyToServingBacklog;
+
+    private ServingIndexInspection(BlockSnapshotMeta readableHead,
+        PersistentServingKeyIndexGeneration.GenerationStatistics generation,
+        ServingIndexApplyStatistics lastApply, long historyToServingBacklog) {
+      this.readableHead = readableHead;
+      this.generation = generation;
+      this.lastApply = lastApply;
+      this.historyToServingBacklog = historyToServingBacklog;
+    }
+
+    public BlockSnapshotMeta getReadableHead() {
+      return readableHead;
+    }
+
+    public PersistentServingKeyIndexGeneration.GenerationStatistics getGeneration() {
+      return generation;
+    }
+
+    public ServingIndexApplyStatistics getLastApply() {
+      return lastApply;
+    }
+
+    public long getHistoryToServingBacklog() {
+      return historyToServingBacklog;
+    }
+  }
+
+  /** In-memory counters for the last successful serving publication at readable R. */
+  public static final class ServingIndexApplyStatistics {
+    private final long indexedFrom;
+    private final long indexedThrough;
+    private final int validatedCommitCount;
+    private final Map<String, Long> changedEntriesByStore;
+    private final boolean generationCreated;
+    private final long elapsedNanos;
+
+    private ServingIndexApplyStatistics(long indexedFrom, long indexedThrough,
+        int validatedCommitCount, Map<String, Long> changedEntriesByStore,
+        boolean generationCreated, long elapsedNanos) {
+      this.indexedFrom = indexedFrom;
+      this.indexedThrough = indexedThrough;
+      this.validatedCommitCount = validatedCommitCount;
+      this.changedEntriesByStore = Collections.unmodifiableMap(
+          new LinkedHashMap<>(changedEntriesByStore));
+      this.generationCreated = generationCreated;
+      this.elapsedNanos = elapsedNanos;
+    }
+
+    private static ServingIndexApplyStatistics from(ServingIndexIncrementalPlan plan,
+        boolean generationCreated, long elapsedNanos) {
+      Map<String, Long> changed = new LinkedHashMap<>();
+      plan.getChangesByDatabase().forEach((store, entries) ->
+          changed.put(store, (long) entries.size()));
+      return new ServingIndexApplyStatistics(plan.getIndexedFrom(), plan.getIndexedThrough(),
+          plan.getSourceStepDigests().size(), changed, generationCreated,
+          Math.max(0, elapsedNanos));
+    }
+
+    private static ServingIndexApplyStatistics zeroAction(BlockSnapshotMeta head) {
+      Map<String, Long> changed = new LinkedHashMap<>();
+      storeNames().forEach(store -> changed.put(store, 0L));
+      return new ServingIndexApplyStatistics(head.getEpoch(), head.getEpoch(), 0, changed,
+          false, 0);
+    }
+
+    public long getIndexedFrom() {
+      return indexedFrom;
+    }
+
+    public long getIndexedThrough() {
+      return indexedThrough;
+    }
+
+    public int getValidatedCommitCount() {
+      return validatedCommitCount;
+    }
+
+    public Map<String, Long> getChangedEntriesByStore() {
+      return changedEntriesByStore;
+    }
+
+    public boolean isGenerationCreated() {
+      return generationCreated;
+    }
+
+    public long getElapsedNanos() {
+      return elapsedNanos;
+    }
+
+    public long getChangedEntryCount() {
+      return changedEntriesByStore.values().stream().mapToLong(Long::longValue).sum();
+    }
+
+    public boolean isThroughputAvailable() {
+      return elapsedNanos > 0 && validatedCommitCount > 0;
+    }
+
+    public double getChangedEntriesPerSecond() {
+      requireThroughput();
+      return getChangedEntryCount() * 1_000_000_000.0 / elapsedNanos;
+    }
+
+    public double getValidatedCommitsPerSecond() {
+      requireThroughput();
+      return validatedCommitCount * 1_000_000_000.0 / elapsedNanos;
+    }
+
+    private void requireThroughput() {
+      if (!isThroughputAvailable()) {
+        throw new IllegalStateException("Serving apply throughput is unavailable");
       }
     }
   }

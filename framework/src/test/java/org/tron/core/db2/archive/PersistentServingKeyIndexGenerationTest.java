@@ -99,6 +99,118 @@ public class PersistentServingKeyIndexGenerationTest {
   }
 
   @Test
+  public void incrementallyPublishesExact27PagesAndCoverageFromCheckpoint() throws Exception {
+    Path root = temporaryFolder.newFolder("persistent-exact-v5").toPath();
+    Path archive = root.resolve("archive");
+    Path catalogRoot = root.resolve("catalog");
+    byte[] hot = bytes("hot");
+    try (ArchiveHistoryWriter writer = new ArchiveHistoryWriter(archive, 4096,
+        ArchiveStoreScope.getStateDatabases())) {
+      for (int epoch = 1; epoch <= 6; epoch++) {
+        writer.accept(exactDiff(epoch, "account", hot));
+      }
+      ServingIndexIncrementalPlan initial = writer.planServingIncrement(0, hash(0));
+      Path firstShadow = root.resolve("shadow-1");
+      try (PersistentServingKeyIndexGeneration first =
+          PersistentServingKeyIndexGeneration.buildExact(firstShadow, "exact-1", initial,
+              hash(77))) {
+        assertTrue(first.isExactOnlyFormat());
+        assertFalse(first.supportsRangeQueries());
+        assertEquals(6, first.getKeyChangeCount());
+        assertEquals(5, change(first, "account", hot, 4, 6));
+        assertThrows(ArchivePersistenceException.class, () -> first.changesInRange(
+            "account", new byte[0], null, 0, 6, 10));
+        assertCoverage(first, "abi", 0, 6, "UNSIGNED_RAW_V1", "exact-1");
+        assertCoverage(first, "market_pair_price_to_order", 0, 6,
+            "MARKET_PRICE_V1", "exact-1");
+        PersistentServingKeyIndexGeneration.GenerationStatistics statistics =
+            first.inspectStatistics();
+        assertEquals(27, statistics.getStores().size());
+        assertTrue(statistics.getApparentBytes() > 0);
+        assertTrue(statistics.getAllocatedBytes() > 0);
+        assertEquals(1, statistics.getStores().get("account").getKeyMetadataCount());
+        assertEquals(0, statistics.getStores().get("account").getInlineKeyCount());
+        assertEquals(1, statistics.getStores().get("account").getPagedKeyCount());
+        assertEquals(1, statistics.getStores().get("account").getPageCount());
+        assertEquals(6, statistics.getStores().get("account").getChangeEntryCount());
+        assertEquals(0, statistics.getStores().get("abi").getChangeEntryCount());
+        assertTrue(statistics.getStores().get("abi").getLogicalBytes() > 0);
+        assertTrue(statistics.getEngine().getEstimatedLiveDataBytes().isAvailable());
+        assertTrue(statistics.getEngine().getTotalSstBytes().isAvailable());
+        assertTrue(statistics.getEngine().getPendingCompactionBytes().isAvailable());
+        assertTrue(statistics.getEngine().getEstimatedLiveDataBytes().getValue() >= 0);
+        PersistentServingKeyIndexGeneration.GenerationStatistics unavailable =
+            first.inspectStatistics(ignored -> OptionalLong.empty());
+        assertFalse(unavailable.getEngine().getEstimatedLiveDataBytes().isAvailable());
+        assertFalse(unavailable.getEngine().getTotalSstBytes().isAvailable());
+        assertFalse(unavailable.getEngine().getPendingCompactionBytes().isAvailable());
+        assertThrows(IllegalStateException.class,
+            () -> unavailable.getEngine().getTotalSstBytes().getValue());
+        assertThrows(ArchivePersistenceException.class,
+            () -> first.inspectStatistics(ignored -> OptionalLong.of(-1)));
+      }
+
+      try (PersistentServingKeyIndexCatalog catalog =
+          PersistentServingKeyIndexCatalog.create(catalogRoot, firstShadow)) {
+        PersistentServingKeyIndexGeneration pinnedOld = catalog.pin();
+        writer.accept(exactDiff(7, "witness", bytes("witness")));
+        ServingIndexIncrementalPlan increment = writer.planServingIncrement(6, hash(6));
+
+        Path failedShadow = root.resolve("shadow-failed");
+        assertThrows(IOException.class, () -> pinnedOld.extendExact(failedShadow,
+            "exact-failed", increment, hash(78), () -> {
+              throw new IOException("injected disk-full before exact batch");
+            }));
+        assertEquals("exact-1", catalog.getCurrentGenerationId());
+        assertFalse(catalog.generationExists("exact-failed"));
+
+        Path replacementShadow = root.resolve("shadow-2");
+        try (PersistentServingKeyIndexGeneration replacement = pinnedOld.extendExact(
+            replacementShadow, "exact-2", increment, hash(78))) {
+          assertEquals(7, replacement.getIndexedThrough());
+          assertEquals(7, replacement.getKeyChangeCount());
+          assertEquals(5, change(replacement, "account", hot, 4, 7));
+          assertEquals(7, change(replacement, "witness", bytes("witness"), 6, 7));
+          assertCoverage(replacement, "abi", 0, 7, "UNSIGNED_RAW_V1", "exact-2");
+          PersistentServingKeyIndexGeneration.GenerationStatistics statistics =
+              replacement.inspectStatistics();
+          assertEquals(1, statistics.getStores().get("witness").getInlineKeyCount());
+          assertEquals(1, statistics.getStores().get("witness").getChangeEntryCount());
+          assertEquals(0, statistics.getStores().get("abi").getChangeEntryCount());
+        }
+        assertTrue(catalog.publish("exact-1", replacementShadow));
+        assertEquals("exact-2", catalog.getCurrentGenerationId());
+        assertTrue(catalog.generationExists("exact-1"));
+        assertEquals(5, change(pinnedOld, "account", hot, 4, 6));
+        pinnedOld.close();
+        assertFalse(catalog.generationExists("exact-1"));
+
+        ServingIndexIncrementalPlan zeroAction = writer.planServingIncrement(7, hash(7));
+        assertEquals(7, zeroAction.getIndexedFrom());
+        assertEquals(7, zeroAction.getIndexedThrough());
+        assertEquals("exact-2", catalog.getCurrentGenerationId());
+      }
+
+      try (PersistentServingKeyIndexCatalog reopened =
+          PersistentServingKeyIndexCatalog.open(catalogRoot);
+          PersistentServingKeyIndexGeneration current = reopened.pin()) {
+        assertTrue(current.isExactOnlyFormat());
+        assertEquals(7, current.getIndexedThrough());
+        assertEquals(7, change(current, "witness", bytes("witness"), 6, 7));
+        assertCoverage(current, "market_pair_price_to_order", 0, 7,
+            "MARKET_PRICE_V1", "exact-2");
+        Path rebuiltPath = root.resolve("rebuilt");
+        try (PersistentServingKeyIndexGeneration rebuilt =
+            PersistentServingKeyIndexGeneration.buildExact(rebuiltPath, "rebuilt",
+                writer.planServingRebuild(), hash(78))) {
+          assertArrayEquals(rebuilt.getAuthoritativePrefixDigest(),
+              current.getAuthoritativePrefixDigest());
+        }
+      }
+    }
+  }
+
+  @Test
   public void rangeIndexPreservesUnsignedBinaryKeyOrderAndPrefixBoundaries() throws Exception {
     Path root = temporaryFolder.newFolder("persistent-binary-range").toPath();
     try (Fixture fixture = new Fixture(root.resolve("authoritative"))) {
@@ -537,6 +649,27 @@ public class PersistentServingKeyIndexGenerationTest {
         closed.set(true);
       }
     };
+  }
+
+  private static void assertCoverage(PersistentServingKeyIndexGeneration generation,
+      String database, long from, long through, String comparatorId, String generationId)
+      throws Exception {
+    PersistentServingKeyIndexGeneration.PersistentStoreCoverage coverage =
+        generation.getPersistentStoreCoverage(database);
+    assertEquals(database, coverage.getDbName());
+    assertEquals(from, coverage.getIndexedFrom());
+    assertEquals(through, coverage.getIndexedThrough());
+    assertEquals(comparatorId, coverage.getComparatorId());
+    assertEquals(generationId, coverage.getGenerationId());
+    assertArrayEquals(generation.getHeadHash(), coverage.getHeadHash());
+    assertArrayEquals(generation.getAuthoritativePrefixDigest(), coverage.getSourceDigest());
+  }
+
+  private static BlockReverseDiff exactDiff(int epoch, String database, byte[] key) {
+    return new BlockReverseDiff(new BlockSnapshotMeta(epoch, epoch, hash(epoch), hash(epoch - 1),
+        epoch * 3_000L), Collections.singletonList(new BlockReverseDiff.DbGroup(database,
+        Collections.singletonList(new BlockReverseDiff.Entry(key,
+            OldValue.present(bytes("old-" + epoch)))))));
   }
 
   private static long change(ServingKeyIndex generation, String database, byte[] key,
