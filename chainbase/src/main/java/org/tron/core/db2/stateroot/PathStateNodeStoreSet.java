@@ -134,6 +134,12 @@ public final class PathStateNodeStoreSet implements Closeable {
         null);
   }
 
+  static PathStateNodeStoreSet beginBaseAt(PathStateStoreManifest manifest, Path directory)
+      throws IOException {
+    return new PathStateNodeStoreSet(Objects.requireNonNull(directory, "directory"),
+        Objects.requireNonNull(manifest, "manifest"), Kind.BASE, null, null);
+  }
+
   public static PathStateNodeStoreSet openLayer(PathStateStoreManifest manifest,
       PathStateRootMetadata metadata) throws IOException {
     PathStateStoreManifest admitted = Objects.requireNonNull(manifest, "manifest");
@@ -297,6 +303,20 @@ public final class PathStateNodeStoreSet implements Closeable {
       throw new IllegalStateException("path-state node database set has no trie owner");
     }
     return root.leafRecords();
+  }
+
+  synchronized PathStateRoot initializeBase(List<PathStateRoot.LeafRecord> leaves,
+      byte[] expectedRoot) {
+    requireOpen();
+    if (kind != Kind.BASE || rootClaimed || progress != null || rebuildCheckpoint != null) {
+      throw new IllegalStateException("path-state replacement BASE is not empty");
+    }
+    PathStateRoot candidate = new PathStateRoot(scope,
+        participant -> participantStores.get(participant.getDbName()), superStore);
+    candidate.initializeLeaves(Objects.requireNonNull(leaves, "leaves"), expectedRoot);
+    root = candidate;
+    rootClaimed = true;
+    return candidate;
   }
 
   /** Atomically persists all pending path nodes and their exact root progress. */

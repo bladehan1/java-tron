@@ -71,9 +71,23 @@ public final class PathStateStoreManifest {
     requireDirectory(root, "path-state root");
     Path manifest = root.resolve(MANIFEST_FILE);
     validateExisting(manifest, encode(selected));
-    requireDirectory(root.resolve(BASE_DIRECTORY), "path-state base");
+    Path base = root.resolve(BASE_DIRECTORY);
+    if (!Files.isDirectory(base, LinkOption.NOFOLLOW_LINKS)) {
+      requireBaseReplacementRecoveryLayout(root);
+    }
     requireDirectory(root.resolve(LAYERS_DIRECTORY), "path-state layers");
     return new PathStateStoreManifest(root, selected);
+  }
+
+  private static void requireBaseReplacementRecoveryLayout(Path root) throws IOException {
+    Path intent = root.resolve(PathStateBaseCompaction.INTENT_FILE);
+    if (!Files.isRegularFile(intent, LinkOption.NOFOLLOW_LINKS)) {
+      throw new IOException("path-state base is missing outside a durable replacement");
+    }
+    requireDirectory(root.resolve(PathStateBaseCompaction.NEXT_DIRECTORY),
+        "path-state next base");
+    requireDirectory(root.resolve(PathStateBaseCompaction.PREVIOUS_DIRECTORY),
+        "path-state previous base");
   }
 
   public Path getDirectory() {
