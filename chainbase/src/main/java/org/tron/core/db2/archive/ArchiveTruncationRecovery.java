@@ -45,7 +45,7 @@ public final class ArchiveTruncationRecovery {
       index.truncateAfter(intent.getMarker().getIndexLocation(), intent.getRecordCount());
     }
     faultHook.afterDurableStage(Stage.INDEX_TRUNCATED);
-    try (HistorySegmentStore bodies = new HistorySegmentStore(archiveDirectory,
+    try (HistoryBodyStore bodies = new PartitionedHistoryBodyStore(archiveDirectory,
         new BlockHistoryCodec(), maxSegmentSize, checkpoint)) {
       bodies.truncateAfter(intent.getMarker().getHistoryLocation(), intent.getRecordCount());
     }

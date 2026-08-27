@@ -69,7 +69,7 @@ public class ArchiveTruncationRecoveryTest {
     initialize(archive);
     ArchiveHistoryScanAnchor checkpoint = ArchiveHistoryScanAnchor.load(archive,
         new HistoryCommitMarkerCodec());
-    try (HistorySegmentStore bodies = new HistorySegmentStore(
+    try (HistoryBodyStore bodies = new PartitionedHistoryBodyStore(
         archive, new BlockHistoryCodec(), 4096, checkpoint);
         HistoryIndexStore index = new HistoryIndexStore(
             archive, new HistoryIndexCodec(), checkpoint);
@@ -102,8 +102,8 @@ public class ArchiveTruncationRecoveryTest {
 
   private static void initialize(Path archive) throws Exception {
     HistoryCommitMarker head;
-    try (HistorySegmentStore bodies = new HistorySegmentStore(
-        archive, new BlockHistoryCodec(), 4096);
+    try (HistoryBodyStore bodies = new PartitionedHistoryBodyStore(
+        archive, new BlockHistoryCodec(), 4096, null);
         HistoryIndexStore index = new HistoryIndexStore(archive, new HistoryIndexCodec());
         HistoryCommitStore commits = new HistoryCommitStore(
             archive, new HistoryCommitMarkerCodec())) {
@@ -127,7 +127,7 @@ public class ArchiveTruncationRecoveryTest {
   private static void prepare(Path archive) throws Exception {
     ArchiveHistoryScanAnchor checkpoint = ArchiveHistoryScanAnchor.load(archive,
         new HistoryCommitMarkerCodec());
-    try (HistorySegmentStore bodies = new HistorySegmentStore(
+    try (HistoryBodyStore bodies = new PartitionedHistoryBodyStore(
         archive, new BlockHistoryCodec(), 4096, checkpoint);
         HistoryIndexStore index = new HistoryIndexStore(
             archive, new HistoryIndexCodec(), checkpoint);
@@ -148,7 +148,7 @@ public class ArchiveTruncationRecoveryTest {
     ArchiveHistoryScanAnchor checkpoint = ArchiveHistoryScanAnchor.load(archive,
         new HistoryCommitMarkerCodec());
     assertEquals(checkpointEpoch, checkpoint.getMarker().getMeta().getEpoch());
-    try (HistorySegmentStore bodies = new HistorySegmentStore(
+    try (HistoryBodyStore bodies = new PartitionedHistoryBodyStore(
         archive, new BlockHistoryCodec(), 4096, checkpoint);
         HistoryIndexStore index = new HistoryIndexStore(
             archive, new HistoryIndexCodec(), checkpoint);

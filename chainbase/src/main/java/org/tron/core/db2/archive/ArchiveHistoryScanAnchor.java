@@ -111,6 +111,14 @@ final class ArchiveHistoryScanAnchor {
     return Arrays.copyOf(encodedMarker, encodedMarker.length);
   }
 
+  ArchiveHistoryScanAnchor forHistoryLocation(HistoryLocation historyLocation) {
+    HistoryCommitMarker laneMarker = new HistoryCommitMarker(marker.getMeta(),
+        marker.getPreviousEpoch(), historyLocation, marker.getIndexLocation(),
+        marker.getBatchId(), marker.getDatabases());
+    return new ArchiveHistoryScanAnchor(firstEpoch, recordCount, commitRecordLength,
+        laneMarker, encodedMarker);
+  }
+
   private static byte[] encode(long firstEpoch, long recordCount, int commitRecordLength,
       byte[] markerBytes) {
     try {
