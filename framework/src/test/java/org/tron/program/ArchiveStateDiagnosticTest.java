@@ -7,6 +7,8 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
@@ -25,10 +27,8 @@ import org.tron.core.db.common.DbSourceInter;
 import org.tron.core.db2.archive.ArchivePersistenceException;
 import org.tron.core.db2.archive.ArchiveStoreScope;
 import org.tron.core.db2.archive.HistoricalAccountAssetBalanceResolver;
-import org.tron.core.db2.archive.HistoricalAccountAssetPrefixResolver;
 import org.tron.core.db2.archive.OldValue;
 import org.tron.core.db2.archive.P66AccountAssetCodec.Phase;
-import org.tron.core.db2.common.WrappedByteArray;
 import org.tron.core.db2.core.Chainbase;
 import org.tron.core.db2.core.SnapshotManager;
 import org.tron.core.exception.TronError;
@@ -72,7 +72,7 @@ public class ArchiveStateDiagnosticTest {
   }
 
   @Test
-  public void shouldCompareExact27AndP66ThroughManagerRequests() {
+  public void shouldCompareExact27AndP66PointWithoutDeferredPrefix() {
     Manager manager = mock(Manager.class);
     SnapshotManager snapshotManager = mock(SnapshotManager.class);
     DynamicPropertiesStore properties = mock(DynamicPropertiesStore.class);
@@ -94,8 +94,6 @@ public class ArchiveStateDiagnosticTest {
         entry(assetKey, assetValue)).iterator());
     when(accountAssetSource.getData(any(byte[].class))).thenAnswer(invocation ->
         Arrays.equals(assetKey, invocation.getArgument(0)) ? assetValue : null);
-    when(accountAssetStore.prefixQuery(any(byte[].class))).thenReturn(Collections.singletonMap(
-        WrappedByteArray.of(assetKey), assetValue));
 
     List<Chainbase> databases = new ArrayList<>();
     for (String dbName : ArchiveStoreScope.getStateDatabases()) {
@@ -137,18 +135,6 @@ public class ArchiveStateDiagnosticTest {
     when(logical.getBalance()).thenReturn(9L);
     when(manager.getArchiveAccountAssetBalance(eq(BLOCK_NUMBER), any(byte[].class), eq(tokenId)))
         .thenReturn(logical);
-    HistoricalAccountAssetPrefixResolver.Balance prefixBalance =
-        mock(HistoricalAccountAssetPrefixResolver.Balance.class);
-    when(prefixBalance.getTokenId()).thenReturn(tokenId);
-    when(prefixBalance.getBalance()).thenReturn(9L);
-    HistoricalAccountAssetPrefixResolver.Result prefix =
-        mock(HistoricalAccountAssetPrefixResolver.Result.class);
-    when(prefix.isAccountPresent()).thenReturn(true);
-    when(prefix.getPhase()).thenReturn(Phase.P66_ON);
-    when(prefix.getBalances()).thenReturn(Collections.singletonList(prefixBalance));
-    when(manager.getArchiveAccountAssets(eq(BLOCK_NUMBER), any(byte[].class),
-        any(HistoricalAccountAssetPrefixResolver.Limits.class))).thenReturn(prefix);
-
     ArchiveStateDiagnostic.Report report = ArchiveStateDiagnostic.run(manager, snapshotManager);
 
     assertEquals(BLOCK_NUMBER, report.getBlockNumber());
@@ -157,7 +143,7 @@ public class ArchiveStateDiagnosticTest {
     assertEquals(1, report.getAbsentCount());
     assertEquals(Phase.P66_ON, report.getP66Phase());
     assertEquals(9L, report.getP66Balance());
-    assertEquals(1, report.getP66PrefixCount());
+    verify(manager, never()).getArchiveAccountAssets(anyLong(), any(byte[].class), any());
   }
 
   @Test

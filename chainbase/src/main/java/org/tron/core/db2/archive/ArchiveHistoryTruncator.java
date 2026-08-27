@@ -9,16 +9,16 @@ public final class ArchiveHistoryTruncator {
 
   private final HistoryCommitStore commits;
   private final HistoryIndexStore index;
-  private final HistorySegmentStore bodies;
+  private final HistoryBodyStore bodies;
   private final FaultHook faultHook;
 
   public ArchiveHistoryTruncator(HistoryCommitStore commits, HistoryIndexStore index,
-      HistorySegmentStore bodies) {
+      HistoryBodyStore bodies) {
     this(commits, index, bodies, stage -> { });
   }
 
   ArchiveHistoryTruncator(HistoryCommitStore commits, HistoryIndexStore index,
-      HistorySegmentStore bodies, FaultHook faultHook) {
+      HistoryBodyStore bodies, FaultHook faultHook) {
     this.commits = Objects.requireNonNull(commits, "commits");
     this.index = Objects.requireNonNull(index, "index");
     this.bodies = Objects.requireNonNull(bodies, "bodies");
