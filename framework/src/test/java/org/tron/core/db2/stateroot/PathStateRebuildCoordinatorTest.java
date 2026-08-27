@@ -25,12 +25,14 @@ import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.tron.common.arch.Arch;
 import org.tron.core.db2.stateroot.PathStateCanonicalizer.P66Phase;
+import org.tron.core.db2.stateroot.PathStateParticipantDescriptor.StoreIdentity;
 import org.tron.core.db2.stateroot.PathStateRebuildCoordinator.EntryConsumer;
 import org.tron.core.db2.stateroot.PathStateRebuildCoordinator.RebuildResult;
 import org.tron.core.db2.stateroot.PathStateRebuildCoordinator.SnapshotIdentity;
 import org.tron.core.db2.stateroot.PathStateRebuildCoordinator.SnapshotSource;
 import org.tron.core.db2.stateroot.PathStateRebuildCoordinator.StoreResult;
 import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
+import org.tron.core.trie.TrieImpl;
 import org.tron.protos.Protocol.Account;
 
 public class PathStateRebuildCoordinatorTest {
@@ -50,6 +52,7 @@ public class PathStateRebuildCoordinatorTest {
       source.add("abi", address(1), new byte[0]);
 
       RebuildResult result = new PathStateRebuildCoordinator().rebuild(manifest, source);
+      OracleResult oracle = independentOracle(source);
 
       assertEquals(27, result.getStores().size());
       assertEquals(3, result.getTotalEntries());
@@ -58,12 +61,20 @@ public class PathStateRebuildCoordinatorTest {
       assertEquals(0, result.requireStore("account").getEntryCount());
       assertArrayEquals(result.getSourceDigest(), result.getMetadata().getPayloadDigest());
       assertTrue(source.getVerificationCount() >= 2);
+      assertArrayEquals(oracle.stateRoot, result.getMetadata().getStateRoot());
+      for (StoreResult store : result.getStores()) {
+        assertArrayEquals(oracle.storeRoots.get(store.getDbName()), store.getStoreRoot());
+      }
 
-      PathStateRootMetadata current = new PathStateCurrentStore(manifest).current();
+      PathStateStoreManifest reopenedManifest = PathStateStoreManifest.validateExisting(
+          manifest.getDirectory(), engine);
+      assertArrayEquals(manifest.getIdentityDigest(), reopenedManifest.getIdentityDigest());
+      PathStateRootMetadata current = new PathStateCurrentStore(reopenedManifest).current();
       assertArrayEquals(result.getMetadata().encode(), current.encode());
-      try (PathStateNodeStoreSet reopened = PathStateNodeStoreSet.openCurrent(manifest)) {
+      assertArrayEquals(result.getSourceDigest(), current.getPayloadDigest());
+      try (PathStateNodeStoreSet reopened = PathStateNodeStoreSet.openCurrent(reopenedManifest)) {
         PathStateRoot restored = reopened.createRoot();
-        assertArrayEquals(result.getMetadata().getStateRoot(), restored.rootHash());
+        assertArrayEquals(oracle.stateRoot, restored.rootHash());
         restored.verifyNodeStores();
       }
 
@@ -406,6 +417,45 @@ public class PathStateRebuildCoordinatorTest {
         : new Engine[]{Engine.LEVELDB, Engine.ROCKSDB};
   }
 
+  private static OracleResult independentOracle(TestSnapshotSource source) {
+    PathStateParticipantDescriptor descriptor = PathStateParticipantDescriptor.current();
+    PathStateCanonicalizer canonicalizer = new PathStateCanonicalizer();
+    Map<String, TrieImpl> tries = new LinkedHashMap<>();
+    Map<String, byte[]> roots = new LinkedHashMap<>();
+    for (StoreIdentity store : descriptor.getStores()) {
+      TrieImpl trie = referenceTrie();
+      for (Row row : source.stores.get(store.getDbName())) {
+        PathStateMutation mutation = canonicalizer.put(source.identity.getPhase(),
+            store.getDbName(), row.key, row.value);
+        byte[] secureKey = PathStateCommitmentCodec.storeLeafKey(store.getStoreId(),
+            mutation.getCanonicalKey());
+        if (mutation.isDelete()) {
+          trie.delete(secureKey);
+        } else {
+          trie.put(secureKey, PathStateCommitmentCodec.presentLeafValue(
+              mutation.getCanonicalValue()));
+        }
+      }
+      tries.put(store.getDbName(), trie);
+      roots.put(store.getDbName(), trie.getRootHash());
+    }
+    TrieImpl superTrie = referenceTrie();
+    PathStateParticipantScope scope = canonicalizer.participantScope();
+    for (StoreIdentity store : descriptor.getStores()) {
+      PathStateParticipant participant = scope.require(store.getDbName());
+      superTrie.put(PathStateCommitmentCodec.superLeafKey(store.getStoreId()),
+          PathStateCommitmentCodec.superLeafValue(store.getStoreId(), store.getDbName(),
+              participant.getStoreFormatVersion(), tries.get(store.getDbName()).getRootHash()));
+    }
+    return new OracleResult(roots, superTrie.getRootHash());
+  }
+
+  private static TrieImpl referenceTrie() {
+    TrieImpl trie = new TrieImpl();
+    trie.setAsync(false);
+    return trie;
+  }
+
   private static byte[] address(int suffix) {
     byte[] address = new byte[21];
     address[0] = 0x41;
@@ -514,6 +564,17 @@ public class PathStateRebuildCoordinatorTest {
       if (!identity.sameAs(expected) || drift && verificationCount > 1) {
         throw new IOException("path-state snapshot identity changed during rebuild");
       }
+    }
+  }
+
+  private static final class OracleResult {
+
+    private final Map<String, byte[]> storeRoots;
+    private final byte[] stateRoot;
+
+    private OracleResult(Map<String, byte[]> storeRoots, byte[] stateRoot) {
+      this.storeRoots = storeRoots;
+      this.stateRoot = stateRoot;
     }
   }
 
