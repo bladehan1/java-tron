@@ -25,10 +25,16 @@ public final class PathStateRebuildCoordinator {
 
   private final PathStateParticipantDescriptor descriptor;
   private final PathStateCanonicalizer canonicalizer;
+  private final FaultHook faultHook;
 
   public PathStateRebuildCoordinator() {
+    this(store -> { });
+  }
+
+  PathStateRebuildCoordinator(FaultHook faultHook) {
     descriptor = PathStateParticipantDescriptor.current();
     canonicalizer = new PathStateCanonicalizer();
+    this.faultHook = Objects.requireNonNull(faultHook, "faultHook");
   }
 
   /**
@@ -43,6 +49,8 @@ public final class PathStateRebuildCoordinator {
     PathStateStoreManifest admittedManifest = Objects.requireNonNull(manifest, "manifest");
     SnapshotSource admittedSource = Objects.requireNonNull(source, "source");
     SnapshotIdentity identity = Objects.requireNonNull(admittedSource.identity(), "identity");
+    byte[] sourceIdentityDigest = SnapshotIdentity.copy32(
+        admittedSource.sourceIdentityDigest(), "sourceIdentityDigest");
     descriptor.requireExactDatabases(admittedSource.databases());
     admittedSource.verifyIdentity(identity);
 
@@ -53,20 +61,41 @@ public final class PathStateRebuildCoordinator {
 
     try (PathStateNodeStoreSet stores = PathStateNodeStoreSet.openBase(admittedManifest)) {
       PathStateRoot root = stores.createRoot();
-      List<StoreResult> storeResults = new ArrayList<>();
+      PathStateRebuildCheckpoint checkpoint = stores.getRebuildCheckpoint();
+      List<StoreResult> storeResults = checkpoint == null ? new ArrayList<>()
+          : new ArrayList<>(checkpoint.getCompletedStores());
+      if (checkpoint != null && !identity.sameAs(checkpoint.getIdentity())) {
+        throw new IOException("path-state rebuild checkpoint snapshot identity mismatch");
+      }
+      if (checkpoint != null && !Arrays.equals(admittedManifest.getIdentityDigest(),
+          checkpoint.getManifestDigest())) {
+        throw new IOException("path-state rebuild checkpoint manifest identity mismatch");
+      }
+      if (checkpoint != null && !Arrays.equals(sourceIdentityDigest,
+          checkpoint.getSourceIdentityDigest())) {
+        throw new IOException("path-state rebuild checkpoint source identity mismatch");
+      }
       long totalEntries = 0;
-      for (StoreIdentity store : descriptor.getStores()) {
+      for (StoreResult completed : storeResults) {
+        totalEntries = Math.addExact(totalEntries, completed.getEntryCount());
+      }
+      for (int index = storeResults.size(); index < descriptor.getStores().size(); index++) {
+        StoreIdentity store = descriptor.getStores().get(index);
         StoreAccumulator accumulator = new StoreAccumulator(store, identity.getPhase(), root,
             admittedSource);
         admittedSource.scan(store.getDbName(), accumulator::accept);
         StoreResult result = accumulator.finish();
         storeResults.add(result);
         totalEntries = Math.addExact(totalEntries, result.getEntryCount());
+        checkpoint = new PathStateRebuildCheckpoint(admittedManifest.getIdentityDigest(),
+            sourceIdentityDigest, identity, storeResults, root.rootHash());
+        stores.checkpointRebuild(checkpoint);
+        faultHook.afterStore(result);
       }
 
       admittedSource.verifyIdentity(identity);
       byte[] stateRoot = root.rootHash();
-      byte[] sourceDigest = sourceDigest(identity, storeResults, stateRoot);
+      byte[] sourceDigest = sourceDigest(identity, sourceIdentityDigest, storeResults, stateRoot);
       PathStateRootMetadata metadata = PathStateRootMetadata.base(identity.getBlockNumber(),
           identity.getBlockHash(), identity.getParentHash(), identity.getTimestamp(),
           identity.getPhase(), admittedManifest.getIdentityDigest(), stateRoot, sourceDigest);
@@ -78,14 +107,15 @@ public final class PathStateRebuildCoordinator {
     }
   }
 
-  private byte[] sourceDigest(SnapshotIdentity identity, List<StoreResult> stores,
-      byte[] stateRoot) {
+  private byte[] sourceDigest(SnapshotIdentity identity, byte[] sourceIdentityDigest,
+      List<StoreResult> stores, byte[] stateRoot) {
     Hasher hasher = domainHasher(SOURCE_DIGEST_DOMAIN);
     putLong(hasher, identity.getBlockNumber());
     putBytes(hasher, identity.getBlockHash());
     putBytes(hasher, identity.getParentHash());
     putLong(hasher, identity.getTimestamp());
     putInt(hasher, identity.getPhase().ordinal());
+    putBytes(hasher, sourceIdentityDigest);
     putInt(hasher, stores.size());
     for (StoreResult store : stores) {
       putInt(hasher, store.getStoreId());
@@ -213,6 +243,9 @@ public final class PathStateRebuildCoordinator {
 
     Collection<String> databases();
 
+    /** Stable identity of the exact physical Store generations held by this snapshot. */
+    byte[] sourceIdentityDigest();
+
     /** Returns one value from the same pinned snapshot, or {@code null} when physically absent. */
     byte[] get(String dbName, byte[] physicalKey) throws IOException;
 
@@ -226,6 +259,12 @@ public final class PathStateRebuildCoordinator {
   public interface EntryConsumer {
 
     void accept(byte[] physicalKey, byte[] rawValue) throws IOException;
+  }
+
+  @FunctionalInterface
+  interface FaultHook {
+
+    void afterStore(StoreResult store) throws IOException;
   }
 
   /** Immutable canonical block boundary shared by every Store snapshot in one rebuild. */
@@ -295,11 +334,19 @@ public final class PathStateRebuildCoordinator {
 
     private StoreResult(int storeId, String dbName, long entryCount, byte[] inputDigest,
         byte[] storeRoot) {
+      if (storeId <= 0 || entryCount < 0) {
+        throw new IllegalArgumentException("rebuild Store result identity is invalid");
+      }
       this.storeId = storeId;
-      this.dbName = dbName;
+      this.dbName = Objects.requireNonNull(dbName, "dbName");
       this.entryCount = entryCount;
-      this.inputDigest = Arrays.copyOf(inputDigest, inputDigest.length);
-      this.storeRoot = Arrays.copyOf(storeRoot, storeRoot.length);
+      this.inputDigest = SnapshotIdentity.copy32(inputDigest, "inputDigest");
+      this.storeRoot = SnapshotIdentity.copy32(storeRoot, "storeRoot");
+    }
+
+    static StoreResult restore(int storeId, String dbName, long entryCount, byte[] inputDigest,
+        byte[] storeRoot) {
+      return new StoreResult(storeId, dbName, entryCount, inputDigest, storeRoot);
     }
 
     public int getStoreId() {

@@ -24,6 +24,9 @@ public final class PathStateNodeStoreSet implements Closeable {
   private static final byte[] LOGICAL_BYTES_KEY = new byte[]{
       (byte) 0xff, (byte) 0xff, (byte) 0xff, (byte) 0xff,
       'l', 'o', 'g', 'i', 'c', 'a', 'l', '-', 'b', 'y', 't', 'e', 's'};
+  private static final byte[] REBUILD_CHECKPOINT_KEY = new byte[]{
+      (byte) 0xff, (byte) 0xff, (byte) 0xff, (byte) 0xff,
+      'r', 'e', 'b', 'u', 'i', 'l', 'd'};
   private static final int LEAF_DOMAIN = -2;
   private static final byte[] LEAF_PREFIX = ByteBuffer.allocate(Integer.BYTES)
       .putInt(LEAF_DOMAIN).array();
@@ -41,6 +44,7 @@ public final class PathStateNodeStoreSet implements Closeable {
   private final PathStateRootMetadata expectedMetadata;
   private final boolean sealed;
   private PathStateRootMetadata progress;
+  private PathStateRebuildCheckpoint rebuildCheckpoint;
   private Long logicalBytes;
   private PathStateRoot root;
   private boolean rootClaimed;
@@ -60,16 +64,23 @@ public final class PathStateNodeStoreSet implements Closeable {
     try {
       progress = decodeProgress(nativeStore.get(PROGRESS_KEY));
       logicalBytes = decodeLogicalBytes(nativeStore.get(LOGICAL_BYTES_KEY));
+      rebuildCheckpoint = decodeRebuildCheckpoint(nativeStore.get(REBUILD_CHECKPOINT_KEY));
       if ((progress == null) != (logicalBytes == null)) {
         throw new IOException("path-state native progress and logical bytes marker differ");
+      }
+      if (progress != null && rebuildCheckpoint != null) {
+        throw new IOException("path-state native progress conflicts with rebuild checkpoint");
       }
       if (progress != null) {
         requireProgressIdentity(progress);
       } else if (kind == Kind.BASE && expectedMetadata != null) {
         throw new IOException("path-state BASE metadata exists without native progress");
       }
+      if (rebuildCheckpoint != null) {
+        requireRebuildCheckpointIdentity(rebuildCheckpoint);
+      }
       loadPersistedLeaves();
-      if (progress == null && !persistedLeaves.isEmpty()) {
+      if (progress == null && rebuildCheckpoint == null && !persistedLeaves.isEmpty()) {
         throw new IOException("path-state leaf inventory exists without native progress");
       }
       for (PathStateParticipant participant : scope.getParticipants()) {
@@ -151,8 +162,10 @@ public final class PathStateNodeStoreSet implements Closeable {
     PathStateRoot candidate = new PathStateRoot(scope,
         participant -> participantStores.get(participant.getDbName()),
         superStore);
-    if (progress != null) {
-      candidate.restoreLeaves(restoredLeafRecords(), progress.getStateRoot());
+    if (progress != null || rebuildCheckpoint != null) {
+      byte[] expectedRoot = progress == null ? rebuildCheckpoint.getPartialRoot()
+          : progress.getStateRoot();
+      candidate.restoreLeaves(restoredLeafRecords(), expectedRoot);
       if (!pending.isEmpty()) {
         throw new IllegalStateException("path-state leaf restoration attempted to repair nodes");
       }
@@ -221,12 +234,56 @@ public final class PathStateNodeStoreSet implements Closeable {
     mutations.add(PathStateNativeNodeStore.BatchMutation.put(PROGRESS_KEY, next.encode()));
     mutations.add(PathStateNativeNodeStore.BatchMutation.put(LOGICAL_BYTES_KEY,
         ByteBuffer.allocate(Long.BYTES).putLong(nextLogicalBytes).array()));
+    if (rebuildCheckpoint != null) {
+      mutations.add(PathStateNativeNodeStore.BatchMutation.delete(REBUILD_CHECKPOINT_KEY));
+    }
     nativeStore.writeBatch(mutations);
     pending.clear();
     persistedLeaves.clear();
     persistedLeaves.putAll(nextLeaves);
     progress = next;
+    rebuildCheckpoint = null;
     logicalBytes = nextLogicalBytes;
+  }
+
+  /** Persists one more completed rebuild Store without creating BASE authority. */
+  synchronized void checkpointRebuild(PathStateRebuildCheckpoint checkpoint) throws IOException {
+    requireOpen();
+    if (kind != Kind.BASE || sealed || progress != null || root == null) {
+      throw new IOException("path-state rebuild checkpoint is not admissible");
+    }
+    PathStateRebuildCheckpoint next = Objects.requireNonNull(checkpoint, "checkpoint");
+    requireRebuildCheckpointIdentity(next);
+    if (!Arrays.equals(root.rootHash(), next.getPartialRoot())) {
+      throw new IOException("path-state rebuild checkpoint root mismatch");
+    }
+    int previousCount = rebuildCheckpoint == null ? 0
+        : rebuildCheckpoint.getCompletedStores().size();
+    if (next.getCompletedStores().size() != previousCount + 1) {
+      throw new IOException("path-state rebuild checkpoint must advance one Store");
+    }
+    if (rebuildCheckpoint != null) {
+      List<PathStateRebuildCoordinator.StoreResult> previous =
+          rebuildCheckpoint.getCompletedStores();
+      List<PathStateRebuildCoordinator.StoreResult> advanced = next.getCompletedStores();
+      for (int index = 0; index < previous.size(); index++) {
+        if (!sameStoreResult(previous.get(index), advanced.get(index))) {
+          throw new IOException("path-state rebuild checkpoint rewrites completed Store");
+        }
+      }
+    }
+    List<PathStateNativeNodeStore.BatchMutation> mutations =
+        durableStateMutations(next.encode());
+    nativeStore.writeBatch(mutations);
+    pending.clear();
+    persistedLeaves.clear();
+    persistedLeaves.putAll(leafMap(root.leafRecords()));
+    rebuildCheckpoint = next;
+  }
+
+  PathStateRebuildCheckpoint getRebuildCheckpoint() {
+    requireOpen();
+    return rebuildCheckpoint;
   }
 
   synchronized long projectedLogicalBytes(PathStateRootMetadata metadata) throws IOException {
@@ -239,7 +296,8 @@ public final class PathStateNodeStoreSet implements Closeable {
     if (!Arrays.equals(root.rootHash(), next.getStateRoot())) {
       throw new IllegalArgumentException("path-state progress root does not match trie root");
     }
-    long total = logicalBytes == null ? 0 : logicalBytes;
+    long total = rebuildCheckpoint == null ? (logicalBytes == null ? 0 : logicalBytes)
+        : rebuildLogicalBytes();
     for (Map.Entry<BytesKey, byte[]> entry : pending.entrySet()) {
       byte[] key = entry.getKey().copy();
       total = replaceLogicalEntry(total, key, nativeStore.get(key), entry.getValue());
@@ -256,8 +314,10 @@ public final class PathStateNodeStoreSet implements Closeable {
         total = replaceLogicalEntry(total, entry.getKey().copy(), previous, entry.getValue());
       }
     }
-    return replaceLogicalEntry(total, PROGRESS_KEY,
+    total = replaceLogicalEntry(total, PROGRESS_KEY,
         progress == null ? null : progress.encode(), next.encode());
+    return rebuildCheckpoint == null ? total : replaceLogicalEntry(total,
+        REBUILD_CHECKPOINT_KEY, rebuildCheckpoint.encode(), null);
   }
 
   public synchronized PathStateRootMetadata getProgress() {
@@ -373,6 +433,65 @@ public final class PathStateNodeStoreSet implements Closeable {
     }
   }
 
+  private List<PathStateNativeNodeStore.BatchMutation> durableStateMutations(
+      byte[] rebuildValue) {
+    List<PathStateNativeNodeStore.BatchMutation> mutations =
+        new ArrayList<>(pending.size() + persistedLeaves.size() + 1);
+    for (Map.Entry<BytesKey, byte[]> entry : pending.entrySet()) {
+      byte[] value = entry.getValue();
+      mutations.add(value == null
+          ? PathStateNativeNodeStore.BatchMutation.delete(entry.getKey().copy())
+          : PathStateNativeNodeStore.BatchMutation.put(entry.getKey().copy(), value));
+    }
+    Map<BytesKey, byte[]> nextLeaves = leafMap(root.leafRecords());
+    for (BytesKey persisted : persistedLeaves.keySet()) {
+      if (!nextLeaves.containsKey(persisted)) {
+        mutations.add(PathStateNativeNodeStore.BatchMutation.delete(persisted.copy()));
+      }
+    }
+    for (Map.Entry<BytesKey, byte[]> entry : nextLeaves.entrySet()) {
+      if (!Arrays.equals(persistedLeaves.get(entry.getKey()), entry.getValue())) {
+        mutations.add(PathStateNativeNodeStore.BatchMutation.put(
+            entry.getKey().copy(), entry.getValue()));
+      }
+    }
+    mutations.add(PathStateNativeNodeStore.BatchMutation.put(REBUILD_CHECKPOINT_KEY,
+        rebuildValue));
+    return mutations;
+  }
+
+  private long rebuildLogicalBytes() throws IOException {
+    long total = 0;
+    try {
+      for (PathStateNativeNodeStore.KeyValue entry : nativeStore.scanAll()) {
+        byte[] key = entry.getKey();
+        if (!Arrays.equals(key, LOGICAL_BYTES_KEY)) {
+          total = Math.addExact(total, Math.addExact(key.length, entry.getValue().length));
+        }
+      }
+      return total;
+    } catch (ArithmeticException overflow) {
+      throw new IOException("path-state rebuild logical bytes overflow", overflow);
+    }
+  }
+
+  private void requireRebuildCheckpointIdentity(PathStateRebuildCheckpoint checkpoint)
+      throws IOException {
+    if (kind != Kind.BASE || expectedMetadata != null
+        || !Arrays.equals(checkpoint.getManifestDigest(), manifestDigest)) {
+      throw new IOException("path-state rebuild checkpoint identity mismatch");
+    }
+  }
+
+  private static boolean sameStoreResult(PathStateRebuildCoordinator.StoreResult left,
+      PathStateRebuildCoordinator.StoreResult right) {
+    return left.getStoreId() == right.getStoreId()
+        && left.getDbName().equals(right.getDbName())
+        && left.getEntryCount() == right.getEntryCount()
+        && Arrays.equals(left.getInputDigest(), right.getInputDigest())
+        && Arrays.equals(left.getStoreRoot(), right.getStoreRoot());
+  }
+
   private List<PathStateRoot.LeafRecord> restoredLeafRecords() {
     List<PathStateRoot.LeafRecord> records = new ArrayList<>(persistedLeaves.size());
     for (Map.Entry<BytesKey, byte[]> entry : persistedLeaves.entrySet()) {
@@ -432,6 +551,11 @@ public final class PathStateNodeStoreSet implements Closeable {
       throw new IOException("path-state logical bytes marker is negative");
     }
     return value;
+  }
+
+  private static PathStateRebuildCheckpoint decodeRebuildCheckpoint(byte[] encoded)
+      throws IOException {
+    return encoded == null ? null : PathStateRebuildCheckpoint.decode(encoded);
   }
 
   private static long replaceLogicalEntry(long total, byte[] key, byte[] previous, byte[] next)

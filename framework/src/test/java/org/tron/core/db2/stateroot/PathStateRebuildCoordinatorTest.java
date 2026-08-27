@@ -3,6 +3,7 @@ package org.tron.core.db2.stateroot;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
@@ -17,6 +18,7 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
@@ -26,6 +28,7 @@ import org.tron.core.db2.stateroot.PathStateRebuildCoordinator.EntryConsumer;
 import org.tron.core.db2.stateroot.PathStateRebuildCoordinator.RebuildResult;
 import org.tron.core.db2.stateroot.PathStateRebuildCoordinator.SnapshotIdentity;
 import org.tron.core.db2.stateroot.PathStateRebuildCoordinator.SnapshotSource;
+import org.tron.core.db2.stateroot.PathStateRebuildCoordinator.StoreResult;
 import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
 import org.tron.protos.Protocol.Account;
 
@@ -178,6 +181,104 @@ public class PathStateRebuildCoordinatorTest {
     assertFalse(new PathStateCurrentStore(offDirectManifest).isInitialized());
   }
 
+  @Test
+  public void resumesCompletedStoresWhileKeepingGenerationInvisible() throws Exception {
+    PathStateStoreManifest manifest = manifest("resume", Engine.ROCKSDB);
+    TestSnapshotSource first = exactSource(identity());
+    first.add("proposal", new byte[]{1}, new byte[]{2});
+    AtomicBoolean failed = new AtomicBoolean();
+    PathStateRebuildCoordinator interrupted = new PathStateRebuildCoordinator(store -> {
+      if ("account".equals(store.getDbName()) && failed.compareAndSet(false, true)) {
+        throw new IOException("injected rebuild interruption");
+      }
+    });
+
+    assertThrows(IOException.class, () -> interrupted.rebuild(manifest, first));
+    assertFalse(new PathStateCurrentStore(manifest).isInitialized());
+    assertFalse(Files.exists(manifest.getBaseDirectory()
+        .resolve(PathStateCurrentStore.METADATA_FILE)));
+    assertNull(PathStateNodeStoreSet.loadProgress(manifest.getBaseDirectory(), manifest));
+
+    TestSnapshotSource resumed = exactSource(identity());
+    resumed.add("proposal", new byte[]{1}, new byte[]{2});
+    RebuildResult result = new PathStateRebuildCoordinator().rebuild(manifest, resumed);
+
+    assertEquals(27, result.getStores().size());
+    assertEquals(0, resumed.getScanCount("abi"));
+    assertEquals(0, resumed.getScanCount("accountid-index"));
+    assertEquals(0, resumed.getScanCount("account-index"));
+    assertEquals(0, resumed.getScanCount("account"));
+    assertEquals(1, resumed.getScanCount("account-asset"));
+    assertEquals(1, resumed.getScanCount("proposal"));
+    assertTrue(new PathStateCurrentStore(manifest).isInitialized());
+
+    PathStateStoreManifest freshManifest = manifest("resume-fresh", Engine.ROCKSDB);
+    TestSnapshotSource fresh = exactSource(identity());
+    fresh.add("proposal", new byte[]{1}, new byte[]{2});
+    RebuildResult freshResult = new PathStateRebuildCoordinator().rebuild(freshManifest, fresh);
+    assertArrayEquals(freshResult.getMetadata().getStateRoot(),
+        result.getMetadata().getStateRoot());
+    assertArrayEquals(freshResult.getSourceDigest(), result.getSourceDigest());
+    try (PathStateNodeStoreSet reopened = PathStateNodeStoreSet.openCurrent(manifest)) {
+      assertNull(reopened.getRebuildCheckpoint());
+      assertArrayEquals(result.getMetadata().getStateRoot(), reopened.createRoot().rootHash());
+    }
+  }
+
+  @Test
+  public void rejectsResumeAgainstAnotherSnapshotIdentity() throws Exception {
+    PathStateStoreManifest manifest = manifest("resume-identity", Engine.ROCKSDB);
+    TestSnapshotSource first = exactSource(identity());
+    PathStateRebuildCoordinator interrupted = new PathStateRebuildCoordinator(store -> {
+      throw new IOException("stop after first Store");
+    });
+    assertThrows(IOException.class, () -> interrupted.rebuild(manifest, first));
+
+    SnapshotIdentity other = new SnapshotIdentity(101, bytes(3), bytes(4), 301,
+        P66Phase.P66_ON);
+    IOException failure = assertThrows(IOException.class,
+        () -> new PathStateRebuildCoordinator().rebuild(manifest, exactSource(other)));
+    assertTrue(failure.getMessage().contains("checkpoint snapshot identity mismatch"));
+    assertFalse(new PathStateCurrentStore(manifest).isInitialized());
+  }
+
+  @Test
+  public void rejectsResumeAgainstReplacedPhysicalSources() throws Exception {
+    PathStateStoreManifest manifest = manifest("resume-source", Engine.ROCKSDB);
+    TestSnapshotSource first = exactSource(identity());
+    PathStateRebuildCoordinator interrupted = new PathStateRebuildCoordinator(store -> {
+      throw new IOException("stop after first Store");
+    });
+    assertThrows(IOException.class, () -> interrupted.rebuild(manifest, first));
+
+    TestSnapshotSource replacement = exactSource(identity());
+    replacement.setSourceIdentityDigest(bytes(43));
+    IOException failure = assertThrows(IOException.class,
+        () -> new PathStateRebuildCoordinator().rebuild(manifest, replacement));
+    assertTrue(failure.getMessage().contains("checkpoint source identity mismatch"));
+    assertFalse(new PathStateCurrentStore(manifest).isInitialized());
+  }
+
+  @Test
+  public void rebuildCheckpointCodecRejectsCorruptionAndNonPrefixStores() throws Exception {
+    StoreResult abi = StoreResult.restore(1, "abi", 2, bytes(5), bytes(6));
+    PathStateRebuildCheckpoint checkpoint = new PathStateRebuildCheckpoint(bytes(7), bytes(11),
+        identity(), Collections.singletonList(abi), bytes(8));
+    PathStateRebuildCheckpoint decoded = PathStateRebuildCheckpoint.decode(checkpoint.encode());
+    assertArrayEquals(checkpoint.getManifestDigest(), decoded.getManifestDigest());
+    assertArrayEquals(checkpoint.getSourceIdentityDigest(), decoded.getSourceIdentityDigest());
+    assertTrue(checkpoint.getIdentity().sameAs(decoded.getIdentity()));
+    assertEquals(1, decoded.getCompletedStores().size());
+    assertArrayEquals(checkpoint.getPartialRoot(), decoded.getPartialRoot());
+
+    byte[] corrupt = checkpoint.encode();
+    corrupt[corrupt.length - 1] ^= 1;
+    assertThrows(IOException.class, () -> PathStateRebuildCheckpoint.decode(corrupt));
+    StoreResult wrongFirst = StoreResult.restore(2, "accountid-index", 0, bytes(9), bytes(10));
+    assertThrows(IllegalArgumentException.class, () -> new PathStateRebuildCheckpoint(bytes(7),
+        bytes(11), identity(), Collections.singletonList(wrongFirst), bytes(8)));
+  }
+
   private PathStateStoreManifest manifest(String name, Engine engine) throws IOException {
     Path directory = temporaryFolder.newFolder(name).toPath();
     return PathStateStoreManifest.createOrOpen(directory, engine);
@@ -237,6 +338,8 @@ public class PathStateRebuildCoordinatorTest {
 
     private final SnapshotIdentity identity;
     private final Map<String, List<Row>> stores;
+    private final Map<String, Integer> scanCounts = new LinkedHashMap<>();
+    private byte[] sourceIdentityDigest = bytes(42);
     private int verificationCount;
     private boolean drift;
 
@@ -261,6 +364,15 @@ public class PathStateRebuildCoordinatorTest {
       return verificationCount;
     }
 
+    private int getScanCount(String dbName) {
+      Integer count = scanCounts.get(dbName);
+      return count == null ? 0 : count;
+    }
+
+    private void setSourceIdentityDigest(byte[] digest) {
+      sourceIdentityDigest = java.util.Arrays.copyOf(digest, digest.length);
+    }
+
     @Override
     public SnapshotIdentity identity() {
       return identity;
@@ -271,6 +383,11 @@ public class PathStateRebuildCoordinatorTest {
       List<String> names = new ArrayList<>(stores.keySet());
       Collections.reverse(names);
       return names;
+    }
+
+    @Override
+    public byte[] sourceIdentityDigest() {
+      return java.util.Arrays.copyOf(sourceIdentityDigest, sourceIdentityDigest.length);
     }
 
     @Override
@@ -285,6 +402,7 @@ public class PathStateRebuildCoordinatorTest {
 
     @Override
     public void scan(String dbName, EntryConsumer consumer) throws IOException {
+      scanCounts.put(dbName, getScanCount(dbName) + 1);
       for (Row row : stores.get(dbName)) {
         consumer.accept(row.key, row.value);
       }
