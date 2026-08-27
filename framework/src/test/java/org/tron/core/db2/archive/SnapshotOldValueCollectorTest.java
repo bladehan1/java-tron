@@ -20,6 +20,8 @@ import com.google.common.primitives.Longs;
 import com.google.protobuf.ByteString;
 import java.io.Closeable;
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.AbstractMap;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -36,6 +38,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.Test;
 import org.tron.common.BaseMethodTest;
+import org.tron.core.capsule.BlockCapsule;
 import org.tron.core.db.common.DbSourceInter;
 import org.tron.core.db2.ISession;
 import org.tron.core.db2.archive.BlockReverseDiff.DbGroup;
@@ -47,14 +50,24 @@ import org.tron.core.db2.core.Chainbase;
 import org.tron.core.db2.core.SnapshotImpl;
 import org.tron.core.db2.core.SnapshotManager;
 import org.tron.core.db2.core.SnapshotRoot;
+import org.tron.core.db2.stateroot.PathStateBasePublication;
 import org.tron.core.db2.stateroot.PathStateBlockTransition;
 import org.tron.core.db2.stateroot.PathStateCanonicalizer.P66Phase;
+import org.tron.core.db2.stateroot.PathStateLayerLimits;
 import org.tron.core.db2.stateroot.PathStateMutation;
+import org.tron.core.db2.stateroot.PathStateNodeStoreSet;
+import org.tron.core.db2.stateroot.PathStateRoot;
+import org.tron.core.db2.stateroot.PathStateRootMetadata;
+import org.tron.core.db2.stateroot.PathStateRuntimeAdmission;
 import org.tron.core.db2.stateroot.PathStateRuntimeAttachment;
+import org.tron.core.db2.stateroot.PathStateSnapshotHead;
+import org.tron.core.db2.stateroot.PathStateStoreManifest;
+import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
 import org.tron.core.exception.TronError;
 import org.tron.core.store.AccountAssetStore;
 import org.tron.core.store.CheckTmpStore;
 import org.tron.protos.Protocol.Account;
+import org.tron.protos.Protocol.Transaction;
 
 public class SnapshotOldValueCollectorTest extends BaseMethodTest {
 
@@ -89,6 +102,101 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
     assertArrayEquals(key, published.get().getMutations().get(0).getCanonicalKey());
     assertSame(attachment, manager.detachPathStateRuntime(attachment));
     manager.shutdown();
+  }
+
+  @Test
+  public void disabledAndShadowCapturePreserveCanonicalBlockAndStateOutcome() throws Exception {
+    byte[] codeKey = bytes("equivalence-code");
+    byte[] before = bytes("before");
+    byte[] after = bytes("after");
+    byte[] parentHash = hash(0);
+    byte[] accountStateRoot = hash(9);
+    Transaction transaction = Transaction.newBuilder()
+        .setRawData(Transaction.raw.newBuilder().setTimestamp(11L))
+        .addRet(Transaction.Result.newBuilder().setFee(7L)
+            .setContractRet(Transaction.Result.contractResult.SUCCESS))
+        .build();
+    BlockCapsule template = new BlockCapsule(12L, ByteString.copyFrom(parentHash), 1L,
+        Collections.singletonList(transaction));
+    template.setMerkleRoot();
+    template.setAccountStateRoot(accountStateRoot);
+    byte[] canonicalBlock = template.getData();
+    byte[] canonicalRaw = template.getInstance().getBlockHeader().getRawData().toByteArray();
+    byte[] canonicalBlockId = template.getBlockId().getBytes();
+    BlockCapsule controlBlock = new BlockCapsule(canonicalBlock);
+    BlockCapsule shadowBlock = new BlockCapsule(canonicalBlock);
+
+    SnapshotManager control = new SnapshotManager("");
+    SnapshotManager shadow = new SnapshotManager("");
+    Chainbase controlCode = equivalenceStore(control, "code", codeKey, before);
+    Chainbase shadowCode = equivalenceStore(shadow, "code", codeKey, before);
+    equivalenceProperties(control);
+    equivalenceProperties(shadow);
+    control.enable();
+    shadow.enable();
+
+    Path controlDirectory = temporaryFolder.getRoot().toPath().resolve("disabled-path-state");
+    assertEquals(PathStateRuntimeAdmission.Status.DISABLED,
+        PathStateRuntimeAdmission.inspect(false, controlDirectory, Engine.ROCKSDB).getStatus());
+    assertFalse(Files.exists(controlDirectory));
+
+    Path shadowDirectory = temporaryFolder.newFolder("enabled-path-state").toPath();
+    PathStateStoreManifest manifest = PathStateStoreManifest.createOrOpen(
+        shadowDirectory, Engine.ROCKSDB);
+    PathStateRootMetadata base;
+    try (PathStateNodeStoreSet stores = PathStateNodeStoreSet.openBase(manifest)) {
+      PathStateRoot root = stores.createRoot();
+      org.tron.core.db2.stateroot.PathStateCanonicalizer canonicalizer =
+          new org.tron.core.db2.stateroot.PathStateCanonicalizer();
+      root.apply(Arrays.asList(
+          canonicalizer.put(P66Phase.P66_ON, "properties",
+              HistoricalAccountAssetBalanceResolver.proposal66PhysicalKey(),
+              Longs.toByteArray(1L)),
+          canonicalizer.put(P66Phase.P66_ON, "code", codeKey, before)));
+      base = PathStateRootMetadata.base(0L, parentHash, hash(99), 1L,
+          P66Phase.P66_ON, manifest.getIdentityDigest(), root.rootHash(), hash(7));
+      new PathStateBasePublication(manifest).publish(stores, base);
+    }
+    PathStateSnapshotHead owner = PathStateSnapshotHead.open(
+        manifest, PathStateLayerLimits.defaults());
+    PathStateRuntimeAttachment runtime = new PathStateRuntimeAttachment(
+        new SnapshotPathStateTransitionCollector(ignored -> Collections.emptyMap()),
+        owner::advance);
+    runtime.synchronizeReadyHead(base);
+    shadow.attachPathStateRuntime(runtime);
+
+    BlockSnapshotMeta meta = BlockSnapshotMeta.forBlock(1L, canonicalBlockId, parentHash, 12L);
+    try (ISession session = control.buildSession()) {
+      controlCode.put(codeKey, after);
+      session.commit(meta);
+    }
+    try (ISession session = shadow.buildSession()) {
+      shadowCode.put(codeKey, after);
+      session.commit(meta);
+    }
+
+    assertArrayEquals(controlCode.getUnchecked(codeKey), shadowCode.getUnchecked(codeKey));
+    assertArrayEquals(after, shadowCode.getUnchecked(codeKey));
+    assertEquals(((SnapshotImpl) controlCode.getHead()).getBlockSnapshotMeta(),
+        ((SnapshotImpl) shadowCode.getHead()).getBlockSnapshotMeta());
+    assertEquals(PathStateRuntimeAttachment.State.READY, runtime.status().getState());
+    assertEquals(1L, owner.getHead().getBlockNumber());
+    assertFalse(Arrays.equals(base.getStateRoot(), owner.getHead().getStateRoot()));
+
+    assertArrayEquals(canonicalBlock, controlBlock.getData());
+    assertArrayEquals(canonicalBlock, shadowBlock.getData());
+    assertArrayEquals(canonicalRaw,
+        shadowBlock.getInstance().getBlockHeader().getRawData().toByteArray());
+    assertArrayEquals(canonicalBlockId, controlBlock.getBlockId().getBytes());
+    assertArrayEquals(canonicalBlockId, shadowBlock.getBlockId().getBytes());
+    assertArrayEquals(accountStateRoot, shadowBlock.getInstance().getBlockHeader().getRawData()
+        .getAccountStateRoot().toByteArray());
+    assertEquals(transaction.getRetList(), shadowBlock.getInstance().getTransactions(0)
+        .getRetList());
+
+    assertSame(runtime, shadow.detachPathStateRuntime(runtime));
+    control.shutdown();
+    shadow.shutdown();
   }
 
   @Test
@@ -1063,6 +1171,21 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
       session.commit();
       return view;
     }
+  }
+
+  private static Chainbase equivalenceStore(SnapshotManager manager, String dbName,
+      byte[] key, byte[] value) {
+    MemoryDb database = new MemoryDb(dbName);
+    database.put(key, value);
+    Chainbase chainbase = new Chainbase(new SnapshotRoot(database));
+    manager.add(chainbase);
+    return chainbase;
+  }
+
+  private static void equivalenceProperties(SnapshotManager manager) {
+    equivalenceStore(manager, HistoricalAccountAssetBalanceResolver.PROPERTIES_DATABASE,
+        HistoricalAccountAssetBalanceResolver.proposal66PhysicalKey(),
+        Longs.toByteArray(1L));
   }
 
   private static byte[] bytes(String value) {
