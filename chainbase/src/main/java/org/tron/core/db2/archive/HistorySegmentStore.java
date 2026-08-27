@@ -1,6 +1,5 @@
 package org.tron.core.db2.archive;
 
-import java.io.Closeable;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
@@ -16,7 +15,7 @@ import java.util.Comparator;
 import java.util.List;
 
 /** Append-only, rotating history body segments with strict tail scanning. */
-public final class HistorySegmentStore implements Closeable {
+public final class HistorySegmentStore implements HistoryBodyStore {
 
   private static final String PREFIX = "history.";
   private static final String SUFFIX = ".dat";
@@ -37,10 +36,25 @@ public final class HistorySegmentStore implements Closeable {
 
   HistorySegmentStore(Path archiveDirectory, BlockHistoryCodec codec, long maxSegmentSize,
       ArchiveHistoryScanAnchor checkpoint) throws IOException {
+    this(archiveDirectory.resolve("history"), codec, maxSegmentSize, checkpoint, true);
+  }
+
+  static HistorySegmentStore openLibrary(Path archiveDirectory, String libraryName,
+      BlockHistoryCodec codec, long maxSegmentSize, ArchiveHistoryScanAnchor checkpoint)
+      throws IOException {
+    if (libraryName == null || !libraryName.matches("state-archive(?:-[a-z0-9-]+)?")) {
+      throw new IllegalArgumentException("Invalid state-archive history library name");
+    }
+    return new HistorySegmentStore(archiveDirectory.resolve("history").resolve(libraryName),
+        codec, maxSegmentSize, checkpoint, true);
+  }
+
+  private HistorySegmentStore(Path directory, BlockHistoryCodec codec, long maxSegmentSize,
+      ArchiveHistoryScanAnchor checkpoint, boolean ignored) throws IOException {
     if (maxSegmentSize <= 0) {
       throw new IllegalArgumentException("maxSegmentSize must be positive");
     }
-    this.directory = archiveDirectory.resolve("history");
+    this.directory = directory;
     this.codec = codec;
     this.maxSegmentSize = maxSegmentSize;
     Files.createDirectories(directory);
@@ -48,6 +62,7 @@ public final class HistorySegmentStore implements Closeable {
     openAppendChannel();
   }
 
+  @Override
   public synchronized HistoryLocation append(BlockReverseDiff diff) throws IOException {
     if (scanResult.getInvalidTail() != null) {
       throw new IllegalStateException("History has an invalid tail which must be truncated first");
@@ -69,11 +84,13 @@ public final class HistorySegmentStore implements Closeable {
     return location;
   }
 
+  @Override
   public synchronized void sync() throws IOException {
     appendChannel.force(true);
     syncDirectory(directory);
   }
 
+  @Override
   public synchronized BlockReverseDiff read(HistoryLocation location) throws IOException {
     return codec.decode(readRecord(location));
   }
@@ -95,6 +112,7 @@ public final class HistorySegmentStore implements Closeable {
     }
   }
 
+  @Override
   public synchronized ScanResult getScanResult() {
     return scanResult;
   }
@@ -117,11 +135,13 @@ public final class HistorySegmentStore implements Closeable {
   }
 
   /** Truncates all records after {@code last}; null means remove every body record. */
+  @Override
   public synchronized void truncateAfter(HistoryLocation last) throws IOException {
     truncateAfter(last, -1);
   }
 
-  synchronized void truncateAfter(HistoryLocation last, long knownRecordCount)
+  @Override
+  public synchronized void truncateAfter(HistoryLocation last, long knownRecordCount)
       throws IOException {
     closeAppendChannel();
     if (last == null) {
@@ -145,7 +165,8 @@ public final class HistorySegmentStore implements Closeable {
     openAppendChannel();
   }
 
-  long getStartupScannedRecords() {
+  @Override
+  public long getStartupScannedRecords() {
     return startupScannedRecords;
   }
 

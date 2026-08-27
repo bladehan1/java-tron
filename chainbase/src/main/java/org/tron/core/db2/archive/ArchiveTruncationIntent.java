@@ -41,14 +41,14 @@ final class ArchiveTruncationIntent {
   }
 
   static ArchiveTruncationIntent prepare(Path archiveDirectory, HistoryCommitStore commits,
-      HistoryIndexStore index, HistorySegmentStore bodies, long targetEpoch,
+      HistoryIndexStore index, HistoryBodyStore bodies, long targetEpoch,
       HistoryCommitMarkerCodec markerCodec) throws IOException {
     return prepare(archiveDirectory, commits, index, bodies, targetEpoch, markerCodec,
         temporary -> { });
   }
 
   static ArchiveTruncationIntent prepare(Path archiveDirectory, HistoryCommitStore commits,
-      HistoryIndexStore index, HistorySegmentStore bodies, long targetEpoch,
+      HistoryIndexStore index, HistoryBodyStore bodies, long targetEpoch,
       HistoryCommitMarkerCodec markerCodec, FaultHook faultHook) throws IOException {
     HistoryCommitMarker marker = commits.get(targetEpoch);
     if (marker == null) {
