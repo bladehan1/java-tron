@@ -58,18 +58,37 @@ public final class PathStateLayer implements Closeable {
         transitionDigest, limits, stage -> { });
   }
 
+  /** Begins a child from an explicitly retained, immutable in-process parent trie snapshot. */
+  public static PathStateLayer beginFromSnapshot(PathStateStoreManifest manifest,
+      PathStateRootMetadata parent, PathStateRoot.Snapshot parentSnapshot, long blockNumber,
+      byte[] blockHash, byte[] parentHash, long timestamp, P66Phase phase,
+      byte[] transitionDigest) throws IOException {
+    return begin(manifest, parent, blockNumber, blockHash, parentHash, timestamp, phase,
+        transitionDigest, PathStateLayerLimits.defaults(), stage -> { },
+        Objects.requireNonNull(parentSnapshot, "parentSnapshot"));
+  }
+
   static PathStateLayer begin(PathStateStoreManifest manifest,
       PathStateRootMetadata parent, long blockNumber, byte[] blockHash, byte[] parentHash,
       long timestamp, P66Phase phase, byte[] transitionDigest,
       PathStateLayerPublication.FaultHook faultHook) throws IOException {
     return begin(manifest, parent, blockNumber, blockHash, parentHash, timestamp, phase,
-        transitionDigest, PathStateLayerLimits.defaults(), faultHook);
+        transitionDigest, PathStateLayerLimits.defaults(), faultHook, null);
   }
 
   static PathStateLayer begin(PathStateStoreManifest manifest,
       PathStateRootMetadata parent, long blockNumber, byte[] blockHash, byte[] parentHash,
       long timestamp, P66Phase phase, byte[] transitionDigest, PathStateLayerLimits limits,
       PathStateLayerPublication.FaultHook faultHook) throws IOException {
+    return begin(manifest, parent, blockNumber, blockHash, parentHash, timestamp, phase,
+        transitionDigest, limits, faultHook, null);
+  }
+
+  private static PathStateLayer begin(PathStateStoreManifest manifest,
+      PathStateRootMetadata parent, long blockNumber, byte[] blockHash, byte[] parentHash,
+      long timestamp, P66Phase phase, byte[] transitionDigest, PathStateLayerLimits limits,
+      PathStateLayerPublication.FaultHook faultHook, PathStateRoot.Snapshot parentSnapshot)
+      throws IOException {
     PathStateStoreManifest admitted = Objects.requireNonNull(manifest, "manifest");
     PathStateLayerLimits admittedLimits = Objects.requireNonNull(limits, "limits");
     PathStateRootMetadata admittedParent = Objects.requireNonNull(parent, "parent");
@@ -90,10 +109,11 @@ public final class PathStateLayer implements Closeable {
         PathStateNodeStoreSet.openPublished(admitted, admittedParent);
     PathStateNodeStoreSet childStores = null;
     try {
-      PathStateRoot parentRoot = parentStores.createRoot();
+      PathStateRoot parentRoot = parentSnapshot == null ? parentStores.createRoot() : null;
       childStores = PathStateNodeStoreSet.beginLayer(admitted, identity, parentStores);
-      PathStateRoot childRoot = childStores.createRootFrom(parentStores.leafRecords(),
-          parentRoot.rootHash());
+      PathStateRoot childRoot = parentSnapshot == null
+          ? childStores.createRootFrom(parentStores.leafRecords(), parentRoot.rootHash())
+          : childStores.createRootFrom(parentSnapshot, admittedParent.getStateRoot());
       return new PathStateLayer(admitted,
           new PathStateLayerPublication(admitted, admittedLimits, faultHook),
           childStores, childRoot,
@@ -130,6 +150,14 @@ public final class PathStateLayer implements Closeable {
 
   public synchronized byte[] rootHash() {
     return root.rootHash();
+  }
+
+  /** Returns a detached immutable trie snapshot only after this layer is durably CURRENT. */
+  public synchronized PathStateRoot.Snapshot snapshot() {
+    if (committed == null) {
+      throw new IllegalStateException("path-state layer is not committed");
+    }
+    return root.snapshot();
   }
 
   @Override

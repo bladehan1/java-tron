@@ -237,6 +237,30 @@ public final class PathStateNodeStoreSet implements Closeable {
     return root;
   }
 
+  synchronized PathStateRoot createRootFrom(PathStateRoot.Snapshot snapshot,
+      byte[] parentRoot) {
+    requireOpen();
+    if (rootClaimed) {
+      throw new IllegalStateException("path-state node database set already has a trie owner");
+    }
+    if (progress != null || !localLeaves.isEmpty() || !leafTombstones.isEmpty()) {
+      throw new IllegalStateException("path-state layer already contains durable state");
+    }
+    if (parentStores == null
+        || !Arrays.equals(snapshot.getStateRoot(), Objects.requireNonNull(parentRoot,
+            "parentRoot"))) {
+      throw new IllegalArgumentException("path-state parent snapshot root mismatch");
+    }
+    PathStateRoot candidate = PathStateRoot.fromSnapshot(scope,
+        participant -> participantStores.get(participant.getDbName()), superStore, snapshot);
+    if (!pending.isEmpty()) {
+      throw new IllegalStateException("path-state snapshot fork attempted to copy nodes");
+    }
+    root = candidate;
+    rootClaimed = true;
+    return root;
+  }
+
   synchronized List<PathStateRoot.LeafRecord> leafRecords() {
     requireOpen();
     if (root == null) {

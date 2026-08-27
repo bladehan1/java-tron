@@ -30,6 +30,7 @@ public class PathStateLayerTest {
     for (Engine engine : availableEngines()) {
       Fixture fixture = publishedBase("inherit-" + engine, engine);
       PathStateRootMetadata first;
+      PathStateRoot.Snapshot firstSnapshot;
       byte[] firstRoot;
       try (PathStateLayer layer = PathStateLayer.begin(fixture.manifest, fixture.base, 101,
           bytes(11), fixture.base.getBlockHash(), 303, P66Phase.P66_ON, bytes(12))) {
@@ -38,6 +39,8 @@ public class PathStateLayerTest {
             PathStateMutation.delete("account", new byte[]{3})));
         firstRoot = layer.rootHash();
         first = layer.commit();
+        firstSnapshot = layer.snapshot();
+        assertArrayEquals(firstRoot, firstSnapshot.getStateRoot());
         assertArrayEquals(first.encode(), layer.commit().encode());
         assertThrows(IllegalStateException.class, () -> layer.apply(Collections.singletonList(
             PathStateMutation.delete("proposal", new byte[]{1}))));
@@ -55,8 +58,9 @@ public class PathStateLayerTest {
 
       PathStateRootMetadata second;
       byte[] secondRoot;
-      try (PathStateLayer layer = PathStateLayer.begin(fixture.manifest, first, 102,
-          bytes(13), first.getBlockHash(), 306, P66Phase.P66_ON, bytes(14))) {
+      try (PathStateLayer layer = PathStateLayer.beginFromSnapshot(fixture.manifest, first,
+          firstSnapshot, 102, bytes(13), first.getBlockHash(), 306, P66Phase.P66_ON,
+          bytes(14))) {
         layer.apply(Collections.singletonList(
             PathStateMutation.put("account", new byte[]{7}, new byte[]{8})));
         secondRoot = layer.rootHash();

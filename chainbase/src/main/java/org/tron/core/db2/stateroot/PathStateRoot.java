@@ -36,6 +36,11 @@ public final class PathStateRoot {
 
   public PathStateRoot(PathStateParticipantScope scope, PathNodeStoreFactory storeFactory,
       PathNodeStore superNodeStore) {
+    this(scope, storeFactory, superNodeStore, null);
+  }
+
+  private PathStateRoot(PathStateParticipantScope scope, PathNodeStoreFactory storeFactory,
+      PathNodeStore superNodeStore, Snapshot snapshot) {
     this.scope = Objects.requireNonNull(scope, "scope");
     PathNodeStoreFactory factory = Objects.requireNonNull(storeFactory, "storeFactory");
     Set<PathNodeStore> uniqueStores = Collections.newSetFromMap(new IdentityHashMap<>());
@@ -45,13 +50,27 @@ public final class PathStateRoot {
       if (!uniqueStores.add(nodeStore)) {
         throw new IllegalArgumentException("participant node Stores must have distinct identities");
       }
-      participantTries.put(participant.getDbName(), new PathMerkleTrie(nodeStore));
+      PathMerkleTrie.Snapshot trieSnapshot = snapshot == null ? null
+          : snapshot.participants.get(participant.getDbName());
+      if (snapshot != null && trieSnapshot == null) {
+        throw new IllegalArgumentException("path-state snapshot participant scope mismatch");
+      }
+      participantTries.put(participant.getDbName(), snapshot == null
+          ? new PathMerkleTrie(nodeStore) : PathMerkleTrie.fromSnapshot(nodeStore, trieSnapshot));
     }
     PathNodeStore rootStore = Objects.requireNonNull(superNodeStore, "superNodeStore");
     if (!uniqueStores.add(rootStore)) {
       throw new IllegalArgumentException("super node Store must have a distinct identity");
     }
-    superTrie = new PathMerkleTrie(rootStore);
+    superTrie = snapshot == null ? new PathMerkleTrie(rootStore)
+        : PathMerkleTrie.fromSnapshot(rootStore, snapshot.superTrie);
+    if (snapshot != null) {
+      if (snapshot.participants.size() != scope.getParticipants().size()
+          || !Arrays.equals(superTrie.rootHash(), snapshot.stateRoot)) {
+        throw new IllegalArgumentException("path-state snapshot root or scope mismatch");
+      }
+      rootMaterialized = true;
+    }
   }
 
   public synchronized void put(String dbName, byte[] canonicalKey, byte[] canonicalValue) {
@@ -115,6 +134,22 @@ public final class PathStateRoot {
       }
     }
     return records;
+  }
+
+  synchronized Snapshot snapshot() {
+    byte[] stateRoot = rootHash();
+    Map<String, PathMerkleTrie.Snapshot> snapshots = new LinkedHashMap<>();
+    for (PathStateParticipant participant : scope.getParticipants()) {
+      snapshots.put(participant.getDbName(),
+          participantTries.get(participant.getDbName()).snapshot());
+    }
+    return new Snapshot(snapshots, superTrie.snapshot(), stateRoot);
+  }
+
+  static PathStateRoot fromSnapshot(PathStateParticipantScope scope,
+      PathNodeStoreFactory storeFactory, PathNodeStore superNodeStore, Snapshot snapshot) {
+    return new PathStateRoot(scope, storeFactory, superNodeStore,
+        Objects.requireNonNull(snapshot, "snapshot"));
   }
 
   synchronized void initializeLeaves(Collection<LeafRecord> records, byte[] expectedRoot) {
@@ -207,6 +242,24 @@ public final class PathStateRoot {
   public interface PathNodeStoreFactory {
 
     PathNodeStore open(PathStateParticipant participant);
+  }
+
+  public static final class Snapshot {
+
+    private final Map<String, PathMerkleTrie.Snapshot> participants;
+    private final PathMerkleTrie.Snapshot superTrie;
+    private final byte[] stateRoot;
+
+    private Snapshot(Map<String, PathMerkleTrie.Snapshot> participants,
+        PathMerkleTrie.Snapshot superTrie, byte[] stateRoot) {
+      this.participants = Collections.unmodifiableMap(new LinkedHashMap<>(participants));
+      this.superTrie = Objects.requireNonNull(superTrie, "superTrie");
+      this.stateRoot = Arrays.copyOf(stateRoot, stateRoot.length);
+    }
+
+    public byte[] getStateRoot() {
+      return Arrays.copyOf(stateRoot, stateRoot.length);
+    }
   }
 
   static final class LeafRecord {
