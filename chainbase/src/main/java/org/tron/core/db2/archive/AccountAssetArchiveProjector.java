@@ -80,7 +80,7 @@ public final class AccountAssetArchiveProjector {
       codec.requireCanonicalLayout(phase(postAccount, projectPost),
           accountKey, canonicalPost.getValue(), changedAssetRows);
     }
-    return new Projection(canonicalOld, canonicalPost, reverseAssets);
+    return new Projection(canonicalOld, canonicalPost, reverseAssets, changedAssetRows);
   }
 
   boolean requiresOldPhysicalAssets(byte[] rawOld, BlockChangeView.PostValue rawPost) {
@@ -163,12 +163,14 @@ public final class AccountAssetArchiveProjector {
     final OldValue oldAccount;
     final BlockChangeView.PostValue postAccount;
     final List<BlockReverseDiff.Entry> reverseAssets;
+    final List<AssetRow> changedAssetRows;
 
     private Projection(OldValue oldAccount, BlockChangeView.PostValue postAccount,
-        List<BlockReverseDiff.Entry> reverseAssets) {
+        List<BlockReverseDiff.Entry> reverseAssets, List<AssetRow> changedAssetRows) {
       this.oldAccount = oldAccount;
       this.postAccount = postAccount;
       this.reverseAssets = Collections.unmodifiableList(new ArrayList<>(reverseAssets));
+      this.changedAssetRows = Collections.unmodifiableList(new ArrayList<>(changedAssetRows));
     }
   }
 }

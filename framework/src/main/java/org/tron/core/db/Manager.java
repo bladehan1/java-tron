@@ -126,6 +126,7 @@ import org.tron.core.db2.archive.HistoricalAccountAssetPrefixResolver;
 import org.tron.core.db2.archive.HistoricalAccountBalanceReader;
 import org.tron.core.db2.archive.OldValue;
 import org.tron.core.db2.archive.SnapshotOldValueCollector;
+import org.tron.core.db2.archive.SnapshotPathStateTransitionCollector;
 import org.tron.core.db2.archive.StateArchiveRuntimeOwner;
 import org.tron.core.db2.core.Chainbase;
 import org.tron.core.db2.core.SnapshotManager;
@@ -136,6 +137,7 @@ import org.tron.core.db2.stateroot.PathStateRebuildCoordinator;
 import org.tron.core.db2.stateroot.PathStateRebuildCoordinator.SnapshotIdentity;
 import org.tron.core.db2.stateroot.PathStateRootMetadata;
 import org.tron.core.db2.stateroot.PathStateRuntimeAdmission;
+import org.tron.core.db2.stateroot.PathStateRuntimeAttachment;
 import org.tron.core.db2.stateroot.PathStateSnapshotHead;
 import org.tron.core.db2.stateroot.PathStateStoreManifest;
 import org.tron.core.exception.AccountResourceInsufficientException;
@@ -218,6 +220,8 @@ public class Manager {
   private StateArchiveRuntimeOwner stateArchiveRuntime;
   @Getter
   private PathStateSnapshotHead pathStateSnapshotHead;
+  @Getter
+  private PathStateRuntimeAttachment pathStateRuntime;
   private StateArchiveRuntimeOwner.ServingIndexFaultHook stateArchiveServingIndexFaultHook =
       stage -> { };
   private StateArchiveRuntimeOwner.ReadableStateFaultHook stateArchiveReadableStateFaultHook =
@@ -770,12 +774,35 @@ public class Manager {
             "Path-state CURRENT differs from the persisted Chainbase head");
       }
       pathStateSnapshotHead = recovered;
+      attachPathStateBlockFinalRuntime();
       logger.info("Path-state current root attached: directory={}, head={}, engine={}",
           directory, recoveredHead.getBlockNumber(), storage.getDbEngine());
     } catch (java.io.IOException | RuntimeException failure) {
       pathStateSnapshotHead = null;
       throw new IllegalStateException("Failed to recover path-state startup", failure);
     }
+  }
+
+  private void attachPathStateBlockFinalRuntime() {
+    if (!(revokingStore instanceof SnapshotManager)) {
+      throw new IllegalStateException("Path-state block-final capture requires SnapshotManager");
+    }
+    AccountAssetStore accountAssetStore = chainBaseManager.getAccountAssetStore();
+    if (accountAssetStore == null) {
+      throw new IllegalStateException(
+          "Path-state block-final capture requires account-asset Store");
+    }
+    PathStateRuntimeAttachment attachment = new PathStateRuntimeAttachment(
+        new SnapshotPathStateTransitionCollector(accountAssetStore::prefixQuery),
+        transition -> {
+          PathStateSnapshotHead owner = pathStateSnapshotHead;
+          if (owner == null) {
+            throw new java.io.IOException("Path-state snapshot owner is unavailable");
+          }
+          owner.advance(transition);
+        });
+    ((SnapshotManager) revokingStore).attachPathStateRuntime(attachment);
+    pathStateRuntime = attachment;
   }
 
   private void rebuildPathStateRoot(SnapshotManager snapshotManager,
@@ -3005,6 +3032,14 @@ public class Manager {
   }
 
   private void closePathStateRoot() {
+    PathStateRuntimeAttachment runtime = pathStateRuntime;
+    if (runtime != null) {
+      if (!(revokingStore instanceof SnapshotManager)) {
+        throw new IllegalStateException("Path-state runtime lost SnapshotManager ownership");
+      }
+      ((SnapshotManager) revokingStore).detachPathStateRuntime(runtime);
+      pathStateRuntime = null;
+    }
     pathStateSnapshotHead = null;
   }
 

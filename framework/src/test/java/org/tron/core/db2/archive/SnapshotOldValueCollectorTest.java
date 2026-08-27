@@ -19,6 +19,7 @@ import com.google.common.primitives.Bytes;
 import com.google.common.primitives.Longs;
 import com.google.protobuf.ByteString;
 import java.io.Closeable;
+import java.io.IOException;
 import java.util.AbstractMap;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -31,6 +32,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.Test;
 import org.tron.common.BaseMethodTest;
 import org.tron.core.db.common.DbSourceInter;
@@ -44,12 +47,73 @@ import org.tron.core.db2.core.Chainbase;
 import org.tron.core.db2.core.SnapshotImpl;
 import org.tron.core.db2.core.SnapshotManager;
 import org.tron.core.db2.core.SnapshotRoot;
+import org.tron.core.db2.stateroot.PathStateBlockTransition;
+import org.tron.core.db2.stateroot.PathStateRuntimeAttachment;
 import org.tron.core.exception.TronError;
 import org.tron.core.store.AccountAssetStore;
 import org.tron.core.store.CheckTmpStore;
 import org.tron.protos.Protocol.Account;
 
 public class SnapshotOldValueCollectorTest extends BaseMethodTest {
+
+  @Test
+  public void pathStateRuntimeCoexistsWithArchiveAtBlockFinalBoundary() throws Exception {
+    MemoryDb propertiesDb = new MemoryDb("properties");
+    propertiesDb.put(HistoricalAccountAssetBalanceResolver.proposal66PhysicalKey(),
+        Longs.toByteArray(1L));
+    MemoryDb codeDb = new MemoryDb("code");
+    SnapshotManager manager = new SnapshotManager("");
+    Chainbase properties = new Chainbase(new SnapshotRoot(propertiesDb));
+    Chainbase code = new Chainbase(new SnapshotRoot(codeDb));
+    manager.add(properties);
+    manager.add(code);
+    manager.enable();
+    manager.installArchiveCollector(new SnapshotOldValueCollector(), diff -> { });
+    AtomicReference<PathStateBlockTransition> published = new AtomicReference<>();
+    PathStateRuntimeAttachment attachment = new PathStateRuntimeAttachment(
+        new SnapshotPathStateTransitionCollector(key -> Collections.emptyMap()), published::set);
+    manager.attachPathStateRuntime(attachment);
+
+    byte[] key = bytes("contract");
+    try (ISession block = manager.buildSession()) {
+      code.put(key, bytes("runtime"));
+      block.commit(BlockSnapshotMeta.forBlock(1, hash(1), hash(0), 3_000L));
+    }
+
+    assertFalse(attachment.isFailed());
+    assertEquals(1, published.get().getBlockNumber());
+    assertEquals(1, published.get().getMutations().size());
+    assertEquals("code", published.get().getMutations().get(0).getDbName());
+    assertArrayEquals(key, published.get().getMutations().get(0).getCanonicalKey());
+    assertSame(attachment, manager.detachPathStateRuntime(attachment));
+    manager.shutdown();
+  }
+
+  @Test
+  public void pathStateFailureDoesNotRejectArchiveDisabledBlockCommit() throws Exception {
+    SnapshotManager manager = new SnapshotManager("");
+    Chainbase code = new Chainbase(new SnapshotRoot(new MemoryDb("code")));
+    manager.add(code);
+    manager.enable();
+    AtomicInteger published = new AtomicInteger();
+    PathStateRuntimeAttachment attachment = new PathStateRuntimeAttachment(view -> {
+      throw new IOException("capture failed");
+    }, transition -> published.incrementAndGet());
+    manager.attachPathStateRuntime(attachment);
+
+    BlockSnapshotMeta meta = BlockSnapshotMeta.forBlock(1, hash(1), hash(0), 3_000L);
+    try (ISession block = manager.buildSession()) {
+      code.put(bytes("contract"), bytes("runtime"));
+      block.commit(meta);
+    }
+
+    assertTrue(attachment.isFailed());
+    assertEquals("capture failed", attachment.getFailure().getMessage());
+    assertEquals(0, published.get());
+    assertEquals(meta, ((SnapshotImpl) code.getHead()).getBlockSnapshotMeta());
+    manager.detachPathStateRuntime(attachment);
+    manager.shutdown();
+  }
 
   @Test
   public void borrowedRuntimeAttachmentIsAtomicAndIdentityBound() throws Exception {
