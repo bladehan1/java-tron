@@ -796,7 +796,8 @@ public class Manager {
     PathStateRuntimeAttachment attachment = new PathStateRuntimeAttachment(
         new SnapshotPathStateTransitionCollector(accountAssetStore::prefixQuery,
             this::scanPathStateActivationAccounts),
-        this::advancePathStateRoot, this::flushPathStateBaseThrough);
+        this::advancePathStateRoot, this::flushPathStateBaseThrough,
+        transition -> pathStateSnapshotHead.prepare(transition).getStateRoot());
     attachment.synchronizeReadyHead(pathStateSnapshotHead.getHead());
     ((SnapshotManager) revokingStore).attachPathStateRuntime(attachment);
     pathStateRuntime = attachment;
@@ -1498,6 +1499,29 @@ public class Manager {
         block.getBlockId().getBytes(),
         block.getParentHash().getBytes(),
         block.getTimeStamp()));
+    diagnosePathStateHeader(block);
+  }
+
+  private void diagnosePathStateHeader(BlockCapsule block) {
+    PathStateRuntimeAttachment runtime = pathStateRuntime;
+    if (runtime == null) {
+      return;
+    }
+    byte[] localRoot = null;
+    try {
+      PathStateSnapshotHead owner = pathStateSnapshotHead;
+      if (owner != null) {
+        PathStateRootMetadata local = owner.getHead();
+        if (local.getBlockNumber() == block.getNum()
+            && Arrays.equals(local.getBlockHash(), block.getBlockId().getBytes())) {
+          localRoot = local.getStateRoot();
+        }
+      }
+    } catch (java.io.IOException | RuntimeException diagnosticFailure) {
+      logger.warn("Path-state local root unavailable for header diagnostic", diagnosticFailure);
+    }
+    runtime.diagnoseHeader(block.getNum(), block.getBlockId().getBytes(), block.getStateRoot(),
+        localRoot);
   }
 
   private void switchFork(BlockCapsule newHead)
@@ -2166,9 +2190,10 @@ public class Manager {
     blockCapsule.addAllTransactions(toBePacked);
     accountStateCallBack.executeGenerateFinish();
 
+    blockCapsule.setMerkleRoot();
+    previewGeneratedPathStateRoot(blockCapsule);
     session.reset();
 
-    blockCapsule.setMerkleRoot();
     blockCapsule.sign(miner.getPrivateKey());
 
     BlockCapsule capsule = new BlockCapsule(blockCapsule.getInstance());
@@ -2183,6 +2208,25 @@ public class Manager {
         capsule.getSerializedSize());
 
     return capsule;
+  }
+
+  private void previewGeneratedPathStateRoot(BlockCapsule block) {
+    if (pathStateRuntime == null || !(revokingStore instanceof SnapshotManager)) {
+      return;
+    }
+    try {
+      byte[] targetBlockHash = new BlockCapsule(block.getInstance()).getBlockId().getBytes();
+      byte[] root = ((SnapshotManager) revokingStore).previewPathStateRoot(
+          BlockSnapshotMeta.forBlock(block.getNum(), targetBlockHash,
+              block.getParentHash().getBytes(), block.getTimeStamp()));
+      // tag 3 plus a 32-byte length-delimited value adds exactly 34 protobuf bytes.
+      if (root != null && block.getSerializedSize() <= ChainConstant.BLOCK_SIZE - 34) {
+        block.setStateRoot(root);
+      }
+    } catch (RuntimeException previewFailure) {
+      logger.warn("Path-state producer preview unavailable; state_root remains absent",
+          previewFailure);
+    }
   }
 
   private void filterOwnerAddress(TransactionCapsule transactionCapsule, Set<String> result) {

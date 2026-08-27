@@ -261,6 +261,20 @@ public class BlockCapsule implements ProtoCapsule<Block> {
         this.block.getBlockHeader().toBuilder().setRawData(blockHeaderRaw)).build();
   }
 
+  /** Sets optional non-consensus path-state metadata outside the signed raw header. */
+  public void setStateRoot(byte[] root) {
+    if (root == null || root.length != Sha256Hash.LENGTH) {
+      throw new IllegalArgumentException("state root must be exactly 32 bytes");
+    }
+    this.block = this.block.toBuilder().setBlockHeader(
+        this.block.getBlockHeader().toBuilder().setStateRoot(ByteString.copyFrom(root))).build();
+  }
+
+  /** Returns a copy of the optional non-consensus path-state metadata. */
+  public byte[] getStateRoot() {
+    return this.block.getBlockHeader().getStateRoot().toByteArray();
+  }
+
   /* only for genesis */
   public void setWitness(String witness) {
     BlockHeader.raw blockHeaderRaw =

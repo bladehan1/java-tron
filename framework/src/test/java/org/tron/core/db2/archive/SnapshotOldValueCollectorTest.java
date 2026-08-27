@@ -3,6 +3,7 @@ package org.tron.core.db2.archive;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
@@ -161,17 +162,23 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
         manifest, PathStateLayerLimits.defaults());
     PathStateRuntimeAttachment runtime = new PathStateRuntimeAttachment(
         new SnapshotPathStateTransitionCollector(ignored -> Collections.emptyMap()),
-        owner::advance);
+        owner::advance, (blockNumber, blockHash) -> { },
+        transition -> owner.prepare(transition).getStateRoot());
     runtime.synchronizeReadyHead(base);
     shadow.attachPathStateRuntime(runtime);
 
     BlockSnapshotMeta meta = BlockSnapshotMeta.forBlock(1L, canonicalBlockId, parentHash, 12L);
     try (ISession session = control.buildSession()) {
       controlCode.put(codeKey, after);
+      assertNull(control.previewPathStateRoot(meta));
       session.commit(meta);
     }
     try (ISession session = shadow.buildSession()) {
       shadowCode.put(codeKey, after);
+      byte[] candidate = shadow.previewPathStateRoot(meta);
+      assertEquals(32, candidate.length);
+      assertArrayEquals(base.getStateRoot(), owner.getHead().getStateRoot());
+      shadowBlock.setStateRoot(candidate);
       session.commit(meta);
     }
 
@@ -184,7 +191,7 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
     assertFalse(Arrays.equals(base.getStateRoot(), owner.getHead().getStateRoot()));
 
     assertArrayEquals(canonicalBlock, controlBlock.getData());
-    assertArrayEquals(canonicalBlock, shadowBlock.getData());
+    assertFalse(Arrays.equals(canonicalBlock, shadowBlock.getData()));
     assertArrayEquals(canonicalRaw,
         shadowBlock.getInstance().getBlockHeader().getRawData().toByteArray());
     assertArrayEquals(canonicalBlockId, controlBlock.getBlockId().getBytes());
@@ -193,6 +200,22 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
         .getAccountStateRoot().toByteArray());
     assertEquals(transaction.getRetList(), shadowBlock.getInstance().getTransactions(0)
         .getRetList());
+    assertArrayEquals(owner.getHead().getStateRoot(), shadowBlock.getStateRoot());
+
+    runtime.diagnoseHeader(1L, canonicalBlockId, shadowBlock.getStateRoot(),
+        owner.getHead().getStateRoot());
+    assertEquals(PathStateRuntimeAttachment.HeaderDiagnostic.MATCH,
+        runtime.status().getHeaderDiagnostic());
+    runtime.diagnoseHeader(1L, canonicalBlockId, new byte[31], owner.getHead().getStateRoot());
+    assertEquals(PathStateRuntimeAttachment.HeaderDiagnostic.INVALID_LENGTH,
+        runtime.status().getHeaderDiagnostic());
+    runtime.diagnoseHeader(1L, canonicalBlockId, hash(88), owner.getHead().getStateRoot());
+    assertEquals(PathStateRuntimeAttachment.HeaderDiagnostic.MISMATCH,
+        runtime.status().getHeaderDiagnostic());
+    runtime.diagnoseHeader(1L, canonicalBlockId, new byte[0], owner.getHead().getStateRoot());
+    assertEquals(PathStateRuntimeAttachment.HeaderDiagnostic.ABSENT,
+        runtime.status().getHeaderDiagnostic());
+    assertEquals(PathStateRuntimeAttachment.State.READY, runtime.status().getState());
 
     assertSame(runtime, shadow.detachPathStateRuntime(runtime));
     control.shutdown();
