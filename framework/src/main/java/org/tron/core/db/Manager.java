@@ -129,6 +129,11 @@ import org.tron.core.db2.archive.SnapshotOldValueCollector;
 import org.tron.core.db2.archive.StateArchiveRuntimeOwner;
 import org.tron.core.db2.core.Chainbase;
 import org.tron.core.db2.core.SnapshotManager;
+import org.tron.core.db2.stateroot.PathStateLayerLimits;
+import org.tron.core.db2.stateroot.PathStateRootMetadata;
+import org.tron.core.db2.stateroot.PathStateRuntimeAdmission;
+import org.tron.core.db2.stateroot.PathStateSnapshotHead;
+import org.tron.core.db2.stateroot.PathStateStoreManifest;
 import org.tron.core.exception.AccountResourceInsufficientException;
 import org.tron.core.exception.BadBlockException;
 import org.tron.core.exception.BadItemException;
@@ -205,6 +210,8 @@ public class Manager {
   private ArchiveHistoryWriter archiveHistoryWriter;
   @Getter
   private StateArchiveRuntimeOwner stateArchiveRuntime;
+  @Getter
+  private PathStateSnapshotHead pathStateSnapshotHead;
   private StateArchiveRuntimeOwner.ServingIndexFaultHook stateArchiveServingIndexFaultHook =
       stage -> { };
   private StateArchiveRuntimeOwner.ReadableStateFaultHook stateArchiveReadableStateFaultHook =
@@ -588,6 +595,7 @@ public class Manager {
     initLiteNode();
 
     initStateArchive();
+    initPathStateRoot();
 
     long headNum = chainBaseManager.getDynamicPropertiesStore().getLatestBlockHeaderNumber();
     logger.info("Current headNum is: {}.", headNum);
@@ -709,6 +717,49 @@ public class Manager {
         }
       }
       throw new IllegalStateException("Failed to recover State Archive startup", failure);
+    }
+  }
+
+  private void initPathStateRoot() {
+    org.tron.core.config.args.Storage storage = Args.getInstance().getStorage();
+    if (!storage.isPathStateRootEnabled()) {
+      try {
+        PathStateRuntimeAdmission.inspect(false, null, null);
+      } catch (java.io.IOException impossible) {
+        throw new IllegalStateException("Disabled path-state admission failed", impossible);
+      }
+      return;
+    }
+    Path directory = Paths.get(Args.getInstance().getOutputDirectory(),
+        storage.getPathStateRootDirectory()).normalize();
+    try {
+      PathStateStoreManifest.Engine engine = PathStateStoreManifest.Engine.valueOf(
+          storage.getDbEngine());
+      PathStateRuntimeAdmission.Result admission = PathStateRuntimeAdmission.inspect(
+          true, directory, engine);
+      if (admission.getStatus() != PathStateRuntimeAdmission.Status.CURRENT_READY) {
+        throw new IllegalStateException(
+            "Path-state startup requires a completed admitted rebuild");
+      }
+      PathStateLayerLimits limits = new PathStateLayerLimits(
+          storage.getPathStateRootReversibleLayerLimit(),
+          storage.getPathStateRootReversibleLayerBytes());
+      PathStateSnapshotHead recovered = PathStateSnapshotHead.open(
+          admission.getManifest(), limits);
+      PathStateRootMetadata recoveredHead = recovered.getHead();
+      if (recoveredHead.getBlockNumber()
+          != getDynamicPropertiesStore().getLatestBlockHeaderNumber()
+          || !Arrays.equals(recoveredHead.getBlockHash(),
+          getDynamicPropertiesStore().getLatestBlockHeaderHash().getBytes())) {
+        throw new IllegalStateException(
+            "Path-state CURRENT differs from the persisted Chainbase head");
+      }
+      pathStateSnapshotHead = recovered;
+      logger.info("Path-state current root attached: directory={}, head={}, engine={}",
+          directory, recoveredHead.getBlockNumber(), storage.getDbEngine());
+    } catch (java.io.IOException | RuntimeException failure) {
+      pathStateSnapshotHead = null;
+      throw new IllegalStateException("Failed to recover path-state startup", failure);
     }
   }
 
@@ -2862,6 +2913,7 @@ public class Manager {
     stopFilterProcessThread();
     stopValidateSignThread();
     rewardViCalService.stop();
+    closePathStateRoot();
     closeStateArchive();
     chainBaseManager.shutdown();
     revokingStore.shutdown();
@@ -2880,6 +2932,10 @@ public class Manager {
     } catch (java.io.IOException failure) {
       throw new IllegalStateException("Failed to close State Archive runtime", failure);
     }
+  }
+
+  private void closePathStateRoot() {
+    pathStateSnapshotHead = null;
   }
 
   private static class ValidateSignTask implements Callable<Boolean> {
