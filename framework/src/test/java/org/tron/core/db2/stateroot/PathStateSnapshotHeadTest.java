@@ -77,6 +77,32 @@ public class PathStateSnapshotHeadTest {
     assertFalse(owner.isFailed());
   }
 
+  @Test
+  public void rewindsOwnedHeadThenBuildsCanonicalSibling() throws Exception {
+    for (Engine engine : availableEngines()) {
+      Fixture fixture = fixture("rewind-" + engine, engine);
+      PathStateSnapshotHead owner = PathStateSnapshotHead.open(
+          fixture.manifest, PathStateLayerLimits.defaults());
+      PathStateRootMetadata first = owner.advance(transition(101, 11,
+          fixture.base.getBlockHash(), Collections.singletonList(
+              PathStateMutation.put("proposal", new byte[]{1}, new byte[]{5}))));
+      PathStateRootMetadata oldSecond = owner.advance(transition(102, 12,
+          first.getBlockHash(), Collections.emptyList()));
+
+      assertArrayEquals(first.encode(), owner.rewindTo(
+          first.getBlockNumber(), first.getBlockHash()).encode());
+      assertFalse(Files.exists(fixture.manifest.getLayerDirectory(
+          oldSecond.getBlockNumber(), oldSecond.getBlockHash())));
+      PathStateRootMetadata sibling = owner.advance(transition(102, 22,
+          first.getBlockHash(), Collections.singletonList(
+              PathStateMutation.put("proposal", new byte[]{1}, new byte[]{9}))));
+
+      assertArrayEquals(sibling.encode(), PathStateSnapshotHead.open(
+          fixture.manifest, PathStateLayerLimits.defaults()).getHead().encode());
+      assertFalse(owner.isFailed());
+    }
+  }
+
   private Fixture fixture(String name, Engine engine) throws Exception {
     PathStateStoreManifest manifest = PathStateStoreManifest.createOrOpen(
         new File(temporaryFolder.getRoot(), name).toPath(), engine);
