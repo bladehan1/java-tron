@@ -86,26 +86,27 @@ public final class PathStateLayer implements Closeable {
         admittedParent.getStateRoot(), admittedParent.getStateRoot(), transitionDigest);
     Path layerDirectory = admitted.getLayerDirectory(blockNumber, blockHash);
     admittedLimits.verifyCanBegin(admitted, layerDirectory);
-    try (PathStateNodeStoreSet parentStores =
-        PathStateNodeStoreSet.openPublished(admitted, admittedParent)) {
+    PathStateNodeStoreSet parentStores =
+        PathStateNodeStoreSet.openPublished(admitted, admittedParent);
+    PathStateNodeStoreSet childStores = null;
+    try {
       PathStateRoot parentRoot = parentStores.createRoot();
-      PathStateNodeStoreSet childStores = PathStateNodeStoreSet.beginLayer(admitted, identity);
+      childStores = PathStateNodeStoreSet.beginLayer(admitted, identity, parentStores);
+      PathStateRoot childRoot = childStores.createRootFrom(parentStores.leafRecords(),
+          parentRoot.rootHash());
+      return new PathStateLayer(admitted,
+          new PathStateLayerPublication(admitted, admittedLimits, faultHook),
+          childStores, childRoot,
+          admittedParent, blockNumber, blockHash, parentHash, timestamp, phase,
+          transitionDigest);
+    } catch (RuntimeException | IOException failure) {
+      PathStateNodeStoreSet owned = childStores == null ? parentStores : childStores;
       try {
-        PathStateRoot childRoot = childStores.createRootFrom(parentStores.leafRecords(),
-            parentRoot.rootHash());
-        return new PathStateLayer(admitted,
-            new PathStateLayerPublication(admitted, admittedLimits, faultHook),
-            childStores, childRoot,
-            admittedParent, blockNumber, blockHash, parentHash, timestamp, phase,
-            transitionDigest);
-      } catch (RuntimeException failure) {
-        try {
-          childStores.close();
-        } catch (IOException closeFailure) {
-          failure.addSuppressed(closeFailure);
-        }
-        throw failure;
+        owned.close();
+      } catch (IOException closeFailure) {
+        failure.addSuppressed(closeFailure);
       }
+      throw failure;
     }
   }
 

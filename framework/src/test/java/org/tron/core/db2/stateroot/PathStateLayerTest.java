@@ -4,6 +4,7 @@ import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertThrows;
+import static org.junit.Assert.assertTrue;
 
 import java.io.File;
 import java.io.IOException;
@@ -43,6 +44,10 @@ public class PathStateLayerTest {
       }
 
       assertCurrentRoot(fixture.manifest, first, firstRoot);
+      assertTrue(nodeEntryCount(fixture.manifest.getLayerDirectory(101, first.getBlockHash()),
+          engine) < nodeEntryCount(fixture.manifest.getBaseDirectory(), engine));
+      assertTrue(nodeTombstoneCount(
+          fixture.manifest.getLayerDirectory(101, first.getBlockHash()), engine) > 0);
 
       PathStateRootMetadata second;
       byte[] secondRoot;
@@ -138,6 +143,24 @@ public class PathStateLayerTest {
         .putInt(storeId)
         .put(secureKey)
         .array();
+  }
+
+  private static long nodeEntryCount(Path owner, Engine engine) throws Exception {
+    try (PathStateNativeNodeStore store = PathStateNativeNodeStore.open(
+        owner.resolve(PathStateNodeStoreSet.NODES_DIRECTORY), engine)) {
+      return store.scanAll().stream()
+          .filter(entry -> java.nio.ByteBuffer.wrap(entry.getKey()).getInt() >= 0)
+          .count();
+    }
+  }
+
+  private static long nodeTombstoneCount(Path owner, Engine engine) throws Exception {
+    try (PathStateNativeNodeStore store = PathStateNativeNodeStore.open(
+        owner.resolve(PathStateNodeStoreSet.NODES_DIRECTORY), engine)) {
+      return store.scanAll().stream()
+          .filter(entry -> java.nio.ByteBuffer.wrap(entry.getKey()).getInt() == -3)
+          .count();
+    }
   }
 
   private static byte[] bytes(int seed) {
