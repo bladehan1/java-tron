@@ -84,6 +84,10 @@ public class PathStateCanonicalizerTest {
     assertTrue(canonical.getAssetV2Map().isEmpty());
     assertEquals("1a154100000000000000000000000000000000000000022063e00301",
         ByteArray.toHexString(activation.getCanonicalValue()));
+    assertEquals(1, canonicalizer.projectSnapshotAccountAssets(
+        P66Phase.P66_ON, address, raw).size());
+    assertTrue(canonicalizer.projectSnapshotAccountAssets(
+        P66Phase.P66_ON, address, on.getCanonicalValue()).isEmpty());
   }
 
   @Test

@@ -186,6 +186,13 @@ public final class PathStateRebuildCoordinator {
       validateAccountAssetLayout(key, value);
       PathStateMutation mutation = canonicalizer.put(phase, store.getDbName(), key, value);
       root.apply(Collections.singletonList(mutation));
+      if ("account".equals(store.getDbName())) {
+        List<PathStateMutation> projected = canonicalizer.projectSnapshotAccountAssets(
+            phase, key, value);
+        if (!projected.isEmpty()) {
+          root.apply(projected);
+        }
+      }
       putBytes(inputDigest, key);
       putBytes(inputDigest, value);
       previousKey = key;
@@ -205,7 +212,7 @@ public final class PathStateRebuildCoordinator {
       if (accountValue == null) {
         throw new IOException("path-state AccountAsset row has no owning Account");
       }
-      canonicalizer.requireSnapshotAccountLayout(phase, accountKey, accountValue);
+      canonicalizer.requirePhysicalAccountAssetOwner(phase, accountKey, accountValue);
     }
 
     private StoreResult finish() {

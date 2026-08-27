@@ -107,12 +107,46 @@ public final class PathStateCanonicalizer {
     requireLength(key, ADDRESS_LENGTH, "account key");
     Account account = parseAccount(key, rawValue);
     if (target.directAssetsEnabled()) {
-      if (!account.getAssetOptimized() || !account.getAssetMap().isEmpty()
-          || !account.getAssetV2Map().isEmpty()) {
+      if (account.getAssetOptimized() && (!account.getAssetMap().isEmpty()
+          || !account.getAssetV2Map().isEmpty())) {
         throw new IllegalArgumentException("P66-on snapshot Account layout is mixed");
       }
     } else if (account.getAssetOptimized()) {
       throw new IllegalArgumentException("P66-off snapshot Account layout is mixed");
+    }
+  }
+
+  /** Projects a lazily migrated P66 Account's embedded V2 balances into canonical direct rows. */
+  public List<PathStateMutation> projectSnapshotAccountAssets(P66Phase phase,
+      byte[] physicalKey, byte[] rawValue) {
+    P66Phase target = Objects.requireNonNull(phase, "phase");
+    byte[] key = copy(physicalKey, "physicalKey");
+    requireLength(key, ADDRESS_LENGTH, "account key");
+    Account account = parseAccount(key, rawValue);
+    if (!target.directAssetsEnabled() || account.getAssetOptimized()) {
+      return Collections.emptyList();
+    }
+    List<Map.Entry<String, Long>> balances = new ArrayList<>(
+        account.getAssetV2Map().entrySet());
+    balances.sort(Map.Entry.comparingByKey());
+    List<PathStateMutation> projected = new ArrayList<>(balances.size());
+    for (Map.Entry<String, Long> balance : balances) {
+      projected.add(accountAsset(target, key, balance.getKey(), balance.getValue()));
+    }
+    return Collections.unmodifiableList(projected);
+  }
+
+  /** Requires that a physical direct row belongs to an already optimized Account. */
+  public void requirePhysicalAccountAssetOwner(P66Phase phase, byte[] physicalKey,
+      byte[] rawValue) {
+    P66Phase target = Objects.requireNonNull(phase, "phase");
+    byte[] key = copy(physicalKey, "physicalKey");
+    requireLength(key, ADDRESS_LENGTH, "account key");
+    Account account = parseAccount(key, rawValue);
+    if (!target.directAssetsEnabled() || !account.getAssetOptimized()
+        || !account.getAssetMap().isEmpty() || !account.getAssetV2Map().isEmpty()) {
+      throw new IllegalArgumentException(
+          "physical AccountAsset row requires an optimized owning Account");
     }
   }
 

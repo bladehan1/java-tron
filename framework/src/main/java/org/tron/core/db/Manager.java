@@ -884,11 +884,11 @@ public class Manager {
         throw new java.io.IOException(
             "Path-state rebuild block differs from persisted Chainbase head");
       }
-      long allowSameTokenName = dynamic.getAllowSameTokenName();
-      if (allowSameTokenName != 0 && allowSameTokenName != 1) {
+      long allowAssetOptimization = dynamic.getAllowAccountAssetOptimizationFromRoot();
+      if (allowAssetOptimization != 0 && allowAssetOptimization != 1) {
         throw new java.io.IOException("Path-state rebuild P66 phase is invalid");
       }
-      P66Phase phase = allowSameTokenName == 0 ? P66Phase.P66_OFF : P66Phase.P66_ON;
+      P66Phase phase = allowAssetOptimization == 0 ? P66Phase.P66_OFF : P66Phase.P66_ON;
       return new SnapshotIdentity(blockNumber, blockHash, block.getParentHash().getBytes(),
           timestamp, phase);
     } catch (BadItemException | ItemNotFoundException failure) {
