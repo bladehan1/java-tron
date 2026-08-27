@@ -6,7 +6,9 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
+import com.google.protobuf.ByteString;
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -25,6 +27,7 @@ import org.tron.core.db2.stateroot.PathStateRebuildCoordinator.RebuildResult;
 import org.tron.core.db2.stateroot.PathStateRebuildCoordinator.SnapshotIdentity;
 import org.tron.core.db2.stateroot.PathStateRebuildCoordinator.SnapshotSource;
 import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
+import org.tron.protos.Protocol.Account;
 
 public class PathStateRebuildCoordinatorTest {
 
@@ -120,6 +123,61 @@ public class PathStateRebuildCoordinatorTest {
         .resolve(PathStateCurrentStore.METADATA_FILE)));
   }
 
+  @Test
+  public void admitsOnlyTargetP66AccountAssetPhysicalLayout() throws Exception {
+    byte[] address = address(7);
+    String tokenId = "1000001";
+
+    PathStateStoreManifest offManifest = manifest("p66-off", Engine.ROCKSDB);
+    TestSnapshotSource off = exactSource(identity(P66Phase.P66_OFF));
+    byte[] embedded = account(address).toBuilder().putAssetV2(tokenId, 11L).build().toByteArray();
+    off.add("account", address, embedded);
+    RebuildResult offResult = new PathStateRebuildCoordinator().rebuild(offManifest, off);
+    assertEquals(1, offResult.requireStore("account").getEntryCount());
+    assertEquals(0, offResult.requireStore("account-asset").getEntryCount());
+
+    PathStateStoreManifest onManifest = manifest("p66-on", Engine.ROCKSDB);
+    TestSnapshotSource on = exactSource(identity(P66Phase.P66_ON));
+    byte[] optimized = account(address).toBuilder().setAssetOptimized(true).build().toByteArray();
+    on.add("account", address, optimized);
+    on.add("account-asset", accountAssetKey(address, tokenId), longBytes(11L));
+    RebuildResult onResult = new PathStateRebuildCoordinator().rebuild(onManifest, on);
+    assertEquals(1, onResult.requireStore("account").getEntryCount());
+    assertEquals(1, onResult.requireStore("account-asset").getEntryCount());
+  }
+
+  @Test
+  public void rejectsMixedOrOrphanAccountAssetSnapshotWithoutPublication() throws Exception {
+    byte[] address = address(8);
+    String tokenId = "1000001";
+
+    PathStateStoreManifest mixedManifest = manifest("p66-mixed", Engine.ROCKSDB);
+    TestSnapshotSource mixed = exactSource(identity(P66Phase.P66_ON));
+    mixed.add("account", address,
+        account(address).toBuilder().putAssetV2(tokenId, 9L).build().toByteArray());
+    mixed.add("account-asset", accountAssetKey(address, tokenId), longBytes(9L));
+    assertThrows(IllegalArgumentException.class,
+        () -> new PathStateRebuildCoordinator().rebuild(mixedManifest, mixed));
+    assertFalse(new PathStateCurrentStore(mixedManifest).isInitialized());
+
+    PathStateStoreManifest orphanManifest = manifest("p66-orphan", Engine.ROCKSDB);
+    TestSnapshotSource orphan = exactSource(identity(P66Phase.P66_ON));
+    orphan.add("account-asset", accountAssetKey(address, tokenId), longBytes(10L));
+    IOException orphanFailure = assertThrows(IOException.class,
+        () -> new PathStateRebuildCoordinator().rebuild(orphanManifest, orphan));
+    assertTrue(orphanFailure.getMessage().contains("no owning Account"));
+    assertFalse(new PathStateCurrentStore(orphanManifest).isInitialized());
+
+    PathStateStoreManifest offDirectManifest = manifest("p66-off-direct", Engine.ROCKSDB);
+    TestSnapshotSource offDirect = exactSource(identity(P66Phase.P66_OFF));
+    offDirect.add("account", address,
+        account(address).toBuilder().putAssetV2(tokenId, 10L).build().toByteArray());
+    offDirect.add("account-asset", accountAssetKey(address, tokenId), longBytes(10L));
+    assertThrows(IllegalArgumentException.class,
+        () -> new PathStateRebuildCoordinator().rebuild(offDirectManifest, offDirect));
+    assertFalse(new PathStateCurrentStore(offDirectManifest).isInitialized());
+  }
+
   private PathStateStoreManifest manifest(String name, Engine engine) throws IOException {
     Path directory = temporaryFolder.newFolder(name).toPath();
     return PathStateStoreManifest.createOrOpen(directory, engine);
@@ -135,7 +193,11 @@ public class PathStateRebuildCoordinatorTest {
   }
 
   private static SnapshotIdentity identity() {
-    return new SnapshotIdentity(100, bytes(1), bytes(2), 300, P66Phase.P66_ON);
+    return identity(P66Phase.P66_ON);
+  }
+
+  private static SnapshotIdentity identity(P66Phase phase) {
+    return new SnapshotIdentity(100, bytes(1), bytes(2), 300, phase);
   }
 
   private static Engine[] availableEngines() {
@@ -156,6 +218,19 @@ public class PathStateRebuildCoordinatorTest {
       value[index] = (byte) (seed + index);
     }
     return value;
+  }
+
+  private static Account account(byte[] address) {
+    return Account.newBuilder().setAddress(ByteString.copyFrom(address)).build();
+  }
+
+  private static byte[] accountAssetKey(byte[] address, String tokenId) {
+    byte[] token = tokenId.getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+    return ByteBuffer.allocate(address.length + token.length).put(address).put(token).array();
+  }
+
+  private static byte[] longBytes(long value) {
+    return ByteBuffer.allocate(Long.BYTES).putLong(value).array();
   }
 
   private static final class TestSnapshotSource implements SnapshotSource {
@@ -196,6 +271,16 @@ public class PathStateRebuildCoordinatorTest {
       List<String> names = new ArrayList<>(stores.keySet());
       Collections.reverse(names);
       return names;
+    }
+
+    @Override
+    public byte[] get(String dbName, byte[] physicalKey) {
+      for (Row row : stores.get(dbName)) {
+        if (java.util.Arrays.equals(row.key, physicalKey)) {
+          return java.util.Arrays.copyOf(row.value, row.value.length);
+        }
+      }
+      return null;
     }
 
     @Override

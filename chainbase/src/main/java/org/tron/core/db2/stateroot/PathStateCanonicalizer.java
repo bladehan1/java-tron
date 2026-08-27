@@ -99,6 +99,34 @@ public final class PathStateCanonicalizer {
             ByteBuffer.allocate(BALANCE_LENGTH).putLong(balance).array());
   }
 
+  /** Requires the physical Account representation admitted for a rebuild target phase. */
+  public void requireSnapshotAccountLayout(P66Phase phase, byte[] physicalKey,
+      byte[] rawValue) {
+    P66Phase target = Objects.requireNonNull(phase, "phase");
+    byte[] key = copyNonEmpty(physicalKey, "physicalKey");
+    requireLength(key, ADDRESS_LENGTH, "account key");
+    Account account = parseAccount(key, rawValue);
+    if (target.directAssetsEnabled()) {
+      if (!account.getAssetOptimized() || !account.getAssetMap().isEmpty()
+          || !account.getAssetV2Map().isEmpty()) {
+        throw new IllegalArgumentException("P66-on snapshot Account layout is mixed");
+      }
+    } else if (account.getAssetOptimized()) {
+      throw new IllegalArgumentException("P66-off snapshot Account layout is mixed");
+    }
+  }
+
+  /** Extracts and validates the owning Account address from one direct physical key. */
+  public byte[] accountAddressFromAssetKey(P66Phase phase, byte[] physicalKey) {
+    P66Phase target = Objects.requireNonNull(phase, "phase");
+    if (!target.directAssetsEnabled()) {
+      throw new IllegalArgumentException("P66-off state must not contain account-asset rows");
+    }
+    byte[] key = copyNonEmpty(physicalKey, "physicalKey");
+    decodeAccountAssetKey(key);
+    return Arrays.copyOf(key, ADDRESS_LENGTH);
+  }
+
   private static void configure(Map<String, StoreFormat> formats, String dbName, String codecId) {
     if (formats.replace(dbName, new StoreFormat(dbName, codecId)) == null) {
       throw new IllegalStateException("missing path-state format participant: " + dbName);
@@ -163,15 +191,7 @@ public final class PathStateCanonicalizer {
   }
 
   private static byte[] canonicalAccount(P66Phase phase, byte[] physicalKey, byte[] rawValue) {
-    Account account;
-    try {
-      account = Account.parseFrom(rawValue);
-    } catch (InvalidProtocolBufferException invalid) {
-      throw new IllegalArgumentException("account value is not valid protobuf", invalid);
-    }
-    if (!Arrays.equals(physicalKey, account.getAddress().toByteArray())) {
-      throw new IllegalArgumentException("account protobuf address does not match physical key");
-    }
+    Account account = parseAccount(physicalKey, rawValue);
     if (!phase.directAssetsEnabled()) {
       if (account.getAssetOptimized()) {
         throw new IllegalArgumentException("P66-off Account must not use direct asset layout");
@@ -184,6 +204,19 @@ public final class PathStateCanonicalizer {
         .clearAssetV2()
         .build()
         .toByteArray();
+  }
+
+  private static Account parseAccount(byte[] physicalKey, byte[] rawValue) {
+    Account account;
+    try {
+      account = Account.parseFrom(Objects.requireNonNull(rawValue, "rawValue"));
+    } catch (InvalidProtocolBufferException invalid) {
+      throw new IllegalArgumentException("account value is not valid protobuf", invalid);
+    }
+    if (!Arrays.equals(physicalKey, account.getAddress().toByteArray())) {
+      throw new IllegalArgumentException("account protobuf address does not match physical key");
+    }
+    return account;
   }
 
   private static void parseAbi(byte[] value) {

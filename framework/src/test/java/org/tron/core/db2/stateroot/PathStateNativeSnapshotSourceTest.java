@@ -233,6 +233,11 @@ public class PathStateNativeSnapshotSourceTest {
 
         @Override
         public byte[] get(byte[] physicalRawKey) {
+          for (Map.Entry<byte[], byte[]> row : pinnedRows) {
+            if (Arrays.equals(row.getKey(), physicalRawKey)) {
+              return Arrays.copyOf(row.getValue(), row.getValue().length);
+            }
+          }
           return null;
         }
 

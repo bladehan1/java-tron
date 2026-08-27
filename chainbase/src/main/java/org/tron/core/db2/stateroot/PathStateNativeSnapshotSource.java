@@ -152,6 +152,18 @@ public final class PathStateNativeSnapshotSource
   }
 
   @Override
+  public synchronized byte[] get(String dbName, byte[] physicalKey) throws IOException {
+    ensureOpen();
+    descriptor.require(dbName);
+    StoreSnapshot snapshot = snapshots.get(dbName);
+    if (snapshot == null) {
+      throw new IOException("database is outside pinned path-state snapshot: " + dbName);
+    }
+    byte[] value = snapshot.get(copy(physicalKey, "physicalKey"));
+    return value == null ? null : Arrays.copyOf(value, value.length);
+  }
+
+  @Override
   public synchronized void scan(String dbName, EntryConsumer consumer) throws IOException {
     ensureOpen();
     Objects.requireNonNull(consumer, "consumer");
