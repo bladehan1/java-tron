@@ -23,12 +23,23 @@ public final class SnapshotPathStateTransitionCollector
   private final PathStateCanonicalizer canonicalizer = new PathStateCanonicalizer();
   private final AccountAssetArchiveProjector accountAssetProjector;
   private final AccountAssetOldPhysicalAssetsSource oldPhysicalAssetsSource;
+  private final ActivationAccountSource activationAccountSource;
 
   public SnapshotPathStateTransitionCollector(
       AccountAssetOldPhysicalAssetsSource oldPhysicalAssetsSource) {
+    this(oldPhysicalAssetsSource, consumer -> {
+      throw new IOException("path-state P66 activation Account source is unavailable");
+    });
+  }
+
+  public SnapshotPathStateTransitionCollector(
+      AccountAssetOldPhysicalAssetsSource oldPhysicalAssetsSource,
+      ActivationAccountSource activationAccountSource) {
     this.accountAssetProjector = new AccountAssetArchiveProjector();
     this.oldPhysicalAssetsSource = Objects.requireNonNull(oldPhysicalAssetsSource,
         "oldPhysicalAssetsSource");
+    this.activationAccountSource = Objects.requireNonNull(activationAccountSource,
+        "activationAccountSource");
   }
 
   @Override
@@ -36,9 +47,17 @@ public final class SnapshotPathStateTransitionCollector
     BlockChangeView admitted = Objects.requireNonNull(view, "view");
     P66Phase phase = resolvePhase(admitted);
     LinkedHashMap<MutationKey, PathStateMutation> mutations = new LinkedHashMap<>();
+    if (phase == P66Phase.P66_ACTIVATION) {
+      collectActivationAccounts(mutations);
+    }
     for (BlockChangeView.DatabaseChanges database : admitted.getDatabases()) {
       String dbName = database.getDbName();
       PathStateParticipantDescriptor.current().require(dbName);
+      if (phase == P66Phase.P66_ACTIVATION
+          && (AccountAssetArchiveProjector.ACCOUNT_DB.equals(dbName)
+          || AccountAssetArchiveProjector.ACCOUNT_ASSET_DB.equals(dbName))) {
+        continue;
+      }
       for (BlockChangeView.Change change : database.getChanges()) {
         if (AccountAssetArchiveProjector.ACCOUNT_DB.equals(dbName)) {
           collectAccount(phase, database, change, mutations);
@@ -51,6 +70,27 @@ public final class SnapshotPathStateTransitionCollector
     BlockSnapshotMeta meta = admitted.getMeta();
     return new PathStateBlockTransition(meta.getBlockNumber(), meta.getBlockHash(),
         meta.getParentHash(), meta.getTimestamp(), phase, mutations.values());
+  }
+
+  private void collectActivationAccounts(
+      Map<MutationKey, PathStateMutation> mutations) throws IOException {
+    activationAccountSource.scan((key, rawPost) -> {
+      BlockChangeView.PostValue postValue = BlockChangeView.PostValue.present(rawPost);
+      Map<WrappedByteArray, byte[]> oldAssets = Collections.emptyMap();
+      if (accountAssetProjector.requiresOldPhysicalAssets(null, postValue)) {
+        oldAssets = AccountAssetOldPhysicalAssetsSource.captureRequired(
+            oldPhysicalAssetsSource, key);
+      }
+      AccountAssetArchiveProjector.Projection projection = accountAssetProjector.project(
+          key, null, postValue, true, oldAssets);
+      addCanonical(AccountAssetArchiveProjector.ACCOUNT_DB, key, projection.oldAccount,
+          projection.postAccount, P66Phase.P66_ACTIVATION, mutations);
+      for (AssetRow asset : projection.changedAssetRows) {
+        addPhysical(P66Phase.P66_ACTIVATION,
+            AccountAssetArchiveProjector.ACCOUNT_ASSET_DB,
+            asset.getPhysicalRawKey(), null, asset.getPostValue(), mutations);
+      }
+    });
   }
 
   private void collectAccount(P66Phase phase, BlockChangeView.DatabaseChanges database,
@@ -127,7 +167,7 @@ public final class SnapshotPathStateTransitionCollector
         throw new IOException("path-state P66 phase cannot move backwards");
       }
       if (previous == 0L && target == 1L) {
-        throw new IOException("path-state P66 activation requires an explicit rebuild");
+        return P66Phase.P66_ACTIVATION;
       }
       return target == 0L ? P66Phase.P66_OFF : P66Phase.P66_ON;
     }
@@ -150,6 +190,19 @@ public final class SnapshotPathStateTransitionCollector
         && left.getDbName().equals(right.getDbName())
         && Arrays.equals(left.getCanonicalKey(), right.getCanonicalKey())
         && Arrays.equals(left.getCanonicalValue(), right.getCanonicalValue());
+  }
+
+  /** Scans the canonical post-state Account domain only for the one-time P66 transition. */
+  @FunctionalInterface
+  public interface ActivationAccountSource {
+
+    void scan(ActivationAccountConsumer consumer) throws IOException;
+  }
+
+  @FunctionalInterface
+  public interface ActivationAccountConsumer {
+
+    void accept(byte[] key, byte[] value) throws IOException;
   }
 
   private static final class MutationKey {
