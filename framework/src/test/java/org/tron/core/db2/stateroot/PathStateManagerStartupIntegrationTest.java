@@ -163,7 +163,7 @@ public class PathStateManagerStartupIntegrationTest {
     when(dynamic.getLatestBlockHeaderNumber()).thenReturn(blockNumber);
     when(dynamic.getLatestBlockHeaderHash()).thenReturn(blockId);
     when(dynamic.getLatestBlockHeaderTimestamp()).thenReturn(timestamp);
-    when(dynamic.getAllowSameTokenName()).thenReturn(1L);
+    when(dynamic.getAllowAccountAssetOptimizationFromRoot()).thenReturn(1L);
     BlockCapsule block = mock(BlockCapsule.class);
     when(block.getNum()).thenReturn(blockNumber);
     when(block.getBlockId()).thenReturn(blockId);
