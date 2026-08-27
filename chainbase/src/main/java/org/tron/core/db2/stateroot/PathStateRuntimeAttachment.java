@@ -14,6 +14,7 @@ public final class PathStateRuntimeAttachment {
   private final PathStateTransitionCollector collector;
   private final TransitionSink sink;
   private final BaseFlushSink baseFlushSink;
+  private final TransitionPreviewer previewer;
   private Throwable failure;
   private FailureStage failureStage;
   private long readyBlockNumber = -1;
@@ -21,16 +22,44 @@ public final class PathStateRuntimeAttachment {
   private long observedBlockNumber = -1;
   private byte[] observedBlockHash;
   private PathStateBlockTransition pending;
+  private HeaderDiagnostic headerDiagnostic = HeaderDiagnostic.NONE;
+  private long headerDiagnosticBlockNumber = -1;
+  private byte[] headerDiagnosticBlockHash;
 
   public PathStateRuntimeAttachment(PathStateTransitionCollector collector, TransitionSink sink) {
-    this(collector, sink, (blockNumber, blockHash) -> { });
+    this(collector, sink, (blockNumber, blockHash) -> { }, null);
   }
 
   public PathStateRuntimeAttachment(PathStateTransitionCollector collector, TransitionSink sink,
       BaseFlushSink baseFlushSink) {
+    this(collector, sink, baseFlushSink, null);
+  }
+
+  public PathStateRuntimeAttachment(PathStateTransitionCollector collector, TransitionSink sink,
+      BaseFlushSink baseFlushSink, TransitionPreviewer previewer) {
     this.collector = Objects.requireNonNull(collector, "collector");
     this.sink = Objects.requireNonNull(sink, "sink");
     this.baseFlushSink = Objects.requireNonNull(baseFlushSink, "baseFlushSink");
+    this.previewer = previewer;
+  }
+
+  /** Computes producer metadata without observing, publishing, or failing this runtime. */
+  public synchronized byte[] preview(BlockChangeView view) {
+    if (failure != null || previewer == null || status().getState() != State.READY) {
+      return null;
+    }
+    try {
+      PathStateBlockTransition transition = collectAndValidate(view);
+      byte[] candidate = previewer.prepare(transition);
+      if (candidate == null || candidate.length != 32) {
+        throw new IOException("path-state preview root must be exactly 32 bytes");
+      }
+      return copy(candidate);
+    } catch (IOException | RuntimeException previewFailure) {
+      logger.warn("Path-state producer preview unavailable; state_root remains absent",
+          previewFailure);
+      return null;
+    }
   }
 
   /** Capture failures fail only this shadow runtime and never reject the canonical block. */
@@ -41,14 +70,7 @@ public final class PathStateRuntimeAttachment {
       return null;
     }
     try {
-      PathStateBlockTransition transition = Objects.requireNonNull(collector.collect(admitted),
-          "path-state collector returned null");
-      if (transition.getBlockNumber() != admitted.getMeta().getBlockNumber()
-          || !Arrays.equals(transition.getBlockHash(), admitted.getMeta().getBlockHash())
-          || !Arrays.equals(transition.getParentHash(), admitted.getMeta().getParentHash())
-          || transition.getTimestamp() != admitted.getMeta().getTimestamp()) {
-        throw new IOException("path-state collector changed the captured block identity");
-      }
+      PathStateBlockTransition transition = collectAndValidate(admitted);
       pending = transition;
       return transition;
     } catch (IOException | RuntimeException currentFailure) {
@@ -102,7 +124,37 @@ public final class PathStateRuntimeAttachment {
         && readyBlockNumber == observedBlockNumber
         && Arrays.equals(readyBlockHash, observedBlockHash) ? State.READY : State.NOT_READY;
     return new Status(state, readyBlockNumber, readyBlockHash, observedBlockNumber,
-        observedBlockHash, failureStage, classify(failure), failure);
+        observedBlockHash, failureStage, classify(failure), failure, headerDiagnostic,
+        headerDiagnosticBlockNumber, headerDiagnosticBlockHash);
+  }
+
+  /** Records a non-blocking comparison of carried header metadata against the local READY root. */
+  public synchronized void diagnoseHeader(long blockNumber, byte[] blockHash, byte[] carriedRoot,
+      byte[] localRoot) {
+    headerDiagnosticBlockNumber = blockNumber;
+    headerDiagnosticBlockHash = copy(blockHash);
+    if (carriedRoot == null || carriedRoot.length == 0) {
+      headerDiagnostic = HeaderDiagnostic.ABSENT;
+      return;
+    }
+    if (carriedRoot.length != 32) {
+      headerDiagnostic = HeaderDiagnostic.INVALID_LENGTH;
+      logger.warn("Path-state header diagnostic: block={}, result={}, length={}", blockNumber,
+          headerDiagnostic, carriedRoot.length);
+      return;
+    }
+    if (failure != null || readyBlockNumber != blockNumber
+        || !Arrays.equals(readyBlockHash, blockHash) || localRoot == null
+        || localRoot.length != 32) {
+      headerDiagnostic = HeaderDiagnostic.NOT_AVAILABLE;
+      return;
+    }
+    headerDiagnostic = Arrays.equals(carriedRoot, localRoot)
+        ? HeaderDiagnostic.MATCH : HeaderDiagnostic.MISMATCH;
+    if (headerDiagnostic == HeaderDiagnostic.MISMATCH) {
+      logger.warn("Path-state header diagnostic: block={}, result={}", blockNumber,
+          headerDiagnostic);
+    }
   }
 
   /** Seeds or rewinds the exact verified durable head; failed runtimes cannot be reset. */
@@ -169,6 +221,19 @@ public final class PathStateRuntimeAttachment {
     observedBlockHash = copy(hash);
   }
 
+  private PathStateBlockTransition collectAndValidate(BlockChangeView view) throws IOException {
+    BlockChangeView admitted = Objects.requireNonNull(view, "view");
+    PathStateBlockTransition transition = Objects.requireNonNull(collector.collect(admitted),
+        "path-state collector returned null");
+    if (transition.getBlockNumber() != admitted.getMeta().getBlockNumber()
+        || !Arrays.equals(transition.getBlockHash(), admitted.getMeta().getBlockHash())
+        || !Arrays.equals(transition.getParentHash(), admitted.getMeta().getParentHash())
+        || transition.getTimestamp() != admitted.getMeta().getTimestamp()) {
+      throw new IOException("path-state collector changed the captured block identity");
+    }
+    return transition;
+  }
+
   private static FailureKind classify(Throwable failure) {
     if (failure == null) {
       return FailureKind.NONE;
@@ -230,6 +295,15 @@ public final class PathStateRuntimeAttachment {
     RUNTIME
   }
 
+  public enum HeaderDiagnostic {
+    NONE,
+    ABSENT,
+    INVALID_LENGTH,
+    NOT_AVAILABLE,
+    MATCH,
+    MISMATCH
+  }
+
   public static final class Status {
 
     private final State state;
@@ -241,10 +315,14 @@ public final class PathStateRuntimeAttachment {
     private final FailureKind failureKind;
     private final String failureType;
     private final String failureMessage;
+    private final HeaderDiagnostic headerDiagnostic;
+    private final long headerDiagnosticBlockNumber;
+    private final byte[] headerDiagnosticBlockHash;
 
     private Status(State state, long readyBlockNumber, byte[] readyBlockHash,
         long observedBlockNumber, byte[] observedBlockHash, FailureStage failureStage,
-        FailureKind failureKind, Throwable failure) {
+        FailureKind failureKind, Throwable failure, HeaderDiagnostic headerDiagnostic,
+        long headerDiagnosticBlockNumber, byte[] headerDiagnosticBlockHash) {
       this.state = state;
       this.readyBlockNumber = readyBlockNumber;
       this.readyBlockHash = copy(readyBlockHash);
@@ -254,6 +332,9 @@ public final class PathStateRuntimeAttachment {
       this.failureKind = failureKind;
       this.failureType = failure == null ? null : failure.getClass().getName();
       this.failureMessage = failure == null ? null : failure.getMessage();
+      this.headerDiagnostic = headerDiagnostic;
+      this.headerDiagnosticBlockNumber = headerDiagnosticBlockNumber;
+      this.headerDiagnosticBlockHash = copy(headerDiagnosticBlockHash);
     }
 
     public State getState() {
@@ -295,6 +376,18 @@ public final class PathStateRuntimeAttachment {
     public String getFailureMessage() {
       return failureMessage;
     }
+
+    public HeaderDiagnostic getHeaderDiagnostic() {
+      return headerDiagnostic;
+    }
+
+    public long getHeaderDiagnosticBlockNumber() {
+      return headerDiagnosticBlockNumber;
+    }
+
+    public byte[] getHeaderDiagnosticBlockHash() {
+      return copy(headerDiagnosticBlockHash);
+    }
   }
 
   @FunctionalInterface
@@ -307,5 +400,11 @@ public final class PathStateRuntimeAttachment {
   public interface BaseFlushSink {
 
     void accept(long blockNumber, byte[] blockHash) throws IOException;
+  }
+
+  @FunctionalInterface
+  public interface TransitionPreviewer {
+
+    byte[] prepare(PathStateBlockTransition transition) throws IOException;
   }
 }

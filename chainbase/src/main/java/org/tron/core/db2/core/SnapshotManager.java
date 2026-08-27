@@ -294,6 +294,18 @@ public class SnapshotManager implements RevokingDatabase {
     }
   }
 
+  /** Previews optional producer metadata from the active block session without publishing it. */
+  public synchronized byte[] previewPathStateRoot(BlockSnapshotMeta meta) {
+    if (activeSession <= 0) {
+      throw new RevokingStoreIllegalStateException(activeSession);
+    }
+    if (pathStateRuntimeAttachment == null) {
+      return null;
+    }
+    return pathStateRuntimeAttachment.preview(BlockChangeView.capture(
+        Objects.requireNonNull(meta, "meta"), dbs));
+  }
+
   private void validateBlockMeta(BlockSnapshotMeta meta) {
     BlockSnapshotMeta previousMeta = null;
     for (Chainbase db : dbs) {
