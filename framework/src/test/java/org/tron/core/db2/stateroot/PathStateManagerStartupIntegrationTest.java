@@ -1,25 +1,37 @@
 package org.tron.core.db2.stateroot;
 
 import static org.junit.Assert.assertArrayEquals;
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.withSettings;
 
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Collections;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.tron.common.parameter.CommonParameter;
 import org.tron.common.utils.Sha256Hash;
 import org.tron.core.ChainBaseManager;
+import org.tron.core.capsule.BlockCapsule;
+import org.tron.core.capsule.BlockCapsule.BlockId;
 import org.tron.core.config.args.Storage;
 import org.tron.core.db.Manager;
+import org.tron.core.db2.archive.LatestStateGenerationAdapter.SnapshotCapableStore;
+import org.tron.core.db2.archive.LatestStateGenerationAdapter.StoreSnapshot;
+import org.tron.core.db2.common.DB;
+import org.tron.core.db2.core.Chainbase;
+import org.tron.core.db2.core.SnapshotManager;
+import org.tron.core.db2.core.SnapshotRoot;
 import org.tron.core.db2.stateroot.PathStateCanonicalizer.P66Phase;
 import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
 import org.tron.core.store.DynamicPropertiesStore;
@@ -77,6 +89,76 @@ public class PathStateManagerStartupIntegrationTest {
     assertNull(manager.getPathStateSnapshotHead());
   }
 
+  @Test
+  public void missingCurrentRebuildsExactNativeSnapshotAndAttaches() throws Exception {
+    Path output = temporaryFolder.newFolder("startup-rebuild").toPath();
+    long blockNumber = 100L;
+    long timestamp = 300L;
+    BlockId blockId = new BlockId(Sha256Hash.wrap(bytes(1)), blockNumber);
+    Sha256Hash parentHash = Sha256Hash.wrap(bytes(2));
+    DynamicPropertiesStore dynamic = mock(DynamicPropertiesStore.class);
+    when(dynamic.getLatestBlockHeaderNumber()).thenReturn(blockNumber);
+    when(dynamic.getLatestBlockHeaderHash()).thenReturn(blockId);
+    when(dynamic.getLatestBlockHeaderTimestamp()).thenReturn(timestamp);
+    when(dynamic.getAllowSameTokenName()).thenReturn(1L);
+    BlockCapsule block = mock(BlockCapsule.class);
+    when(block.getNum()).thenReturn(blockNumber);
+    when(block.getBlockId()).thenReturn(blockId);
+    when(block.getParentHash()).thenReturn(parentHash);
+    when(block.getTimeStamp()).thenReturn(timestamp);
+    ChainBaseManager chainBase = mock(ChainBaseManager.class);
+    when(chainBase.getDynamicPropertiesStore()).thenReturn(dynamic);
+    when(chainBase.getBlockByNum(blockNumber)).thenReturn(block);
+
+    AtomicInteger closed = new AtomicInteger();
+    Manager manager = new Manager();
+    setChainBaseManager(manager, chainBase);
+
+    withConfig(output, true, () -> {
+      SnapshotManager snapshots = new SnapshotManager("");
+      for (PathStateParticipantDescriptor.StoreIdentity participant
+          : PathStateParticipantDescriptor.current().getStores()) {
+        snapshots.getDbs().add(emptyNativeStore(participant.getDbName(), blockNumber,
+            blockId.getBytes(), closed));
+      }
+      setField(manager, "revokingStore", snapshots);
+      invoke(manager, "initPathStateRoot");
+    });
+    assertNotNull(manager.getPathStateSnapshotHead());
+    PathStateRootMetadata head = manager.getPathStateSnapshotHead().getHead();
+    assertArrayEquals(blockId.getBytes(), head.getBlockHash());
+    assertArrayEquals(parentHash.getBytes(), head.getParentHash());
+    assertNotNull(PathStateStoreManifest.validateExisting(
+        output.resolve("path-state-root"), Engine.ROCKSDB));
+    assertEquals(PathStateParticipantDescriptor.current().getStores().size(), closed.get());
+  }
+
+  @SuppressWarnings("unchecked")
+  private static Chainbase emptyNativeStore(String dbName, long blockNumber, byte[] blockHash,
+      AtomicInteger closed) throws Exception {
+    DB<byte[], byte[]> database = mock(DB.class,
+        withSettings().extraInterfaces(SnapshotCapableStore.class));
+    SnapshotCapableStore capable = (SnapshotCapableStore) database;
+    when(database.getDbName()).thenReturn(dbName);
+    when(capable.getDbName()).thenReturn(dbName);
+    when(capable.getSourceIdentity()).thenReturn("source-" + dbName);
+    StoreSnapshot snapshot = mock(StoreSnapshot.class);
+    when(snapshot.getDbName()).thenReturn(dbName);
+    when(snapshot.getSourceIdentity()).thenReturn("source-" + dbName);
+    when(snapshot.getBlockNumber()).thenReturn(blockNumber);
+    when(snapshot.getBlockHash()).thenReturn(blockHash);
+    when(snapshot.range(org.mockito.ArgumentMatchers.any(byte[].class),
+        org.mockito.ArgumentMatchers.isNull(), org.mockito.ArgumentMatchers.anyInt()))
+        .thenReturn(Collections.emptyList());
+    org.mockito.Mockito.doAnswer(invocation -> {
+      closed.incrementAndGet();
+      return null;
+    }).when(snapshot).close();
+    when(capable.pin(org.mockito.ArgumentMatchers.eq(blockNumber),
+        org.mockito.ArgumentMatchers.any(byte[].class))).thenReturn(snapshot);
+    return new Chainbase(new SnapshotRoot(database));
+  }
+
   private static void withConfig(Path output, boolean enabled, ThrowingRunnable action)
       throws Exception {
     CommonParameter args = CommonParameter.getInstance();
@@ -100,9 +182,13 @@ public class PathStateManagerStartupIntegrationTest {
 
   private static void setChainBaseManager(Manager manager, ChainBaseManager chainBase)
       throws Exception {
-    java.lang.reflect.Field field = Manager.class.getDeclaredField("chainBaseManager");
+    setField(manager, "chainBaseManager", chainBase);
+  }
+
+  private static void setField(Manager manager, String name, Object value) throws Exception {
+    java.lang.reflect.Field field = Manager.class.getDeclaredField(name);
     field.setAccessible(true);
-    field.set(manager, chainBase);
+    field.set(manager, value);
   }
 
   private static void invoke(Manager manager, String methodName) throws Exception {
