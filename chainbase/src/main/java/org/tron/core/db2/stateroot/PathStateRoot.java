@@ -102,6 +102,9 @@ public final class PathStateRoot {
 
   /** Returns the super root after binding every participant identity, format, and current root. */
   public synchronized byte[] rootHash() {
+    if (rootMaterialized) {
+      return superTrie.rootHash();
+    }
     for (PathStateParticipant participant : scope.getParticipants()) {
       byte[] storeRoot = participantTries.get(participant.getDbName()).rootHash();
       superTrie.put(PathStateCommitmentCodec.superLeafKey(participant.getStoreId()),
