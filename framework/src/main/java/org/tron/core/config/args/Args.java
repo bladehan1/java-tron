@@ -221,6 +221,20 @@ public class Args extends CommonParameter {
     PARAMETER.storage.setStateArchiveDirectory(sc.getStateArchive().getDirectory());
     PARAMETER.storage.setStateArchiveMaxSegmentSize(sc.getStateArchive().getMaxSegmentSize());
     PARAMETER.storage.setStateArchiveQueueCapacity(sc.getStateArchive().getQueueCapacity());
+    PARAMETER.storage.setPathStateRootEnabled(sc.getPathStateRoot().isEnabled());
+    PARAMETER.storage.setPathStateRootMode(sc.getPathStateRoot().getMode());
+    PARAMETER.storage.setPathStateRootDirectory(sc.getPathStateRoot().getDirectory());
+    PARAMETER.storage.setPathStateRootFormatVersion(sc.getPathStateRoot().getFormatVersion());
+    PARAMETER.storage.setPathStateRootReversibleLayerLimit(
+        sc.getPathStateRoot().getReversibleLayerLimit());
+    PARAMETER.storage.setPathStateRootReversibleLayerBytes(
+        sc.getPathStateRoot().getReversibleLayerBytes());
+    PARAMETER.storage.setPathStateRootWriteBufferBytes(
+        sc.getPathStateRoot().getWriteBufferBytes());
+    PARAMETER.storage.setPathStateRootRebuildFromGenesis(
+        sc.getPathStateRoot().isRebuildFromGenesis());
+    PARAMETER.storage.setPathStateRootVerifyEveryBlock(
+        sc.getPathStateRoot().isVerifyEveryBlock());
 
     // estimatedTransactions / maxFlushCount clamping & validation run inside
     // TxCacheConfig.postProcess / SnapshotConfig.postProcess during bean load.
