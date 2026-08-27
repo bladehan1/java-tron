@@ -50,6 +50,13 @@ public final class PathStateRuntimeAttachment {
     return failure;
   }
 
+  /** Marks an externally coordinated lifecycle operation as failed without replacing first cause. */
+  public synchronized void fail(Throwable currentFailure) {
+    if (failure == null) {
+      failure = Objects.requireNonNull(currentFailure, "currentFailure");
+    }
+  }
+
   @FunctionalInterface
   public interface TransitionSink {
 

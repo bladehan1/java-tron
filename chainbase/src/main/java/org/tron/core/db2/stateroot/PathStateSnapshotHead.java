@@ -45,6 +45,32 @@ public final class PathStateSnapshotHead {
     return advancePrepared(prepare(transition));
   }
 
+  /** Switches the owned durable CURRENT and snapshot to an exact reversible ancestor. */
+  public synchronized PathStateRootMetadata rewindTo(long blockNumber, byte[] blockHash)
+      throws IOException {
+    requireHealthy();
+    PathStateRootMetadata previous = head;
+    try {
+      PathStateCurrentStore currentStore = new PathStateCurrentStore(manifest);
+      PathStateRootMetadata target = currentStore.findAncestor(blockNumber, blockHash, limits);
+      PathStateRootMetadata switched = new PathStateLayerRetirement(manifest, limits)
+          .switchToAncestor(target);
+      PathStateSnapshotHead restored = open(manifest, limits);
+      if (!same(switched, restored.head)
+          || restored.head.getBlockNumber() != blockNumber
+          || !Arrays.equals(restored.head.getBlockHash(), blockHash)) {
+        failed = true;
+        throw new IOException("path-state rewound snapshot identity mismatch");
+      }
+      head = restored.head;
+      snapshot = restored.snapshot;
+      return head;
+    } catch (IOException | RuntimeException failure) {
+      failIfAuthorityMoved(previous, failure);
+      throw failure;
+    }
+  }
+
   /** Computes an immutable candidate without opening or changing durable path-state storage. */
   public synchronized PreparedPathStateTransition prepare(PathStateBlockTransition transition)
       throws IOException {

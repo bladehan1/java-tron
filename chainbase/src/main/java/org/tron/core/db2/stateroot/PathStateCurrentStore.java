@@ -118,6 +118,35 @@ public final class PathStateCurrentStore {
     throw new IOException("path-state canonical switch exceeds the reversible window");
   }
 
+  /** Resolves an exact number/hash ancestor without exposing historical-root lookup. */
+  synchronized PathStateRootMetadata findAncestor(long blockNumber, byte[] blockHash,
+      PathStateLayerLimits limits) throws IOException {
+    byte[] admittedHash = Arrays.copyOf(Objects.requireNonNull(blockHash, "blockHash"),
+        blockHash.length);
+    PathStateLayerLimits admittedLimits = Objects.requireNonNull(limits, "limits");
+    PathStateRootMetadata base = requireKind(PathStateMetadataFile.load(basePath()), Kind.BASE);
+    requireFormat(base);
+    PathStateRootMetadata cursor = current();
+    if (matchesBlock(cursor, blockNumber, admittedHash)) {
+      verifyTargetState(cursor);
+      return cursor;
+    }
+    if (blockNumber >= cursor.getBlockNumber()) {
+      throw new IOException("path-state canonical target is not an ancestor");
+    }
+    for (int depth = 1; depth <= admittedLimits.getMaxLayers(); depth++) {
+      cursor = parentOf(cursor, base);
+      if (matchesBlock(cursor, blockNumber, admittedHash)) {
+        verifyTargetState(cursor);
+        return cursor;
+      }
+      if (cursor.getKind() == Kind.BASE) {
+        break;
+      }
+    }
+    throw new IOException("path-state canonical target exceeds the reversible window");
+  }
+
   /** Loads CURRENT and verifies that every referenced layer reaches the single durable base. */
   public synchronized PathStateRootMetadata current() throws IOException {
     PathStateRootMetadata base = requireKind(PathStateMetadataFile.load(basePath()), Kind.BASE);
@@ -232,6 +261,12 @@ public final class PathStateCurrentStore {
 
   private static boolean same(PathStateRootMetadata left, PathStateRootMetadata right) {
     return Arrays.equals(left.encode(), right.encode());
+  }
+
+  private static boolean matchesBlock(PathStateRootMetadata metadata, long blockNumber,
+      byte[] blockHash) {
+    return metadata.getBlockNumber() == blockNumber
+        && Arrays.equals(metadata.getBlockHash(), blockHash);
   }
 
 }
