@@ -46,8 +46,21 @@ public final class PathStateRebuildCoordinator {
    */
   public RebuildResult rebuild(PathStateStoreManifest manifest, SnapshotSource source)
       throws IOException {
+    return rebuildInternal(manifest, source, null, PathStateLayerLimits.defaults());
+  }
+
+  /** Publishes BASE(P0) through the catch-up handoff and drains every queued transition. */
+  public RebuildResult rebuild(PathStateStoreManifest manifest, SnapshotSource source,
+      PathStateCatchUpQueue catchUpQueue, PathStateLayerLimits layerLimits) throws IOException {
+    return rebuildInternal(manifest, source,
+        Objects.requireNonNull(catchUpQueue, "catchUpQueue"), layerLimits);
+  }
+
+  private RebuildResult rebuildInternal(PathStateStoreManifest manifest, SnapshotSource source,
+      PathStateCatchUpQueue catchUpQueue, PathStateLayerLimits layerLimits) throws IOException {
     PathStateStoreManifest admittedManifest = Objects.requireNonNull(manifest, "manifest");
     SnapshotSource admittedSource = Objects.requireNonNull(source, "source");
+    PathStateLayerLimits admittedLimits = Objects.requireNonNull(layerLimits, "layerLimits");
     SnapshotIdentity identity = Objects.requireNonNull(admittedSource.identity(), "identity");
     byte[] sourceIdentityDigest = SnapshotIdentity.copy32(
         admittedSource.sourceIdentityDigest(), "sourceIdentityDigest");
@@ -58,7 +71,11 @@ public final class PathStateRebuildCoordinator {
     if (currentStore.isInitialized()) {
       throw new IOException("path-state rebuild requires an uninitialized current store");
     }
+    if (catchUpQueue != null) {
+      catchUpQueue.admitSnapshot(identity);
+    }
 
+    RebuildResult rebuildResult;
     try (PathStateNodeStoreSet stores = PathStateNodeStoreSet.openBase(admittedManifest)) {
       PathStateRoot root = stores.createRoot();
       PathStateRebuildCheckpoint checkpoint = stores.getRebuildCheckpoint();
@@ -99,12 +116,19 @@ public final class PathStateRebuildCoordinator {
       PathStateRootMetadata metadata = PathStateRootMetadata.base(identity.getBlockNumber(),
           identity.getBlockHash(), identity.getParentHash(), identity.getTimestamp(),
           identity.getPhase(), admittedManifest.getIdentityDigest(), stateRoot, sourceDigest);
-      PathStateRootMetadata published =
-          new PathStateBasePublication(admittedManifest).publish(stores, metadata);
-      return new RebuildResult(published, storeResults, totalEntries, sourceDigest);
+      PathStateBasePublication publication = new PathStateBasePublication(admittedManifest);
+      PathStateRootMetadata published = catchUpQueue == null
+          ? publication.publish(stores, metadata)
+          : catchUpQueue.publishBase(identity, metadata,
+              () -> publication.publish(stores, metadata));
+      rebuildResult = new RebuildResult(published, storeResults, totalEntries, sourceDigest);
     } catch (ArithmeticException overflow) {
       throw new IOException("path-state rebuild entry count overflow", overflow);
     }
+    if (catchUpQueue != null) {
+      catchUpQueue.drain(admittedManifest, admittedLimits);
+    }
+    return rebuildResult;
   }
 
   private byte[] sourceDigest(SnapshotIdentity identity, byte[] sourceIdentityDigest,
