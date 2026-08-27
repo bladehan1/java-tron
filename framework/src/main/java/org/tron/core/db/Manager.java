@@ -1380,6 +1380,7 @@ public class Manager {
       logger.info("Start to erase block: {}.", oldHeadBlock);
       khaosDb.pop();
       revokingStore.fastPop();
+      rewindPathStateRootAfterPop();
       logger.info("End to erase block: {}.", oldHeadBlock);
       oldHeadBlock.getTransactions().forEach(tc ->
           poppedTransactions.add(new TransactionCapsule(tc.getInstance())));
@@ -1388,6 +1389,24 @@ public class Manager {
 
     } catch (ItemNotFoundException | BadItemException e) {
       logger.warn(e.getMessage(), e);
+    }
+  }
+
+  /** Keeps the non-consensus path-state head aligned after Chainbase owns a successful pop. */
+  private void rewindPathStateRootAfterPop() {
+    PathStateSnapshotHead owner = pathStateSnapshotHead;
+    if (owner == null) {
+      return;
+    }
+    try {
+      owner.rewindTo(getDynamicPropertiesStore().getLatestBlockHeaderNumber(),
+          getDynamicPropertiesStore().getLatestBlockHeaderHash().getBytes());
+    } catch (java.io.IOException | RuntimeException failure) {
+      PathStateRuntimeAttachment runtime = pathStateRuntime;
+      if (runtime != null) {
+        runtime.fail(failure);
+      }
+      logger.error("Path-state short-reorg rewind failed after canonical block pop", failure);
     }
   }
 
