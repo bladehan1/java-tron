@@ -4,6 +4,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import com.google.protobuf.ByteString;
+import com.google.protobuf.util.JsonFormat;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -153,6 +154,43 @@ public class BlockCapsuleTest {
       e.printStackTrace();
     }
 
+  }
+
+  @Test
+  public void stateRootRoundTripsOutsideBlockIdentityAndSignature() throws Exception {
+    String key = PublicMethod.getRandomPrivateKey();
+    byte[] witnessAddress = PublicMethod.getAddressByteByPrivateKey(key);
+    BlockCapsule block = new BlockCapsule(5,
+        Sha256Hash.wrap(ByteString.copyFrom(ByteArray.fromHexString(
+            "9938a342238077182498b464ac0292229938a342238077182498b464ac029222"))),
+        6789,
+        ByteString.copyFrom(witnessAddress));
+    block.setMerkleRoot();
+    block.sign(ByteArray.fromHexString(key));
+    byte[] rawData = block.getInstance().getBlockHeader().getRawData().toByteArray();
+    byte[] blockId = block.getBlockId().getBytes();
+    byte[] signature = block.getInstance().getBlockHeader().getWitnessSignature().toByteArray();
+    byte[] root = Sha256Hash.of(true, "path-state".getBytes()).getBytes();
+
+    block.setStateRoot(root);
+
+    Assert.assertArrayEquals(root, block.getStateRoot());
+    Assert.assertArrayEquals(rawData,
+        block.getInstance().getBlockHeader().getRawData().toByteArray());
+    Assert.assertArrayEquals(blockId, block.getBlockId().getBytes());
+    Assert.assertArrayEquals(signature,
+        block.getInstance().getBlockHeader().getWitnessSignature().toByteArray());
+    BlockCapsule restored = new BlockCapsule(block.getData());
+    Assert.assertArrayEquals(root, restored.getStateRoot());
+    Assert.assertEquals(3, BlockHeader.getDescriptor().findFieldByName("state_root").getNumber());
+    Assert.assertTrue(JsonFormat.printer().print(restored.getInstance().getBlockHeader())
+        .contains("\"stateRoot\""));
+
+    DynamicPropertiesStore dps = mock(DynamicPropertiesStore.class);
+    when(dps.getAllowMultiSign()).thenReturn(0L);
+    Assert.assertTrue(restored.validateSignature(dps, mock(AccountStore.class)));
+    Assert.assertThrows(IllegalArgumentException.class,
+        () -> block.setStateRoot(new byte[31]));
   }
 
   @Test
