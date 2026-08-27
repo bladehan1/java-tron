@@ -34,10 +34,13 @@ public final class PathMerkleTrie {
   private final PathNodeStore nodeStore;
   private final Map<BytesKey, byte[]> leaves = new TreeMap<>(UNSIGNED_KEY_COMPARATOR);
   private final IdentityHashMap<Node, BytesKey> materializedNodes = new IdentityHashMap<>();
+  private Snapshot inheritedSnapshot;
   private Node rootNode;
   private Node materializedRoot;
   private byte[] rootHash = Arrays.copyOf(Hash.EMPTY_TRIE_HASH, Hash.EMPTY_TRIE_HASH.length);
+  private int leafCount;
   private boolean dirty;
+  private boolean frozen;
   private int lastNodePuts;
   private int lastNodeDeletes;
 
@@ -46,25 +49,34 @@ public final class PathMerkleTrie {
   }
 
   public synchronized void put(byte[] secureKey, byte[] encodedValue) {
+    requireMutable();
     BytesKey key = secureKey(secureKey);
     byte[] value = nonEmpty(encodedValue, "encodedValue");
-    byte[] previous = leaves.put(key, value);
-    if (!Arrays.equals(previous, value)) {
-      rootNode = update(rootNode, toNibbles(key.bytes), 0, value);
-      dirty = true;
+    byte[] previous = leafValue(key);
+    if (Arrays.equals(previous, value)) {
+      return;
     }
+    leaves.put(key, value);
+    if (previous == null) {
+      leafCount++;
+    }
+    rootNode = update(rootNode, toNibbles(key.bytes), 0, value);
+    dirty = true;
   }
 
   public synchronized void delete(byte[] secureKey) {
+    requireMutable();
     BytesKey key = secureKey(secureKey);
-    if (leaves.remove(key) != null) {
+    if (leafValue(key) != null) {
+      leaves.put(key, null);
+      leafCount--;
       rootNode = update(rootNode, toNibbles(key.bytes), 0, null);
       dirty = true;
     }
   }
 
   public synchronized byte[] get(byte[] secureKey) {
-    byte[] value = leaves.get(secureKey(secureKey));
+    byte[] value = leafValue(secureKey(secureKey));
     return value == null ? null : Arrays.copyOf(value, value.length);
   }
 
@@ -77,7 +89,7 @@ public final class PathMerkleTrie {
   }
 
   public synchronized int size() {
-    return leaves.size();
+    return leafCount;
   }
 
   synchronized int getLastNodePuts() {
@@ -89,11 +101,30 @@ public final class PathMerkleTrie {
   }
 
   synchronized List<LeafEntry> leafEntries() {
-    List<LeafEntry> entries = new ArrayList<>(leaves.size());
-    for (Map.Entry<BytesKey, byte[]> entry : leaves.entrySet()) {
+    Map<BytesKey, byte[]> effective = effectiveLeaves();
+    List<LeafEntry> entries = new ArrayList<>(effective.size());
+    for (Map.Entry<BytesKey, byte[]> entry : effective.entrySet()) {
       entries.add(new LeafEntry(entry.getKey().copy(), entry.getValue()));
     }
     return entries;
+  }
+
+  synchronized Snapshot snapshot() {
+    rootHash();
+    frozen = true;
+    return new Snapshot(inheritedSnapshot, leaves, materializedNodes, rootNode, rootHash,
+        leafCount);
+  }
+
+  static PathMerkleTrie fromSnapshot(PathNodeStore nodeStore, Snapshot snapshot) {
+    Snapshot parent = Objects.requireNonNull(snapshot, "snapshot");
+    PathMerkleTrie trie = new PathMerkleTrie(nodeStore);
+    trie.inheritedSnapshot = parent;
+    trie.rootNode = parent.rootNode;
+    trie.materializedRoot = parent.rootNode;
+    trie.rootHash = Arrays.copyOf(parent.rootHash, parent.rootHash.length);
+    trie.leafCount = parent.leafCount;
+    return trie;
   }
 
   /** Initializes an empty trie from canonical leaves and writes its complete path-node set. */
@@ -120,7 +151,8 @@ public final class PathMerkleTrie {
   }
 
   private void importLeaves(Collection<LeafEntry> entries, String operation) {
-    if (!leaves.isEmpty() || rootNode != null || materializedRoot != null || dirty) {
+    if (!leaves.isEmpty() || inheritedSnapshot != null || rootNode != null
+        || materializedRoot != null || dirty) {
       throw new IllegalStateException("path trie is not empty before leaf " + operation);
     }
     for (LeafEntry entry : Objects.requireNonNull(entries, "entries")) {
@@ -129,6 +161,7 @@ public final class PathMerkleTrie {
           nonEmpty(present.encodedValue, "encodedValue")) != null) {
         throw new IllegalArgumentException("duplicate " + operation + " path-state leaf");
       }
+      leafCount++;
     }
   }
 
@@ -138,9 +171,6 @@ public final class PathMerkleTrie {
       throw new IllegalStateException("cannot verify a dirty path trie");
     }
     Map<BytesKey, byte[]> expectedNodes = collectNodes(rootNode);
-    if (materializedNodes.size() != expectedNodes.size()) {
-      throw new IllegalStateException("materialized path set does not match current leaves");
-    }
     for (Map.Entry<BytesKey, byte[]> entry : expectedNodes.entrySet()) {
       if (!Arrays.equals(nodeStore.get(entry.getKey().bytes), entry.getValue())) {
         throw new IllegalStateException("missing or corrupt materialized path node");
@@ -178,7 +208,7 @@ public final class PathMerkleTrie {
     if (node == null) {
       return;
     }
-    BytesKey oldPath = materializedNodes.get(node);
+    BytesKey oldPath = materializedPath(node);
     if (oldPath != null) {
       if (!Arrays.equals(oldPath.bytes, path)) {
         throw new IllegalStateException("path-local update moved an unchanged subtree");
@@ -196,7 +226,7 @@ public final class PathMerkleTrie {
     if (node == null || retained.containsKey(node)) {
       return;
     }
-    BytesKey path = materializedNodes.get(node);
+    BytesKey path = materializedPath(node);
     if (path == null) {
       throw new IllegalStateException("path-local update lost a materialized node identity");
     }
@@ -206,14 +236,54 @@ public final class PathMerkleTrie {
   }
 
   private Node buildTree() {
-    if (leaves.isEmpty()) {
+    Map<BytesKey, byte[]> effective = effectiveLeaves();
+    if (effective.isEmpty()) {
       return null;
     }
-    List<Leaf> entries = new ArrayList<>(leaves.size());
-    for (Map.Entry<BytesKey, byte[]> entry : leaves.entrySet()) {
+    List<Leaf> entries = new ArrayList<>(effective.size());
+    for (Map.Entry<BytesKey, byte[]> entry : effective.entrySet()) {
       entries.add(new Leaf(toNibbles(entry.getKey().bytes), entry.getValue()));
     }
     return build(entries, 0);
+  }
+
+  private byte[] leafValue(BytesKey key) {
+    if (leaves.containsKey(key)) {
+      return leaves.get(key);
+    }
+    return inheritedSnapshot == null ? null : inheritedSnapshot.leafValue(key);
+  }
+
+  private Map<BytesKey, byte[]> effectiveLeaves() {
+    Map<BytesKey, byte[]> effective = new TreeMap<>(UNSIGNED_KEY_COMPARATOR);
+    if (inheritedSnapshot != null) {
+      inheritedSnapshot.populateLeaves(effective);
+    }
+    applyLeaves(effective, leaves);
+    return effective;
+  }
+
+  private BytesKey materializedPath(Node node) {
+    BytesKey path = materializedNodes.get(node);
+    return path != null || inheritedSnapshot == null
+        ? path : inheritedSnapshot.materializedPath(node);
+  }
+
+  private void requireMutable() {
+    if (frozen) {
+      throw new IllegalStateException("path trie is frozen as an immutable parent snapshot");
+    }
+  }
+
+  private static void applyLeaves(Map<BytesKey, byte[]> target,
+      Map<BytesKey, byte[]> changes) {
+    for (Map.Entry<BytesKey, byte[]> entry : changes.entrySet()) {
+      if (entry.getValue() == null) {
+        target.remove(entry.getKey());
+      } else {
+        target.put(entry.getKey(), entry.getValue());
+      }
+    }
   }
 
   private static Node build(List<Leaf> entries, int depth) {
@@ -617,6 +687,46 @@ public final class PathMerkleTrie {
   private interface NodeVisitor {
 
     void visit(Node node, byte[] path);
+  }
+
+  static final class Snapshot {
+
+    private final Snapshot parent;
+    private final Map<BytesKey, byte[]> leaves;
+    private final IdentityHashMap<Node, BytesKey> materializedNodes;
+    private final Node rootNode;
+    private final byte[] rootHash;
+    private final int leafCount;
+
+    private Snapshot(Snapshot parent, Map<BytesKey, byte[]> leaves,
+        IdentityHashMap<Node, BytesKey> materializedNodes, Node rootNode, byte[] rootHash,
+        int leafCount) {
+      this.parent = parent;
+      this.leaves = leaves;
+      this.materializedNodes = materializedNodes;
+      this.rootNode = rootNode;
+      this.rootHash = Arrays.copyOf(rootHash, rootHash.length);
+      this.leafCount = leafCount;
+    }
+
+    private byte[] leafValue(BytesKey key) {
+      if (leaves.containsKey(key)) {
+        return leaves.get(key);
+      }
+      return parent == null ? null : parent.leafValue(key);
+    }
+
+    private void populateLeaves(Map<BytesKey, byte[]> target) {
+      if (parent != null) {
+        parent.populateLeaves(target);
+      }
+      applyLeaves(target, leaves);
+    }
+
+    private BytesKey materializedPath(Node node) {
+      BytesKey path = materializedNodes.get(node);
+      return path != null || parent == null ? path : parent.materializedPath(node);
+    }
   }
 
   static final class LeafEntry {
