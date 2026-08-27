@@ -24,6 +24,7 @@ public final class PathStateLayer implements Closeable {
   private final byte[] transitionDigest;
   private PathStateRootMetadata prepared;
   private PathStateRootMetadata committed;
+  private PathStateRoot.Snapshot preparedSnapshot;
 
   private PathStateLayer(PathStateStoreManifest manifest, PathStateLayerPublication publication,
       PathStateNodeStoreSet stores, PathStateRoot root, PathStateRootMetadata parent,
@@ -63,8 +64,16 @@ public final class PathStateLayer implements Closeable {
       PathStateRootMetadata parent, PathStateRoot.Snapshot parentSnapshot, long blockNumber,
       byte[] blockHash, byte[] parentHash, long timestamp, P66Phase phase,
       byte[] transitionDigest) throws IOException {
+    return beginFromSnapshot(manifest, parent, parentSnapshot, blockNumber, blockHash, parentHash,
+        timestamp, phase, transitionDigest, PathStateLayerLimits.defaults());
+  }
+
+  public static PathStateLayer beginFromSnapshot(PathStateStoreManifest manifest,
+      PathStateRootMetadata parent, PathStateRoot.Snapshot parentSnapshot, long blockNumber,
+      byte[] blockHash, byte[] parentHash, long timestamp, P66Phase phase,
+      byte[] transitionDigest, PathStateLayerLimits limits) throws IOException {
     return begin(manifest, parent, blockNumber, blockHash, parentHash, timestamp, phase,
-        transitionDigest, PathStateLayerLimits.defaults(), stage -> { },
+        transitionDigest, Objects.requireNonNull(limits, "limits"), stage -> { },
         Objects.requireNonNull(parentSnapshot, "parentSnapshot"));
   }
 
@@ -157,7 +166,24 @@ public final class PathStateLayer implements Closeable {
     if (committed == null) {
       throw new IllegalStateException("path-state layer is not committed");
     }
-    return root.snapshot();
+    return preparedSnapshot == null ? root.snapshot() : preparedSnapshot;
+  }
+
+  synchronized PathStateRoot.Snapshot prepareSnapshot() {
+    if (committed != null) {
+      return snapshot();
+    }
+    if (prepared == null) {
+      prepared = PathStateRootMetadata.layer(blockNumber, blockHash, parentHash, timestamp, phase,
+          manifest.getIdentityDigest(), parent.getStateRoot(), root.rootHash(), transitionDigest);
+    }
+    if (preparedSnapshot == null) {
+      preparedSnapshot = root.snapshot();
+    }
+    if (!Arrays.equals(prepared.getStateRoot(), preparedSnapshot.getStateRoot())) {
+      throw new IllegalStateException("path-state prepared snapshot root mismatch");
+    }
+    return preparedSnapshot;
   }
 
   @Override
