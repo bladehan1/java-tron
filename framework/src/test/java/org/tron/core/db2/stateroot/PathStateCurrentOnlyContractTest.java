@@ -26,6 +26,7 @@ public class PathStateCurrentOnlyContractTest {
 
   private static final Class<?>[] DURABLE_API = new Class<?>[]{
       PathStateBasePublication.class,
+      PathStateCatchUpQueue.class,
       PathStateCurrentStore.class,
       PathStateLayer.class,
       PathStateLayerLimits.class,
