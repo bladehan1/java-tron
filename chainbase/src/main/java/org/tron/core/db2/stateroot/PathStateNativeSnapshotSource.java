@@ -1,7 +1,11 @@
 package org.tron.core.db2.stateroot;
 
+import com.google.common.hash.Hasher;
+import com.google.common.hash.Hashing;
 import java.io.Closeable;
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -29,6 +33,7 @@ public final class PathStateNativeSnapshotSource
   private final SnapshotIdentity identity;
   private final Map<String, SnapshotCapableStore> stores;
   private final Map<String, String> sourceIdentities;
+  private final byte[] sourceIdentityDigest;
   private final Map<String, StoreSnapshot> snapshots;
   private final int pageSize;
   private final int marketEntryLimit;
@@ -42,6 +47,7 @@ public final class PathStateNativeSnapshotSource
     this.identity = identity;
     this.stores = Collections.unmodifiableMap(new LinkedHashMap<>(stores));
     this.sourceIdentities = Collections.unmodifiableMap(new LinkedHashMap<>(sourceIdentities));
+    this.sourceIdentityDigest = sourceIdentityDigest(this.sourceIdentities);
     this.snapshots = Collections.unmodifiableMap(new LinkedHashMap<>(snapshots));
     this.pageSize = pageSize;
     this.marketEntryLimit = marketEntryLimit;
@@ -149,6 +155,11 @@ public final class PathStateNativeSnapshotSource
   @Override
   public Collection<String> databases() {
     return stores.keySet();
+  }
+
+  @Override
+  public byte[] sourceIdentityDigest() {
+    return Arrays.copyOf(sourceIdentityDigest, sourceIdentityDigest.length);
   }
 
   @Override
@@ -313,6 +324,22 @@ public final class PathStateNativeSnapshotSource
       }
     }
     return Integer.compare(left.length, right.length);
+  }
+
+  private static byte[] sourceIdentityDigest(Map<String, String> identities) {
+    Hasher hasher = Hashing.sha256().newHasher();
+    hasher.putBytes(ByteBuffer.allocate(Integer.BYTES).putInt(identities.size()).array());
+    for (Map.Entry<String, String> entry : identities.entrySet()) {
+      putString(hasher, entry.getKey());
+      putString(hasher, entry.getValue());
+    }
+    return hasher.hash().asBytes();
+  }
+
+  private static void putString(Hasher hasher, String value) {
+    byte[] encoded = value.getBytes(StandardCharsets.UTF_8);
+    hasher.putBytes(ByteBuffer.allocate(Integer.BYTES).putInt(encoded.length).array());
+    hasher.putBytes(encoded);
   }
 
   private void ensureOpen() {
