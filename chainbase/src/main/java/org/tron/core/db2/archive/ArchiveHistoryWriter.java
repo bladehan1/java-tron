@@ -20,10 +20,9 @@ public final class ArchiveHistoryWriter
 
   static final int MAX_RESTART_TAIL_RECORDS = 1024;
 
-  private final HistorySegmentStore bodies;
+  private final HistoryBodyStore bodies;
   private final HistoryIndexStore index;
   private final HistoryCommitStore commits;
-  private final AccountChangeIndex accountIndex;
   private final ArchiveBaseManifest manifest;
   private final Path archiveDirectory;
   private final HistoryCommitMarkerCodec commitCodec;
@@ -46,7 +45,7 @@ public final class ArchiveHistoryWriter
     new ArchiveTruncationRecovery(archiveDirectory, maxSegmentSize).recover();
     ArchiveHistoryScanAnchor checkpoint = ArchiveHistoryScanAnchor.load(archiveDirectory,
         commitCodec);
-    this.bodies = new HistorySegmentStore(archiveDirectory, new BlockHistoryCodec(),
+    this.bodies = new PartitionedHistoryBodyStore(archiveDirectory, new BlockHistoryCodec(),
         maxSegmentSize, checkpoint);
     this.index = new HistoryIndexStore(archiveDirectory, new HistoryIndexCodec(), checkpoint);
     this.commits = new HistoryCommitStore(archiveDirectory, commitCodec, checkpoint);
@@ -56,10 +55,8 @@ public final class ArchiveHistoryWriter
     if (commits.head() != null) {
       manifest.ensureBase(commits.get(commits.firstEpoch()).getMeta());
     }
-    this.accountIndex = new AccountChangeIndex(archiveDirectory.resolve("account-change-index"));
     HistoryCommitMarker bootstrap;
     try {
-      catchUpAccountIndex();
       bootstrap = ArchiveBootstrapAnchor.loadAndValidateIfPresent(
           archiveDirectory, this, this.participatingDatabases);
     } catch (IOException | RuntimeException failure) {
@@ -96,7 +93,6 @@ public final class ArchiveHistoryWriter
         int end = Math.min(diffs.size(), start + MAX_RESTART_TAIL_RECORDS);
         persistChunk(diffs.subList(start, end));
       }
-      accountIndex.apply(diffs);
     } catch (IOException | RuntimeException e) {
       handleWriteFailure(diffs.get(diffs.size() - 1).getMeta(), e);
     }
@@ -107,9 +103,7 @@ public final class ArchiveHistoryWriter
     try {
       HistoryCommitMarker head = commits.head();
       if (head != null && head.getMeta().equals(meta)) {
-        BlockReverseDiff reverted = readCommitted(meta.getEpoch());
         HistoryCommitMarker previous = commits.get(meta.getEpoch() - 1);
-        accountIndex.revert(reverted, previous == null ? null : previous.getMeta());
         commits.removeHead(meta);
         persistHistoryScanAnchor();
         previous = commits.head();
@@ -219,13 +213,19 @@ public final class ArchiveHistoryWriter
       throw new IllegalArgumentException("Account query is outside archive coverage");
     }
     try {
-      java.util.OptionalLong changed = accountIndex.firstChangeAfter(address, targetBlock,
-          head.getMeta().getEpoch());
-      if (!changed.isPresent()) {
-        return OldValue.fromNullable(accountAtCommittedHead);
+      for (long epoch = targetBlock + 1; epoch <= head.getMeta().getEpoch(); epoch++) {
+        HistoryCommitMarker marker = commits.get(epoch);
+        if (marker == null) {
+          throw new ArchivePersistenceException("Committed account history contains a gap");
+        }
+        HistoryIndexRecord indexRecord = index.read(marker.getIndexLocation());
+        validateMarkerReferences(marker, indexRecord);
+        if (contains(indexRecord, HistoricalAccountBalanceReader.ACCOUNT_DATABASE, address)) {
+          return findOldValue(readCommitted(epoch),
+              HistoricalAccountBalanceReader.ACCOUNT_DATABASE, address);
+        }
       }
-      BlockReverseDiff diff = readCommitted(changed.getAsLong());
-      return findOldValue(diff, HistoricalAccountBalanceReader.ACCOUNT_DATABASE, address);
+      return OldValue.fromNullable(accountAtCommittedHead);
     } catch (IOException failure) {
       throw new ArchivePersistenceException("Failed to query historical account", failure);
     }
@@ -443,47 +443,7 @@ public final class ArchiveHistoryWriter
     bodies.truncateAfter(head == null ? null : head.getHistoryLocation(), commits.size());
   }
 
-  private void catchUpAccountIndex() throws IOException {
-    HistoryCommitMarker head = commits.head();
-    if (head == null) {
-      if (accountIndex.getIndexedThrough() >= 0) {
-        accountIndex.truncateAfter(null);
-      }
-      return;
-    }
-    long indexed = accountIndex.getIndexedThrough();
-    long first = commits.firstEpoch();
-    if (indexed > head.getMeta().getEpoch()) {
-      accountIndex.truncateAfter(head.getMeta());
-      indexed = head.getMeta().getEpoch();
-    }
-    if (indexed >= 0) {
-      HistoryCommitMarker indexedMarker = commits.get(indexed);
-      if (indexedMarker == null || !accountIndex.headMatches(indexedMarker.getMeta())) {
-        throw new ArchivePersistenceException(
-            "Account index head differs from committed history");
-      }
-    }
-    if (indexed >= head.getMeta().getEpoch()) {
-      return;
-    }
-    long next = indexed < 0 ? first : indexed + 1;
-    List<BlockReverseDiff> batch = new ArrayList<>(1024);
-    for (long epoch = next; epoch <= head.getMeta().getEpoch(); epoch++) {
-      batch.add(readCommitted(epoch));
-      if (batch.size() == 1024 || epoch == head.getMeta().getEpoch()) {
-        accountIndex.apply(batch);
-        batch.clear();
-      }
-    }
-  }
-
   private void closeAfterFailedConstruction(Exception failure) {
-    try {
-      accountIndex.close();
-    } catch (IOException closeFailure) {
-      failure.addSuppressed(closeFailure);
-    }
     try {
       index.close();
     } catch (IOException closeFailure) {
@@ -513,6 +473,20 @@ public final class ArchiveHistoryWriter
       }
     }
     throw new ArchivePersistenceException("Account index references a missing history key");
+  }
+
+  private static boolean contains(HistoryIndexRecord record, String dbName, byte[] rawKey) {
+    for (HistoryIndexRecord.KeyGroup group : record.getGroups()) {
+      if (!dbName.equals(group.getDbName())) {
+        continue;
+      }
+      for (byte[] key : group.getKeys()) {
+        if (Arrays.equals(rawKey, key)) {
+          return true;
+        }
+      }
+    }
+    return false;
   }
 
   private void validateMarkerReferences(HistoryCommitMarker marker,
@@ -550,15 +524,6 @@ public final class ArchiveHistoryWriter
       index.close();
     } catch (IOException e) {
       failure = e;
-    }
-    try {
-      accountIndex.close();
-    } catch (IOException e) {
-      if (failure == null) {
-        failure = e;
-      } else {
-        failure.addSuppressed(e);
-      }
     }
     try {
       bodies.close();

@@ -19,13 +19,10 @@ import org.tron.core.db.common.DbSourceInter;
 import org.tron.core.db2.archive.ArchivePersistenceException;
 import org.tron.core.db2.archive.ArchiveStoreScope;
 import org.tron.core.db2.archive.HistoricalAccountAssetBalanceResolver;
-import org.tron.core.db2.archive.HistoricalAccountAssetPrefixResolver;
-import org.tron.core.db2.archive.HistoricalAccountAssetPrefixResolver.Balance;
 import org.tron.core.db2.archive.OldValue;
 import org.tron.core.db2.archive.P66AccountAssetCodec;
 import org.tron.core.db2.archive.P66AccountAssetCodec.DecodedAssetRow;
 import org.tron.core.db2.archive.P66AccountAssetCodec.Phase;
-import org.tron.core.db2.common.WrappedByteArray;
 import org.tron.core.db2.core.Chainbase;
 import org.tron.core.db2.core.SnapshotManager;
 import org.tron.core.store.AccountAssetStore;
@@ -52,10 +49,9 @@ public final class ArchiveStateDiagnostic {
     }
     Report report = run(context.getBean(Manager.class), (SnapshotManager) revokingDatabase);
     logger.info("State archive startup diagnostic complete: block={}, stores={}, present={}, "
-            + "absent={}, p66Phase={}, p66Balance={}, p66PrefixEntries={}",
+            + "absent={}, p66Phase={}, p66Balance={}",
         report.getBlockNumber(), report.getStoreCount(), report.getPresentCount(),
-        report.getAbsentCount(), report.getP66Phase(), report.getP66Balance(),
-        report.getP66PrefixCount());
+        report.getAbsentCount(), report.getP66Phase(), report.getP66Balance());
   }
 
   static Report run(Manager manager, SnapshotManager snapshotManager) {
@@ -109,72 +105,8 @@ public final class ArchiveStateDiagnostic {
         blockNumber, Hex.toHexString(decoded.getAccountAddress()), decoded.getTokenId(),
         logical.getPhase(), logical.getBalance());
 
-    Map<String, Long> currentBalances = currentAccountAssetBalances(
-        accountAssetStore, decoded.getAccountAddress());
-    HistoricalAccountAssetPrefixResolver.Limits limits = prefixLimits(
-        accountAssetStore, decoded.getAccountAddress());
-    HistoricalAccountAssetPrefixResolver.Result prefix = manager.getArchiveAccountAssets(
-        blockNumber, decoded.getAccountAddress(), limits);
-    if (!prefix.isAccountPresent() || prefix.getPhase() != Phase.P66_ON
-        || prefix.getBalances().size() != currentBalances.size()) {
-      throw new ArchivePersistenceException(
-          "State Archive diagnostic P66 AccountAsset prefix mismatch at block " + blockNumber);
-    }
-    for (Balance balance : prefix.getBalances()) {
-      Long currentBalance = currentBalances.get(balance.getTokenId());
-      if (currentBalance == null || currentBalance != balance.getBalance()) {
-        throw new ArchivePersistenceException(
-            "State Archive diagnostic P66 AccountAsset prefix value mismatch at block "
-                + blockNumber);
-      }
-    }
-    logger.info("State archive diagnostic P66 prefix: block={}, address={}, phase={}, entries={}",
-        blockNumber, Hex.toHexString(decoded.getAccountAddress()), prefix.getPhase(),
-        prefix.getBalances().size());
     return new Report(blockNumber, expectedStores.size(), presentCount, absentCount,
-        logical.getPhase(), logical.getBalance(), prefix.getBalances().size());
-  }
-
-  private static Map<String, Long> currentAccountAssetBalances(AccountAssetStore store,
-      byte[] address) {
-    Map<String, Long> balances = new java.util.TreeMap<>();
-    P66AccountAssetCodec codec = new P66AccountAssetCodec();
-    for (Map.Entry<WrappedByteArray, byte[]> entry : store.prefixQuery(address).entrySet()) {
-      DecodedAssetRow decoded = codec.decodePresentAssetRow(
-          entry.getKey().getBytes(), entry.getValue());
-      if (!Arrays.equals(address, decoded.getAccountAddress())
-          || balances.put(decoded.getTokenId(), decoded.getBalance()) != null) {
-        throw new ArchivePersistenceException(
-            "State Archive diagnostic current AccountAsset prefix is invalid");
-      }
-    }
-    if (balances.isEmpty()) {
-      throw new ArchivePersistenceException(
-          "State Archive diagnostic requires a nonempty AccountAsset prefix");
-    }
-    return balances;
-  }
-
-  private static HistoricalAccountAssetPrefixResolver.Limits prefixLimits(
-      AccountAssetStore store, byte[] address) {
-    int entries = 0;
-    int maxKeyBytes = 1;
-    int maxValueBytes = 1;
-    long totalBytes = 0L;
-    for (Map.Entry<WrappedByteArray, byte[]> entry : store.prefixQuery(address).entrySet()) {
-      byte[] key = entry.getKey().getBytes();
-      byte[] value = Objects.requireNonNull(entry.getValue(), "AccountAsset prefix value");
-      entries++;
-      maxKeyBytes = Math.max(maxKeyBytes, key.length);
-      maxValueBytes = Math.max(maxValueBytes, value.length);
-      totalBytes = Math.addExact(totalBytes, Math.addExact((long) key.length, value.length));
-    }
-    if (entries == 0) {
-      throw new ArchivePersistenceException(
-          "State Archive diagnostic requires AccountAsset prefix limits");
-    }
-    return new HistoricalAccountAssetPrefixResolver.Limits(
-        1, entries, entries, maxKeyBytes, maxValueBytes, totalBytes);
+        logical.getPhase(), logical.getBalance());
   }
 
   private static Map<String, StoreView> collectStores(Manager manager,
@@ -301,17 +233,15 @@ public final class ArchiveStateDiagnostic {
     private final int absentCount;
     private final Phase p66Phase;
     private final long p66Balance;
-    private final int p66PrefixCount;
 
     private Report(long blockNumber, int storeCount, int presentCount, int absentCount,
-        Phase p66Phase, long p66Balance, int p66PrefixCount) {
+        Phase p66Phase, long p66Balance) {
       this.blockNumber = blockNumber;
       this.storeCount = storeCount;
       this.presentCount = presentCount;
       this.absentCount = absentCount;
       this.p66Phase = p66Phase;
       this.p66Balance = p66Balance;
-      this.p66PrefixCount = p66PrefixCount;
     }
 
     long getBlockNumber() {
@@ -336,10 +266,6 @@ public final class ArchiveStateDiagnostic {
 
     long getP66Balance() {
       return p66Balance;
-    }
-
-    int getP66PrefixCount() {
-      return p66PrefixCount;
     }
   }
 }

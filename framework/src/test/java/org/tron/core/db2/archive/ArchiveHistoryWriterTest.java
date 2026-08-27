@@ -127,8 +127,8 @@ public class ArchiveHistoryWriterTest {
   public void truncatesCrashLeftPreparedBodyAndIndexOnOpen() throws Exception {
     Path archive = temporaryFolder.newFolder("prepared").toPath();
     BlockReverseDiff diff = diff(1);
-    try (HistorySegmentStore bodies = new HistorySegmentStore(
-        archive, new BlockHistoryCodec(), 4096);
+    try (HistoryBodyStore bodies = new PartitionedHistoryBodyStore(
+        archive, new BlockHistoryCodec(), 4096, null);
         HistoryIndexStore index = new HistoryIndexStore(archive, new HistoryIndexCodec())) {
       HistoryLocation body = bodies.append(diff);
       index.append(HistoryIndexRecord.from(diff, body));
@@ -156,7 +156,7 @@ public class ArchiveHistoryWriterTest {
   }
 
   @Test
-  public void persistsAccountSeekIndexAndRecoversItAcrossRestart() throws Exception {
+  public void readsAccountHistoryWithoutLegacyAccountIndexAcrossRestart() throws Exception {
     Path archive = temporaryFolder.newFolder("account-index").toPath();
     byte[] address = new byte[21];
     address[0] = 0x41;
@@ -184,6 +184,7 @@ public class ArchiveHistoryWriterTest {
         assertEquals(1, files.count());
       }
     }
+    assertFalse(Files.exists(archive.resolve("account-change-index")));
   }
 
   @Test
@@ -215,7 +216,8 @@ public class ArchiveHistoryWriterTest {
     }
 
     try (java.util.stream.Stream<Path> commits = Files.list(archive.resolve("commits"));
-        java.util.stream.Stream<Path> segments = Files.list(archive.resolve("history"))) {
+        java.util.stream.Stream<Path> segments = Files.list(
+            archive.resolve("history/state-archive"))) {
       assertEquals(1, commits.count());
       assertTrue(segments.count() < 1_000);
     }
@@ -279,7 +281,8 @@ public class ArchiveHistoryWriterTest {
       writer.acceptAll(batch);
     }
     Path lastSegment;
-    try (java.util.stream.Stream<Path> segments = Files.list(archive.resolve("history"))) {
+    try (java.util.stream.Stream<Path> segments = Files.list(
+        archive.resolve("history/state-archive"))) {
       lastSegment = segments.sorted().reduce((left, right) -> right)
           .orElseThrow(AssertionError::new);
     }
@@ -351,7 +354,7 @@ public class ArchiveHistoryWriterTest {
   }
 
   @Test
-  public void truncatesDerivedAccountIndexToRecoveredHistoryAuthority() throws Exception {
+  public void recoveryDoesNotCreateLegacyAccountIndex() throws Exception {
     Path archive = temporaryFolder.newFolder("writer-index-ahead").toPath();
     try (ArchiveHistoryWriter writer = new ArchiveHistoryWriter(archive, 4096, databases())) {
       writer.acceptAll(Arrays.asList(diff(1), diff(2), diff(3)));
@@ -362,15 +365,65 @@ public class ArchiveHistoryWriterTest {
         archive, 4096, databases())) {
       assertEquals(2, reopened.committedHead().getMeta().getEpoch());
     }
-    ArchiveHistoryScanAnchor checkpoint = ArchiveHistoryScanAnchor.load(archive,
-        new HistoryCommitMarkerCodec());
+    ArchiveHistoryScanAnchor checkpoint = ArchiveHistoryScanAnchor.load(
+        archive, new HistoryCommitMarkerCodec());
     assertEquals(2, checkpoint.getMarker().getMeta().getEpoch());
-    try (AccountChangeIndex index = new AccountChangeIndex(
-        archive.resolve("account-change-index"))) {
-      assertEquals(2, index.getIndexedThrough());
-      assertTrue(index.headMatches(checkpoint.getMarker().getMeta()));
-    }
+    assertFalse(Files.exists(archive.resolve("account-change-index")));
     assertFalse(Files.exists(archive.resolve("truncation.intent")));
+  }
+
+  @Test
+  public void placesFourHotStoresInDedicatedStateArchiveLibraries() throws Exception {
+    Path archive = temporaryFolder.newFolder("dedicated-history-libraries").toPath();
+    BlockSnapshotMeta meta = new BlockSnapshotMeta(1, 1, hash(1), hash(0), 3_000L);
+    List<DbGroup> groups = new ArrayList<>();
+    for (String store : PartitionedHistoryBodyStore.DEDICATED_STORES) {
+      groups.add(new DbGroup(store, Collections.singletonList(
+          new Entry(bytes(store), OldValue.present(bytes("old-" + store))))));
+    }
+    groups.add(new DbGroup("properties", Collections.singletonList(
+        new Entry(bytes("property"), OldValue.present(bytes("old-property"))))));
+    BlockReverseDiff expected = new BlockReverseDiff(meta, groups);
+
+    try (ArchiveHistoryWriter writer = new ArchiveHistoryWriter(
+        archive, 4096, exactDatabases())) {
+      writer.accept(expected);
+      assertEquals(expected.getGroups().size(), writer.readCommitted(1).getGroups().size());
+    }
+
+    Path history = archive.resolve("history");
+    assertTrue(Files.isDirectory(history.resolve("state-archive")));
+    for (String store : PartitionedHistoryBodyStore.DEDICATED_STORES) {
+      Path library = history.resolve(PartitionedHistoryBodyStore.libraryName(store));
+      assertTrue(Files.isDirectory(library));
+      assertTrue(Files.size(library.resolve("history.000000.dat")) > 0);
+    }
+    assertFalse(Files.exists(archive.resolve("account-change-index")));
+  }
+
+  @Test
+  public void rejectsLegacyAccountIndexWithoutCreatingNewHistoryLibraries() throws Exception {
+    Path archive = temporaryFolder.newFolder("legacy-account-index").toPath();
+    Files.createDirectory(archive.resolve("account-change-index"));
+
+    ArchivePersistenceException failure = assertThrows(ArchivePersistenceException.class,
+        () -> new ArchiveHistoryWriter(archive, 4096, databases()));
+
+    assertTrue(failure.getMessage().contains("explicit offline removal"));
+    assertFalse(Files.exists(archive.resolve("history")));
+  }
+
+  @Test
+  public void rejectsLegacySharedHistoryWithoutCreatingNewLibraries() throws Exception {
+    Path archive = temporaryFolder.newFolder("legacy-shared-history").toPath();
+    Path history = Files.createDirectory(archive.resolve("history"));
+    Files.createFile(history.resolve("history.000000.dat"));
+
+    ArchivePersistenceException failure = assertThrows(ArchivePersistenceException.class,
+        () -> new ArchiveHistoryWriter(archive, 4096, databases()));
+
+    assertTrue(failure.getMessage().contains("explicit offline migration"));
+    assertFalse(Files.exists(history.resolve("state-archive")));
   }
 
   @Test
@@ -477,8 +530,8 @@ public class ArchiveHistoryWriterTest {
   }
 
   private static void initializeHistory(Path archive, int lastEpoch) throws Exception {
-    try (HistorySegmentStore bodies = new HistorySegmentStore(
-        archive, new BlockHistoryCodec(), 4096);
+    try (HistoryBodyStore bodies = new PartitionedHistoryBodyStore(
+        archive, new BlockHistoryCodec(), 4096, null);
         HistoryIndexStore index = new HistoryIndexStore(archive, new HistoryIndexCodec());
         HistoryCommitStore commits = new HistoryCommitStore(
             archive, new HistoryCommitMarkerCodec())) {
@@ -501,7 +554,7 @@ public class ArchiveHistoryWriterTest {
   private static void prepareTruncation(Path archive, long targetEpoch) throws Exception {
     ArchiveHistoryScanAnchor checkpoint = ArchiveHistoryScanAnchor.load(archive,
         new HistoryCommitMarkerCodec());
-    try (HistorySegmentStore bodies = new HistorySegmentStore(
+    try (HistoryBodyStore bodies = new PartitionedHistoryBodyStore(
         archive, new BlockHistoryCodec(), 4096, checkpoint);
         HistoryIndexStore index = new HistoryIndexStore(
             archive, new HistoryIndexCodec(), checkpoint);
