@@ -48,6 +48,8 @@ import org.tron.core.db2.core.SnapshotImpl;
 import org.tron.core.db2.core.SnapshotManager;
 import org.tron.core.db2.core.SnapshotRoot;
 import org.tron.core.db2.stateroot.PathStateBlockTransition;
+import org.tron.core.db2.stateroot.PathStateCanonicalizer.P66Phase;
+import org.tron.core.db2.stateroot.PathStateMutation;
 import org.tron.core.db2.stateroot.PathStateRuntimeAttachment;
 import org.tron.core.exception.TronError;
 import org.tron.core.store.AccountAssetStore;
@@ -86,6 +88,84 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
     assertEquals("code", published.get().getMutations().get(0).getDbName());
     assertArrayEquals(key, published.get().getMutations().get(0).getCanonicalKey());
     assertSame(attachment, manager.detachPathStateRuntime(attachment));
+    manager.shutdown();
+  }
+
+  @Test
+  public void pathStateP66ActivationScansPostStateThenResumesIncrementalCapture()
+      throws Exception {
+    byte[] firstAddress = archiveAddress(21);
+    byte[] secondAddress = archiveAddress(22);
+    Account firstBefore = Account.newBuilder()
+        .setAddress(ByteString.copyFrom(firstAddress))
+        .putAssetV2("1000021", 21L)
+        .build();
+    Account firstPost = firstBefore.toBuilder().putAssetV2("1000021", 210L).build();
+    Account second = Account.newBuilder()
+        .setAddress(ByteString.copyFrom(secondAddress))
+        .putAssetV2("1000022", 22L)
+        .build();
+    MemoryDb accountDb = new MemoryDb("account");
+    accountDb.put(firstAddress, firstBefore.toByteArray());
+    accountDb.put(secondAddress, second.toByteArray());
+    MemoryDb propertiesDb = new MemoryDb("properties");
+    propertiesDb.put(HistoricalAccountAssetBalanceResolver.proposal66PhysicalKey(),
+        Longs.toByteArray(0L));
+    SnapshotManager manager = new SnapshotManager("");
+    Chainbase account = new Chainbase(new SnapshotRoot(accountDb));
+    Chainbase properties = new Chainbase(new SnapshotRoot(propertiesDb));
+    Chainbase code = new Chainbase(new SnapshotRoot(new MemoryDb("code")));
+    manager.add(account);
+    manager.add(properties);
+    manager.add(code);
+    manager.enable();
+    List<PathStateBlockTransition> published = new ArrayList<>();
+    SnapshotPathStateTransitionCollector collector = new SnapshotPathStateTransitionCollector(
+        ignored -> Collections.emptyMap(), consumer -> {
+      Iterator<Map.Entry<byte[], byte[]>> entries = account.iterator();
+      while (entries.hasNext()) {
+        Map.Entry<byte[], byte[]> entry = entries.next();
+        consumer.accept(entry.getKey(), entry.getValue());
+      }
+    });
+    PathStateRuntimeAttachment attachment = new PathStateRuntimeAttachment(collector,
+        published::add);
+    manager.attachPathStateRuntime(attachment);
+
+    try (ISession block = manager.buildSession()) {
+      properties.put(HistoricalAccountAssetBalanceResolver.proposal66PhysicalKey(),
+          Longs.toByteArray(1L));
+      account.put(firstAddress, firstPost.toByteArray());
+      block.commit(BlockSnapshotMeta.forBlock(1, hash(1), hash(0), 1L));
+    }
+
+    assertFalse(attachment.isFailed());
+    assertEquals(1, published.size());
+    PathStateBlockTransition activation = published.get(0);
+    assertEquals(P66Phase.P66_ACTIVATION, activation.getPhase());
+    assertEquals(5, activation.getMutations().size());
+    assertEquals(2, mutationCount(activation, "account"));
+    assertEquals(2, mutationCount(activation, "account-asset"));
+    PathStateMutation firstAccount = mutation(activation, "account", firstAddress);
+    Account canonicalFirst = Account.parseFrom(firstAccount.getCanonicalValue());
+    assertTrue(canonicalFirst.getAssetOptimized());
+    assertTrue(canonicalFirst.getAssetV2Map().isEmpty());
+    PathStateMutation firstAsset = mutation(activation, "account-asset",
+        Bytes.concat(firstAddress, bytes("1000021")));
+    assertArrayEquals(Longs.toByteArray(210L), firstAsset.getCanonicalValue());
+
+    byte[] codeKey = bytes("after-activation");
+    try (ISession block = manager.buildSession()) {
+      code.put(codeKey, bytes("incremental"));
+      block.commit(BlockSnapshotMeta.forBlock(2, hash(2), hash(1), 2L));
+    }
+
+    assertFalse(attachment.isFailed());
+    assertEquals(2, published.size());
+    assertEquals(P66Phase.P66_ON, published.get(1).getPhase());
+    assertEquals(1, published.get(1).getMutations().size());
+    assertEquals("code", published.get(1).getMutations().get(0).getDbName());
+    manager.detachPathStateRuntime(attachment);
     manager.shutdown();
   }
 
@@ -883,6 +963,21 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
 
   private static boolean contains(DbGroup group, byte[] key) {
     return group.getEntries().stream().anyMatch(entry -> Arrays.equals(entry.getKey(), key));
+  }
+
+  private static int mutationCount(PathStateBlockTransition transition, String dbName) {
+    return (int) transition.getMutations().stream()
+        .filter(mutation -> dbName.equals(mutation.getDbName()))
+        .count();
+  }
+
+  private static PathStateMutation mutation(PathStateBlockTransition transition,
+      String dbName, byte[] key) {
+    return transition.getMutations().stream()
+        .filter(candidate -> dbName.equals(candidate.getDbName())
+            && Arrays.equals(key, candidate.getCanonicalKey()))
+        .findFirst()
+        .orElseThrow(AssertionError::new);
   }
 
   private static byte[] bytes(String value) {

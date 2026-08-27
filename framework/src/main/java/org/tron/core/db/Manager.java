@@ -794,10 +794,31 @@ public class Manager {
           "Path-state block-final capture requires account-asset Store");
     }
     PathStateRuntimeAttachment attachment = new PathStateRuntimeAttachment(
-        new SnapshotPathStateTransitionCollector(accountAssetStore::prefixQuery),
+        new SnapshotPathStateTransitionCollector(accountAssetStore::prefixQuery,
+            this::scanPathStateActivationAccounts),
         this::advancePathStateRoot, this::flushPathStateBaseThrough);
     ((SnapshotManager) revokingStore).attachPathStateRuntime(attachment);
     pathStateRuntime = attachment;
+  }
+
+  private void scanPathStateActivationAccounts(
+      SnapshotPathStateTransitionCollector.ActivationAccountConsumer consumer)
+      throws java.io.IOException {
+    SnapshotManager snapshotManager = (SnapshotManager) revokingStore;
+    org.tron.core.db2.core.Chainbase account = snapshotManager.getDbs().stream()
+        .filter(database -> AccountAssetArchiveProjector.ACCOUNT_DB.equals(database.getDbName()))
+        .findFirst()
+        .orElseThrow(() -> new java.io.IOException(
+            "Path-state P66 activation requires the Account Store"));
+    java.util.Iterator<java.util.Map.Entry<byte[], byte[]>> iterator = account.iterator();
+    while (iterator.hasNext()) {
+      java.util.Map.Entry<byte[], byte[]> entry = iterator.next();
+      if (entry.getKey() == null || entry.getValue() == null) {
+        throw new java.io.IOException("Path-state P66 activation Account scan contains null");
+      }
+      consumer.accept(Arrays.copyOf(entry.getKey(), entry.getKey().length),
+          Arrays.copyOf(entry.getValue(), entry.getValue().length));
+    }
   }
 
   private void advancePathStateRoot(PathStateBlockTransition transition)
