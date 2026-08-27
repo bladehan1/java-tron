@@ -34,6 +34,7 @@ import org.tron.core.db2.core.SnapshotManager;
 import org.tron.core.db2.core.SnapshotRoot;
 import org.tron.core.db2.stateroot.PathStateCanonicalizer.P66Phase;
 import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
+import org.tron.core.store.AccountAssetStore;
 import org.tron.core.store.DynamicPropertiesStore;
 
 public class PathStateManagerStartupIntegrationTest {
@@ -74,14 +75,18 @@ public class PathStateManagerStartupIntegrationTest {
     when(dynamic.getLatestBlockHeaderHash()).thenReturn(Sha256Hash.wrap(base.getBlockHash()));
     ChainBaseManager chainBase = mock(ChainBaseManager.class);
     when(chainBase.getDynamicPropertiesStore()).thenReturn(dynamic);
+    when(chainBase.getAccountAssetStore()).thenReturn(mock(AccountAssetStore.class));
     Manager manager = new Manager();
     setChainBaseManager(manager, chainBase);
+    setField(manager, "revokingStore", new SnapshotManager(""));
 
     withConfig(output, true, () -> invoke(manager, "initPathStateRoot"));
     assertNotNull(manager.getPathStateSnapshotHead());
+    assertNotNull(manager.getPathStateRuntime());
     assertArrayEquals(base.encode(), manager.getPathStateSnapshotHead().getHead().encode());
     invoke(manager, "closePathStateRoot");
     assertNull(manager.getPathStateSnapshotHead());
+    assertNull(manager.getPathStateRuntime());
 
     when(dynamic.getLatestBlockHeaderNumber()).thenReturn(101L);
     assertThrows(IllegalStateException.class,
@@ -109,6 +114,7 @@ public class PathStateManagerStartupIntegrationTest {
     ChainBaseManager chainBase = mock(ChainBaseManager.class);
     when(chainBase.getDynamicPropertiesStore()).thenReturn(dynamic);
     when(chainBase.getBlockByNum(blockNumber)).thenReturn(block);
+    when(chainBase.getAccountAssetStore()).thenReturn(mock(AccountAssetStore.class));
 
     AtomicInteger closed = new AtomicInteger();
     Manager manager = new Manager();

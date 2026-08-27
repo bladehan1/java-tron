@@ -50,6 +50,8 @@ import org.tron.core.db2.archive.DurableBlockReverseDiffSink;
 import org.tron.core.db2.archive.DurableHistoryMarkerRangeEvidence;
 import org.tron.core.db2.archive.HistoryCommitMarker;
 import org.tron.core.db2.archive.OldValueCollector;
+import org.tron.core.db2.stateroot.PathStateBlockTransition;
+import org.tron.core.db2.stateroot.PathStateRuntimeAttachment;
 import org.tron.core.db2.common.DB;
 import org.tron.core.db2.common.IRevokingDB;
 import org.tron.core.db2.common.Key;
@@ -102,6 +104,7 @@ public class SnapshotManager implements RevokingDatabase {
 
   private OldValueCollector oldValueCollector;
   private ArchiveRuntimeAttachment archiveRuntimeAttachment;
+  private PathStateRuntimeAttachment pathStateRuntimeAttachment;
   private Long submittedArchiveHistoryEpoch;
   private BlockReverseDiffSink blockReverseDiffSink;
   @Getter
@@ -262,12 +265,18 @@ public class SnapshotManager implements RevokingDatabase {
       }
     }
 
+    BlockChangeView changeView = null;
+    if (oldValueCollector != null || pathStateRuntimeAttachment != null) {
+      changeView = BlockChangeView.capture(meta, dbs);
+    }
     BlockReverseDiff reverseDiff = null;
     if (oldValueCollector != null) {
       reverseDiff = Objects.requireNonNull(
-          oldValueCollector.collect(BlockChangeView.capture(meta, dbs)),
+          oldValueCollector.collect(changeView),
           "archive collector returned null");
     }
+    PathStateBlockTransition pathStateTransition = pathStateRuntimeAttachment == null ? null
+        : pathStateRuntimeAttachment.capture(changeView);
 
     dbs.forEach(db -> {
       if (db.getHead().isOptimized()) {
@@ -280,6 +289,9 @@ public class SnapshotManager implements RevokingDatabase {
           ArchiveStoreScope.isStateDatabase(db.getDbName()) ? reverseDiff : null);
     }
     --activeSession;
+    if (pathStateRuntimeAttachment != null) {
+      pathStateRuntimeAttachment.publish(pathStateTransition);
+    }
   }
 
   private void validateBlockMeta(BlockSnapshotMeta meta) {
@@ -354,6 +366,30 @@ public class SnapshotManager implements RevokingDatabase {
     blockReverseDiffSink = null;
     submittedArchiveHistoryEpoch = null;
     archiveReadableEpoch = -1;
+    return candidate;
+  }
+
+  /** Installs an independent non-consensus path-state block-final runtime. */
+  public synchronized void attachPathStateRuntime(PathStateRuntimeAttachment attachment) {
+    ArchiveStoreScope.validate(dbs);
+    PathStateRuntimeAttachment candidate = Objects.requireNonNull(attachment, "attachment");
+    if (pathStateRuntimeAttachment != null) {
+      throw new IllegalStateException("Path-state runtime is already attached");
+    }
+    pathStateRuntimeAttachment = candidate;
+  }
+
+  /** Detaches the exact borrowed path-state runtime without closing its Manager-owned state. */
+  public synchronized PathStateRuntimeAttachment detachPathStateRuntime(
+      PathStateRuntimeAttachment expected) {
+    PathStateRuntimeAttachment candidate = Objects.requireNonNull(expected, "expected");
+    if (pathStateRuntimeAttachment == null) {
+      throw new IllegalStateException("Path-state runtime is not attached");
+    }
+    if (pathStateRuntimeAttachment != candidate) {
+      throw new IllegalStateException("Cannot detach a foreign path-state runtime");
+    }
+    pathStateRuntimeAttachment = null;
     return candidate;
   }
 
