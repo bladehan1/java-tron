@@ -5,23 +5,15 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Set;
 import java.util.TreeMap;
 import org.tron.common.crypto.Hash;
 
-/**
- * Backend-neutral secure-key Merkle Patricia trie with path-addressed node persistence.
- *
- * <p>This TASK-016 P1 core deliberately owns no database, block, history, or recovery lifecycle.
- * It rebuilds the canonical node set from current leaves when committed, then reconciles that set
- * through {@link PathNodeStore}. The later durable backend can replace the rebuild strategy without
- * changing the node byte contract.
- */
+/** Backend-neutral secure-key MPT with path-local immutable node updates. */
 public final class PathMerkleTrie {
 
   public static final int SECURE_KEY_LENGTH = 32;
@@ -29,23 +21,25 @@ public final class PathMerkleTrie {
   private static final byte[] EMPTY_PATH = new byte[0];
   private static final byte[] EMPTY_RLP_ITEM = new byte[]{(byte) 0x80};
   private static final Comparator<BytesKey> UNSIGNED_KEY_COMPARATOR = (left, right) -> {
-    byte[] leftBytes = left.bytes;
-    byte[] rightBytes = right.bytes;
-    int length = Math.min(leftBytes.length, rightBytes.length);
+    int length = Math.min(left.bytes.length, right.bytes.length);
     for (int i = 0; i < length; i++) {
-      int compared = Integer.compare(leftBytes[i] & 0xff, rightBytes[i] & 0xff);
+      int compared = Integer.compare(left.bytes[i] & 0xff, right.bytes[i] & 0xff);
       if (compared != 0) {
         return compared;
       }
     }
-    return Integer.compare(leftBytes.length, rightBytes.length);
+    return Integer.compare(left.bytes.length, right.bytes.length);
   };
 
   private final PathNodeStore nodeStore;
   private final Map<BytesKey, byte[]> leaves = new TreeMap<>(UNSIGNED_KEY_COMPARATOR);
-  private final Set<BytesKey> committedPaths = new LinkedHashSet<>();
+  private final IdentityHashMap<Node, BytesKey> materializedNodes = new IdentityHashMap<>();
+  private Node rootNode;
+  private Node materializedRoot;
   private byte[] rootHash = Arrays.copyOf(Hash.EMPTY_TRIE_HASH, Hash.EMPTY_TRIE_HASH.length);
   private boolean dirty;
+  private int lastNodePuts;
+  private int lastNodeDeletes;
 
   public PathMerkleTrie(PathNodeStore nodeStore) {
     this.nodeStore = Objects.requireNonNull(nodeStore, "nodeStore");
@@ -55,11 +49,18 @@ public final class PathMerkleTrie {
     BytesKey key = secureKey(secureKey);
     byte[] value = nonEmpty(encodedValue, "encodedValue");
     byte[] previous = leaves.put(key, value);
-    dirty |= !Arrays.equals(previous, value);
+    if (!Arrays.equals(previous, value)) {
+      rootNode = update(rootNode, toNibbles(key.bytes), 0, value);
+      dirty = true;
+    }
   }
 
   public synchronized void delete(byte[] secureKey) {
-    dirty |= leaves.remove(secureKey(secureKey)) != null;
+    BytesKey key = secureKey(secureKey);
+    if (leaves.remove(key) != null) {
+      rootNode = update(rootNode, toNibbles(key.bytes), 0, null);
+      dirty = true;
+    }
   }
 
   public synchronized byte[] get(byte[] secureKey) {
@@ -67,7 +68,7 @@ public final class PathMerkleTrie {
     return value == null ? null : Arrays.copyOf(value, value.length);
   }
 
-  /** Reconciles path-addressed nodes and returns the canonical root hash. */
+  /** Reconciles only structurally changed paths and returns the canonical root hash. */
   public synchronized byte[] rootHash() {
     if (dirty) {
       commit();
@@ -77,6 +78,14 @@ public final class PathMerkleTrie {
 
   public synchronized int size() {
     return leaves.size();
+  }
+
+  synchronized int getLastNodePuts() {
+    return lastNodePuts;
+  }
+
+  synchronized int getLastNodeDeletes() {
+    return lastNodeDeletes;
   }
 
   synchronized List<LeafEntry> leafEntries() {
@@ -90,6 +99,7 @@ public final class PathMerkleTrie {
   /** Initializes an empty trie from canonical leaves and writes its complete path-node set. */
   synchronized void initializeLeaves(Collection<LeafEntry> entries) {
     importLeaves(entries, "initialized");
+    rootNode = buildTree();
     dirty = true;
     rootHash();
   }
@@ -97,18 +107,20 @@ public final class PathMerkleTrie {
   /** Restores current leaves and verifies their complete path-node set without repairing it. */
   synchronized void restoreLeaves(Collection<LeafEntry> entries) {
     importLeaves(entries, "restored");
-    Map<BytesKey, byte[]> expectedNodes = buildCurrentNodes();
+    rootNode = buildTree();
+    Map<BytesKey, byte[]> expectedNodes = collectNodes(rootNode);
     for (Map.Entry<BytesKey, byte[]> entry : expectedNodes.entrySet()) {
       if (!Arrays.equals(nodeStore.get(entry.getKey().bytes), entry.getValue())) {
         throw new IllegalStateException("restored leaves do not match persisted path nodes");
       }
     }
-    committedPaths.addAll(expectedNodes.keySet());
-    rootHash = rootHash(expectedNodes);
+    materializedRoot = rootNode;
+    indexNodes(rootNode, EMPTY_PATH, materializedNodes);
+    rootHash = hash(rootNode);
   }
 
   private void importLeaves(Collection<LeafEntry> entries, String operation) {
-    if (!leaves.isEmpty() || !committedPaths.isEmpty() || dirty) {
+    if (!leaves.isEmpty() || rootNode != null || materializedRoot != null || dirty) {
       throw new IllegalStateException("path trie is not empty before leaf " + operation);
     }
     for (LeafEntry entry : Objects.requireNonNull(entries, "entries")) {
@@ -120,90 +132,102 @@ public final class PathMerkleTrie {
     }
   }
 
-  /** Verifies every path owned by the current committed node set without repairing corruption. */
+  /** Verifies every path owned by the current materialized node set without repairing it. */
   public synchronized void verifyNodeStore() {
     if (dirty) {
       throw new IllegalStateException("cannot verify a dirty path trie");
     }
-    Map<BytesKey, byte[]> expectedNodes = buildCurrentNodes();
-    if (!committedPaths.equals(expectedNodes.keySet())) {
-      throw new IllegalStateException("committed path set does not match current leaves");
-    }
-    byte[] expectedRoot = rootHash(expectedNodes);
-    if (!Arrays.equals(rootHash, expectedRoot)) {
-      throw new IllegalStateException("committed path root does not match current leaves");
+    Map<BytesKey, byte[]> expectedNodes = collectNodes(rootNode);
+    if (materializedNodes.size() != expectedNodes.size()) {
+      throw new IllegalStateException("materialized path set does not match current leaves");
     }
     for (Map.Entry<BytesKey, byte[]> entry : expectedNodes.entrySet()) {
       if (!Arrays.equals(nodeStore.get(entry.getKey().bytes), entry.getValue())) {
-        throw new IllegalStateException("missing or corrupt committed path node");
+        throw new IllegalStateException("missing or corrupt materialized path node");
       }
+    }
+    if (!Arrays.equals(rootHash, hash(rootNode))) {
+      throw new IllegalStateException("materialized path root does not match current leaves");
     }
   }
 
   private void commit() {
-    Map<BytesKey, byte[]> nextNodes = buildCurrentNodes();
-    rootHash = rootHash(nextNodes);
+    IdentityHashMap<Node, Boolean> retained = new IdentityHashMap<>();
+    List<NodePath> additions = new ArrayList<>();
+    collectAdditions(rootNode, EMPTY_PATH, retained, additions);
+    List<NodePath> removals = new ArrayList<>();
+    collectRemovals(materializedRoot, retained, removals);
 
-    Set<BytesKey> stalePaths = new LinkedHashSet<>(committedPaths);
-    stalePaths.removeAll(nextNodes.keySet());
-    for (BytesKey stalePath : stalePaths) {
-      nodeStore.delete(stalePath.copy());
+    for (NodePath removal : removals) {
+      nodeStore.delete(removal.path);
+      materializedNodes.remove(removal.node);
     }
-    for (Map.Entry<BytesKey, byte[]> entry : nextNodes.entrySet()) {
-      byte[] existing = nodeStore.get(entry.getKey().bytes);
-      if (!Arrays.equals(existing, entry.getValue())) {
-        nodeStore.put(entry.getKey().copy(), Arrays.copyOf(entry.getValue(), entry.getValue().length));
-      }
+    for (NodePath addition : additions) {
+      nodeStore.put(addition.path, addition.node.encoded);
+      materializedNodes.put(addition.node, new BytesKey(addition.path));
     }
-    committedPaths.clear();
-    committedPaths.addAll(nextNodes.keySet());
+    lastNodeDeletes = removals.size();
+    lastNodePuts = additions.size();
+    materializedRoot = rootNode;
+    rootHash = hash(rootNode);
     dirty = false;
   }
 
-  private Map<BytesKey, byte[]> buildCurrentNodes() {
-    Map<BytesKey, byte[]> nodes = new LinkedHashMap<>();
-    if (!leaves.isEmpty()) {
-      List<Leaf> entries = new ArrayList<>(leaves.size());
-      for (Map.Entry<BytesKey, byte[]> entry : leaves.entrySet()) {
-        entries.add(new Leaf(toNibbles(entry.getKey().bytes), entry.getValue()));
+  private void collectAdditions(Node node, byte[] path,
+      IdentityHashMap<Node, Boolean> retained, List<NodePath> additions) {
+    if (node == null) {
+      return;
+    }
+    BytesKey oldPath = materializedNodes.get(node);
+    if (oldPath != null) {
+      if (!Arrays.equals(oldPath.bytes, path)) {
+        throw new IllegalStateException("path-local update moved an unchanged subtree");
       }
-      build(entries, 0, EMPTY_PATH, nodes);
+      retained.put(node, Boolean.TRUE);
+      return;
     }
-    return nodes;
+    additions.add(new NodePath(node, path));
+    visitChildren(node, path,
+        (child, childPath) -> collectAdditions(child, childPath, retained, additions));
   }
 
-  private static byte[] rootHash(Map<BytesKey, byte[]> nodes) {
-    if (nodes.isEmpty()) {
-      return Arrays.copyOf(Hash.EMPTY_TRIE_HASH, Hash.EMPTY_TRIE_HASH.length);
+  private void collectRemovals(Node node, IdentityHashMap<Node, Boolean> retained,
+      List<NodePath> removals) {
+    if (node == null || retained.containsKey(node)) {
+      return;
     }
-    byte[] root = nodes.get(new BytesKey(EMPTY_PATH));
-    if (root == null) {
-      throw new IllegalStateException("path node set has no root");
+    BytesKey path = materializedNodes.get(node);
+    if (path == null) {
+      throw new IllegalStateException("path-local update lost a materialized node identity");
     }
-    return Hash.sha3(root);
+    removals.add(new NodePath(node, path.copy()));
+    visitChildren(node, path.bytes,
+        (child, ignored) -> collectRemovals(child, retained, removals));
   }
 
-  private static byte[] build(List<Leaf> entries, int depth, byte[] nodePath,
-      Map<BytesKey, byte[]> nodes) {
+  private Node buildTree() {
+    if (leaves.isEmpty()) {
+      return null;
+    }
+    List<Leaf> entries = new ArrayList<>(leaves.size());
+    for (Map.Entry<BytesKey, byte[]> entry : leaves.entrySet()) {
+      entries.add(new Leaf(toNibbles(entry.getKey().bytes), entry.getValue()));
+    }
+    return build(entries, 0);
+  }
+
+  private static Node build(List<Leaf> entries, int depth) {
     if (entries.size() == 1) {
       Leaf leaf = entries.get(0);
-      byte[] encoded = rlpList(rlpItem(compactPath(leaf.nibbles, depth, true)),
-          rlpItem(leaf.value));
-      nodes.put(new BytesKey(nodePath), encoded);
-      return encoded;
+      return new LeafNode(Arrays.copyOfRange(leaf.nibbles, depth, leaf.nibbles.length),
+          leaf.value);
     }
-
     int shared = sharedPrefix(entries, depth);
     if (shared > 0) {
-      byte[] childPath = append(nodePath, entries.get(0).nibbles, depth, shared);
-      byte[] child = build(entries, depth + shared, childPath, nodes);
-      byte[] prefix = Arrays.copyOfRange(entries.get(0).nibbles, depth, depth + shared);
-      byte[] encoded = rlpList(rlpItem(compactPath(prefix, 0, false)), nodeReference(child));
-      nodes.put(new BytesKey(nodePath), encoded);
-      return encoded;
+      return new ExtensionNode(Arrays.copyOfRange(entries.get(0).nibbles, depth,
+          depth + shared), build(entries, depth + shared));
     }
-
-    List<byte[]> encodedChildren = new ArrayList<>(Collections.nCopies(17, EMPTY_RLP_ITEM));
+    Node[] children = new Node[16];
     int start = 0;
     while (start < entries.size()) {
       int nibble = entries.get(start).nibbles[depth];
@@ -211,14 +235,176 @@ public final class PathMerkleTrie {
       while (end < entries.size() && entries.get(end).nibbles[depth] == nibble) {
         end++;
       }
-      byte[] childPath = append(nodePath, new byte[]{(byte) nibble}, 0, 1);
-      byte[] child = build(entries.subList(start, end), depth + 1, childPath, nodes);
-      encodedChildren.set(nibble, nodeReference(child));
+      children[nibble] = build(entries.subList(start, end), depth + 1);
       start = end;
     }
-    byte[] encoded = rlpList(encodedChildren.toArray(new byte[encodedChildren.size()][]));
-    nodes.put(new BytesKey(nodePath), encoded);
-    return encoded;
+    return new BranchNode(children);
+  }
+
+  private static Node update(Node node, byte[] key, int offset, byte[] value) {
+    if (node == null) {
+      return value == null ? null
+          : new LeafNode(Arrays.copyOfRange(key, offset, key.length), value);
+    }
+    if (node instanceof LeafNode) {
+      return updateLeaf((LeafNode) node, key, offset, value);
+    }
+    if (node instanceof ExtensionNode) {
+      return updateExtension((ExtensionNode) node, key, offset, value);
+    }
+    BranchNode branch = (BranchNode) node;
+    if (offset >= key.length) {
+      throw new IllegalStateException("secure path ended inside a branch");
+    }
+    int nibble = key[offset];
+    Node previous = branch.children[nibble];
+    Node changed = update(previous, key, offset + 1, value);
+    if (previous == changed) {
+      return branch;
+    }
+    Node[] children = Arrays.copyOf(branch.children, branch.children.length);
+    children[nibble] = changed;
+    return normalizeBranch(children);
+  }
+
+  private static Node updateLeaf(LeafNode leaf, byte[] key, int offset, byte[] value) {
+    int remaining = key.length - offset;
+    int shared = commonPrefix(leaf.path, 0, key, offset);
+    if (shared == leaf.path.length && shared == remaining) {
+      if (value == null) {
+        return null;
+      }
+      return Arrays.equals(leaf.value, value) ? leaf : new LeafNode(leaf.path, value);
+    }
+    if (value == null) {
+      return leaf;
+    }
+    if (shared >= leaf.path.length || shared >= remaining) {
+      throw new IllegalStateException("fixed secure keys cannot prefix one another");
+    }
+    Node[] children = new Node[16];
+    int oldNibble = leaf.path[shared];
+    children[oldNibble] = new LeafNode(
+        Arrays.copyOfRange(leaf.path, shared + 1, leaf.path.length), leaf.value);
+    int newNibble = key[offset + shared];
+    children[newNibble] = new LeafNode(
+        Arrays.copyOfRange(key, offset + shared + 1, key.length), value);
+    Node branch = new BranchNode(children);
+    return shared == 0 ? branch
+        : new ExtensionNode(Arrays.copyOf(leaf.path, shared), branch);
+  }
+
+  private static Node updateExtension(ExtensionNode extension, byte[] key, int offset,
+      byte[] value) {
+    int shared = commonPrefix(extension.path, 0, key, offset);
+    if (shared == extension.path.length) {
+      Node changed = update(extension.child, key, offset + shared, value);
+      if (changed == extension.child) {
+        return extension;
+      }
+      return normalizeExtension(extension.path, changed);
+    }
+    if (value == null) {
+      return extension;
+    }
+    Node[] children = new Node[16];
+    int oldNibble = extension.path[shared];
+    byte[] oldSuffix = Arrays.copyOfRange(extension.path, shared + 1, extension.path.length);
+    children[oldNibble] = oldSuffix.length == 0 ? extension.child
+        : new ExtensionNode(oldSuffix, extension.child);
+    int newNibble = key[offset + shared];
+    children[newNibble] = new LeafNode(
+        Arrays.copyOfRange(key, offset + shared + 1, key.length), value);
+    Node branch = new BranchNode(children);
+    return shared == 0 ? branch
+        : new ExtensionNode(Arrays.copyOf(extension.path, shared), branch);
+  }
+
+  private static Node normalizeBranch(Node[] children) {
+    int count = 0;
+    int only = -1;
+    for (int i = 0; i < children.length; i++) {
+      if (children[i] != null) {
+        count++;
+        only = i;
+      }
+    }
+    if (count == 0) {
+      return null;
+    }
+    if (count > 1) {
+      return new BranchNode(children);
+    }
+    Node child = children[only];
+    byte[] prefix = new byte[]{(byte) only};
+    if (child instanceof LeafNode) {
+      LeafNode leaf = (LeafNode) child;
+      return new LeafNode(append(prefix, leaf.path), leaf.value);
+    }
+    if (child instanceof ExtensionNode) {
+      ExtensionNode extension = (ExtensionNode) child;
+      return new ExtensionNode(append(prefix, extension.path), extension.child);
+    }
+    return new ExtensionNode(prefix, child);
+  }
+
+  private static Node normalizeExtension(byte[] path, Node child) {
+    if (child == null) {
+      return null;
+    }
+    if (child instanceof LeafNode) {
+      LeafNode leaf = (LeafNode) child;
+      return new LeafNode(append(path, leaf.path), leaf.value);
+    }
+    if (child instanceof ExtensionNode) {
+      ExtensionNode extension = (ExtensionNode) child;
+      return new ExtensionNode(append(path, extension.path), extension.child);
+    }
+    return new ExtensionNode(path, child);
+  }
+
+  private static Map<BytesKey, byte[]> collectNodes(Node root) {
+    Map<BytesKey, byte[]> nodes = new LinkedHashMap<>();
+    collectNodes(root, EMPTY_PATH, nodes);
+    return nodes;
+  }
+
+  private static void collectNodes(Node node, byte[] path, Map<BytesKey, byte[]> nodes) {
+    if (node == null) {
+      return;
+    }
+    if (nodes.put(new BytesKey(path), node.encoded) != null) {
+      throw new IllegalStateException("duplicate path-state node path");
+    }
+    visitChildren(node, path, (child, childPath) -> collectNodes(child, childPath, nodes));
+  }
+
+  private static void indexNodes(Node node, byte[] path,
+      IdentityHashMap<Node, BytesKey> indexed) {
+    if (node == null) {
+      return;
+    }
+    indexed.put(node, new BytesKey(path));
+    visitChildren(node, path, (child, childPath) -> indexNodes(child, childPath, indexed));
+  }
+
+  private static void visitChildren(Node node, byte[] path, NodeVisitor visitor) {
+    if (node instanceof ExtensionNode) {
+      ExtensionNode extension = (ExtensionNode) node;
+      visitor.visit(extension.child, append(path, extension.path));
+    } else if (node instanceof BranchNode) {
+      BranchNode branch = (BranchNode) node;
+      for (int i = 0; i < branch.children.length; i++) {
+        if (branch.children[i] != null) {
+          visitor.visit(branch.children[i], append(path, new byte[]{(byte) i}));
+        }
+      }
+    }
+  }
+
+  private static byte[] hash(Node node) {
+    return node == null ? Arrays.copyOf(Hash.EMPTY_TRIE_HASH, Hash.EMPTY_TRIE_HASH.length)
+        : Hash.sha3(node.encoded);
   }
 
   private static int sharedPrefix(List<Leaf> entries, int depth) {
@@ -236,16 +422,25 @@ public final class PathMerkleTrie {
     return shared;
   }
 
+  private static int commonPrefix(byte[] left, int leftOffset, byte[] right, int rightOffset) {
+    int length = Math.min(left.length - leftOffset, right.length - rightOffset);
+    int shared = 0;
+    while (shared < length && left[leftOffset + shared] == right[rightOffset + shared]) {
+      shared++;
+    }
+    return shared;
+  }
+
   private static byte[] nodeReference(byte[] encodedNode) {
     return encodedNode.length < SECURE_KEY_LENGTH ? encodedNode : rlpItem(Hash.sha3(encodedNode));
   }
 
-  private static byte[] compactPath(byte[] nibbles, int offset, boolean leaf) {
-    int length = nibbles.length - offset;
+  private static byte[] compactPath(byte[] nibbles, boolean leaf) {
+    int length = nibbles.length;
     boolean odd = (length & 1) != 0;
     byte[] compact = new byte[1 + length / 2];
     int flag = leaf ? 2 : 0;
-    int source = offset;
+    int source = 0;
     if (odd) {
       compact[0] = (byte) ((flag + 1) << 4 | nibbles[source++]);
     } else {
@@ -267,9 +462,9 @@ public final class PathMerkleTrie {
     return nibbles;
   }
 
-  private static byte[] append(byte[] prefix, byte[] suffix, int offset, int length) {
-    byte[] result = Arrays.copyOf(prefix, prefix.length + length);
-    System.arraycopy(suffix, offset, result, prefix.length, length);
+  private static byte[] append(byte[] first, byte[] second) {
+    byte[] result = Arrays.copyOf(first, first.length + second.length);
+    System.arraycopy(second, 0, result, first.length, second.length);
     return result;
   }
 
@@ -293,8 +488,7 @@ public final class PathMerkleTrie {
     if (raw.length == 1 && (raw[0] & 0xff) < 0x80) {
       return Arrays.copyOf(raw, raw.length);
     }
-    byte[] prefix = rlpLength(raw.length, 0x80, 0xb7);
-    return concatenate(prefix, raw);
+    return concatenate(rlpLength(raw.length, 0x80, 0xb7), raw);
   }
 
   private static byte[] rlpList(byte[]... encodedItems) {
@@ -333,6 +527,70 @@ public final class PathMerkleTrie {
     return result;
   }
 
+  private abstract static class Node {
+
+    private final byte[] encoded;
+
+    private Node(byte[] encoded) {
+      this.encoded = encoded;
+    }
+  }
+
+  private static final class LeafNode extends Node {
+
+    private final byte[] path;
+    private final byte[] value;
+
+    private LeafNode(byte[] path, byte[] value) {
+      super(rlpList(rlpItem(compactPath(path, true)), rlpItem(value)));
+      this.path = Arrays.copyOf(path, path.length);
+      this.value = Arrays.copyOf(value, value.length);
+    }
+  }
+
+  private static final class ExtensionNode extends Node {
+
+    private final byte[] path;
+    private final Node child;
+
+    private ExtensionNode(byte[] path, Node child) {
+      super(encode(path, child));
+      if (path.length == 0) {
+        throw new IllegalArgumentException("extension path must not be empty");
+      }
+      this.path = Arrays.copyOf(path, path.length);
+      this.child = Objects.requireNonNull(child, "child");
+    }
+
+    private static byte[] encode(byte[] path, Node child) {
+      Node present = Objects.requireNonNull(child, "child");
+      return rlpList(rlpItem(compactPath(path, false)), nodeReference(present.encoded));
+    }
+  }
+
+  private static final class BranchNode extends Node {
+
+    private final Node[] children;
+
+    private BranchNode(Node[] children) {
+      super(encode(children));
+      this.children = Arrays.copyOf(children, children.length);
+    }
+
+    private static byte[] encode(Node[] children) {
+      if (children.length != 16) {
+        throw new IllegalArgumentException("branch must contain 16 child slots");
+      }
+      List<byte[]> encodedChildren = new ArrayList<>(Collections.nCopies(17, EMPTY_RLP_ITEM));
+      for (int i = 0; i < children.length; i++) {
+        if (children[i] != null) {
+          encodedChildren.set(i, nodeReference(children[i].encoded));
+        }
+      }
+      return rlpList(encodedChildren.toArray(new byte[encodedChildren.size()][]));
+    }
+  }
+
   private static final class Leaf {
 
     private final byte[] nibbles;
@@ -342,6 +600,23 @@ public final class PathMerkleTrie {
       this.nibbles = nibbles;
       this.value = value;
     }
+  }
+
+  private static final class NodePath {
+
+    private final Node node;
+    private final byte[] path;
+
+    private NodePath(Node node, byte[] path) {
+      this.node = node;
+      this.path = Arrays.copyOf(path, path.length);
+    }
+  }
+
+  @FunctionalInterface
+  private interface NodeVisitor {
+
+    void visit(Node node, byte[] path);
   }
 
   static final class LeafEntry {

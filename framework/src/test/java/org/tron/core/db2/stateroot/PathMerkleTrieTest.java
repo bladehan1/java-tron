@@ -120,6 +120,31 @@ public class PathMerkleTrieTest {
     assertThrows(IllegalStateException.class, dirtyTrie::verifyNodeStore);
   }
 
+  @Test
+  public void singleLeafUpdateRewritesOnlyItsMaterializedPath() {
+    int leafCount = 32;
+    byte[][] keys = new byte[leafCount][];
+    byte[][] values = new byte[leafCount][];
+    InMemoryPathNodeStore store = new InMemoryPathNodeStore();
+    PathMerkleTrie trie = new PathMerkleTrie(store);
+    for (int i = 0; i < leafCount; i++) {
+      keys[i] = filledKey(i);
+      values[i] = value("value-" + i);
+      trie.put(keys[i], values[i]);
+    }
+    trie.rootHash();
+    int fullNodeCount = store.nodes.size();
+
+    values[17] = value("updated");
+    trie.put(keys[17], values[17]);
+
+    assertArrayEquals(referenceRoot(keys, values), trie.rootHash());
+    assertTrue(fullNodeCount > 3);
+    assertEquals(3, trie.getLastNodePuts());
+    assertEquals(3, trie.getLastNodeDeletes());
+    trie.verifyNodeStore();
+  }
+
   private static byte[] referenceRoot(byte[][] keys, byte[][] values) {
     TrieImpl reference = new TrieImpl();
     reference.setAsync(false);
