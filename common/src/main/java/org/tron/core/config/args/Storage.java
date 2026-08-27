@@ -101,6 +101,42 @@ public class Storage {
   @Setter
   private int stateArchiveQueueCapacity;
 
+  @Getter
+  @Setter
+  private boolean pathStateRootEnabled;
+
+  @Getter
+  @Setter
+  private String pathStateRootMode;
+
+  @Getter
+  @Setter
+  private String pathStateRootDirectory;
+
+  @Getter
+  @Setter
+  private int pathStateRootFormatVersion;
+
+  @Getter
+  @Setter
+  private int pathStateRootReversibleLayerLimit;
+
+  @Getter
+  @Setter
+  private long pathStateRootReversibleLayerBytes;
+
+  @Getter
+  @Setter
+  private long pathStateRootWriteBufferBytes;
+
+  @Getter
+  @Setter
+  private boolean pathStateRootRebuildFromGenesis;
+
+  @Getter
+  @Setter
+  private boolean pathStateRootVerifyEveryBlock;
+
   private Options defaultDbOptions;
 
   @Getter

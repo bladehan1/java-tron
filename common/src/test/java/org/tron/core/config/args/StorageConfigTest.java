@@ -79,6 +79,36 @@ public class StorageConfigTest {
   }
 
   @Test
+  public void testPathStateRootDefaultsAndOverrides() {
+    StorageConfig defaults = StorageConfig.fromConfig(withRef());
+    assertFalse(defaults.getPathStateRoot().isEnabled());
+    assertEquals("shadow", defaults.getPathStateRoot().getMode());
+    assertEquals("path-state-root", defaults.getPathStateRoot().getDirectory());
+    assertEquals(1, defaults.getPathStateRoot().getFormatVersion());
+    assertEquals(128, defaults.getPathStateRoot().getReversibleLayerLimit());
+    assertEquals(2147483648L, defaults.getPathStateRoot().getReversibleLayerBytes());
+    assertEquals(268435456L, defaults.getPathStateRoot().getWriteBufferBytes());
+    assertFalse(defaults.getPathStateRoot().isRebuildFromGenesis());
+    assertTrue(defaults.getPathStateRoot().isVerifyEveryBlock());
+
+    StorageConfig configured = StorageConfig.fromConfig(withRef(
+        "storage.pathStateRoot { enabled = true, mode = shadow, directory = root-test, "
+            + "formatVersion = 1, reversibleLayerLimit = 8, reversibleLayerBytes = 4096, "
+            + "writeBufferBytes = 1024, rebuildFromGenesis = false, "
+            + "verifyEveryBlock = true }"));
+    assertTrue(configured.getPathStateRoot().isEnabled());
+    assertEquals("root-test", configured.getPathStateRoot().getDirectory());
+    assertEquals(8, configured.getPathStateRoot().getReversibleLayerLimit());
+    assertEquals(4096L, configured.getPathStateRoot().getReversibleLayerBytes());
+    assertEquals(1024L, configured.getPathStateRoot().getWriteBufferBytes());
+  }
+
+  @Test(expected = IllegalArgumentException.class)
+  public void testPathStateRootRejectsUnsupportedMode() {
+    StorageConfig.fromConfig(withRef("storage.pathStateRoot.mode = consensus"));
+  }
+
+  @Test
   public void testDbSettingsDefaults() {
     // These defaults must match develop's Args.initRocksDbSettings() fallbacks so that
     // nodes with minimal configs retain the same RocksDB tuning. See
