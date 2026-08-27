@@ -78,7 +78,7 @@ public class PathStateBlockTransitionTest {
   }
 
   @Test
-  public void rejectsAmbiguousOrOutOfScopeMutations() {
+  public void rejectsDuplicateOrOutOfScopeMutations() {
     PathStateMutation first = PathStateMutation.put("proposal", new byte[]{1}, new byte[]{2});
     PathStateMutation duplicate = PathStateMutation.delete("proposal", new byte[]{1});
 
@@ -87,9 +87,16 @@ public class PathStateBlockTransitionTest {
     assertThrows(IllegalArgumentException.class,
         () -> transition(Collections.singletonList(
             PathStateMutation.put("unknown", new byte[]{1}, new byte[]{2}))));
-    assertThrows(IllegalArgumentException.class,
-        () -> transition(Collections.singletonList(
-            PathStateMutation.put("proposal", new byte[0], new byte[]{2}))));
+  }
+
+  @Test
+  public void lengthDelimitedEmptyKeyIsDeterministic() {
+    PathStateBlockTransition first = transition(Collections.singletonList(
+        PathStateMutation.put("accountid-index", new byte[0], new byte[]{2})));
+    PathStateBlockTransition second = transition(Collections.singletonList(
+        PathStateMutation.put("accountid-index", new byte[0], new byte[]{2})));
+
+    assertArrayEquals(first.getPayloadDigest(), second.getPayloadDigest());
   }
 
   @Test

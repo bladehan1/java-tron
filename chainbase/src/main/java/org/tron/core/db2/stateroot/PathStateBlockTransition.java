@@ -108,9 +108,6 @@ public final class PathStateBlockTransition {
       PathStateMutation mutation = copyMutation(Objects.requireNonNull(candidate, "mutation"));
       StoreIdentity store = descriptor.require(mutation.getDbName());
       byte[] key = mutation.getCanonicalKey();
-      if (key.length == 0) {
-        throw new IllegalArgumentException("canonicalKey must not be empty");
-      }
       if (!unique.add(new MutationKey(store.getStoreId(), key))) {
         throw new IllegalArgumentException("duplicate path-state mutation key");
       }

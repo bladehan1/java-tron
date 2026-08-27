@@ -50,6 +50,14 @@ public class PathStateCommitmentCodecTest {
   }
 
   @Test
+  public void lengthDelimitedEmptyKeyHasAnIndependentLeafIdentity() throws Exception {
+    byte[] empty = PathStateCommitmentCodec.storeLeafKey(2, new byte[0]);
+    assertArrayEquals(referenceStoreKey(2, new byte[0]), empty);
+    assertFalse(Arrays.equals(empty,
+        PathStateCommitmentCodec.storeLeafKey(2, new byte[]{0})));
+  }
+
+  @Test
   public void presentValuesKeepEmptyAndZeroDistinct() {
     assertArrayEquals(Hex.decode("c20180"),
         PathStateCommitmentCodec.presentLeafValue(new byte[0]));
@@ -83,8 +91,6 @@ public class PathStateCommitmentCodecTest {
   public void rejectsAmbiguousOrUnboundInputs() {
     assertThrows(IllegalArgumentException.class,
         () -> PathStateCommitmentCodec.storeLeafKey(0, new byte[]{1}));
-    assertThrows(IllegalArgumentException.class,
-        () -> PathStateCommitmentCodec.storeLeafKey(1, new byte[0]));
     assertThrows(NullPointerException.class,
         () -> PathStateCommitmentCodec.presentLeafValue(null));
     assertThrows(IllegalArgumentException.class,

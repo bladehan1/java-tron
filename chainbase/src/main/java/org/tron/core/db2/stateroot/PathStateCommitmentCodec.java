@@ -35,7 +35,7 @@ public final class PathStateCommitmentCodec {
   /** Returns the secure per-Store trie key for one canonical present value. */
   public static byte[] storeLeafKey(int stableStoreId, byte[] canonicalKey) {
     requireStoreId(stableStoreId);
-    byte[] key = nonEmpty(canonicalKey, "canonicalKey");
+    byte[] key = copy(canonicalKey, "canonicalKey");
     ByteBuffer material = ByteBuffer.allocate(Short.BYTES + STORE_LEAF_KEY_DOMAIN.length
         + Short.BYTES + Integer.BYTES + Integer.BYTES + key.length);
     putDomain(material, STORE_LEAF_KEY_DOMAIN);
@@ -98,12 +98,8 @@ public final class PathStateCommitmentCodec {
     }
   }
 
-  private static byte[] nonEmpty(byte[] value, String name) {
-    byte[] copy = Arrays.copyOf(Objects.requireNonNull(value, name), value.length);
-    if (copy.length == 0) {
-      throw new IllegalArgumentException(name + " must not be empty");
-    }
-    return copy;
+  private static byte[] copy(byte[] value, String name) {
+    return Arrays.copyOf(Objects.requireNonNull(value, name), value.length);
   }
 
   private static byte[] rlpList(byte[]... rawItems) {
