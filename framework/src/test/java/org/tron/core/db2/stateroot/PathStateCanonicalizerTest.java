@@ -167,6 +167,17 @@ public class PathStateCanonicalizerTest {
         () -> canonicalizer.put(P66Phase.P66_ON, "unknown", key, new byte[0]));
   }
 
+  @Test
+  public void genericIndexStoresPreserveEmptyPhysicalKeys() {
+    PathStateMutation accountId = canonicalizer.put(
+        P66Phase.P66_ON, "accountid-index", new byte[0], address(5));
+    PathStateMutation accountName = canonicalizer.put(
+        P66Phase.P66_ON, "account-index", new byte[0], address(6));
+
+    assertArrayEquals(new byte[0], accountId.getCanonicalKey());
+    assertArrayEquals(new byte[0], accountName.getCanonicalKey());
+  }
+
   private static Account account(byte[] address) {
     return Account.newBuilder().setAddress(ByteString.copyFrom(address)).build();
   }

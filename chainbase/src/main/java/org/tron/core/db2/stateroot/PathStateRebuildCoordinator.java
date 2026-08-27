@@ -176,7 +176,7 @@ public final class PathStateRebuildCoordinator {
     }
 
     private void accept(byte[] physicalKey, byte[] rawValue) throws IOException {
-      byte[] key = copyNonEmpty(physicalKey, "physicalKey");
+      byte[] key = copy(physicalKey, "physicalKey");
       byte[] value = Arrays.copyOf(Objects.requireNonNull(rawValue, "rawValue"),
           rawValue.length);
       if (previousKey != null && compare(store, previousKey, key) >= 0) {
@@ -252,12 +252,8 @@ public final class PathStateRebuildCoordinator {
     hasher.putBytes(ByteBuffer.allocate(Long.BYTES).putLong(value).array());
   }
 
-  private static byte[] copyNonEmpty(byte[] value, String name) {
-    byte[] copy = Arrays.copyOf(Objects.requireNonNull(value, name), value.length);
-    if (copy.length == 0) {
-      throw new IllegalArgumentException(name + " must not be empty");
-    }
-    return copy;
+  private static byte[] copy(byte[] value, String name) {
+    return Arrays.copyOf(Objects.requireNonNull(value, name), value.length);
   }
 
   /** Caller-owned exact-27 native snapshot boundary. */
