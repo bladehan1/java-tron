@@ -50,14 +50,18 @@ public class PathStateRebuildCoordinatorTest {
       source.add("proposal", new byte[]{1}, new byte[]{11});
       source.add("proposal", new byte[]{2}, new byte[]{22});
       source.add("abi", address(1), new byte[0]);
+      source.add("accountid-index", new byte[0], address(2));
+      source.add("account-index", new byte[0], address(3));
 
       RebuildResult result = new PathStateRebuildCoordinator().rebuild(manifest, source);
       OracleResult oracle = independentOracle(source);
 
       assertEquals(27, result.getStores().size());
-      assertEquals(3, result.getTotalEntries());
+      assertEquals(5, result.getTotalEntries());
       assertEquals(2, result.requireStore("proposal").getEntryCount());
       assertEquals(1, result.requireStore("abi").getEntryCount());
+      assertEquals(1, result.requireStore("accountid-index").getEntryCount());
+      assertEquals(1, result.requireStore("account-index").getEntryCount());
       assertEquals(0, result.requireStore("account").getEntryCount());
       assertArrayEquals(result.getSourceDigest(), result.getMetadata().getPayloadDigest());
       assertTrue(source.getVerificationCount() >= 2);

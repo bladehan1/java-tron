@@ -103,7 +103,7 @@ public final class PathStateCanonicalizer {
   public void requireSnapshotAccountLayout(P66Phase phase, byte[] physicalKey,
       byte[] rawValue) {
     P66Phase target = Objects.requireNonNull(phase, "phase");
-    byte[] key = copyNonEmpty(physicalKey, "physicalKey");
+    byte[] key = copy(physicalKey, "physicalKey");
     requireLength(key, ADDRESS_LENGTH, "account key");
     Account account = parseAccount(key, rawValue);
     if (target.directAssetsEnabled()) {
@@ -134,7 +134,7 @@ public final class PathStateCanonicalizer {
   }
 
   private static byte[] canonicalKey(P66Phase phase, String dbName, byte[] physicalKey) {
-    byte[] key = copyNonEmpty(physicalKey, "physicalKey");
+    byte[] key = copy(physicalKey, "physicalKey");
     switch (dbName) {
       case "account":
       case "abi":
@@ -284,6 +284,10 @@ public final class PathStateCanonicalizer {
       throw new IllegalArgumentException(name + " must not be empty");
     }
     return copy;
+  }
+
+  private static byte[] copy(byte[] value, String name) {
+    return Arrays.copyOf(Objects.requireNonNull(value, name), value.length);
   }
 
   private static void requireLength(byte[] value, int length, String name) {
