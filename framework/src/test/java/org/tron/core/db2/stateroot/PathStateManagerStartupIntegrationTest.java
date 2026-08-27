@@ -84,6 +84,9 @@ public class PathStateManagerStartupIntegrationTest {
     assertNotNull(manager.getPathStateSnapshotHead());
     assertNotNull(manager.getPathStateRuntime());
     assertArrayEquals(base.encode(), manager.getPathStateSnapshotHead().getHead().encode());
+    assertEquals(PathStateRuntimeAttachment.State.READY,
+        manager.getPathStateRuntime().status().getState());
+    assertEquals(100L, manager.getPathStateRuntime().status().getReadyBlockNumber());
     invoke(manager, "closePathStateRoot");
     assertNull(manager.getPathStateSnapshotHead());
     assertNull(manager.getPathStateRuntime());
@@ -133,11 +136,18 @@ public class PathStateManagerStartupIntegrationTest {
     assertFalse(Files.exists(manifest.getLayerDirectory(
         oldSecond.getBlockNumber(), oldSecond.getBlockHash())));
     assertFalse(manager.getPathStateRuntime().isFailed());
+    assertEquals(PathStateRuntimeAttachment.State.READY,
+        manager.getPathStateRuntime().status().getState());
+    assertEquals(101L, manager.getPathStateRuntime().status().getReadyBlockNumber());
 
     when(dynamic.getLatestBlockHeaderNumber()).thenReturn(100L);
     when(dynamic.getLatestBlockHeaderHash()).thenReturn(Sha256Hash.wrap(bytes(99)));
     invoke(manager, "rewindPathStateRootAfterPop");
     assertNotNull(manager.getPathStateRuntime().getFailure());
+    assertEquals(PathStateRuntimeAttachment.FailureStage.REORG,
+        manager.getPathStateRuntime().status().getFailureStage());
+    assertEquals(100L, manager.getPathStateRuntime().status().getObservedBlockNumber());
+    assertEquals(1L, manager.getPathStateRuntime().status().getRootLag());
     assertArrayEquals(first.encode(), new PathStateCurrentStore(manifest).current().encode());
     invoke(manager, "closePathStateRoot");
   }
