@@ -129,7 +129,11 @@ import org.tron.core.db2.archive.SnapshotOldValueCollector;
 import org.tron.core.db2.archive.StateArchiveRuntimeOwner;
 import org.tron.core.db2.core.Chainbase;
 import org.tron.core.db2.core.SnapshotManager;
+import org.tron.core.db2.stateroot.PathStateCanonicalizer.P66Phase;
 import org.tron.core.db2.stateroot.PathStateLayerLimits;
+import org.tron.core.db2.stateroot.PathStateNativeSnapshotSource;
+import org.tron.core.db2.stateroot.PathStateRebuildCoordinator;
+import org.tron.core.db2.stateroot.PathStateRebuildCoordinator.SnapshotIdentity;
 import org.tron.core.db2.stateroot.PathStateRootMetadata;
 import org.tron.core.db2.stateroot.PathStateRuntimeAdmission;
 import org.tron.core.db2.stateroot.PathStateSnapshotHead;
@@ -206,6 +210,8 @@ public class Manager {
   private static final int SLEEP_TIME_OUT = 50;
   private static final int TX_ID_CACHE_SIZE = 100_000;
   private static final int SLEEP_FOR_WAIT_LOCK = 10;
+  private static final int PATH_STATE_REBUILD_PAGE_SIZE = 4096;
+  private static final int PATH_STATE_REBUILD_MARKET_ENTRY_LIMIT = 1_000_000;
   @Getter
   private ArchiveHistoryWriter archiveHistoryWriter;
   @Getter
@@ -737,6 +743,15 @@ public class Manager {
           storage.getDbEngine());
       PathStateRuntimeAdmission.Result admission = PathStateRuntimeAdmission.inspect(
           true, directory, engine);
+      if (admission.getStatus() == PathStateRuntimeAdmission.Status.REBUILD_REQUIRED) {
+        if (!(revokingStore instanceof SnapshotManager)) {
+          throw new IllegalStateException("Path-state rebuild requires SnapshotManager");
+        }
+        PathStateStoreManifest rebuildManifest = admission.getManifest() == null
+            ? PathStateStoreManifest.createOrOpen(directory, engine) : admission.getManifest();
+        rebuildPathStateRoot((SnapshotManager) revokingStore, rebuildManifest);
+        admission = PathStateRuntimeAdmission.inspect(true, directory, engine);
+      }
       if (admission.getStatus() != PathStateRuntimeAdmission.Status.CURRENT_READY) {
         throw new IllegalStateException(
             "Path-state startup requires a completed admitted rebuild");
@@ -760,6 +775,61 @@ public class Manager {
     } catch (java.io.IOException | RuntimeException failure) {
       pathStateSnapshotHead = null;
       throw new IllegalStateException("Failed to recover path-state startup", failure);
+    }
+  }
+
+  private void rebuildPathStateRoot(SnapshotManager snapshotManager,
+      PathStateStoreManifest manifest) throws java.io.IOException {
+    java.util.Map<String,
+        org.tron.core.db2.archive.LatestStateGenerationAdapter.SnapshotCapableStore>
+        supplementalStores = java.util.Collections.emptyMap();
+    boolean accountAssetRegistered = snapshotManager.getDbs().stream()
+        .anyMatch(database -> AccountAssetArchiveProjector.ACCOUNT_ASSET_DB
+            .equals(database.getDbName()));
+    if (!accountAssetRegistered) {
+      AccountAssetStore accountAssetStore = chainBaseManager.getAccountAssetStore();
+      if (accountAssetStore == null) {
+        throw new java.io.IOException("Path-state rebuild requires account-asset Store");
+      }
+      supplementalStores = java.util.Collections.singletonMap(
+          AccountAssetArchiveProjector.ACCOUNT_ASSET_DB,
+          org.tron.core.db2.archive.LatestStateGenerationAdapter.fromDataSource(
+              AccountAssetArchiveProjector.ACCOUNT_ASSET_DB,
+              accountAssetStore.getDbSource()));
+    }
+    try (PathStateNativeSnapshotSource source = PathStateNativeSnapshotSource.acquire(
+        snapshotManager, supplementalStores, this::readPathStateSnapshotIdentity,
+        PATH_STATE_REBUILD_PAGE_SIZE, PATH_STATE_REBUILD_MARKET_ENTRY_LIMIT)) {
+      PathStateRebuildCoordinator.RebuildResult result = new PathStateRebuildCoordinator()
+          .rebuild(manifest, source);
+      logger.info("Path-state initial root rebuilt: directory={}, head={}, entries={}",
+          manifest.getDirectory(), result.getMetadata().getBlockNumber(),
+          result.getTotalEntries());
+    }
+  }
+
+  private SnapshotIdentity readPathStateSnapshotIdentity() throws java.io.IOException {
+    DynamicPropertiesStore dynamic = getDynamicPropertiesStore();
+    long blockNumber = dynamic.getLatestBlockHeaderNumber();
+    try {
+      BlockCapsule block = chainBaseManager.getBlockByNum(blockNumber);
+      byte[] blockHash = dynamic.getLatestBlockHeaderHash().getBytes();
+      long timestamp = dynamic.getLatestBlockHeaderTimestamp();
+      if (block.getNum() != blockNumber
+          || !Arrays.equals(block.getBlockId().getBytes(), blockHash)
+          || block.getTimeStamp() != timestamp) {
+        throw new java.io.IOException(
+            "Path-state rebuild block differs from persisted Chainbase head");
+      }
+      long allowSameTokenName = dynamic.getAllowSameTokenName();
+      if (allowSameTokenName != 0 && allowSameTokenName != 1) {
+        throw new java.io.IOException("Path-state rebuild P66 phase is invalid");
+      }
+      P66Phase phase = allowSameTokenName == 0 ? P66Phase.P66_OFF : P66Phase.P66_ON;
+      return new SnapshotIdentity(blockNumber, blockHash, block.getParentHash().getBytes(),
+          timestamp, phase);
+    } catch (BadItemException | ItemNotFoundException failure) {
+      throw new java.io.IOException("Path-state rebuild cannot resolve canonical head", failure);
     }
   }
 
