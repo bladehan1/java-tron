@@ -19,6 +19,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
@@ -279,6 +280,99 @@ public class PathStateRebuildCoordinatorTest {
         bytes(11), identity(), Collections.singletonList(wrongFirst), bytes(8)));
   }
 
+  @Test
+  public void publishesBaseThenDrainsBlockHashContinuousCatchUp() throws Exception {
+    PathStateStoreManifest manifest = manifest("catch-up", Engine.ROCKSDB);
+    PathStateCatchUpQueue queue = new PathStateCatchUpQueue(identity(), 4, 8, 1L << 20);
+    PathStateBlockTransition first = transition(101, bytes(20), bytes(1),
+        PathStateMutation.put("proposal", new byte[]{1}, new byte[]{2}));
+    PathStateBlockTransition second = transition(102, bytes(21), bytes(20),
+        PathStateMutation.put("account", new byte[]{3}, new byte[]{4}));
+    assertEquals(PathStateCatchUpQueue.CaptureDisposition.QUEUED, queue.capture(first));
+    assertEquals(PathStateCatchUpQueue.CaptureDisposition.QUEUED, queue.capture(second));
+
+    RebuildResult result = new PathStateRebuildCoordinator().rebuild(manifest,
+        exactSource(identity()), queue, new PathStateLayerLimits(4, 1L << 30));
+
+    assertEquals(100, result.getMetadata().getBlockNumber());
+    PathStateRootMetadata current = new PathStateCurrentStore(manifest).current();
+    assertEquals(102, current.getBlockNumber());
+    assertArrayEquals(second.getBlockHash(), current.getBlockHash());
+    assertArrayEquals(second.getPayloadDigest(), current.getPayloadDigest());
+    assertEquals(PathStateCatchUpQueue.State.READY, queue.getState());
+    assertEquals(0, queue.getQueuedTransitions());
+    assertEquals(0, queue.getQueuedMutations());
+    assertEquals(0, queue.getQueuedBytes());
+    assertEquals(PathStateCatchUpQueue.CaptureDisposition.DIRECT_APPLY,
+        queue.capture(transition(103, bytes(22), bytes(21),
+            PathStateMutation.delete("proposal", new byte[]{1}))));
+  }
+
+  @Test
+  public void acceptsNewContinuousCaptureWhileCatchUpIsDraining() throws Exception {
+    PathStateStoreManifest manifest = manifest("catch-up-race", Engine.ROCKSDB);
+    AtomicReference<PathStateCatchUpQueue> queueRef = new AtomicReference<>();
+    PathStateBlockTransition second = transition(102, bytes(31), bytes(30),
+        PathStateMutation.put("account", new byte[]{5}, new byte[]{6}));
+    PathStateCatchUpQueue queue = new PathStateCatchUpQueue(identity(), 4, 8, 1L << 20,
+        committed -> {
+          if (committed.getBlockNumber() == 101) {
+            queueRef.get().capture(second);
+          }
+        });
+    queueRef.set(queue);
+    queue.capture(transition(101, bytes(30), bytes(1),
+        PathStateMutation.put("proposal", new byte[]{1}, new byte[]{2})));
+
+    new PathStateRebuildCoordinator().rebuild(manifest, exactSource(identity()), queue,
+        new PathStateLayerLimits(4, 1L << 30));
+
+    assertEquals(PathStateCatchUpQueue.State.READY, queue.getState());
+    assertEquals(102, queue.getReadyHead().getBlockNumber());
+    assertEquals(102, new PathStateCurrentStore(manifest).current().getBlockNumber());
+  }
+
+  @Test
+  public void catchUpGapAndOverflowFailBeforeBasePublication() throws Exception {
+    PathStateCatchUpQueue gap = new PathStateCatchUpQueue(identity(), 2, 2, 1L << 20);
+    IOException gapFailure = assertThrows(IOException.class,
+        () -> gap.capture(transition(102, bytes(41), bytes(40),
+            PathStateMutation.delete("proposal", new byte[]{1}))));
+    assertTrue(gapFailure.getMessage().contains("block/hash continuous"));
+    assertEquals(PathStateCatchUpQueue.State.FAILED, gap.getState());
+
+    PathStateStoreManifest manifest = manifest("catch-up-overflow", Engine.ROCKSDB);
+    PathStateCatchUpQueue overflow = new PathStateCatchUpQueue(identity(), 1, 2, 1L << 20);
+    overflow.capture(transition(101, bytes(40), bytes(1),
+        PathStateMutation.put("proposal", new byte[]{1}, new byte[]{2})));
+    IOException overflowFailure = assertThrows(IOException.class,
+        () -> overflow.capture(transition(102, bytes(41), bytes(40),
+            PathStateMutation.put("account", new byte[]{3}, new byte[]{4}))));
+    assertTrue(overflowFailure.getMessage().contains("limit exceeded"));
+    assertEquals(PathStateCatchUpQueue.State.FAILED, overflow.getState());
+    assertThrows(IOException.class, () -> new PathStateRebuildCoordinator().rebuild(manifest,
+        exactSource(identity()), overflow, new PathStateLayerLimits(4, 1L << 30)));
+    assertFalse(new PathStateCurrentStore(manifest).isInitialized());
+    assertFalse(Files.exists(manifest.getBaseDirectory()
+        .resolve(PathStateNodeStoreSet.NODES_DIRECTORY)));
+
+    PathStateStoreManifest mismatchManifest = manifest("catch-up-identity", Engine.ROCKSDB);
+    SnapshotIdentity other = new SnapshotIdentity(99, bytes(50), bytes(51), 299,
+        P66Phase.P66_ON);
+    PathStateCatchUpQueue mismatch = new PathStateCatchUpQueue(other, 2, 2, 1L << 20);
+    IOException mismatchFailure = assertThrows(IOException.class,
+        () -> new PathStateRebuildCoordinator().rebuild(mismatchManifest,
+            exactSource(identity()), mismatch, new PathStateLayerLimits(4, 1L << 30)));
+    assertTrue(mismatchFailure.getMessage().contains("snapshot identity mismatch"));
+    assertFalse(new PathStateCurrentStore(mismatchManifest).isInitialized());
+
+    PathStateCatchUpQueue byteOverflow = new PathStateCatchUpQueue(identity(), 2, 2, 1);
+    assertThrows(IOException.class, () -> byteOverflow.capture(
+        transition(101, bytes(60), bytes(1),
+            PathStateMutation.put("proposal", new byte[]{1}, new byte[]{2}))));
+    assertEquals(PathStateCatchUpQueue.State.FAILED, byteOverflow.getState());
+  }
+
   private PathStateStoreManifest manifest(String name, Engine engine) throws IOException {
     Path directory = temporaryFolder.newFolder(name).toPath();
     return PathStateStoreManifest.createOrOpen(directory, engine);
@@ -299,6 +393,12 @@ public class PathStateRebuildCoordinatorTest {
 
   private static SnapshotIdentity identity(P66Phase phase) {
     return new SnapshotIdentity(100, bytes(1), bytes(2), 300, phase);
+  }
+
+  private static PathStateBlockTransition transition(long blockNumber, byte[] blockHash,
+      byte[] parentHash, PathStateMutation mutation) {
+    return new PathStateBlockTransition(blockNumber, blockHash, parentHash,
+        300 + blockNumber, P66Phase.P66_ON, Collections.singletonList(mutation));
   }
 
   private static Engine[] availableEngines() {
