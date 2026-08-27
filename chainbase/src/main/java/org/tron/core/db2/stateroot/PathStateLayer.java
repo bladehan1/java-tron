@@ -77,6 +77,21 @@ public final class PathStateLayer implements Closeable {
         Objects.requireNonNull(parentSnapshot, "parentSnapshot"));
   }
 
+  /** Begins durable publication from an immutable candidate computed without native I/O. */
+  public static PathStateLayer beginPrepared(PathStateStoreManifest manifest,
+      PathStateRootMetadata parent, PreparedPathStateTransition prepared,
+      PathStateLayerLimits limits) throws IOException {
+    PreparedPathStateTransition candidate = Objects.requireNonNull(prepared, "prepared");
+    if (!candidate.extendsParent(Objects.requireNonNull(parent, "parent"))) {
+      throw new IOException("path-state prepared transition parent is not CURRENT candidate");
+    }
+    PathStateBlockTransition transition = candidate.getTransition();
+    return begin(manifest, parent, transition.getBlockNumber(), transition.getBlockHash(),
+        transition.getParentHash(), transition.getTimestamp(), transition.getPhase(),
+        transition.getPayloadDigest(), Objects.requireNonNull(limits, "limits"), stage -> { },
+        null, candidate);
+  }
+
   static PathStateLayer begin(PathStateStoreManifest manifest,
       PathStateRootMetadata parent, long blockNumber, byte[] blockHash, byte[] parentHash,
       long timestamp, P66Phase phase, byte[] transitionDigest,
@@ -98,6 +113,15 @@ public final class PathStateLayer implements Closeable {
       long timestamp, P66Phase phase, byte[] transitionDigest, PathStateLayerLimits limits,
       PathStateLayerPublication.FaultHook faultHook, PathStateRoot.Snapshot parentSnapshot)
       throws IOException {
+    return begin(manifest, parent, blockNumber, blockHash, parentHash, timestamp, phase,
+        transitionDigest, limits, faultHook, parentSnapshot, null);
+  }
+
+  private static PathStateLayer begin(PathStateStoreManifest manifest,
+      PathStateRootMetadata parent, long blockNumber, byte[] blockHash, byte[] parentHash,
+      long timestamp, P66Phase phase, byte[] transitionDigest, PathStateLayerLimits limits,
+      PathStateLayerPublication.FaultHook faultHook, PathStateRoot.Snapshot parentSnapshot,
+      PreparedPathStateTransition preparedTransition) throws IOException {
     PathStateStoreManifest admitted = Objects.requireNonNull(manifest, "manifest");
     PathStateLayerLimits admittedLimits = Objects.requireNonNull(limits, "limits");
     PathStateRootMetadata admittedParent = Objects.requireNonNull(parent, "parent");
@@ -118,9 +142,12 @@ public final class PathStateLayer implements Closeable {
         PathStateNodeStoreSet.openPublished(admitted, admittedParent);
     PathStateNodeStoreSet childStores = null;
     try {
-      PathStateRoot parentRoot = parentSnapshot == null ? parentStores.createRoot() : null;
+      PathStateRoot parentRoot = parentSnapshot == null && preparedTransition == null
+          ? parentStores.createRoot() : null;
       childStores = PathStateNodeStoreSet.beginLayer(admitted, identity, parentStores);
-      PathStateRoot childRoot = parentSnapshot == null
+      PathStateRoot childRoot = preparedTransition != null
+          ? childStores.createRootFrom(preparedTransition)
+          : parentSnapshot == null
           ? childStores.createRootFrom(parentStores.leafRecords(), parentRoot.rootHash())
           : childStores.createRootFrom(parentSnapshot, admittedParent.getStateRoot());
       return new PathStateLayer(admitted,

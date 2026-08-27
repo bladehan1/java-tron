@@ -42,29 +42,41 @@ public final class PathStateSnapshotHead {
   /** Applies one exact child and publishes its snapshot only after durable layer commit succeeds. */
   public synchronized PathStateRootMetadata advance(PathStateBlockTransition transition)
       throws IOException {
+    return advancePrepared(prepare(transition));
+  }
+
+  /** Computes an immutable candidate without opening or changing durable path-state storage. */
+  public synchronized PreparedPathStateTransition prepare(PathStateBlockTransition transition)
+      throws IOException {
     requireHealthy();
     PathStateBlockTransition admitted = Objects.requireNonNull(transition, "transition");
     requireChild(admitted);
+    return PreparedPathStateTransition.prepare(head, snapshot, admitted);
+  }
+
+  /** Publishes one exact prepared child and adopts it only after CURRENT confirms durability. */
+  public synchronized PathStateRootMetadata advancePrepared(
+      PreparedPathStateTransition prepared) throws IOException {
+    requireHealthy();
+    PreparedPathStateTransition admitted = Objects.requireNonNull(prepared, "prepared");
+    if (!admitted.extendsParent(head)) {
+      throw new IOException("path-state prepared transition does not extend owned head");
+    }
     PathStateRootMetadata previous = head;
-    PathStateRoot.Snapshot candidateSnapshot;
+    PathStateRoot.Snapshot candidateSnapshot = admitted.getSnapshot();
     PathStateRootMetadata committed;
-    try (PathStateLayer layer = PathStateLayer.beginFromSnapshot(manifest, previous, snapshot,
-        admitted.getBlockNumber(), admitted.getBlockHash(), admitted.getParentHash(),
-        admitted.getTimestamp(), admitted.getPhase(), admitted.getPayloadDigest(), limits)) {
-      if (!admitted.getMutations().isEmpty()) {
-        layer.apply(admitted.getMutations());
-      }
-      candidateSnapshot = layer.prepareSnapshot();
+    PathStateBlockTransition transition = admitted.getTransition();
+    try (PathStateLayer layer = PathStateLayer.beginPrepared(manifest, previous, admitted, limits)) {
       committed = layer.commit();
     } catch (IOException | RuntimeException failure) {
       failIfAuthorityMoved(previous, failure);
       throw failure;
     }
     if (!same(committed, new PathStateCurrentStore(manifest).current())
-        || committed.getBlockNumber() != admitted.getBlockNumber()
-        || !Arrays.equals(committed.getBlockHash(), admitted.getBlockHash())
-        || !Arrays.equals(committed.getParentHash(), admitted.getParentHash())
-        || !Arrays.equals(committed.getPayloadDigest(), admitted.getPayloadDigest())
+        || committed.getBlockNumber() != transition.getBlockNumber()
+        || !Arrays.equals(committed.getBlockHash(), transition.getBlockHash())
+        || !Arrays.equals(committed.getParentHash(), transition.getParentHash())
+        || !Arrays.equals(committed.getPayloadDigest(), transition.getPayloadDigest())
         || !Arrays.equals(committed.getStateRoot(), candidateSnapshot.getStateRoot())) {
       failed = true;
       throw new IOException("path-state committed snapshot identity mismatch");

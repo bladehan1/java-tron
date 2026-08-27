@@ -3,11 +3,14 @@ package org.tron.core.db2.stateroot;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertThrows;
+import static org.junit.Assert.assertTrue;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.Files;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.stream.Stream;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
@@ -26,10 +29,23 @@ public class PathStateSnapshotHeadTest {
       Fixture fixture = fixture("advance-" + engine, engine);
       PathStateSnapshotHead owner = PathStateSnapshotHead.open(
           fixture.manifest, PathStateLayerLimits.defaults());
-      PathStateRootMetadata first = owner.advance(transition(101, 11,
+      PreparedPathStateTransition prepared = owner.prepare(transition(101, 11,
           fixture.base.getBlockHash(), Collections.singletonList(
               PathStateMutation.put("proposal", new byte[]{1}, new byte[]{5}))));
+      PreparedPathStateTransition stale = owner.prepare(transition(101, 21,
+          fixture.base.getBlockHash(), Collections.singletonList(
+              PathStateMutation.put("proposal", new byte[]{1}, new byte[]{6}))));
+      assertTrue(prepared.getNodeMutationCount() > 0);
+      try (Stream<java.nio.file.Path> layers = Files.list(
+          fixture.manifest.getLayersDirectory())) {
+        assertFalse(layers.findAny().isPresent());
+      }
+      assertArrayEquals(fixture.base.encode(),
+          new PathStateCurrentStore(fixture.manifest).current().encode());
+      PathStateRootMetadata first = owner.advancePrepared(prepared);
       assertArrayEquals(first.getStateRoot(), owner.getSnapshot().getStateRoot());
+      assertThrows(IOException.class, () -> owner.advancePrepared(stale));
+      assertArrayEquals(first.encode(), owner.getHead().encode());
 
       assertThrows(IOException.class, () -> owner.advance(transition(103, 13,
           first.getBlockHash(), Collections.emptyList())));
