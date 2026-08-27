@@ -28,6 +28,7 @@ public class StorageConfig {
   private CheckpointConfig checkpoint = new CheckpointConfig();
   private SnapshotConfig snapshot = new SnapshotConfig();
   private StateArchiveConfig stateArchive = new StateArchiveConfig();
+  private PathStateRootConfig pathStateRoot = new PathStateRootConfig();
   private TxCacheConfig txCache = new TxCacheConfig();
   // ConfigBeanFactory requires all bean fields present per item, so we parse manually.
   @Setter(lombok.AccessLevel.NONE)
@@ -166,6 +167,42 @@ public class StorageConfig {
     }
   }
 
+  @Getter
+  @Setter
+  public static class PathStateRootConfig {
+
+    private boolean enabled = false;
+    private String mode = "shadow";
+    private String directory = "path-state-root";
+    private int formatVersion = 1;
+    private int reversibleLayerLimit = 128;
+    private long reversibleLayerBytes = 2147483648L;
+    private long writeBufferBytes = 268435456L;
+    private boolean rebuildFromGenesis = false;
+    private boolean verifyEveryBlock = true;
+
+    void postProcess() {
+      if (!"shadow".equals(mode)) {
+        throw new IllegalArgumentException("pathStateRoot.mode must be shadow");
+      }
+      if (directory == null || directory.trim().isEmpty()) {
+        throw new IllegalArgumentException("pathStateRoot.directory must not be empty");
+      }
+      if (formatVersion != 1) {
+        throw new IllegalArgumentException("pathStateRoot.formatVersion must be 1");
+      }
+      if (reversibleLayerLimit <= 0 || reversibleLayerBytes <= 0 || writeBufferBytes <= 0) {
+        throw new IllegalArgumentException("pathStateRoot limits must be positive");
+      }
+      if (rebuildFromGenesis) {
+        throw new IllegalArgumentException("pathStateRoot.rebuildFromGenesis is not supported");
+      }
+      if (!verifyEveryBlock) {
+        throw new IllegalArgumentException("pathStateRoot.verifyEveryBlock must remain enabled");
+      }
+    }
+  }
+
   private static final class BlockHistoryLimits {
     private static final long MIN_SEGMENT_SIZE = 64L * 1024 * 1024;
   }
@@ -214,6 +251,7 @@ public class StorageConfig {
     sc.dbSettings.postProcess();
     sc.snapshot.postProcess();
     sc.stateArchive.postProcess();
+    sc.pathStateRoot.postProcess();
     sc.txCache.postProcess();
     return sc;
   }

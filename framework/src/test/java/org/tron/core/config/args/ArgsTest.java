@@ -311,6 +311,32 @@ public class ArgsTest {
     Args.clearParam();
   }
 
+  @Test
+  public void testPathStateRootStorageConfigMapping() {
+    Map<String, String> override = new HashMap<>();
+    override.put("storage.db.directory", "database");
+    override.put("storage.pathStateRoot.enabled", "true");
+    override.put("storage.pathStateRoot.directory", "root-mapped");
+    override.put("storage.pathStateRoot.reversibleLayerLimit", "9");
+    override.put("storage.pathStateRoot.reversibleLayerBytes", "8192");
+    Config config = ConfigFactory.parseMap(override)
+        .withFallback(ConfigFactory.defaultReference());
+
+    Args.applyConfigParams(config);
+
+    Storage storage = Args.getInstance().getStorage();
+    Assert.assertTrue(storage.isPathStateRootEnabled());
+    Assert.assertEquals("shadow", storage.getPathStateRootMode());
+    Assert.assertEquals("root-mapped", storage.getPathStateRootDirectory());
+    Assert.assertEquals(1, storage.getPathStateRootFormatVersion());
+    Assert.assertEquals(9, storage.getPathStateRootReversibleLayerLimit());
+    Assert.assertEquals(8192L, storage.getPathStateRootReversibleLayerBytes());
+    Assert.assertEquals(268435456L, storage.getPathStateRootWriteBufferBytes());
+    Assert.assertFalse(storage.isPathStateRootRebuildFromGenesis());
+    Assert.assertTrue(storage.isPathStateRootVerifyEveryBlock());
+    Args.clearParam();
+  }
+
   /**
    * Verify that event.subscribe.enable = false from config is read correctly.
    */
