@@ -9,11 +9,18 @@ public final class PathStateRuntimeAttachment {
 
   private final PathStateTransitionCollector collector;
   private final TransitionSink sink;
+  private final BaseFlushSink baseFlushSink;
   private Throwable failure;
 
   public PathStateRuntimeAttachment(PathStateTransitionCollector collector, TransitionSink sink) {
+    this(collector, sink, (blockNumber, blockHash) -> { });
+  }
+
+  public PathStateRuntimeAttachment(PathStateTransitionCollector collector, TransitionSink sink,
+      BaseFlushSink baseFlushSink) {
     this.collector = Objects.requireNonNull(collector, "collector");
     this.sink = Objects.requireNonNull(sink, "sink");
+    this.baseFlushSink = Objects.requireNonNull(baseFlushSink, "baseFlushSink");
   }
 
   /** Capture failures fail only this shadow runtime and never reject the canonical block. */
@@ -42,6 +49,18 @@ public final class PathStateRuntimeAttachment {
     }
   }
 
+  /** Compacts only after Chainbase has durably refreshed the matching prefix. */
+  public synchronized void flushBaseThrough(long blockNumber, byte[] blockHash) {
+    if (failure != null) {
+      return;
+    }
+    try {
+      baseFlushSink.accept(blockNumber, blockHash);
+    } catch (IOException | RuntimeException currentFailure) {
+      failure = currentFailure;
+    }
+  }
+
   public synchronized boolean isFailed() {
     return failure != null;
   }
@@ -61,5 +80,11 @@ public final class PathStateRuntimeAttachment {
   public interface TransitionSink {
 
     void accept(PathStateBlockTransition transition) throws IOException;
+  }
+
+  @FunctionalInterface
+  public interface BaseFlushSink {
+
+    void accept(long blockNumber, byte[] blockHash) throws IOException;
   }
 }

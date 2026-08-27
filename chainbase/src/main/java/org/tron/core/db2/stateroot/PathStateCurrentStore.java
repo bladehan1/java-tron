@@ -147,6 +147,26 @@ public final class PathStateCurrentStore {
     throw new IOException("path-state canonical target exceeds the reversible window");
   }
 
+  synchronized PathStateRootMetadata firstLayerAfterBaseToward(
+      PathStateRootMetadata target, PathStateLayerLimits limits) throws IOException {
+    PathStateRootMetadata admittedTarget = Objects.requireNonNull(target, "target");
+    PathStateLayerLimits admittedLimits = Objects.requireNonNull(limits, "limits");
+    PathStateRootMetadata base = requireKind(PathStateMetadataFile.load(basePath()), Kind.BASE);
+    requireFormat(base);
+    if (admittedTarget.getKind() != Kind.LAYER) {
+      throw new IOException("path-state base flush target is not a layer");
+    }
+    PathStateRootMetadata cursor = admittedTarget;
+    for (int depth = 1; depth <= admittedLimits.getMaxLayers(); depth++) {
+      PathStateRootMetadata parent = parentOf(cursor, base);
+      if (same(parent, base)) {
+        return cursor;
+      }
+      cursor = parent;
+    }
+    throw new IOException("path-state base flush target exceeds the reversible window");
+  }
+
   /** Loads CURRENT and verifies that every referenced layer reaches the single durable base. */
   public synchronized PathStateRootMetadata current() throws IOException {
     PathStateRootMetadata base = requireKind(PathStateMetadataFile.load(basePath()), Kind.BASE);

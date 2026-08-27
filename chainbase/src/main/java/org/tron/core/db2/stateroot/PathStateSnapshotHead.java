@@ -26,6 +26,7 @@ public final class PathStateSnapshotHead {
       PathStateLayerLimits limits) throws IOException {
     PathStateStoreManifest admitted = Objects.requireNonNull(manifest, "manifest");
     PathStateLayerLimits admittedLimits = Objects.requireNonNull(limits, "limits");
+    new PathStateBaseCompaction(admitted, admittedLimits).recover();
     PathStateRootMetadata current = new PathStateCurrentStore(admitted).current();
     try (PathStateNodeStoreSet stores = PathStateNodeStoreSet.openPublished(admitted, current)) {
       PathStateRoot root = stores.createRoot();
@@ -65,6 +66,25 @@ public final class PathStateSnapshotHead {
       head = restored.head;
       snapshot = restored.snapshot;
       return head;
+    } catch (IOException | RuntimeException failure) {
+      failIfAuthorityMoved(previous, failure);
+      throw failure;
+    }
+  }
+
+  /** Compacts the exact Chainbase-flushed prefix while retaining this newer reversible head. */
+  public synchronized PathStateRootMetadata flushBaseThrough(long blockNumber, byte[] blockHash)
+      throws IOException {
+    requireHealthy();
+    PathStateRootMetadata previous = head;
+    try {
+      PathStateRootMetadata base = new PathStateBaseCompaction(manifest, limits)
+          .compactThrough(blockNumber, blockHash);
+      if (!same(previous, new PathStateCurrentStore(manifest).current())) {
+        failed = true;
+        throw new IOException("path-state base flush changed the owned head");
+      }
+      return base;
     } catch (IOException | RuntimeException failure) {
       failIfAuthorityMoved(previous, failure);
       throw failure;
