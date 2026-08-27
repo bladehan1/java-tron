@@ -261,6 +261,36 @@ public final class PathStateNodeStoreSet implements Closeable {
     return root;
   }
 
+  synchronized PathStateRoot createRootFrom(PreparedPathStateTransition prepared) {
+    requireOpen();
+    if (rootClaimed) {
+      throw new IllegalStateException("path-state node database set already has a trie owner");
+    }
+    if (progress != null || !localLeaves.isEmpty() || !leafTombstones.isEmpty()) {
+      throw new IllegalStateException("path-state layer already contains durable state");
+    }
+    if (parentStores == null) {
+      throw new IllegalStateException("path-state layer has no parent node overlay");
+    }
+    PreparedPathStateTransition candidate = Objects.requireNonNull(prepared, "prepared");
+    PathStateRoot next = PathStateRoot.fromSnapshot(scope,
+        participant -> participantStores.get(participant.getDbName()), superStore,
+        candidate.getSnapshot());
+    for (PreparedPathStateTransition.NodeMutation mutation : candidate.getNodeMutations()) {
+      PathNodeStore store = nodeStore(mutation.getStoreId());
+      byte[] encoded = mutation.getEncodedNode();
+      if (encoded == null) {
+        store.delete(mutation.getPath());
+      } else {
+        store.put(mutation.getPath(), encoded);
+      }
+    }
+    next.verifyNodeStores();
+    root = next;
+    rootClaimed = true;
+    return root;
+  }
+
   synchronized List<PathStateRoot.LeafRecord> leafRecords() {
     requireOpen();
     if (root == null) {
@@ -490,6 +520,18 @@ public final class PathStateNodeStoreSet implements Closeable {
 
   private synchronized void delete(byte[] key) {
     pending.put(new BytesKey(key), null);
+  }
+
+  private PathNodeStore nodeStore(int storeId) {
+    if (storeId == 0) {
+      return superStore;
+    }
+    for (PathStateParticipant participant : scope.getParticipants()) {
+      if (participant.getStoreId() == storeId) {
+        return participantStores.get(participant.getDbName());
+      }
+    }
+    throw new IllegalArgumentException("unknown prepared path-state Store ID: " + storeId);
   }
 
   private void requireProgressIdentity(PathStateRootMetadata metadata) throws IOException {
