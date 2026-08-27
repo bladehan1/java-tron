@@ -116,6 +116,43 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
   }
 
   @Test
+  public void pathStateCompactsOnlyAfterChainbaseRefreshesThePrefix() throws Exception {
+    SnapshotManager manager = new SnapshotManager("");
+    Chainbase code = new Chainbase(new SnapshotRoot(new MemoryDb("code")));
+    manager.add(code);
+    manager.enable();
+    manager.setUnChecked(false);
+    CheckTmpStore checkpoint = mock(CheckTmpStore.class);
+    DbSourceInter<byte[]> checkpointDb = mock(DbSourceInter.class);
+    when(checkpointDb.iterator()).thenReturn(Collections.emptyIterator());
+    when(checkpoint.getDbSource()).thenReturn(checkpointDb);
+    manager.setCheckTmpStore(checkpoint);
+    AtomicReference<Long> flushedNumber = new AtomicReference<>();
+    AtomicReference<byte[]> flushedHash = new AtomicReference<>();
+    PathStateRuntimeAttachment attachment = new PathStateRuntimeAttachment(
+        view -> mock(PathStateBlockTransition.class), transition -> { },
+        (blockNumber, blockHash) -> {
+          flushedNumber.set(blockNumber);
+          flushedHash.set(blockHash);
+        });
+    manager.attachPathStateRuntime(attachment);
+
+    BlockSnapshotMeta first = BlockSnapshotMeta.forBlock(1, hash(1), hash(0), 1L);
+    BlockSnapshotMeta second = BlockSnapshotMeta.forBlock(2, hash(2), hash(1), 2L);
+    commitBlock(manager, code, first, "first");
+    commitBlock(manager, code, second, "second");
+    setFlushCount(manager, 1);
+
+    manager.flush();
+
+    assertEquals(Long.valueOf(1L), flushedNumber.get());
+    assertArrayEquals(first.getBlockHash(), flushedHash.get());
+    assertFalse(attachment.isFailed());
+    manager.detachPathStateRuntime(attachment);
+    manager.shutdown();
+  }
+
+  @Test
   public void borrowedRuntimeAttachmentIsAtomicAndIdentityBound() throws Exception {
     SnapshotManager manager = new SnapshotManager("");
     manager.add(new Chainbase(new SnapshotRoot(new MemoryDb("code"))));

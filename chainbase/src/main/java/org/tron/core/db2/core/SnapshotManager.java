@@ -576,6 +576,7 @@ public class SnapshotManager implements RevokingDatabase {
     if (force || shouldBeRefreshed()) {
       try {
         long start = System.currentTimeMillis();
+        BlockSnapshotMeta pathStateFlushTarget = pathStateFlushTarget();
         ArchiveWalBinding archiveBinding = publishArchiveHistoryForFlush();
         if (!isV2Open()) {
           deleteCheckpoint();
@@ -591,6 +592,10 @@ public class SnapshotManager implements RevokingDatabase {
           }
         }
         refresh();
+        if (pathStateRuntimeAttachment != null && pathStateFlushTarget != null) {
+          pathStateRuntimeAttachment.flushBaseThrough(pathStateFlushTarget.getBlockNumber(),
+              pathStateFlushTarget.getBlockHash());
+        }
         if (archiveBinding != null && archiveRuntimeAttachment != null) {
           try {
             archiveRuntimeAttachment.publishReadableState(archiveBinding.getLast());
@@ -614,6 +619,30 @@ public class SnapshotManager implements RevokingDatabase {
         hitDown = true;
         throw new TronError(e, TronError.ErrCode.DB_FLUSH);
       }
+    }
+  }
+
+  private BlockSnapshotMeta pathStateFlushTarget() {
+    if (pathStateRuntimeAttachment == null || flushCount == 0 || dbs.isEmpty()) {
+      return null;
+    }
+    try {
+      Snapshot next = dbs.get(0).getHead().getRoot();
+      BlockSnapshotMeta target = null;
+      for (int index = 0; index < flushCount; index++) {
+        next = next.getNext();
+        if (!Snapshot.isImpl(next)) {
+          throw new IllegalStateException("Path-state flush range is missing a snapshot layer");
+        }
+        target = ((SnapshotImpl) next).getBlockSnapshotMeta();
+        if (target == null) {
+          throw new IllegalStateException("Path-state flush layer has no block metadata");
+        }
+      }
+      return target;
+    } catch (RuntimeException failure) {
+      pathStateRuntimeAttachment.fail(failure);
+      return null;
     }
   }
 

@@ -130,6 +130,7 @@ import org.tron.core.db2.archive.SnapshotPathStateTransitionCollector;
 import org.tron.core.db2.archive.StateArchiveRuntimeOwner;
 import org.tron.core.db2.core.Chainbase;
 import org.tron.core.db2.core.SnapshotManager;
+import org.tron.core.db2.stateroot.PathStateBlockTransition;
 import org.tron.core.db2.stateroot.PathStateCanonicalizer.P66Phase;
 import org.tron.core.db2.stateroot.PathStateLayerLimits;
 import org.tron.core.db2.stateroot.PathStateNativeSnapshotSource;
@@ -794,15 +795,27 @@ public class Manager {
     }
     PathStateRuntimeAttachment attachment = new PathStateRuntimeAttachment(
         new SnapshotPathStateTransitionCollector(accountAssetStore::prefixQuery),
-        transition -> {
-          PathStateSnapshotHead owner = pathStateSnapshotHead;
-          if (owner == null) {
-            throw new java.io.IOException("Path-state snapshot owner is unavailable");
-          }
-          owner.advance(transition);
-        });
+        this::advancePathStateRoot, this::flushPathStateBaseThrough);
     ((SnapshotManager) revokingStore).attachPathStateRuntime(attachment);
     pathStateRuntime = attachment;
+  }
+
+  private void advancePathStateRoot(PathStateBlockTransition transition)
+      throws java.io.IOException {
+    PathStateSnapshotHead owner = pathStateSnapshotHead;
+    if (owner == null) {
+      throw new java.io.IOException("Path-state snapshot owner is unavailable");
+    }
+    owner.advance(transition);
+  }
+
+  private void flushPathStateBaseThrough(long blockNumber, byte[] blockHash)
+      throws java.io.IOException {
+    PathStateSnapshotHead owner = pathStateSnapshotHead;
+    if (owner == null) {
+      throw new java.io.IOException("Path-state snapshot owner is unavailable");
+    }
+    owner.flushBaseThrough(blockNumber, blockHash);
   }
 
   private void rebuildPathStateRoot(SnapshotManager snapshotManager,
