@@ -196,6 +196,75 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
   }
 
   @Test
+  public void pathStateStatusExposesLagStorageFailureAndCaptureGap() throws Exception {
+    SnapshotManager manager = new SnapshotManager("");
+    Chainbase code = new Chainbase(new SnapshotRoot(new MemoryDb("code")));
+    manager.add(code);
+    manager.enable();
+    AtomicInteger publications = new AtomicInteger();
+    PathStateRuntimeAttachment attachment = new PathStateRuntimeAttachment(view -> {
+      BlockSnapshotMeta meta = view.getMeta();
+      return new PathStateBlockTransition(meta.getBlockNumber(), meta.getBlockHash(),
+          meta.getParentHash(), meta.getTimestamp(), P66Phase.P66_ON,
+          Collections.emptyList());
+    }, transition -> {
+      if (publications.incrementAndGet() == 2) {
+        throw new IOException("No space left on device");
+      }
+    });
+
+    PathStateBlockTransition first = attachment.capture(
+        captureView(manager, code, BlockSnapshotMeta.forBlock(1, hash(1), hash(0), 1L)));
+    assertEquals(PathStateRuntimeAttachment.State.NOT_READY, attachment.status().getState());
+    attachment.publish(first);
+    assertEquals(PathStateRuntimeAttachment.State.READY, attachment.status().getState());
+    assertEquals(0L, attachment.status().getRootLag());
+
+    PathStateBlockTransition second = attachment.capture(
+        captureView(manager, code, BlockSnapshotMeta.forBlock(2, hash(2), hash(1), 2L)));
+    assertEquals(PathStateRuntimeAttachment.State.NOT_READY, attachment.status().getState());
+    assertEquals(1L, attachment.status().getRootLag());
+    attachment.publish(second);
+    assertEquals(PathStateRuntimeAttachment.State.FAILED, attachment.status().getState());
+    assertEquals(PathStateRuntimeAttachment.FailureStage.PUBLISH,
+        attachment.status().getFailureStage());
+    assertEquals(PathStateRuntimeAttachment.FailureKind.STORAGE_FULL,
+        attachment.status().getFailureKind());
+    attachment.capture(
+        captureView(manager, code, BlockSnapshotMeta.forBlock(3, hash(3), hash(2), 3L)));
+    assertEquals(2L, attachment.status().getRootLag());
+
+    PathStateRuntimeAttachment gap = new PathStateRuntimeAttachment(view -> {
+      BlockSnapshotMeta meta = view.getMeta();
+      return new PathStateBlockTransition(meta.getBlockNumber(), meta.getBlockHash(),
+          meta.getParentHash(), meta.getTimestamp(), P66Phase.P66_ON,
+          Collections.emptyList());
+    }, transition -> { });
+    PathStateBlockTransition admitted = gap.capture(
+        captureView(manager, code, BlockSnapshotMeta.forBlock(4, hash(4), hash(3), 4L)));
+    gap.publish(admitted);
+    assertEquals(PathStateRuntimeAttachment.State.READY, gap.status().getState());
+    assertEquals(null, gap.capture(
+        captureView(manager, code, BlockSnapshotMeta.forBlock(6, hash(6), hash(5), 6L))));
+    assertEquals(PathStateRuntimeAttachment.FailureStage.CAPTURE_GAP,
+        gap.status().getFailureStage());
+    assertEquals(2L, gap.status().getRootLag());
+
+    PathStateRuntimeAttachment corrupt = new PathStateRuntimeAttachment(view -> {
+      throw new AssertionError("capture is not used");
+    }, transition -> { }, (blockNumber, blockHash) -> {
+      throw new IOException("native progress checksum mismatch");
+    });
+    corrupt.flushBaseThrough(4L, hash(4));
+    assertEquals(PathStateRuntimeAttachment.State.FAILED, corrupt.status().getState());
+    assertEquals(PathStateRuntimeAttachment.FailureStage.BASE_FLUSH,
+        corrupt.status().getFailureStage());
+    assertEquals(PathStateRuntimeAttachment.FailureKind.CORRUPTION,
+        corrupt.status().getFailureKind());
+    manager.shutdown();
+  }
+
+  @Test
   public void pathStateCompactsOnlyAfterChainbaseRefreshesThePrefix() throws Exception {
     SnapshotManager manager = new SnapshotManager("");
     Chainbase code = new Chainbase(new SnapshotRoot(new MemoryDb("code")));
@@ -210,7 +279,12 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
     AtomicReference<Long> flushedNumber = new AtomicReference<>();
     AtomicReference<byte[]> flushedHash = new AtomicReference<>();
     PathStateRuntimeAttachment attachment = new PathStateRuntimeAttachment(
-        view -> mock(PathStateBlockTransition.class), transition -> { },
+        view -> {
+          BlockSnapshotMeta meta = view.getMeta();
+          return new PathStateBlockTransition(meta.getBlockNumber(), meta.getBlockHash(),
+              meta.getParentHash(), meta.getTimestamp(), P66Phase.P66_ON,
+              Collections.emptyList());
+        }, transition -> { },
         (blockNumber, blockHash) -> {
           flushedNumber.set(blockNumber);
           flushedHash.set(blockHash);
@@ -978,6 +1052,17 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
             && Arrays.equals(key, candidate.getCanonicalKey()))
         .findFirst()
         .orElseThrow(AssertionError::new);
+  }
+
+  private static BlockChangeView captureView(SnapshotManager manager, Chainbase database,
+      BlockSnapshotMeta meta) {
+    try (ISession session = manager.buildSession()) {
+      database.put(bytes("status-" + meta.getBlockNumber()),
+          bytes("value-" + meta.getBlockNumber()));
+      BlockChangeView view = BlockChangeView.capture(meta, manager.getDbs());
+      session.commit();
+      return view;
+    }
   }
 
   private static byte[] bytes(String value) {

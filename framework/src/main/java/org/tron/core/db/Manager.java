@@ -784,7 +784,7 @@ public class Manager {
     }
   }
 
-  private void attachPathStateBlockFinalRuntime() {
+  private void attachPathStateBlockFinalRuntime() throws java.io.IOException {
     if (!(revokingStore instanceof SnapshotManager)) {
       throw new IllegalStateException("Path-state block-final capture requires SnapshotManager");
     }
@@ -797,6 +797,7 @@ public class Manager {
         new SnapshotPathStateTransitionCollector(accountAssetStore::prefixQuery,
             this::scanPathStateActivationAccounts),
         this::advancePathStateRoot, this::flushPathStateBaseThrough);
+    attachment.synchronizeReadyHead(pathStateSnapshotHead.getHead());
     ((SnapshotManager) revokingStore).attachPathStateRuntime(attachment);
     pathStateRuntime = attachment;
   }
@@ -1432,13 +1433,19 @@ public class Manager {
     if (owner == null) {
       return;
     }
+    long canonicalNumber = getDynamicPropertiesStore().getLatestBlockHeaderNumber();
+    byte[] canonicalHash = getDynamicPropertiesStore().getLatestBlockHeaderHash().getBytes();
     try {
-      owner.rewindTo(getDynamicPropertiesStore().getLatestBlockHeaderNumber(),
-          getDynamicPropertiesStore().getLatestBlockHeaderHash().getBytes());
+      PathStateRootMetadata rewound = owner.rewindTo(canonicalNumber, canonicalHash);
+      PathStateRuntimeAttachment runtime = pathStateRuntime;
+      if (runtime != null) {
+        runtime.synchronizeReadyHead(rewound);
+      }
     } catch (java.io.IOException | RuntimeException failure) {
       PathStateRuntimeAttachment runtime = pathStateRuntime;
       if (runtime != null) {
-        runtime.fail(failure);
+        runtime.failAt(PathStateRuntimeAttachment.FailureStage.REORG,
+            canonicalNumber, canonicalHash, failure);
       }
       logger.error("Path-state short-reorg rewind failed after canonical block pop", failure);
     }
