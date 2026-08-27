@@ -17,7 +17,7 @@ public final class PersistentCommittedHistoryReader
   private final long indexedThrough;
   private final byte[] headHash;
   private final byte[] sourceDigest;
-  private final HistorySegmentStore bodies;
+  private final HistoryBodyStore bodies;
   private final HistoryIndexStore index;
   private final HistoryCommitStore commits;
   private boolean closed;
@@ -30,11 +30,11 @@ public final class PersistentCommittedHistoryReader
     if (checkpoint == null) {
       throw new ArchivePersistenceException("Archive history scan anchor is missing");
     }
-    HistorySegmentStore openedBodies = null;
+    HistoryBodyStore openedBodies = null;
     HistoryIndexStore openedIndex = null;
     HistoryCommitStore openedCommits = null;
     try {
-      openedBodies = new HistorySegmentStore(archiveDirectory, new BlockHistoryCodec(),
+      openedBodies = new PartitionedHistoryBodyStore(archiveDirectory, new BlockHistoryCodec(),
           maxSegmentSize, checkpoint);
       openedIndex = new HistoryIndexStore(archiveDirectory, new HistoryIndexCodec(), checkpoint);
       openedCommits = new HistoryCommitStore(archiveDirectory, new HistoryCommitMarkerCodec(),
@@ -142,7 +142,7 @@ public final class PersistentCommittedHistoryReader
   }
 
   private static void validatePinnedAuthority(PersistentServingKeyIndexGeneration serving,
-      HistorySegmentStore bodies, HistoryIndexStore index, HistoryCommitStore commits)
+      HistoryBodyStore bodies, HistoryIndexStore index, HistoryCommitStore commits)
       throws IOException {
     HistoryCommitMarker marker = commits.get(serving.getIndexedThrough());
     if (marker == null || !Arrays.equals(marker.getMeta().getBlockHash(), serving.getHeadHash())
@@ -211,7 +211,7 @@ public final class PersistentCommittedHistoryReader
         && Arrays.equals(left.getBodyDigest(), right.getBodyDigest());
   }
 
-  private static void closeAfterFailedConstruction(HistorySegmentStore bodies,
+  private static void closeAfterFailedConstruction(HistoryBodyStore bodies,
       HistoryIndexStore index, HistoryCommitStore commits, Exception failure) {
     close(index, failure);
     close(bodies, failure);
