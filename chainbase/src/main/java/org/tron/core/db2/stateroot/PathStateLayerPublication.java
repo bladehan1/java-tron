@@ -55,6 +55,7 @@ public final class PathStateLayerPublication {
       throw new IllegalArgumentException("path-state LAYER node database directory mismatch");
     }
     requireCurrentParentOrChild(layer);
+    nodeStores.releaseParentReadHandles();
     limits.verifyAdmission(manifest, directory, layer,
         nodeStores.projectedLogicalBytes(layer));
 

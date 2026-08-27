@@ -28,6 +28,10 @@ public final class PathStateNodeStoreSet implements Closeable {
       (byte) 0xff, (byte) 0xff, (byte) 0xff, (byte) 0xff,
       'r', 'e', 'b', 'u', 'i', 'l', 'd'};
   private static final int LEAF_DOMAIN = -2;
+  private static final int NODE_TOMBSTONE_DOMAIN = -3;
+  private static final byte[] NODE_TOMBSTONE_PREFIX = ByteBuffer.allocate(Integer.BYTES)
+      .putInt(NODE_TOMBSTONE_DOMAIN).array();
+  private static final byte[] TOMBSTONE_VALUE = new byte[]{1};
   private static final byte[] LEAF_PREFIX = ByteBuffer.allocate(Integer.BYTES)
       .putInt(LEAF_DOMAIN).array();
   private static final int LEAF_KEY_LENGTH = Integer.BYTES * 2 + PathMerkleTrie.SECURE_KEY_LENGTH;
@@ -38,6 +42,7 @@ public final class PathStateNodeStoreSet implements Closeable {
   private final Map<BytesKey, byte[]> pending = new LinkedHashMap<>();
   private final Map<BytesKey, byte[]> persistedLeaves = new LinkedHashMap<>();
   private final PathStateNativeNodeStore nativeStore;
+  private final PathStateNodeStoreSet parentStores;
   private final PathNodeStore superStore;
   private final byte[] manifestDigest;
   private final Kind kind;
@@ -51,13 +56,14 @@ public final class PathStateNodeStoreSet implements Closeable {
   private boolean closed;
 
   private PathStateNodeStoreSet(Path directory, PathStateStoreManifest manifest, Kind kind,
-      PathStateRootMetadata expectedMetadata)
+      PathStateRootMetadata expectedMetadata, PathStateNodeStoreSet parentStores)
       throws IOException {
     this.directory = directory.resolve(NODES_DIRECTORY);
     this.scope = new PathStateCanonicalizer().participantScope();
     this.manifestDigest = manifest.getIdentityDigest();
     this.kind = kind;
     this.expectedMetadata = expectedMetadata;
+    this.parentStores = parentStores;
     this.sealed = Files.exists(directory.resolve(PathStateCurrentStore.METADATA_FILE),
         LinkOption.NOFOLLOW_LINKS);
     nativeStore = PathStateNativeNodeStore.open(this.directory, manifest.getEngine());
@@ -80,6 +86,7 @@ public final class PathStateNodeStoreSet implements Closeable {
         requireRebuildCheckpointIdentity(rebuildCheckpoint);
       }
       loadPersistedLeaves();
+      validateNodeTombstones();
       if (progress == null && rebuildCheckpoint == null && !persistedLeaves.isEmpty()) {
         throw new IOException("path-state leaf inventory exists without native progress");
       }
@@ -100,7 +107,8 @@ public final class PathStateNodeStoreSet implements Closeable {
     Path metadataPath = admitted.getBaseDirectory().resolve(PathStateCurrentStore.METADATA_FILE);
     PathStateRootMetadata metadata = Files.exists(metadataPath, LinkOption.NOFOLLOW_LINKS)
         ? PathStateMetadataFile.load(metadataPath) : null;
-    return new PathStateNodeStoreSet(admitted.getBaseDirectory(), admitted, Kind.BASE, metadata);
+    return new PathStateNodeStoreSet(admitted.getBaseDirectory(), admitted, Kind.BASE, metadata,
+        null);
   }
 
   public static PathStateNodeStoreSet openLayer(PathStateStoreManifest manifest,
@@ -115,7 +123,7 @@ public final class PathStateNodeStoreSet implements Closeable {
     }
     Path layerDirectory = admitted.getLayerDirectory(layer.getBlockNumber(), layer.getBlockHash());
     requireUnsealed(layerDirectory);
-    return new PathStateNodeStoreSet(layerDirectory, admitted, Kind.LAYER, layer);
+    return new PathStateNodeStoreSet(layerDirectory, admitted, Kind.LAYER, layer, null);
   }
 
   /** Opens the node database referenced by the verified current authority. */
@@ -127,7 +135,7 @@ public final class PathStateNodeStoreSet implements Closeable {
   }
 
   static PathStateNodeStoreSet beginLayer(PathStateStoreManifest manifest,
-      PathStateRootMetadata identity) throws IOException {
+      PathStateRootMetadata identity, PathStateNodeStoreSet parentStores) throws IOException {
     PathStateStoreManifest admitted = Objects.requireNonNull(manifest, "manifest");
     PathStateRootMetadata layer = Objects.requireNonNull(identity, "identity");
     if (layer.getKind() != Kind.LAYER
@@ -136,7 +144,8 @@ public final class PathStateNodeStoreSet implements Closeable {
     }
     Path directory = admitted.getLayerDirectory(layer.getBlockNumber(), layer.getBlockHash());
     requireUnsealed(directory);
-    return new PathStateNodeStoreSet(directory, admitted, Kind.LAYER, null);
+    return new PathStateNodeStoreSet(directory, admitted, Kind.LAYER, null,
+        Objects.requireNonNull(parentStores, "parentStores"));
   }
 
   static PathStateNodeStoreSet openPublished(PathStateStoreManifest manifest,
@@ -150,7 +159,14 @@ public final class PathStateNodeStoreSet implements Closeable {
     if (!Arrays.equals(stored.encode(), published.encode())) {
       throw new IOException("path-state published metadata differs from authority");
     }
-    return new PathStateNodeStoreSet(owner, admitted, published.getKind(), published);
+    PathStateNodeStoreSet parent = published.getKind() == Kind.BASE ? null
+        : openPublished(admitted, loadParent(admitted, published));
+    try {
+      return new PathStateNodeStoreSet(owner, admitted, published.getKind(), published, parent);
+    } catch (IOException | RuntimeException failure) {
+      closeAfterFailure(parent, failure);
+      throw failure;
+    }
   }
 
   /** Claims this database and restores its durable leaves when progress already exists. */
@@ -186,7 +202,13 @@ public final class PathStateNodeStoreSet implements Closeable {
     }
     PathStateRoot candidate = new PathStateRoot(scope,
         participant -> participantStores.get(participant.getDbName()), superStore);
-    candidate.initializeLeaves(parentLeaves, parentRoot);
+    if (parentStores == null) {
+      throw new IllegalStateException("path-state layer has no parent node overlay");
+    }
+    candidate.restoreLeaves(parentLeaves, parentRoot);
+    if (!pending.isEmpty()) {
+      throw new IllegalStateException("path-state parent restore attempted to copy nodes");
+    }
     root = candidate;
     rootClaimed = true;
     return root;
@@ -213,12 +235,7 @@ public final class PathStateNodeStoreSet implements Closeable {
     long nextLogicalBytes = projectedLogicalBytes(next);
     List<PathStateNativeNodeStore.BatchMutation> mutations =
         new ArrayList<>(pending.size() + persistedLeaves.size() + 1);
-    for (Map.Entry<BytesKey, byte[]> entry : pending.entrySet()) {
-      byte[] value = entry.getValue();
-      mutations.add(value == null
-          ? PathStateNativeNodeStore.BatchMutation.delete(entry.getKey().copy())
-          : PathStateNativeNodeStore.BatchMutation.put(entry.getKey().copy(), value));
-    }
+    appendPendingMutations(mutations);
     Map<BytesKey, byte[]> nextLeaves = leafMap(root.leafRecords());
     for (BytesKey persisted : persistedLeaves.keySet()) {
       if (!nextLeaves.containsKey(persisted)) {
@@ -298,10 +315,7 @@ public final class PathStateNodeStoreSet implements Closeable {
     }
     long total = rebuildCheckpoint == null ? (logicalBytes == null ? 0 : logicalBytes)
         : rebuildLogicalBytes();
-    for (Map.Entry<BytesKey, byte[]> entry : pending.entrySet()) {
-      byte[] key = entry.getKey().copy();
-      total = replaceLogicalEntry(total, key, nativeStore.get(key), entry.getValue());
-    }
+    total = projectedPendingBytes(total);
     Map<BytesKey, byte[]> nextLeaves = leafMap(root.leafRecords());
     for (Map.Entry<BytesKey, byte[]> entry : persistedLeaves.entrySet()) {
       if (!nextLeaves.containsKey(entry.getKey())) {
@@ -378,13 +392,40 @@ public final class PathStateNodeStoreSet implements Closeable {
     return directory;
   }
 
+  /** Releases inherited read handles after the child root has been frozen for publication. */
+  synchronized void releaseParentReadHandles() throws IOException {
+    requireOpen();
+    if (parentStores != null) {
+      parentStores.close();
+    }
+  }
+
   @Override
   public synchronized void close() throws IOException {
     if (closed) {
       return;
     }
     closed = true;
-    nativeStore.close();
+    IOException failure = null;
+    try {
+      nativeStore.close();
+    } catch (IOException closeFailure) {
+      failure = closeFailure;
+    }
+    if (parentStores != null) {
+      try {
+        parentStores.close();
+      } catch (IOException closeFailure) {
+        if (failure == null) {
+          failure = closeFailure;
+        } else {
+          failure.addSuppressed(closeFailure);
+        }
+      }
+    }
+    if (failure != null) {
+      throw failure;
+    }
   }
 
   private void requireOpen() {
@@ -399,7 +440,15 @@ public final class PathStateNodeStoreSet implements Closeable {
       byte[] value = pending.get(ownedKey);
       return value == null ? null : Arrays.copyOf(value, value.length);
     }
-    return nativeStore.get(ownedKey.copy());
+    byte[] owned = ownedKey.copy();
+    byte[] local = nativeStore.get(owned);
+    if (local != null) {
+      return local;
+    }
+    if (kind == Kind.LAYER && nativeStore.get(tombstoneKey(owned)) != null) {
+      return null;
+    }
+    return parentStores == null ? null : parentStores.get(owned);
   }
 
   private synchronized void put(byte[] key, byte[] value) {
@@ -433,16 +482,40 @@ public final class PathStateNodeStoreSet implements Closeable {
     }
   }
 
+  private void validateNodeTombstones() throws IOException {
+    List<PathStateNativeNodeStore.KeyValue> tombstones =
+        nativeStore.scanPrefix(NODE_TOMBSTONE_PREFIX);
+    if (!tombstones.isEmpty() && (kind != Kind.LAYER || progress == null)) {
+      throw new IOException("path-state node tombstones require durable LAYER progress");
+    }
+    for (PathStateNativeNodeStore.KeyValue entry : tombstones) {
+      byte[] key = entry.getKey();
+      if (key.length < Integer.BYTES * 2
+          || ByteBuffer.wrap(key).getInt() != NODE_TOMBSTONE_DOMAIN
+          || !Arrays.equals(entry.getValue(), TOMBSTONE_VALUE)) {
+        throw new IOException("path-state node tombstone is malformed");
+      }
+      byte[] nodeKey = Arrays.copyOfRange(key, Integer.BYTES, key.length);
+      int storeId = ByteBuffer.wrap(nodeKey).getInt();
+      if (storeId < 0 || storeId > scope.getParticipants().size()) {
+        throw new IOException("path-state node tombstone has an unknown Store ID");
+      }
+      for (int index = Integer.BYTES; index < nodeKey.length; index++) {
+        if (nodeKey[index] < 0 || nodeKey[index] > 15) {
+          throw new IOException("path-state node tombstone contains a non-nibble path");
+        }
+      }
+      if (nativeStore.get(nodeKey) != null) {
+        throw new IOException("path-state node and tombstone coexist");
+      }
+    }
+  }
+
   private List<PathStateNativeNodeStore.BatchMutation> durableStateMutations(
       byte[] rebuildValue) {
     List<PathStateNativeNodeStore.BatchMutation> mutations =
         new ArrayList<>(pending.size() + persistedLeaves.size() + 1);
-    for (Map.Entry<BytesKey, byte[]> entry : pending.entrySet()) {
-      byte[] value = entry.getValue();
-      mutations.add(value == null
-          ? PathStateNativeNodeStore.BatchMutation.delete(entry.getKey().copy())
-          : PathStateNativeNodeStore.BatchMutation.put(entry.getKey().copy(), value));
-    }
+    appendPendingMutations(mutations);
     Map<BytesKey, byte[]> nextLeaves = leafMap(root.leafRecords());
     for (BytesKey persisted : persistedLeaves.keySet()) {
       if (!nextLeaves.containsKey(persisted)) {
@@ -567,6 +640,80 @@ public final class PathStateNodeStoreSet implements Closeable {
           : Math.addExact(adjusted, Math.addExact(key.length, next.length));
     } catch (ArithmeticException overflow) {
       throw new IOException("path-state logical bytes overflow", overflow);
+    }
+  }
+
+  private void appendPendingMutations(
+      List<PathStateNativeNodeStore.BatchMutation> mutations) {
+    for (Map.Entry<BytesKey, byte[]> entry : pending.entrySet()) {
+      byte[] key = entry.getKey().copy();
+      byte[] value = entry.getValue();
+      if (kind == Kind.LAYER) {
+        mutations.add(value == null
+            ? PathStateNativeNodeStore.BatchMutation.delete(key)
+            : PathStateNativeNodeStore.BatchMutation.put(key, value));
+        byte[] tombstone = tombstoneKey(key);
+        mutations.add(value == null
+            ? PathStateNativeNodeStore.BatchMutation.put(tombstone, TOMBSTONE_VALUE)
+            : PathStateNativeNodeStore.BatchMutation.delete(tombstone));
+      } else {
+        mutations.add(value == null
+            ? PathStateNativeNodeStore.BatchMutation.delete(key)
+            : PathStateNativeNodeStore.BatchMutation.put(key, value));
+      }
+    }
+  }
+
+  private long projectedPendingBytes(long total) throws IOException {
+    long projected = total;
+    for (Map.Entry<BytesKey, byte[]> entry : pending.entrySet()) {
+      byte[] key = entry.getKey().copy();
+      byte[] value = entry.getValue();
+      projected = replaceLogicalEntry(projected, key, nativeStore.get(key), value);
+      if (kind == Kind.LAYER) {
+        byte[] tombstone = tombstoneKey(key);
+        projected = replaceLogicalEntry(projected, tombstone, nativeStore.get(tombstone),
+            value == null ? TOMBSTONE_VALUE : null);
+      }
+    }
+    return projected;
+  }
+
+  private static byte[] tombstoneKey(byte[] nodeKey) {
+    return ByteBuffer.allocate(Integer.BYTES + nodeKey.length)
+        .putInt(NODE_TOMBSTONE_DOMAIN)
+        .put(nodeKey)
+        .array();
+  }
+
+  private static PathStateRootMetadata loadParent(PathStateStoreManifest manifest,
+      PathStateRootMetadata child) throws IOException {
+    if (child.getKind() != Kind.LAYER || child.getBlockNumber() == 0) {
+      throw new IOException("path-state node overlay has an invalid child identity");
+    }
+    PathStateRootMetadata base = PathStateMetadataFile.load(
+        manifest.getBaseDirectory().resolve(PathStateCurrentStore.METADATA_FILE));
+    PathStateRootMetadata parent = base.getBlockNumber() == child.getBlockNumber() - 1
+        ? base : PathStateMetadataFile.load(manifest.getLayerDirectory(
+            child.getBlockNumber() - 1, child.getParentHash())
+            .resolve(PathStateCurrentStore.METADATA_FILE));
+    if (child.getBlockNumber() != parent.getBlockNumber() + 1
+        || !Arrays.equals(child.getParentHash(), parent.getBlockHash())
+        || !Arrays.equals(child.getParentStateRoot(), parent.getStateRoot())
+        || !Arrays.equals(parent.getFormatDigest(), manifest.getIdentityDigest())) {
+      throw new IOException("path-state node overlay parent identity mismatch");
+    }
+    return parent;
+  }
+
+  private static void closeAfterFailure(PathStateNodeStoreSet stores, Throwable failure) {
+    if (stores == null) {
+      return;
+    }
+    try {
+      stores.close();
+    } catch (IOException closeFailure) {
+      failure.addSuppressed(closeFailure);
     }
   }
 
