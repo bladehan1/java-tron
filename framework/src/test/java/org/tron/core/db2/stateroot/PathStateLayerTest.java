@@ -48,6 +48,10 @@ public class PathStateLayerTest {
           engine) < nodeEntryCount(fixture.manifest.getBaseDirectory(), engine));
       assertTrue(nodeTombstoneCount(
           fixture.manifest.getLayerDirectory(101, first.getBlockHash()), engine) > 0);
+      assertTrue(leafEntryCount(fixture.manifest.getLayerDirectory(101, first.getBlockHash()),
+          engine) < leafEntryCount(fixture.manifest.getBaseDirectory(), engine));
+      assertTrue(leafTombstoneCount(
+          fixture.manifest.getLayerDirectory(101, first.getBlockHash()), engine) > 0);
 
       PathStateRootMetadata second;
       byte[] secondRoot;
@@ -159,6 +163,23 @@ public class PathStateLayerTest {
         owner.resolve(PathStateNodeStoreSet.NODES_DIRECTORY), engine)) {
       return store.scanAll().stream()
           .filter(entry -> java.nio.ByteBuffer.wrap(entry.getKey()).getInt() == -3)
+          .count();
+    }
+  }
+
+  private static long leafEntryCount(Path owner, Engine engine) throws Exception {
+    return domainEntryCount(owner, engine, -2);
+  }
+
+  private static long leafTombstoneCount(Path owner, Engine engine) throws Exception {
+    return domainEntryCount(owner, engine, -4);
+  }
+
+  private static long domainEntryCount(Path owner, Engine engine, int domain) throws Exception {
+    try (PathStateNativeNodeStore store = PathStateNativeNodeStore.open(
+        owner.resolve(PathStateNodeStoreSet.NODES_DIRECTORY), engine)) {
+      return store.scanAll().stream()
+          .filter(entry -> java.nio.ByteBuffer.wrap(entry.getKey()).getInt() == domain)
           .count();
     }
   }
