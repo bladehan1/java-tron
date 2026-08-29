@@ -176,7 +176,7 @@ public class PathStateRebuildCoordinatorTest {
   }
 
   @Test
-  public void rejectsMixedOrOrphanAccountAssetSnapshotWithoutPublication() throws Exception {
+  public void buildsAccountAssetRowsWithoutCrossStoreOwnerValidation() throws Exception {
     byte[] address = address(8);
     String tokenId = "1000001";
 
@@ -185,17 +185,18 @@ public class PathStateRebuildCoordinatorTest {
     mixed.add("account", address,
         account(address).toBuilder().putAssetV2(tokenId, 9L).build().toByteArray());
     mixed.add("account-asset", accountAssetKey(address, tokenId), longBytes(9L));
-    assertThrows(IllegalArgumentException.class,
-        () -> new PathStateRebuildCoordinator().rebuild(mixedManifest, mixed));
-    assertFalse(new PathStateCurrentStore(mixedManifest).isInitialized());
+    RebuildResult mixedResult = new PathStateRebuildCoordinator()
+        .rebuild(mixedManifest, mixed);
+    assertEquals(1, mixedResult.requireStore("account-asset").getEntryCount());
+    assertTrue(new PathStateCurrentStore(mixedManifest).isInitialized());
 
     PathStateStoreManifest orphanManifest = manifest("p66-orphan", Engine.ROCKSDB);
     TestSnapshotSource orphan = exactSource(identity(P66Phase.P66_ON));
     orphan.add("account-asset", accountAssetKey(address, tokenId), longBytes(10L));
-    IOException orphanFailure = assertThrows(IOException.class,
-        () -> new PathStateRebuildCoordinator().rebuild(orphanManifest, orphan));
-    assertTrue(orphanFailure.getMessage().contains("no owning Account"));
-    assertFalse(new PathStateCurrentStore(orphanManifest).isInitialized());
+    RebuildResult orphanResult = new PathStateRebuildCoordinator()
+        .rebuild(orphanManifest, orphan);
+    assertEquals(1, orphanResult.requireStore("account-asset").getEntryCount());
+    assertTrue(new PathStateCurrentStore(orphanManifest).isInitialized());
 
     PathStateStoreManifest offDirectManifest = manifest("p66-off-direct", Engine.ROCKSDB);
     TestSnapshotSource offDirect = exactSource(identity(P66Phase.P66_OFF));
@@ -552,16 +553,6 @@ public class PathStateRebuildCoordinatorTest {
     @Override
     public byte[] sourceIdentityDigest() {
       return java.util.Arrays.copyOf(sourceIdentityDigest, sourceIdentityDigest.length);
-    }
-
-    @Override
-    public byte[] get(String dbName, byte[] physicalKey) {
-      for (Row row : stores.get(dbName)) {
-        if (java.util.Arrays.equals(row.key, physicalKey)) {
-          return java.util.Arrays.copyOf(row.value, row.value.length);
-        }
-      }
-      return null;
     }
 
     @Override

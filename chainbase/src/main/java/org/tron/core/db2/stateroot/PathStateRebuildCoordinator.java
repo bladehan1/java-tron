@@ -98,8 +98,7 @@ public final class PathStateRebuildCoordinator {
       }
       for (int index = storeResults.size(); index < descriptor.getStores().size(); index++) {
         StoreIdentity store = descriptor.getStores().get(index);
-        StoreAccumulator accumulator = new StoreAccumulator(store, identity.getPhase(), root,
-            admittedSource);
+        StoreAccumulator accumulator = new StoreAccumulator(store, identity.getPhase(), root);
         admittedSource.scan(store.getDbName(), accumulator::accept);
         StoreResult result = accumulator.finish();
         storeResults.add(result);
@@ -157,17 +156,14 @@ public final class PathStateRebuildCoordinator {
     private final StoreIdentity store;
     private final P66Phase phase;
     private final PathStateRoot root;
-    private final SnapshotSource source;
     private final Hasher inputDigest;
     private byte[] previousKey;
     private long entryCount;
 
-    private StoreAccumulator(StoreIdentity store, P66Phase phase, PathStateRoot root,
-        SnapshotSource source) {
+    private StoreAccumulator(StoreIdentity store, P66Phase phase, PathStateRoot root) {
       this.store = store;
       this.phase = phase;
       this.root = root;
-      this.source = source;
       inputDigest = domainHasher(STORE_DIGEST_DOMAIN);
       putInt(inputDigest, store.getStoreId());
       putString(inputDigest, store.getDbName());
@@ -183,7 +179,7 @@ public final class PathStateRebuildCoordinator {
         throw new IllegalArgumentException(
             "path-state snapshot keys are not strictly increasing: " + store.getDbName());
       }
-      validateAccountAssetLayout(key, value);
+      validateAccountLayout(key, value);
       PathStateMutation mutation = canonicalizer.put(phase, store.getDbName(), key, value);
       root.apply(Collections.singletonList(mutation));
       if ("account".equals(store.getDbName())) {
@@ -199,20 +195,10 @@ public final class PathStateRebuildCoordinator {
       entryCount = Math.addExact(entryCount, 1L);
     }
 
-    private void validateAccountAssetLayout(byte[] key, byte[] value) throws IOException {
+    private void validateAccountLayout(byte[] key, byte[] value) {
       if ("account".equals(store.getDbName())) {
         canonicalizer.requireSnapshotAccountLayout(phase, key, value);
-        return;
       }
-      if (!"account-asset".equals(store.getDbName())) {
-        return;
-      }
-      byte[] accountKey = canonicalizer.accountAddressFromAssetKey(phase, key);
-      byte[] accountValue = source.get("account", accountKey);
-      if (accountValue == null) {
-        throw new IOException("path-state AccountAsset row has no owning Account");
-      }
-      canonicalizer.requirePhysicalAccountAssetOwner(phase, accountKey, accountValue);
     }
 
     private StoreResult finish() {
@@ -272,9 +258,6 @@ public final class PathStateRebuildCoordinator {
 
     /** Stable identity of the exact physical Store generations held by this snapshot. */
     byte[] sourceIdentityDigest();
-
-    /** Returns one value from the same pinned snapshot, or {@code null} when physically absent. */
-    byte[] get(String dbName, byte[] physicalKey) throws IOException;
 
     void scan(String dbName, EntryConsumer consumer) throws IOException;
 
