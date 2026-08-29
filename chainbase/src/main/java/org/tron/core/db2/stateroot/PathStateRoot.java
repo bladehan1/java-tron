@@ -31,6 +31,8 @@ public final class PathStateRoot {
 
   private final PathStateParticipantScope scope;
   private final Map<String, PathMerkleTrie> participantTries = new LinkedHashMap<>();
+  private final Map<MutationKey, PathStateParticipant> pendingLeafMutations =
+      new LinkedHashMap<>();
   private final PathMerkleTrie superTrie;
   private boolean rootMaterialized;
 
@@ -92,7 +94,19 @@ public final class PathStateRoot {
         trie.put(mutation.secureKey, mutation.encodedValue);
       }
     }
+    recordPendingLeafMutations(prepared);
     rootMaterialized = false;
+  }
+
+  synchronized void recordPendingLeafMutations(Collection<PathStateMutation> mutations) {
+    recordPendingLeafMutations(prepare(mutations));
+  }
+
+  private void recordPendingLeafMutations(List<PreparedMutation> prepared) {
+    for (PreparedMutation mutation : prepared) {
+      MutationKey key = new MutationKey(mutation.participant.getStoreId(), mutation.secureKey);
+      pendingLeafMutations.put(key, mutation.participant);
+    }
   }
 
   public synchronized byte[] participantRoot(String dbName) {
@@ -137,6 +151,30 @@ public final class PathStateRoot {
       }
     }
     return records;
+  }
+
+  /** Returns only leaf mutations accumulated since the last durable commit/checkpoint. */
+  synchronized List<LeafMutationRecord> pendingLeafMutations() {
+    List<LeafMutationRecord> mutations = new ArrayList<>(pendingLeafMutations.size());
+    for (Map.Entry<MutationKey, PathStateParticipant> entry : pendingLeafMutations.entrySet()) {
+      MutationKey key = entry.getKey();
+      PathStateParticipant participant = entry.getValue();
+      mutations.add(new LeafMutationRecord(participant.getStoreId(), key.secureKey,
+          participantTries.get(participant.getDbName()).get(key.secureKey)));
+    }
+    return mutations;
+  }
+
+  synchronized void clearPendingLeafMutations() {
+    pendingLeafMutations.clear();
+  }
+
+  synchronized void recordPendingLeafRecords(Collection<LeafRecord> records) {
+    for (LeafRecord record : Objects.requireNonNull(records, "records")) {
+      LeafRecord present = Objects.requireNonNull(record, "record");
+      PathStateParticipant participant = participant(present.storeId);
+      pendingLeafMutations.put(new MutationKey(present.storeId, present.secureKey), participant);
+    }
   }
 
   synchronized Snapshot snapshot() {
@@ -231,6 +269,15 @@ public final class PathStateRoot {
     return prepared;
   }
 
+  private PathStateParticipant participant(int storeId) {
+    for (PathStateParticipant participant : scope.getParticipants()) {
+      if (participant.getStoreId() == storeId) {
+        return participant;
+      }
+    }
+    throw new IllegalArgumentException("unknown path-state Store ID: " + storeId);
+  }
+
   private static int compareUnsigned(byte[] left, byte[] right) {
     for (int i = 0; i < Math.min(left.length, right.length); i++) {
       int result = Integer.compare(left[i] & 0xff, right[i] & 0xff);
@@ -289,6 +336,33 @@ public final class PathStateRoot {
 
     byte[] getEncodedValue() {
       return Arrays.copyOf(encodedValue, encodedValue.length);
+    }
+  }
+
+  static final class LeafMutationRecord {
+
+    private final int storeId;
+    private final byte[] secureKey;
+    private final byte[] encodedValue;
+
+    private LeafMutationRecord(int storeId, byte[] secureKey, byte[] encodedValue) {
+      this.storeId = storeId;
+      this.secureKey = Arrays.copyOf(Objects.requireNonNull(secureKey, "secureKey"),
+          secureKey.length);
+      this.encodedValue = encodedValue == null ? null
+          : Arrays.copyOf(encodedValue, encodedValue.length);
+    }
+
+    int getStoreId() {
+      return storeId;
+    }
+
+    byte[] getSecureKey() {
+      return Arrays.copyOf(secureKey, secureKey.length);
+    }
+
+    byte[] getEncodedValue() {
+      return encodedValue == null ? null : Arrays.copyOf(encodedValue, encodedValue.length);
     }
   }
 
