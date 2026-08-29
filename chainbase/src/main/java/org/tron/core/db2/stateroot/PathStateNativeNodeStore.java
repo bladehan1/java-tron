@@ -70,24 +70,37 @@ final class PathStateNativeNodeStore implements Closeable {
 
   synchronized void writeBatch(List<BatchMutation> mutations) {
     requireOpen();
-    List<BatchMutation> owned = new ArrayList<>(Objects.requireNonNull(mutations, "mutations"));
-    if (owned.isEmpty()) {
+    List<BatchMutation> supplied = Objects.requireNonNull(mutations, "mutations");
+    if (supplied.isEmpty()) {
       throw new IllegalArgumentException("path-state native batch must not be empty");
     }
-    for (int index = 0; index < owned.size(); index++) {
-      owned.set(index, new BatchMutation(Objects.requireNonNull(owned.get(index), "mutation")));
+    for (BatchMutation mutation : supplied) {
+      Objects.requireNonNull(mutation, "mutation");
     }
-    delegate.writeBatch(owned);
+    delegate.writeBatch(supplied);
   }
 
-  synchronized List<KeyValue> scanPrefix(byte[] prefix) {
-    requireOpen();
-    return delegate.scanPrefix(nonEmpty(prefix, "prefix"));
+  synchronized List<KeyValue> scanPrefix(byte[] prefix) throws IOException {
+    List<KeyValue> entries = new ArrayList<>();
+    scanPrefix(prefix, entries::add);
+    return entries;
   }
 
-  synchronized List<KeyValue> scanAll() {
+  synchronized List<KeyValue> scanAll() throws IOException {
+    List<KeyValue> entries = new ArrayList<>();
+    scanAll(entries::add);
+    return entries;
+  }
+
+  synchronized void scanPrefix(byte[] prefix, EntryConsumer consumer) throws IOException {
     requireOpen();
-    return delegate.scanAll();
+    delegate.scanPrefix(nonEmpty(prefix, "prefix"),
+        Objects.requireNonNull(consumer, "consumer"));
+  }
+
+  synchronized void scanAll(EntryConsumer consumer) throws IOException {
+    requireOpen();
+    delegate.scanAll(Objects.requireNonNull(consumer, "consumer"));
   }
 
   Path getDirectory() {
@@ -126,9 +139,9 @@ final class PathStateNativeNodeStore implements Closeable {
 
     void writeBatch(List<BatchMutation> mutations);
 
-    List<KeyValue> scanPrefix(byte[] prefix);
+    void scanPrefix(byte[] prefix, EntryConsumer consumer) throws IOException;
 
-    List<KeyValue> scanAll();
+    void scanAll(EntryConsumer consumer) throws IOException;
   }
 
   private static final class LevelDelegate implements Delegate {
@@ -163,8 +176,7 @@ final class PathStateNativeNodeStore implements Closeable {
     }
 
     @Override
-    public List<KeyValue> scanPrefix(byte[] prefix) {
-      List<KeyValue> entries = new ArrayList<>();
+    public void scanPrefix(byte[] prefix, EntryConsumer consumer) throws IOException {
       try (org.iq80.leveldb.DBIterator iterator = database.iterator()) {
         iterator.seek(prefix);
         while (iterator.hasNext()) {
@@ -172,27 +184,20 @@ final class PathStateNativeNodeStore implements Closeable {
           if (!startsWith(entry.getKey(), prefix)) {
             break;
           }
-          entries.add(new KeyValue(entry.getKey(), entry.getValue()));
+          consumer.accept(new KeyValue(entry.getKey(), entry.getValue()));
         }
-      } catch (IOException failure) {
-        throw new IllegalStateException("failed to scan path-state LevelDB nodes", failure);
       }
-      return entries;
     }
 
     @Override
-    public List<KeyValue> scanAll() {
-      List<KeyValue> entries = new ArrayList<>();
+    public void scanAll(EntryConsumer consumer) throws IOException {
       try (org.iq80.leveldb.DBIterator iterator = database.iterator()) {
         iterator.seekToFirst();
         while (iterator.hasNext()) {
           Map.Entry<byte[], byte[]> entry = iterator.next();
-          entries.add(new KeyValue(entry.getKey(), entry.getValue()));
+          consumer.accept(new KeyValue(entry.getKey(), entry.getValue()));
         }
-      } catch (IOException failure) {
-        throw new IllegalStateException("failed to scan all path-state LevelDB nodes", failure);
       }
-      return entries;
     }
 
     @Override
@@ -245,35 +250,31 @@ final class PathStateNativeNodeStore implements Closeable {
     }
 
     @Override
-    public List<KeyValue> scanPrefix(byte[] prefix) {
-      List<KeyValue> entries = new ArrayList<>();
+    public void scanPrefix(byte[] prefix, EntryConsumer consumer) throws IOException {
       try (org.rocksdb.RocksIterator iterator = database.newIterator()) {
         iterator.seek(prefix);
         while (iterator.isValid() && startsWith(iterator.key(), prefix)) {
-          entries.add(new KeyValue(iterator.key(), iterator.value()));
+          consumer.accept(new KeyValue(iterator.key(), iterator.value()));
           iterator.next();
         }
         iterator.status();
       } catch (RocksDBException failure) {
         throw new IllegalStateException("failed to scan path-state RocksDB nodes", failure);
       }
-      return entries;
     }
 
     @Override
-    public List<KeyValue> scanAll() {
-      List<KeyValue> entries = new ArrayList<>();
+    public void scanAll(EntryConsumer consumer) throws IOException {
       try (org.rocksdb.RocksIterator iterator = database.newIterator()) {
         iterator.seekToFirst();
         while (iterator.isValid()) {
-          entries.add(new KeyValue(iterator.key(), iterator.value()));
+          consumer.accept(new KeyValue(iterator.key(), iterator.value()));
           iterator.next();
         }
         iterator.status();
       } catch (RocksDBException failure) {
         throw new IllegalStateException("failed to scan all path-state RocksDB nodes", failure);
       }
-      return entries;
     }
 
     @Override
@@ -292,10 +293,6 @@ final class PathStateNativeNodeStore implements Closeable {
     private BatchMutation(byte[] key, byte[] value) {
       this.key = nonEmpty(key, "key");
       this.value = value == null ? null : nonEmpty(value, "value");
-    }
-
-    private BatchMutation(BatchMutation mutation) {
-      this(mutation.key, mutation.value);
     }
 
     static BatchMutation put(byte[] key, byte[] value) {
@@ -324,6 +321,12 @@ final class PathStateNativeNodeStore implements Closeable {
     byte[] getValue() {
       return Arrays.copyOf(value, value.length);
     }
+  }
+
+  @FunctionalInterface
+  interface EntryConsumer {
+
+    void accept(KeyValue entry) throws IOException;
   }
 
   private static boolean startsWith(byte[] value, byte[] prefix) {
