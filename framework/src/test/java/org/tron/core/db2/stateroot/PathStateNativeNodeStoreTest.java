@@ -9,9 +9,11 @@ import static org.junit.Assert.assertThrows;
 import java.io.File;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
 import org.junit.Rule;
 import org.junit.Test;
@@ -58,6 +60,27 @@ public class PathStateNativeNodeStoreTest {
     store.close();
     store.close();
     assertThrows(IllegalStateException.class, () -> store.get(new byte[0]));
+  }
+
+  @Test
+  public void streamsNativeScansWithoutCollectingTheResultSet() throws Exception {
+    for (Engine engine : availableEngines()) {
+      Path directory = new File(temporaryFolder.getRoot(), "stream-" + engine).toPath();
+      List<PathStateNativeNodeStore.BatchMutation> mutations = new ArrayList<>();
+      for (int index = 0; index < 64; index++) {
+        mutations.add(PathStateNativeNodeStore.BatchMutation.put(
+            new byte[]{1, (byte) index}, new byte[]{(byte) (index + 1)}));
+      }
+      try (PathStateNativeNodeStore store = PathStateNativeNodeStore.open(directory, engine)) {
+        store.writeBatch(mutations);
+        AtomicInteger prefixCount = new AtomicInteger();
+        AtomicInteger allCount = new AtomicInteger();
+        store.scanPrefix(new byte[]{1}, entry -> prefixCount.incrementAndGet());
+        store.scanAll(entry -> allCount.incrementAndGet());
+        assertEquals(64, prefixCount.get());
+        assertEquals(64, allCount.get());
+      }
+    }
   }
 
   @Test

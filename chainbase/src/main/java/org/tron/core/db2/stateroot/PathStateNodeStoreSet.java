@@ -109,8 +109,10 @@ public final class PathStateNodeStoreSet implements Closeable {
       loadPersistedLeaves();
       loadLeafTombstones();
       validateNodeTombstones();
+      boolean hasUnexpectedLeaves = kind == Kind.BASE
+          ? !persistedLeaves.isEmpty() : !localLeaves.isEmpty();
       if (progress == null && rebuildCheckpoint == null
-          && (!localLeaves.isEmpty() || !leafTombstones.isEmpty())) {
+          && (hasUnexpectedLeaves || !leafTombstones.isEmpty())) {
         throw new IOException("path-state leaf inventory exists without native progress");
       }
       for (PathStateParticipant participant : scope.getParticipants()) {
@@ -282,6 +284,9 @@ public final class PathStateNodeStoreSet implements Closeable {
     PathStateRoot next = PathStateRoot.fromSnapshot(scope,
         participant -> participantStores.get(participant.getDbName()), superStore,
         candidate.getSnapshot());
+    if (!candidate.getTransition().getMutations().isEmpty()) {
+      next.recordPendingLeafMutations(candidate.getTransition().getMutations());
+    }
     for (PreparedPathStateTransition.NodeMutation mutation : candidate.getNodeMutations()) {
       PathNodeStore store = nodeStore(mutation.getStoreId());
       byte[] encoded = mutation.getEncodedNode();
@@ -313,7 +318,9 @@ public final class PathStateNodeStoreSet implements Closeable {
     }
     PathStateRoot candidate = new PathStateRoot(scope,
         participant -> participantStores.get(participant.getDbName()), superStore);
-    candidate.initializeLeaves(Objects.requireNonNull(leaves, "leaves"), expectedRoot);
+    List<PathStateRoot.LeafRecord> admittedLeaves = Objects.requireNonNull(leaves, "leaves");
+    candidate.initializeLeaves(admittedLeaves, expectedRoot);
+    candidate.recordPendingLeafRecords(admittedLeaves);
     root = candidate;
     rootClaimed = true;
     return candidate;
@@ -330,11 +337,11 @@ public final class PathStateNodeStoreSet implements Closeable {
     }
     PathStateRootMetadata next = Objects.requireNonNull(metadata, "metadata");
     long nextLogicalBytes = projectedLogicalBytes(next);
+    List<PathStateRoot.LeafMutationRecord> leafMutations = root.pendingLeafMutations();
     List<PathStateNativeNodeStore.BatchMutation> mutations =
-        new ArrayList<>(pending.size() + persistedLeaves.size() + 1);
+        new ArrayList<>(pending.size() + leafMutations.size() + 4);
     appendPendingMutations(mutations);
-    Map<BytesKey, byte[]> nextLeaves = leafMap(root.leafRecords());
-    appendLeafMutations(mutations, nextLeaves);
+    appendLeafMutations(mutations, leafMutations);
     mutations.add(PathStateNativeNodeStore.BatchMutation.put(PROGRESS_KEY, next.encode()));
     if (leafOverlay) {
       mutations.add(PathStateNativeNodeStore.BatchMutation.put(
@@ -347,7 +354,8 @@ public final class PathStateNodeStoreSet implements Closeable {
     }
     nativeStore.writeBatch(mutations);
     pending.clear();
-    recordCommittedLeaves(nextLeaves);
+    recordCommittedLeaves(leafMutations);
+    root.clearPendingLeafMutations();
     progress = next;
     rebuildCheckpoint = null;
     logicalBytes = nextLogicalBytes;
@@ -379,11 +387,13 @@ public final class PathStateNodeStoreSet implements Closeable {
         }
       }
     }
+    List<PathStateRoot.LeafMutationRecord> leafMutations = root.pendingLeafMutations();
     List<PathStateNativeNodeStore.BatchMutation> mutations =
-        durableStateMutations(next.encode());
+        durableStateMutations(next.encode(), leafMutations);
     nativeStore.writeBatch(mutations);
     pending.clear();
-    recordCommittedLeaves(leafMap(root.leafRecords()));
+    recordCommittedLeaves(leafMutations);
+    root.clearPendingLeafMutations();
     rebuildCheckpoint = next;
   }
 
@@ -405,8 +415,7 @@ public final class PathStateNodeStoreSet implements Closeable {
     long total = rebuildCheckpoint == null ? (logicalBytes == null ? 0 : logicalBytes)
         : rebuildLogicalBytes();
     total = projectedPendingBytes(total);
-    Map<BytesKey, byte[]> nextLeaves = leafMap(root.leafRecords());
-    total = projectedLeafBytes(total, nextLeaves);
+    total = projectedLeafBytes(total, root.pendingLeafMutations());
     if (leafOverlay) {
       total = replaceLogicalEntry(total, LEAF_OVERLAY_KEY,
           nativeStore.get(LEAF_OVERLAY_KEY), LEAF_OVERLAY_VALUE);
@@ -452,19 +461,19 @@ public final class PathStateNodeStoreSet implements Closeable {
       if (expected == null) {
         return null;
       }
-      long actual = 0;
+      long[] actual = new long[]{0};
       try {
-        for (PathStateNativeNodeStore.KeyValue entry : store.scanAll()) {
+        store.scanAll(entry -> {
           byte[] key = entry.getKey();
           if (!Arrays.equals(key, LOGICAL_BYTES_KEY)) {
-            actual = Math.addExact(actual,
+            actual[0] = Math.addExact(actual[0],
                 Math.addExact(key.length, entry.getValue().length));
           }
-        }
+        });
       } catch (ArithmeticException overflow) {
         throw new IOException("path-state logical bytes verification overflow", overflow);
       }
-      if (actual != expected) {
+      if (actual[0] != expected) {
         throw new IOException("path-state logical bytes marker does not match native entries");
       }
       return expected;
@@ -566,7 +575,7 @@ public final class PathStateNodeStoreSet implements Closeable {
   }
 
   private void loadPersistedLeaves() throws IOException {
-    for (PathStateNativeNodeStore.KeyValue entry : nativeStore.scanPrefix(LEAF_PREFIX)) {
+    nativeStore.scanPrefix(LEAF_PREFIX, entry -> {
       byte[] key = entry.getKey();
       if (key.length != LEAF_KEY_LENGTH || ByteBuffer.wrap(key).getInt() != LEAF_DOMAIN) {
         throw new IOException("path-state durable leaf key is malformed");
@@ -574,11 +583,16 @@ public final class PathStateNodeStoreSet implements Closeable {
       int storeId = ByteBuffer.wrap(key, Integer.BYTES, Integer.BYTES).getInt();
       requireParticipant(storeId);
       BytesKey leafKey = new BytesKey(key);
-      if (localLeaves.put(leafKey, entry.getValue()) != null) {
+      byte[] value = entry.getValue();
+      if (kind == Kind.LAYER) {
+        if (localLeaves.put(leafKey, value) != null) {
+          throw new IOException("duplicate path-state durable leaf key");
+        }
+        persistedLeaves.put(leafKey, value);
+      } else if (persistedLeaves.put(leafKey, value) != null) {
         throw new IOException("duplicate path-state durable leaf key");
       }
-      persistedLeaves.put(leafKey, entry.getValue());
-    }
+    });
   }
 
   private void inheritParentLeaves() {
@@ -591,12 +605,10 @@ public final class PathStateNodeStoreSet implements Closeable {
   }
 
   private void loadLeafTombstones() throws IOException {
-    List<PathStateNativeNodeStore.KeyValue> tombstones =
-        nativeStore.scanPrefix(LEAF_TOMBSTONE_PREFIX);
-    if (!tombstones.isEmpty() && (!leafOverlay || kind != Kind.LAYER || progress == null)) {
-      throw new IOException("path-state leaf tombstones require durable LAYER progress");
-    }
-    for (PathStateNativeNodeStore.KeyValue entry : tombstones) {
+    nativeStore.scanPrefix(LEAF_TOMBSTONE_PREFIX, entry -> {
+      if (!leafOverlay || kind != Kind.LAYER || progress == null) {
+        throw new IOException("path-state leaf tombstones require durable LAYER progress");
+      }
       byte[] key = entry.getKey();
       if (key.length != LEAF_KEY_LENGTH
           || ByteBuffer.wrap(key).getInt() != LEAF_TOMBSTONE_DOMAIN
@@ -614,16 +626,14 @@ public final class PathStateNodeStoreSet implements Closeable {
       }
       leafTombstones.add(leafKey);
       persistedLeaves.remove(leafKey);
-    }
+    });
   }
 
   private void validateNodeTombstones() throws IOException {
-    List<PathStateNativeNodeStore.KeyValue> tombstones =
-        nativeStore.scanPrefix(NODE_TOMBSTONE_PREFIX);
-    if (!tombstones.isEmpty() && (kind != Kind.LAYER || progress == null)) {
-      throw new IOException("path-state node tombstones require durable LAYER progress");
-    }
-    for (PathStateNativeNodeStore.KeyValue entry : tombstones) {
+    nativeStore.scanPrefix(NODE_TOMBSTONE_PREFIX, entry -> {
+      if (kind != Kind.LAYER || progress == null) {
+        throw new IOException("path-state node tombstones require durable LAYER progress");
+      }
       byte[] key = entry.getKey();
       if (key.length < Integer.BYTES * 2
           || ByteBuffer.wrap(key).getInt() != NODE_TOMBSTONE_DOMAIN
@@ -643,31 +653,31 @@ public final class PathStateNodeStoreSet implements Closeable {
       if (nativeStore.get(nodeKey) != null) {
         throw new IOException("path-state node and tombstone coexist");
       }
-    }
+    });
   }
 
   private List<PathStateNativeNodeStore.BatchMutation> durableStateMutations(
-      byte[] rebuildValue) {
+      byte[] rebuildValue, List<PathStateRoot.LeafMutationRecord> leafMutations) {
     List<PathStateNativeNodeStore.BatchMutation> mutations =
-        new ArrayList<>(pending.size() + persistedLeaves.size() + 1);
+        new ArrayList<>(pending.size() + leafMutations.size() + 1);
     appendPendingMutations(mutations);
-    Map<BytesKey, byte[]> nextLeaves = leafMap(root.leafRecords());
-    appendLeafMutations(mutations, nextLeaves);
+    appendLeafMutations(mutations, leafMutations);
     mutations.add(PathStateNativeNodeStore.BatchMutation.put(REBUILD_CHECKPOINT_KEY,
         rebuildValue));
     return mutations;
   }
 
   private long rebuildLogicalBytes() throws IOException {
-    long total = 0;
+    long[] total = new long[]{0};
     try {
-      for (PathStateNativeNodeStore.KeyValue entry : nativeStore.scanAll()) {
+      nativeStore.scanAll(entry -> {
         byte[] key = entry.getKey();
         if (!Arrays.equals(key, LOGICAL_BYTES_KEY)) {
-          total = Math.addExact(total, Math.addExact(key.length, entry.getValue().length));
+          total[0] = Math.addExact(total[0],
+              Math.addExact(key.length, entry.getValue().length));
         }
-      }
-      return total;
+      });
+      return total[0];
     } catch (ArithmeticException overflow) {
       throw new IOException("path-state rebuild logical bytes overflow", overflow);
     }
@@ -699,22 +709,6 @@ public final class PathStateNodeStoreSet implements Closeable {
       records.add(new PathStateRoot.LeafRecord(storeId, secureKey, entry.getValue()));
     }
     return records;
-  }
-
-  private Map<BytesKey, byte[]> leafMap(List<PathStateRoot.LeafRecord> records) {
-    Map<BytesKey, byte[]> leaves = new LinkedHashMap<>();
-    for (PathStateRoot.LeafRecord record : records) {
-      requireParticipant(record.getStoreId());
-      BytesKey key = new BytesKey(ByteBuffer.allocate(LEAF_KEY_LENGTH)
-          .putInt(LEAF_DOMAIN)
-          .putInt(record.getStoreId())
-          .put(record.getSecureKey())
-          .array());
-      if (leaves.put(key, record.getEncodedValue()) != null) {
-        throw new IllegalStateException("duplicate path-state durable leaf key");
-      }
-    }
-    return leaves;
   }
 
   private PathStateParticipant requireParticipant(int storeId) {
@@ -790,15 +784,12 @@ public final class PathStateNodeStoreSet implements Closeable {
   }
 
   private void appendLeafMutations(List<PathStateNativeNodeStore.BatchMutation> mutations,
-      Map<BytesKey, byte[]> nextLeaves) {
-    for (BytesKey persisted : persistedLeaves.keySet()) {
-      if (!nextLeaves.containsKey(persisted)) {
-        appendLeafMutation(mutations, persisted.copy(), null);
-      }
-    }
-    for (Map.Entry<BytesKey, byte[]> entry : nextLeaves.entrySet()) {
-      if (!Arrays.equals(persistedLeaves.get(entry.getKey()), entry.getValue())) {
-        appendLeafMutation(mutations, entry.getKey().copy(), entry.getValue());
+      List<PathStateRoot.LeafMutationRecord> leafMutations) {
+    for (PathStateRoot.LeafMutationRecord mutation : leafMutations) {
+      byte[] key = leafKey(mutation);
+      byte[] value = mutation.getEncodedValue();
+      if (!Arrays.equals(persistedLeaves.get(new BytesKey(key)), value)) {
+        appendLeafMutation(mutations, key, value);
       }
     }
   }
@@ -816,17 +807,15 @@ public final class PathStateNodeStoreSet implements Closeable {
     }
   }
 
-  private long projectedLeafBytes(long total, Map<BytesKey, byte[]> nextLeaves)
+  private long projectedLeafBytes(long total,
+      List<PathStateRoot.LeafMutationRecord> leafMutations)
       throws IOException {
     long projected = total;
-    for (BytesKey persisted : persistedLeaves.keySet()) {
-      if (!nextLeaves.containsKey(persisted)) {
-        projected = projectedLeafMutation(projected, persisted.copy(), null);
-      }
-    }
-    for (Map.Entry<BytesKey, byte[]> entry : nextLeaves.entrySet()) {
-      if (!Arrays.equals(persistedLeaves.get(entry.getKey()), entry.getValue())) {
-        projected = projectedLeafMutation(projected, entry.getKey().copy(), entry.getValue());
+    for (PathStateRoot.LeafMutationRecord mutation : leafMutations) {
+      byte[] key = leafKey(mutation);
+      byte[] value = mutation.getEncodedValue();
+      if (!Arrays.equals(persistedLeaves.get(new BytesKey(key)), value)) {
+        projected = projectedLeafMutation(projected, key, value);
       }
     }
     return projected;
@@ -842,23 +831,38 @@ public final class PathStateNodeStoreSet implements Closeable {
     return projected;
   }
 
-  private void recordCommittedLeaves(Map<BytesKey, byte[]> nextLeaves) {
-    for (BytesKey persisted : persistedLeaves.keySet()) {
-      if (!nextLeaves.containsKey(persisted)) {
-        localLeaves.remove(persisted);
-        if (leafOverlay) {
-          leafTombstones.add(persisted);
+  private void recordCommittedLeaves(List<PathStateRoot.LeafMutationRecord> leafMutations) {
+    for (PathStateRoot.LeafMutationRecord mutation : leafMutations) {
+      BytesKey key = new BytesKey(leafKey(mutation));
+      byte[] value = mutation.getEncodedValue();
+      if (Arrays.equals(persistedLeaves.get(key), value)) {
+        continue;
+      }
+      if (value == null) {
+        persistedLeaves.remove(key);
+        if (kind == Kind.LAYER) {
+          localLeaves.remove(key);
         }
+        if (leafOverlay) {
+          leafTombstones.add(key);
+        }
+      } else if (!Arrays.equals(persistedLeaves.get(key), value)) {
+        byte[] owned = Arrays.copyOf(value, value.length);
+        persistedLeaves.put(key, owned);
+        if (kind == Kind.LAYER) {
+          localLeaves.put(key, owned);
+        }
+        leafTombstones.remove(key);
       }
     }
-    for (Map.Entry<BytesKey, byte[]> entry : nextLeaves.entrySet()) {
-      if (!Arrays.equals(persistedLeaves.get(entry.getKey()), entry.getValue())) {
-        localLeaves.put(entry.getKey(), Arrays.copyOf(entry.getValue(), entry.getValue().length));
-        leafTombstones.remove(entry.getKey());
-      }
-    }
-    persistedLeaves.clear();
-    persistedLeaves.putAll(nextLeaves);
+  }
+
+  private static byte[] leafKey(PathStateRoot.LeafMutationRecord mutation) {
+    return ByteBuffer.allocate(LEAF_KEY_LENGTH)
+        .putInt(LEAF_DOMAIN)
+        .putInt(mutation.getStoreId())
+        .put(mutation.getSecureKey())
+        .array();
   }
 
   private long projectedPendingBytes(long total) throws IOException {

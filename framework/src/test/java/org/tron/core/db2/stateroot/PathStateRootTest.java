@@ -1,6 +1,7 @@
 package org.tron.core.db2.stateroot;
 
 import static org.junit.Assert.assertArrayEquals;
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertThrows;
 
 import java.util.ArrayList;
@@ -144,6 +145,22 @@ public class PathStateRootTest {
     PathStateRoot zero = stateRoot(participants());
     zero.put("abi", bytes("key"), new byte[]{0});
     org.junit.Assert.assertFalse(Arrays.equals(empty.rootHash(), zero.rootHash()));
+  }
+
+  @Test
+  public void retainsOnlyLeafDeltaSinceLastDurableBoundary() {
+    PathStateRoot stateRoot = stateRoot(participants());
+    stateRoot.put("abi", bytes("one"), bytes("first"));
+    stateRoot.put("account", bytes("two"), bytes("second"));
+    assertEquals(2, stateRoot.pendingLeafMutations().size());
+
+    stateRoot.clearPendingLeafMutations();
+    assertEquals(0, stateRoot.pendingLeafMutations().size());
+    stateRoot.put("abi", bytes("one"), bytes("third"));
+    stateRoot.put("abi", bytes("one"), bytes("fourth"));
+    stateRoot.delete("account", bytes("two"));
+
+    assertEquals(2, stateRoot.pendingLeafMutations().size());
   }
 
   @Test
