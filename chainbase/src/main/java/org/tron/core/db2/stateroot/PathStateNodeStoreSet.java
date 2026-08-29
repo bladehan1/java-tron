@@ -8,6 +8,7 @@ import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -48,7 +49,7 @@ public final class PathStateNodeStoreSet implements Closeable {
   private final Path directory;
   private final PathStateParticipantScope scope;
   private final Map<String, PathNodeStore> participantStores = new LinkedHashMap<>();
-  private final Map<BytesKey, byte[]> pending = new LinkedHashMap<>();
+  private final Map<Integer, LinkedHashMap<BytesKey, byte[]>> pending = new LinkedHashMap<>();
   private final Map<BytesKey, byte[]> localLeaves = new LinkedHashMap<>();
   private final Map<BytesKey, byte[]> persistedLeaves = new LinkedHashMap<>();
   private final Set<BytesKey> leafTombstones = new LinkedHashSet<>();
@@ -116,9 +117,11 @@ public final class PathStateNodeStoreSet implements Closeable {
         throw new IOException("path-state leaf inventory exists without native progress");
       }
       for (PathStateParticipant participant : scope.getParticipants()) {
+        pending.put(participant.getStoreId(), new LinkedHashMap<>());
         participantStores.put(participant.getDbName(),
             new NamespacedNodeStore(this, participant.getStoreId()));
       }
+      pending.put(0, new LinkedHashMap<>());
       superStore = new NamespacedNodeStore(this, 0);
     } catch (RuntimeException | IOException failure) {
       nativeStore.close();
@@ -210,10 +213,14 @@ public final class PathStateNodeStoreSet implements Closeable {
         participant -> participantStores.get(participant.getDbName()),
         superStore);
     if (progress != null || rebuildCheckpoint != null) {
-      byte[] expectedRoot = progress == null ? rebuildCheckpoint.getPartialRoot()
-          : progress.getStateRoot();
-      candidate.restoreLeaves(restoredLeafRecords(), expectedRoot);
-      if (!pending.isEmpty()) {
+      if (progress == null && rebuildCheckpoint.hasIndependentStores()) {
+        candidate.restoreRebuildLeaves(restoredLeafRecords(), rebuildCheckpoint);
+      } else {
+        byte[] expectedRoot = progress == null ? rebuildCheckpoint.getPartialRoot()
+            : progress.getStateRoot();
+        candidate.restoreLeaves(restoredLeafRecords(), expectedRoot);
+      }
+      if (hasPending()) {
         throw new IllegalStateException("path-state leaf restoration attempted to repair nodes");
       }
     }
@@ -237,7 +244,7 @@ public final class PathStateNodeStoreSet implements Closeable {
       throw new IllegalStateException("path-state layer has no parent node overlay");
     }
     candidate.restoreLeaves(parentLeaves, parentRoot);
-    if (!pending.isEmpty()) {
+    if (hasPending()) {
       throw new IllegalStateException("path-state parent restore attempted to copy nodes");
     }
     root = candidate;
@@ -261,7 +268,7 @@ public final class PathStateNodeStoreSet implements Closeable {
     }
     PathStateRoot candidate = PathStateRoot.fromSnapshot(scope,
         participant -> participantStores.get(participant.getDbName()), superStore, snapshot);
-    if (!pending.isEmpty()) {
+    if (hasPending()) {
       throw new IllegalStateException("path-state snapshot fork attempted to copy nodes");
     }
     root = candidate;
@@ -339,7 +346,7 @@ public final class PathStateNodeStoreSet implements Closeable {
     long nextLogicalBytes = projectedLogicalBytes(next);
     List<PathStateRoot.LeafMutationRecord> leafMutations = root.pendingLeafMutations();
     List<PathStateNativeNodeStore.BatchMutation> mutations =
-        new ArrayList<>(pending.size() + leafMutations.size() + 4);
+        new ArrayList<>(pendingSize() + leafMutations.size() + 4);
     appendPendingMutations(mutations);
     appendLeafMutations(mutations, leafMutations);
     mutations.add(PathStateNativeNodeStore.BatchMutation.put(PROGRESS_KEY, next.encode()));
@@ -353,7 +360,7 @@ public final class PathStateNodeStoreSet implements Closeable {
       mutations.add(PathStateNativeNodeStore.BatchMutation.delete(REBUILD_CHECKPOINT_KEY));
     }
     nativeStore.writeBatch(mutations);
-    pending.clear();
+    clearPending();
     recordCommittedLeaves(leafMutations);
     root.clearPendingLeafMutations();
     progress = next;
@@ -362,38 +369,52 @@ public final class PathStateNodeStoreSet implements Closeable {
   }
 
   /** Persists one more completed rebuild Store without creating BASE authority. */
-  synchronized void checkpointRebuild(PathStateRebuildCheckpoint checkpoint) throws IOException {
+  synchronized void checkpointRebuild(PathStateRebuildCheckpoint checkpoint,
+      Collection<Integer> participantStoreIds) throws IOException {
     requireOpen();
     if (kind != Kind.BASE || sealed || progress != null || root == null) {
       throw new IOException("path-state rebuild checkpoint is not admissible");
     }
     PathStateRebuildCheckpoint next = Objects.requireNonNull(checkpoint, "checkpoint");
     requireRebuildCheckpointIdentity(next);
-    if (!Arrays.equals(root.rootHash(), next.getPartialRoot())) {
-      throw new IOException("path-state rebuild checkpoint root mismatch");
-    }
     int previousCount = rebuildCheckpoint == null ? 0
         : rebuildCheckpoint.getCompletedStores().size();
     if (next.getCompletedStores().size() != previousCount + 1) {
       throw new IOException("path-state rebuild checkpoint must advance one Store");
     }
     if (rebuildCheckpoint != null) {
-      List<PathStateRebuildCoordinator.StoreResult> previous =
-          rebuildCheckpoint.getCompletedStores();
-      List<PathStateRebuildCoordinator.StoreResult> advanced = next.getCompletedStores();
-      for (int index = 0; index < previous.size(); index++) {
-        if (!sameStoreResult(previous.get(index), advanced.get(index))) {
+      for (PathStateRebuildCoordinator.StoreResult previous
+          : rebuildCheckpoint.getCompletedStores()) {
+        boolean retained = false;
+        for (PathStateRebuildCoordinator.StoreResult advanced : next.getCompletedStores()) {
+          if (sameStoreResult(previous, advanced)) {
+            retained = true;
+            break;
+          }
+        }
+        if (!retained) {
           throw new IOException("path-state rebuild checkpoint rewrites completed Store");
         }
       }
     }
-    List<PathStateRoot.LeafMutationRecord> leafMutations = root.pendingLeafMutations();
+    Set<Integer> storeIds = new LinkedHashSet<>(Objects.requireNonNull(participantStoreIds,
+        "participantStoreIds"));
+    if (storeIds.isEmpty() || storeIds.contains(0)) {
+      throw new IOException("path-state rebuild checkpoint Store ownership is invalid");
+    }
+    List<PathStateRoot.LeafMutationRecord> leafMutations = new ArrayList<>();
+    for (Integer storeId : storeIds) {
+      requireParticipant(storeId);
+      leafMutations.addAll(root.pendingLeafMutations(storeId));
+    }
     List<PathStateNativeNodeStore.BatchMutation> mutations =
-        durableStateMutations(next.encode(), leafMutations);
+        durableStateMutations(next.encode(), leafMutations, storeIds);
     nativeStore.writeBatch(mutations);
-    pending.clear();
+    for (Integer storeId : storeIds) {
+      clearPending(storeId);
+      root.clearPendingLeafMutations(storeId);
+    }
     recordCommittedLeaves(leafMutations);
-    root.clearPendingLeafMutations();
     rebuildCheckpoint = next;
   }
 
@@ -526,11 +547,14 @@ public final class PathStateNodeStoreSet implements Closeable {
     }
   }
 
-  private synchronized byte[] get(byte[] key) {
+  private byte[] get(byte[] key) {
     BytesKey ownedKey = new BytesKey(key);
-    if (pending.containsKey(ownedKey)) {
-      byte[] value = pending.get(ownedKey);
-      return value == null ? null : Arrays.copyOf(value, value.length);
+    Map<BytesKey, byte[]> participantPending = pending(key);
+    synchronized (participantPending) {
+      if (participantPending.containsKey(ownedKey)) {
+        byte[] value = participantPending.get(ownedKey);
+        return value == null ? null : Arrays.copyOf(value, value.length);
+      }
     }
     byte[] owned = ownedKey.copy();
     byte[] local = nativeStore.get(owned);
@@ -543,12 +567,18 @@ public final class PathStateNodeStoreSet implements Closeable {
     return parentStores == null ? null : parentStores.get(owned);
   }
 
-  private synchronized void put(byte[] key, byte[] value) {
-    pending.put(new BytesKey(key), Arrays.copyOf(value, value.length));
+  private void put(byte[] key, byte[] value) {
+    Map<BytesKey, byte[]> participantPending = pending(key);
+    synchronized (participantPending) {
+      participantPending.put(new BytesKey(key), Arrays.copyOf(value, value.length));
+    }
   }
 
-  private synchronized void delete(byte[] key) {
-    pending.put(new BytesKey(key), null);
+  private void delete(byte[] key) {
+    Map<BytesKey, byte[]> participantPending = pending(key);
+    synchronized (participantPending) {
+      participantPending.put(new BytesKey(key), null);
+    }
   }
 
   private PathNodeStore nodeStore(int storeId) {
@@ -657,10 +687,11 @@ public final class PathStateNodeStoreSet implements Closeable {
   }
 
   private List<PathStateNativeNodeStore.BatchMutation> durableStateMutations(
-      byte[] rebuildValue, List<PathStateRoot.LeafMutationRecord> leafMutations) {
+      byte[] rebuildValue, List<PathStateRoot.LeafMutationRecord> leafMutations,
+      Collection<Integer> storeIds) {
     List<PathStateNativeNodeStore.BatchMutation> mutations =
-        new ArrayList<>(pending.size() + leafMutations.size() + 1);
-    appendPendingMutations(mutations);
+        new ArrayList<>(pendingSize(storeIds) + leafMutations.size() + 1);
+    appendPendingMutations(mutations, storeIds);
     appendLeafMutations(mutations, leafMutations);
     mutations.add(PathStateNativeNodeStore.BatchMutation.put(REBUILD_CHECKPOINT_KEY,
         rebuildValue));
@@ -764,7 +795,22 @@ public final class PathStateNodeStoreSet implements Closeable {
 
   private void appendPendingMutations(
       List<PathStateNativeNodeStore.BatchMutation> mutations) {
-    for (Map.Entry<BytesKey, byte[]> entry : pending.entrySet()) {
+    appendPendingMutations(mutations, pending.keySet());
+  }
+
+  private void appendPendingMutations(List<PathStateNativeNodeStore.BatchMutation> mutations,
+      Collection<Integer> storeIds) {
+    for (Integer storeId : storeIds) {
+      Map<BytesKey, byte[]> participantPending = pending.get(storeId);
+      synchronized (participantPending) {
+        appendPendingMutations(mutations, participantPending);
+      }
+    }
+  }
+
+  private void appendPendingMutations(List<PathStateNativeNodeStore.BatchMutation> mutations,
+      Map<BytesKey, byte[]> participantPending) {
+    for (Map.Entry<BytesKey, byte[]> entry : participantPending.entrySet()) {
       byte[] key = entry.getKey().copy();
       byte[] value = entry.getValue();
       if (kind == Kind.LAYER) {
@@ -867,7 +913,18 @@ public final class PathStateNodeStoreSet implements Closeable {
 
   private long projectedPendingBytes(long total) throws IOException {
     long projected = total;
-    for (Map.Entry<BytesKey, byte[]> entry : pending.entrySet()) {
+    for (Map<BytesKey, byte[]> participantPending : pending.values()) {
+      synchronized (participantPending) {
+        projected = projectedPendingBytes(projected, participantPending);
+      }
+    }
+    return projected;
+  }
+
+  private long projectedPendingBytes(long total, Map<BytesKey, byte[]> participantPending)
+      throws IOException {
+    long projected = total;
+    for (Map.Entry<BytesKey, byte[]> entry : participantPending.entrySet()) {
       byte[] key = entry.getKey().copy();
       byte[] value = entry.getValue();
       projected = replaceLogicalEntry(projected, key, nativeStore.get(key), value);
@@ -878,6 +935,50 @@ public final class PathStateNodeStoreSet implements Closeable {
       }
     }
     return projected;
+  }
+
+  private Map<BytesKey, byte[]> pending(byte[] key) {
+    if (key.length < Integer.BYTES) {
+      throw new IllegalArgumentException("path-state namespaced key is too short");
+    }
+    int storeId = ByteBuffer.wrap(key).getInt();
+    Map<BytesKey, byte[]> participantPending = pending.get(storeId);
+    if (participantPending == null) {
+      throw new IllegalArgumentException("unknown path-state node Store ID: " + storeId);
+    }
+    return participantPending;
+  }
+
+  private boolean hasPending() {
+    return pendingSize() != 0;
+  }
+
+  private int pendingSize() {
+    return pendingSize(pending.keySet());
+  }
+
+  private int pendingSize(Collection<Integer> storeIds) {
+    int size = 0;
+    for (Integer storeId : storeIds) {
+      Map<BytesKey, byte[]> participantPending = pending.get(storeId);
+      synchronized (participantPending) {
+        size = Math.addExact(size, participantPending.size());
+      }
+    }
+    return size;
+  }
+
+  private void clearPending() {
+    for (Integer storeId : pending.keySet()) {
+      clearPending(storeId);
+    }
+  }
+
+  private void clearPending(int storeId) {
+    Map<BytesKey, byte[]> participantPending = pending.get(storeId);
+    synchronized (participantPending) {
+      participantPending.clear();
+    }
   }
 
   private static byte[] tombstoneKey(byte[] nodeKey) {
