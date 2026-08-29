@@ -136,31 +136,6 @@ public final class PathStateCanonicalizer {
     return Collections.unmodifiableList(projected);
   }
 
-  /** Requires that a physical direct row belongs to an already optimized Account. */
-  public void requirePhysicalAccountAssetOwner(P66Phase phase, byte[] physicalKey,
-      byte[] rawValue) {
-    P66Phase target = Objects.requireNonNull(phase, "phase");
-    byte[] key = copy(physicalKey, "physicalKey");
-    requireLength(key, ADDRESS_LENGTH, "account key");
-    Account account = parseAccount(key, rawValue);
-    if (!target.directAssetsEnabled() || !account.getAssetOptimized()
-        || !account.getAssetMap().isEmpty() || !account.getAssetV2Map().isEmpty()) {
-      throw new IllegalArgumentException(
-          "physical AccountAsset row requires an optimized owning Account");
-    }
-  }
-
-  /** Extracts and validates the owning Account address from one direct physical key. */
-  public byte[] accountAddressFromAssetKey(P66Phase phase, byte[] physicalKey) {
-    P66Phase target = Objects.requireNonNull(phase, "phase");
-    if (!target.directAssetsEnabled()) {
-      throw new IllegalArgumentException("P66-off state must not contain account-asset rows");
-    }
-    byte[] key = copyNonEmpty(physicalKey, "physicalKey");
-    decodeAccountAssetKey(key);
-    return Arrays.copyOf(key, ADDRESS_LENGTH);
-  }
-
   private static void configure(Map<String, StoreFormat> formats, String dbName, String codecId) {
     if (formats.replace(dbName, new StoreFormat(dbName, codecId)) == null) {
       throw new IllegalStateException("missing path-state format participant: " + dbName);
