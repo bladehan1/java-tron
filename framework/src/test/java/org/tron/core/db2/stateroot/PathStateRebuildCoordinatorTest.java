@@ -7,6 +7,7 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
+import com.google.common.hash.Hashing;
 import com.google.protobuf.ByteString;
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -18,6 +19,8 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.Rule;
@@ -92,6 +95,67 @@ public class PathStateRebuildCoordinatorTest {
       assertThrows(IOException.class,
           () -> new PathStateRebuildCoordinator().rebuild(manifest, source));
     }
+  }
+
+  @Test
+  public void schedulesLargeAndSmallStoresInParallelAndOrdersAccountAsset() throws Exception {
+    PathStateStoreManifest manifest = manifest("parallel-tiers", Engine.ROCKSDB);
+    TestSnapshotSource delegate = exactSource(identity());
+    CountDownLatch concurrentScans = new CountDownLatch(3);
+    Map<String, String> threads = Collections.synchronizedMap(new LinkedHashMap<>());
+    AtomicBoolean accountReturned = new AtomicBoolean();
+    SnapshotSource source = new SnapshotSource() {
+      @Override
+      public SnapshotIdentity identity() {
+        return delegate.identity();
+      }
+
+      @Override
+      public Collection<String> databases() {
+        return delegate.databases();
+      }
+
+      @Override
+      public byte[] sourceIdentityDigest() {
+        return delegate.sourceIdentityDigest();
+      }
+
+      @Override
+      public void scan(String dbName, EntryConsumer consumer) throws IOException {
+        threads.put(dbName, Thread.currentThread().getName());
+        if ("account-asset".equals(dbName) && !accountReturned.get()) {
+          throw new IOException("account-asset started before account completed");
+        }
+        if ("account".equals(dbName) || "storage-row".equals(dbName)
+            || "abi".equals(dbName)) {
+          concurrentScans.countDown();
+          try {
+            if (!concurrentScans.await(5, TimeUnit.SECONDS)) {
+              throw new IOException("Store tiers did not scan concurrently");
+            }
+          } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new IOException("parallel Store test interrupted", interrupted);
+          }
+        }
+        delegate.scan(dbName, consumer);
+        if ("account".equals(dbName)) {
+          accountReturned.set(true);
+        }
+      }
+
+      @Override
+      public void verifyIdentity(SnapshotIdentity expected) throws IOException {
+        delegate.verifyIdentity(expected);
+      }
+    };
+
+    assertEquals(27, new PathStateRebuildCoordinator().rebuild(manifest, source)
+        .getStores().size());
+    assertTrue(threads.get("account").startsWith("path-state-rebuild-large-"));
+    assertTrue(threads.get("storage-row").startsWith("path-state-rebuild-large-"));
+    assertTrue(threads.get("abi").startsWith("path-state-rebuild-small-"));
+    assertTrue(accountReturned.get());
   }
 
   @Test
@@ -212,6 +276,10 @@ public class PathStateRebuildCoordinatorTest {
   public void resumesCompletedStoresWhileKeepingGenerationInvisible() throws Exception {
     PathStateStoreManifest manifest = manifest("resume", Engine.ROCKSDB);
     TestSnapshotSource first = exactSource(identity());
+    byte[] lazyAddress = address(9);
+    byte[] lazyAccount = account(lazyAddress).toBuilder()
+        .putAssetV2("1000001", 17L).build().toByteArray();
+    first.add("account", lazyAddress, lazyAccount);
     first.add("proposal", new byte[]{1}, new byte[]{2});
     AtomicBoolean failed = new AtomicBoolean();
     PathStateRebuildCoordinator interrupted = new PathStateRebuildCoordinator(store -> {
@@ -227,6 +295,7 @@ public class PathStateRebuildCoordinatorTest {
     assertNull(PathStateNodeStoreSet.loadProgress(manifest.getBaseDirectory(), manifest));
 
     TestSnapshotSource resumed = exactSource(identity());
+    resumed.add("account", lazyAddress, lazyAccount);
     resumed.add("proposal", new byte[]{1}, new byte[]{2});
     RebuildResult result = new PathStateRebuildCoordinator().rebuild(manifest, resumed);
 
@@ -236,11 +305,13 @@ public class PathStateRebuildCoordinatorTest {
     assertEquals(0, resumed.getScanCount("account-index"));
     assertEquals(0, resumed.getScanCount("account"));
     assertEquals(1, resumed.getScanCount("account-asset"));
-    assertEquals(1, resumed.getScanCount("proposal"));
+    assertTrue(resumed.getScanCount("proposal") == 0
+        || resumed.getScanCount("proposal") == 1);
     assertTrue(new PathStateCurrentStore(manifest).isInitialized());
 
     PathStateStoreManifest freshManifest = manifest("resume-fresh", Engine.ROCKSDB);
     TestSnapshotSource fresh = exactSource(identity());
+    fresh.add("account", lazyAddress, lazyAccount);
     fresh.add("proposal", new byte[]{1}, new byte[]{2});
     RebuildResult freshResult = new PathStateRebuildCoordinator().rebuild(freshManifest, fresh);
     assertArrayEquals(freshResult.getMetadata().getStateRoot(),
@@ -250,6 +321,36 @@ public class PathStateRebuildCoordinatorTest {
       assertNull(reopened.getRebuildCheckpoint());
       assertArrayEquals(result.getMetadata().getStateRoot(), reopened.createRoot().rootHash());
     }
+  }
+
+  @Test
+  public void resumesNonPrefixCheckpointWithoutPersistingFailedStoreResidue() throws Exception {
+    PathStateStoreManifest manifest = manifest("resume-non-prefix", Engine.ROCKSDB);
+    TestSnapshotSource failedSource = exactSource(identity());
+    byte[] accountKey = address(7);
+    byte[] accountValue = account(accountKey).toByteArray();
+    failedSource.add("account", accountKey, accountValue);
+    failedSource.add("account", accountKey, accountValue);
+
+    assertThrows(IllegalArgumentException.class,
+        () -> new PathStateRebuildCoordinator().rebuild(manifest, failedSource));
+    assertFalse(new PathStateCurrentStore(manifest).isInitialized());
+    try (PathStateNodeStoreSet reopened = PathStateNodeStoreSet.openBase(manifest)) {
+      PathStateRebuildCheckpoint checkpoint = reopened.getRebuildCheckpoint();
+      assertTrue(checkpoint.hasIndependentStores());
+      assertTrue(checkpoint.getCompletedStores().stream()
+          .noneMatch(store -> "account".equals(store.getDbName())));
+      assertTrue(checkpoint.getCompletedStores().stream()
+          .anyMatch(store -> store.getStoreId() > 4));
+    }
+
+    RebuildResult resumed = new PathStateRebuildCoordinator().rebuild(manifest,
+        exactSource(identity()));
+    PathStateStoreManifest freshManifest = manifest("resume-non-prefix-fresh", Engine.ROCKSDB);
+    RebuildResult fresh = new PathStateRebuildCoordinator().rebuild(freshManifest,
+        exactSource(identity()));
+    assertArrayEquals(fresh.getMetadata().getStateRoot(), resumed.getMetadata().getStateRoot());
+    assertArrayEquals(fresh.getSourceDigest(), resumed.getSourceDigest());
   }
 
   @Test
@@ -287,7 +388,8 @@ public class PathStateRebuildCoordinatorTest {
   }
 
   @Test
-  public void rebuildCheckpointCodecRejectsCorruptionAndNonPrefixStores() throws Exception {
+  public void rebuildCheckpointCodecSupportsNonPrefixStoresAndRejectsCorruption()
+      throws Exception {
     StoreResult abi = StoreResult.restore(1, "abi", 2, bytes(5), bytes(6));
     PathStateRebuildCheckpoint checkpoint = new PathStateRebuildCheckpoint(bytes(7), bytes(11),
         identity(), Collections.singletonList(abi), bytes(8));
@@ -298,10 +400,22 @@ public class PathStateRebuildCoordinatorTest {
     assertEquals(1, decoded.getCompletedStores().size());
     assertArrayEquals(checkpoint.getPartialRoot(), decoded.getPartialRoot());
 
+    byte[] legacy = checkpoint.encode();
+    ByteBuffer.wrap(legacy).putShort(Integer.BYTES, (short) 1);
+    int payloadLength = legacy.length - Integer.BYTES;
+    ByteBuffer.wrap(legacy).putInt(payloadLength,
+        Hashing.crc32c().hashBytes(legacy, 0, payloadLength).asInt());
+    assertFalse(PathStateRebuildCheckpoint.decode(legacy).hasIndependentStores());
+
     byte[] corrupt = checkpoint.encode();
     corrupt[corrupt.length - 1] ^= 1;
     assertThrows(IOException.class, () -> PathStateRebuildCheckpoint.decode(corrupt));
-    StoreResult wrongFirst = StoreResult.restore(2, "accountid-index", 0, bytes(9), bytes(10));
+    StoreResult nonPrefix = StoreResult.restore(2, "accountid-index", 0, bytes(9), bytes(10));
+    PathStateRebuildCheckpoint nonPrefixCheckpoint = new PathStateRebuildCheckpoint(bytes(7),
+        bytes(11), identity(), Collections.singletonList(nonPrefix), bytes(8));
+    assertEquals(2, PathStateRebuildCheckpoint.decode(nonPrefixCheckpoint.encode())
+        .getCompletedStores().get(0).getStoreId());
+    StoreResult wrongFirst = StoreResult.restore(2, "abi", 0, bytes(9), bytes(10));
     assertThrows(IllegalArgumentException.class, () -> new PathStateRebuildCheckpoint(bytes(7),
         bytes(11), identity(), Collections.singletonList(wrongFirst), bytes(8)));
   }
@@ -529,7 +643,7 @@ public class PathStateRebuildCoordinatorTest {
       return verificationCount;
     }
 
-    private int getScanCount(String dbName) {
+    private synchronized int getScanCount(String dbName) {
       Integer count = scanCounts.get(dbName);
       return count == null ? 0 : count;
     }
@@ -557,7 +671,9 @@ public class PathStateRebuildCoordinatorTest {
 
     @Override
     public void scan(String dbName, EntryConsumer consumer) throws IOException {
-      scanCounts.put(dbName, getScanCount(dbName) + 1);
+      synchronized (this) {
+        scanCounts.put(dbName, getScanCount(dbName) + 1);
+      }
       for (Row row : stores.get(dbName)) {
         consumer.accept(row.key, row.value);
       }

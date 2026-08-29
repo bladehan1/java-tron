@@ -29,7 +29,7 @@ final class PathStateNativeNodeStore implements Closeable {
   private final Path directory;
   private final Engine engine;
   private final Delegate delegate;
-  private boolean closed;
+  private volatile boolean closed;
 
   private PathStateNativeNodeStore(Path directory, Engine engine, Delegate delegate) {
     this.directory = directory;
@@ -53,7 +53,7 @@ final class PathStateNativeNodeStore implements Closeable {
     return new PathStateNativeNodeStore(path, selected, opened);
   }
 
-  synchronized byte[] get(byte[] key) {
+  byte[] get(byte[] key) {
     requireOpen();
     byte[] ownedKey = nonEmpty(key, "key");
     byte[] value = delegate.get(ownedKey);

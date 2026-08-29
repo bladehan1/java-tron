@@ -31,10 +31,10 @@ public final class PathStateRoot {
 
   private final PathStateParticipantScope scope;
   private final Map<String, PathMerkleTrie> participantTries = new LinkedHashMap<>();
-  private final Map<MutationKey, PathStateParticipant> pendingLeafMutations =
-      new LinkedHashMap<>();
+  private final Map<Integer, LinkedHashMap<MutationKey, PathStateParticipant>>
+      pendingLeafMutations = new LinkedHashMap<>();
   private final PathMerkleTrie superTrie;
-  private boolean rootMaterialized;
+  private volatile boolean rootMaterialized;
 
   public PathStateRoot(PathStateParticipantScope scope, PathNodeStoreFactory storeFactory,
       PathNodeStore superNodeStore) {
@@ -59,6 +59,7 @@ public final class PathStateRoot {
       }
       participantTries.put(participant.getDbName(), snapshot == null
           ? new PathMerkleTrie(nodeStore) : PathMerkleTrie.fromSnapshot(nodeStore, trieSnapshot));
+      pendingLeafMutations.put(participant.getStoreId(), new LinkedHashMap<>());
     }
     PathNodeStore rootStore = Objects.requireNonNull(superNodeStore, "superNodeStore");
     if (!uniqueStores.add(rootStore)) {
@@ -98,6 +99,21 @@ public final class PathStateRoot {
     rootMaterialized = false;
   }
 
+  /** Applies one rebuild batch while locking only the participant tries touched by that batch. */
+  void applyRebuild(Collection<PathStateMutation> mutations) {
+    List<PreparedMutation> prepared = prepare(mutations);
+    for (PreparedMutation mutation : prepared) {
+      PathMerkleTrie trie = participantTries.get(mutation.participant.getDbName());
+      if (mutation.encodedValue == null) {
+        trie.delete(mutation.secureKey);
+      } else {
+        trie.put(mutation.secureKey, mutation.encodedValue);
+      }
+    }
+    recordPendingLeafMutations(prepared);
+    rootMaterialized = false;
+  }
+
   synchronized void recordPendingLeafMutations(Collection<PathStateMutation> mutations) {
     recordPendingLeafMutations(prepare(mutations));
   }
@@ -105,7 +121,11 @@ public final class PathStateRoot {
   private void recordPendingLeafMutations(List<PreparedMutation> prepared) {
     for (PreparedMutation mutation : prepared) {
       MutationKey key = new MutationKey(mutation.participant.getStoreId(), mutation.secureKey);
-      pendingLeafMutations.put(key, mutation.participant);
+      Map<MutationKey, PathStateParticipant> participantMutations =
+          pendingLeafMutations.get(mutation.participant.getStoreId());
+      synchronized (participantMutations) {
+        participantMutations.put(key, mutation.participant);
+      }
     }
   }
 
@@ -155,25 +175,58 @@ public final class PathStateRoot {
 
   /** Returns only leaf mutations accumulated since the last durable commit/checkpoint. */
   synchronized List<LeafMutationRecord> pendingLeafMutations() {
-    List<LeafMutationRecord> mutations = new ArrayList<>(pendingLeafMutations.size());
-    for (Map.Entry<MutationKey, PathStateParticipant> entry : pendingLeafMutations.entrySet()) {
-      MutationKey key = entry.getKey();
-      PathStateParticipant participant = entry.getValue();
-      mutations.add(new LeafMutationRecord(participant.getStoreId(), key.secureKey,
-          participantTries.get(participant.getDbName()).get(key.secureKey)));
+    List<LeafMutationRecord> mutations = new ArrayList<>();
+    for (Integer storeId : pendingLeafMutations.keySet()) {
+      mutations.addAll(pendingLeafMutations(storeId));
     }
     return mutations;
   }
 
+  List<LeafMutationRecord> pendingLeafMutations(int storeId) {
+    Map<MutationKey, PathStateParticipant> participantMutations =
+        pendingLeafMutations.get(storeId);
+    if (participantMutations == null) {
+      throw new IllegalArgumentException("unknown path-state Store ID: " + storeId);
+    }
+    synchronized (participantMutations) {
+      List<LeafMutationRecord> mutations = new ArrayList<>(participantMutations.size());
+      for (Map.Entry<MutationKey, PathStateParticipant> entry
+          : participantMutations.entrySet()) {
+        MutationKey key = entry.getKey();
+        PathStateParticipant participant = entry.getValue();
+        mutations.add(new LeafMutationRecord(participant.getStoreId(), key.secureKey,
+            participantTries.get(participant.getDbName()).get(key.secureKey)));
+      }
+      return mutations;
+    }
+  }
+
   synchronized void clearPendingLeafMutations() {
-    pendingLeafMutations.clear();
+    for (Integer storeId : pendingLeafMutations.keySet()) {
+      clearPendingLeafMutations(storeId);
+    }
+  }
+
+  void clearPendingLeafMutations(int storeId) {
+    Map<MutationKey, PathStateParticipant> participantMutations =
+        pendingLeafMutations.get(storeId);
+    if (participantMutations == null) {
+      throw new IllegalArgumentException("unknown path-state Store ID: " + storeId);
+    }
+    synchronized (participantMutations) {
+      participantMutations.clear();
+    }
   }
 
   synchronized void recordPendingLeafRecords(Collection<LeafRecord> records) {
     for (LeafRecord record : Objects.requireNonNull(records, "records")) {
       LeafRecord present = Objects.requireNonNull(record, "record");
       PathStateParticipant participant = participant(present.storeId);
-      pendingLeafMutations.put(new MutationKey(present.storeId, present.secureKey), participant);
+      Map<MutationKey, PathStateParticipant> participantMutations =
+          pendingLeafMutations.get(present.storeId);
+      synchronized (participantMutations) {
+        participantMutations.put(new MutationKey(present.storeId, present.secureKey), participant);
+      }
     }
   }
 
@@ -201,31 +254,24 @@ public final class PathStateRoot {
     restoreLeaves(records, expectedRoot, false);
   }
 
+  synchronized void restoreRebuildLeaves(Collection<LeafRecord> records,
+      PathStateRebuildCheckpoint checkpoint) {
+    restoreParticipantLeaves(records, false);
+    for (PathStateRebuildCoordinator.StoreResult result : checkpoint.getCompletedStores()) {
+      if (!Arrays.equals(participantRoot(result.getDbName()), result.getStoreRoot())) {
+        throw new IllegalStateException(
+            "restored path-state participant root differs from durable progress");
+      }
+    }
+    rootMaterialized = false;
+  }
+
   private void restoreLeaves(Collection<LeafRecord> records, byte[] expectedRoot,
       boolean initialize) {
-    Map<Integer, PathStateParticipant> participants = new LinkedHashMap<>();
-    Map<Integer, List<PathMerkleTrie.LeafEntry>> leaves = new LinkedHashMap<>();
-    for (PathStateParticipant participant : scope.getParticipants()) {
-      participants.put(participant.getStoreId(), participant);
-      leaves.put(participant.getStoreId(), new ArrayList<>());
-    }
-    for (LeafRecord record : Objects.requireNonNull(records, "records")) {
-      LeafRecord present = Objects.requireNonNull(record, "record");
-      if (!participants.containsKey(present.storeId)) {
-        throw new IllegalArgumentException("restored leaf has unknown path-state Store ID");
-      }
-      leaves.get(present.storeId).add(new PathMerkleTrie.LeafEntry(
-          present.secureKey, present.encodedValue));
-    }
-
+    restoreParticipantLeaves(records, initialize);
     List<PathMerkleTrie.LeafEntry> superLeaves = new ArrayList<>();
     for (PathStateParticipant participant : scope.getParticipants()) {
       PathMerkleTrie trie = participantTries.get(participant.getDbName());
-      if (initialize) {
-        trie.initializeLeaves(leaves.get(participant.getStoreId()));
-      } else {
-        trie.restoreLeaves(leaves.get(participant.getStoreId()));
-      }
       byte[] storeRoot = trie.rootHash();
       superLeaves.add(new PathMerkleTrie.LeafEntry(
           PathStateCommitmentCodec.superLeafKey(participant.getStoreId()),
@@ -243,6 +289,34 @@ public final class PathStateRoot {
     }
     rootMaterialized = true;
     verifyNodeStores();
+  }
+
+  private Map<Integer, List<PathMerkleTrie.LeafEntry>> restoreParticipantLeaves(
+      Collection<LeafRecord> records, boolean initialize) {
+    Map<Integer, PathStateParticipant> participants = new LinkedHashMap<>();
+    Map<Integer, List<PathMerkleTrie.LeafEntry>> leaves = new LinkedHashMap<>();
+    for (PathStateParticipant participant : scope.getParticipants()) {
+      participants.put(participant.getStoreId(), participant);
+      leaves.put(participant.getStoreId(), new ArrayList<>());
+    }
+    for (LeafRecord record : Objects.requireNonNull(records, "records")) {
+      LeafRecord present = Objects.requireNonNull(record, "record");
+      if (!participants.containsKey(present.storeId)) {
+        throw new IllegalArgumentException("restored leaf has unknown path-state Store ID");
+      }
+      leaves.get(present.storeId).add(new PathMerkleTrie.LeafEntry(
+          present.secureKey, present.encodedValue));
+    }
+
+    for (PathStateParticipant participant : scope.getParticipants()) {
+      PathMerkleTrie trie = participantTries.get(participant.getDbName());
+      if (initialize) {
+        trie.initializeLeaves(leaves.get(participant.getStoreId()));
+      } else {
+        trie.restoreLeaves(leaves.get(participant.getStoreId()));
+      }
+    }
+    return leaves;
   }
 
   private List<PreparedMutation> prepare(Collection<PathStateMutation> mutations) {
