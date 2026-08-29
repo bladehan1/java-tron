@@ -21,7 +21,8 @@ import org.tron.core.db2.stateroot.PathStateRebuildCoordinator.StoreResult;
 final class PathStateRebuildCheckpoint {
 
   private static final int MAGIC = 0x50535243; // PSRC
-  private static final short VERSION = 1;
+  private static final short LEGACY_VERSION = 1;
+  private static final short VERSION = 2;
   private static final int MAX_LENGTH = 64 * 1024;
 
   private final byte[] manifestDigest;
@@ -29,14 +30,28 @@ final class PathStateRebuildCheckpoint {
   private final SnapshotIdentity identity;
   private final List<StoreResult> completedStores;
   private final byte[] partialRoot;
+  private final boolean independentStores;
 
   PathStateRebuildCheckpoint(byte[] manifestDigest, byte[] sourceIdentityDigest,
       SnapshotIdentity identity, List<StoreResult> completedStores, byte[] partialRoot) {
+    this(manifestDigest, sourceIdentityDigest, identity, completedStores, partialRoot, true);
+  }
+
+  PathStateRebuildCheckpoint(byte[] manifestDigest, byte[] sourceIdentityDigest,
+      SnapshotIdentity identity, List<StoreResult> completedStores) {
+    this(manifestDigest, sourceIdentityDigest, identity, completedStores,
+        new byte[PathStateRootMetadata.DIGEST_LENGTH], true);
+  }
+
+  private PathStateRebuildCheckpoint(byte[] manifestDigest, byte[] sourceIdentityDigest,
+      SnapshotIdentity identity, List<StoreResult> completedStores, byte[] partialRoot,
+      boolean independentStores) {
     this.manifestDigest = copy32(manifestDigest, "manifestDigest");
     this.sourceIdentityDigest = copy32(sourceIdentityDigest, "sourceIdentityDigest");
     this.identity = Objects.requireNonNull(identity, "identity");
     this.completedStores = validateStores(completedStores);
     this.partialRoot = copy32(partialRoot, "partialRoot");
+    this.independentStores = independentStores;
   }
 
   byte[] getManifestDigest() {
@@ -57,6 +72,10 @@ final class PathStateRebuildCheckpoint {
 
   byte[] getPartialRoot() {
     return Arrays.copyOf(partialRoot, partialRoot.length);
+  }
+
+  boolean hasIndependentStores() {
+    return independentStores;
   }
 
   byte[] encode() {
@@ -108,7 +127,11 @@ final class PathStateRebuildCheckpoint {
       throw new IOException("path-state rebuild checkpoint checksum mismatch");
     }
     try (DataInputStream input = new DataInputStream(new ByteArrayInputStream(bytes))) {
-      if (input.readInt() != MAGIC || input.readShort() != VERSION || input.readShort() != 0
+      if (input.readInt() != MAGIC) {
+        throw new IOException("unsupported path-state rebuild checkpoint header");
+      }
+      short version = input.readShort();
+      if ((version != LEGACY_VERSION && version != VERSION) || input.readShort() != 0
           || input.readInt() != bytes.length) {
         throw new IOException("unsupported path-state rebuild checkpoint header");
       }
@@ -136,7 +159,7 @@ final class PathStateRebuildCheckpoint {
         throw new IOException("path-state rebuild checkpoint payload mismatch");
       }
       return new PathStateRebuildCheckpoint(manifestDigest, sourceIdentityDigest, identity, stores,
-          partialRoot);
+          partialRoot, version == VERSION);
     } catch (IllegalArgumentException invalid) {
       throw new IOException("path-state rebuild checkpoint is invalid", invalid);
     }
@@ -149,13 +172,19 @@ final class PathStateRebuildCheckpoint {
     if (supplied.size() > expected.size() || supplied.contains(null)) {
       throw new IllegalArgumentException("rebuild checkpoint Store count is invalid");
     }
-    for (int index = 0; index < supplied.size(); index++) {
-      StoreResult actual = supplied.get(index);
-      PathStateParticipantDescriptor.StoreIdentity participant = expected.get(index);
+    int previousStoreId = 0;
+    for (StoreResult actual : supplied) {
+      if (actual.getStoreId() <= previousStoreId
+          || actual.getStoreId() > expected.size()) {
+        throw new IllegalArgumentException("rebuild checkpoint Store order is invalid");
+      }
+      PathStateParticipantDescriptor.StoreIdentity participant =
+          expected.get(actual.getStoreId() - 1);
       if (actual.getStoreId() != participant.getStoreId()
           || !actual.getDbName().equals(participant.getDbName())) {
         throw new IllegalArgumentException("rebuild checkpoint Store order is invalid");
       }
+      previousStoreId = actual.getStoreId();
     }
     return Collections.unmodifiableList(supplied);
   }

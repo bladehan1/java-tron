@@ -37,7 +37,7 @@ public final class PathStateNativeSnapshotSource
   private final Map<String, StoreSnapshot> snapshots;
   private final int pageSize;
   private final int marketEntryLimit;
-  private boolean closed;
+  private volatile boolean closed;
 
   private PathStateNativeSnapshotSource(PathStateParticipantDescriptor descriptor,
       SnapshotIdentity identity, Map<String, SnapshotCapableStore> stores,
@@ -163,7 +163,7 @@ public final class PathStateNativeSnapshotSource
   }
 
   @Override
-  public synchronized void scan(String dbName, EntryConsumer consumer) throws IOException {
+  public void scan(String dbName, EntryConsumer consumer) throws IOException {
     ensureOpen();
     Objects.requireNonNull(consumer, "consumer");
     PathStateParticipantDescriptor.StoreIdentity participant = descriptor.require(dbName);

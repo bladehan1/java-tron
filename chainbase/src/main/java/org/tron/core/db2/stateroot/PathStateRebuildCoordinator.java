@@ -10,9 +10,18 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
+import java.util.TreeMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.tron.core.capsule.utils.MarketUtils;
 import org.tron.core.db2.stateroot.PathStateCanonicalizer.P66Phase;
 import org.tron.core.db2.stateroot.PathStateParticipantDescriptor.StoreIdentity;
@@ -22,6 +31,11 @@ public final class PathStateRebuildCoordinator {
 
   private static final String STORE_DIGEST_DOMAIN = "path-state-rebuild-store/v1";
   private static final String SOURCE_DIGEST_DOMAIN = "path-state-rebuild-source/v1";
+  private static final int LARGE_STORE_WORKERS = 2;
+  private static final int SMALL_STORE_WORKERS = 2;
+  private static final Set<String> LARGE_STORES = Collections.unmodifiableSet(
+      new LinkedHashSet<>(Arrays.asList(
+          "account", "account-asset", "delegation", "storage-row")));
 
   private final PathStateParticipantDescriptor descriptor;
   private final PathStateCanonicalizer canonicalizer;
@@ -79,8 +93,12 @@ public final class PathStateRebuildCoordinator {
     try (PathStateNodeStoreSet stores = PathStateNodeStoreSet.openBase(admittedManifest)) {
       PathStateRoot root = stores.createRoot();
       PathStateRebuildCheckpoint checkpoint = stores.getRebuildCheckpoint();
-      List<StoreResult> storeResults = checkpoint == null ? new ArrayList<>()
-          : new ArrayList<>(checkpoint.getCompletedStores());
+      Map<Integer, StoreResult> completedStores = new TreeMap<>();
+      if (checkpoint != null) {
+        for (StoreResult completed : checkpoint.getCompletedStores()) {
+          completedStores.put(completed.getStoreId(), completed);
+        }
+      }
       if (checkpoint != null && !identity.sameAs(checkpoint.getIdentity())) {
         throw new IOException("path-state rebuild checkpoint snapshot identity mismatch");
       }
@@ -92,21 +110,12 @@ public final class PathStateRebuildCoordinator {
           checkpoint.getSourceIdentityDigest())) {
         throw new IOException("path-state rebuild checkpoint source identity mismatch");
       }
+      buildStoresInParallel(admittedManifest, admittedSource, identity, sourceIdentityDigest,
+          root, stores, completedStores);
+      List<StoreResult> storeResults = new ArrayList<>(completedStores.values());
       long totalEntries = 0;
       for (StoreResult completed : storeResults) {
         totalEntries = Math.addExact(totalEntries, completed.getEntryCount());
-      }
-      for (int index = storeResults.size(); index < descriptor.getStores().size(); index++) {
-        StoreIdentity store = descriptor.getStores().get(index);
-        StoreAccumulator accumulator = new StoreAccumulator(store, identity.getPhase(), root);
-        admittedSource.scan(store.getDbName(), accumulator::accept);
-        StoreResult result = accumulator.finish();
-        storeResults.add(result);
-        totalEntries = Math.addExact(totalEntries, result.getEntryCount());
-        checkpoint = new PathStateRebuildCheckpoint(admittedManifest.getIdentityDigest(),
-            sourceIdentityDigest, identity, storeResults, root.rootHash());
-        stores.checkpointRebuild(checkpoint);
-        faultHook.afterStore(result);
       }
 
       admittedSource.verifyIdentity(identity);
@@ -128,6 +137,130 @@ public final class PathStateRebuildCoordinator {
       catchUpQueue.drain(admittedManifest, admittedLimits);
     }
     return rebuildResult;
+  }
+
+  private void buildStoresInParallel(PathStateStoreManifest manifest, SnapshotSource source,
+      SnapshotIdentity identity, byte[] sourceIdentityDigest, PathStateRoot root,
+      PathStateNodeStoreSet stores, Map<Integer, StoreResult> completedStores) throws IOException {
+    Object checkpointLock = new Object();
+    ExecutorService largeExecutor = Executors.newFixedThreadPool(LARGE_STORE_WORKERS,
+        rebuildThreadFactory("large"));
+    ExecutorService smallExecutor = Executors.newFixedThreadPool(SMALL_STORE_WORKERS,
+        rebuildThreadFactory("small"));
+    List<Future<?>> futures = new ArrayList<>();
+    Future<?> accountFuture = null;
+    StoreIdentity accountAsset = null;
+    try {
+      for (StoreIdentity store : descriptor.getStores()) {
+        if (completedStores.containsKey(store.getStoreId())) {
+          continue;
+        }
+        if ("account-asset".equals(store.getDbName())) {
+          accountAsset = store;
+          continue;
+        }
+        ExecutorService executor = LARGE_STORES.contains(store.getDbName())
+            ? largeExecutor : smallExecutor;
+        Future<?> future = submitStore(executor, null, store, manifest, source, identity,
+            sourceIdentityDigest, root, stores, completedStores, checkpointLock);
+        futures.add(future);
+        if ("account".equals(store.getDbName())) {
+          accountFuture = future;
+        }
+      }
+      if (accountAsset != null) {
+        futures.add(submitStore(largeExecutor, accountFuture, accountAsset, manifest, source,
+            identity, sourceIdentityDigest, root, stores, completedStores, checkpointLock));
+      }
+      Throwable failure = null;
+      for (Future<?> future : futures) {
+        try {
+          future.get();
+        } catch (InterruptedException interrupted) {
+          Thread.currentThread().interrupt();
+          failure = appendFailure(failure,
+              new IOException("path-state rebuild interrupted", interrupted));
+        } catch (ExecutionException failed) {
+          Throwable cause = failed.getCause();
+          failure = appendFailure(failure, cause instanceof IOException
+              || cause instanceof RuntimeException ? cause
+              : new IOException("path-state Store rebuild failed", cause));
+        }
+      }
+      if (failure != null) {
+        if (failure instanceof IOException) {
+          throw (IOException) failure;
+        }
+        throw (RuntimeException) failure;
+      }
+    } finally {
+      largeExecutor.shutdownNow();
+      smallExecutor.shutdownNow();
+    }
+  }
+
+  private Future<?> submitStore(ExecutorService executor, Future<?> dependency,
+      StoreIdentity store, PathStateStoreManifest manifest, SnapshotSource source,
+      SnapshotIdentity identity, byte[] sourceIdentityDigest, PathStateRoot root,
+      PathStateNodeStoreSet stores, Map<Integer, StoreResult> completedStores,
+      Object checkpointLock) {
+    return executor.submit(() -> {
+      awaitDependency(dependency);
+      StoreAccumulator accumulator = new StoreAccumulator(store, identity.getPhase(), root);
+      source.scan(store.getDbName(), accumulator::accept);
+      StoreResult result = accumulator.finish();
+      if ("account".equals(store.getDbName())) {
+        root.participantRoot("account-asset");
+      }
+      synchronized (checkpointLock) {
+        completedStores.put(result.getStoreId(), result);
+        PathStateRebuildCheckpoint next = new PathStateRebuildCheckpoint(
+            manifest.getIdentityDigest(), sourceIdentityDigest, identity,
+            new ArrayList<>(completedStores.values()));
+        stores.checkpointRebuild(next, checkpointStoreIds(store));
+      }
+      faultHook.afterStore(result);
+      return null;
+    });
+  }
+
+  private static void awaitDependency(Future<?> dependency) throws IOException {
+    if (dependency == null) {
+      return;
+    }
+    try {
+      dependency.get();
+    } catch (InterruptedException interrupted) {
+      Thread.currentThread().interrupt();
+      throw new IOException("path-state dependent Store rebuild interrupted", interrupted);
+    } catch (ExecutionException failed) {
+      throw new IOException("path-state dependent Store rebuild failed", failed.getCause());
+    }
+  }
+
+  private static Collection<Integer> checkpointStoreIds(StoreIdentity store) {
+    if ("account".equals(store.getDbName())) {
+      return Arrays.asList(store.getStoreId(), store.getStoreId() + 1);
+    }
+    return Collections.singletonList(store.getStoreId());
+  }
+
+  private static ThreadFactory rebuildThreadFactory(String tier) {
+    AtomicInteger sequence = new AtomicInteger();
+    return task -> {
+      Thread thread = new Thread(task,
+          "path-state-rebuild-" + tier + "-" + sequence.incrementAndGet());
+      thread.setDaemon(true);
+      return thread;
+    };
+  }
+
+  private static Throwable appendFailure(Throwable previous, Throwable next) {
+    if (previous == null) {
+      return next;
+    }
+    previous.addSuppressed(next);
+    return previous;
   }
 
   private byte[] sourceDigest(SnapshotIdentity identity, byte[] sourceIdentityDigest,
@@ -181,12 +314,12 @@ public final class PathStateRebuildCoordinator {
       }
       validateAccountLayout(key, value);
       PathStateMutation mutation = canonicalizer.put(phase, store.getDbName(), key, value);
-      root.apply(Collections.singletonList(mutation));
+      root.applyRebuild(Collections.singletonList(mutation));
       if ("account".equals(store.getDbName())) {
         List<PathStateMutation> projected = canonicalizer.projectSnapshotAccountAssets(
             phase, key, value);
         if (!projected.isEmpty()) {
-          root.apply(projected);
+          root.applyRebuild(projected);
         }
       }
       putBytes(inputDigest, key);
