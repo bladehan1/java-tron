@@ -6,6 +6,7 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
@@ -145,6 +146,34 @@ public class PathMerkleTrieTest {
     trie.verifyNodeStore();
   }
 
+  @Test
+  public void restoresRootAndLoadsOnlyTheChangedPath() {
+    int leafCount = 1_000;
+    byte[][] keys = new byte[leafCount][];
+    byte[][] values = new byte[leafCount][];
+    InMemoryPathNodeStore sourceStore = new InMemoryPathNodeStore();
+    PathMerkleTrie source = new PathMerkleTrie(sourceStore);
+    for (int index = 0; index < leafCount; index++) {
+      keys[index] = indexedKey(index);
+      values[index] = value("value-" + index);
+      source.put(keys[index], values[index]);
+    }
+    byte[] originalRoot = source.rootHash();
+
+    InMemoryPathNodeStore lazyStore = new InMemoryPathNodeStore();
+    lazyStore.nodes.putAll(sourceStore.nodes);
+    PathMerkleTrie restored = new PathMerkleTrie(lazyStore);
+    restored.restoreRoot(originalRoot);
+    assertEquals(1, lazyStore.gets);
+    assertArrayEquals(values[517], restored.get(keys[517]));
+    assertTrue(lazyStore.gets <= PathMerkleTrie.SECURE_KEY_LENGTH * 2 + 2);
+
+    values[517] = value("updated-lazily");
+    restored.put(keys[517], values[517]);
+    assertArrayEquals(referenceRoot(keys, values), restored.rootHash());
+    assertTrue(restored.getLastNodePuts() <= PathMerkleTrie.SECURE_KEY_LENGTH * 2 + 1);
+  }
+
   private static byte[] referenceRoot(byte[][] keys, byte[][] values) {
     TrieImpl reference = new TrieImpl();
     reference.setAsync(false);
@@ -166,6 +195,12 @@ public class PathMerkleTrieTest {
     return key;
   }
 
+  private static byte[] indexedKey(int index) {
+    byte[] key = new byte[PathMerkleTrie.SECURE_KEY_LENGTH];
+    ByteBuffer.wrap(key, key.length - Integer.BYTES, Integer.BYTES).putInt(index);
+    return key;
+  }
+
   private static byte[] value(String value) {
     return PathStateCommitmentCodec.presentLeafValue(value.getBytes(StandardCharsets.UTF_8));
   }
@@ -181,9 +216,11 @@ public class PathMerkleTrieTest {
   private static final class InMemoryPathNodeStore implements PathNodeStore {
 
     private final Map<String, byte[]> nodes = new LinkedHashMap<>();
+    private int gets;
 
     @Override
     public byte[] get(byte[] path) {
+      gets++;
       byte[] value = nodes.get(Hex.toHexString(path));
       return value == null ? null : Arrays.copyOf(value, value.length);
     }

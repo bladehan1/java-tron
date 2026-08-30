@@ -5,6 +5,7 @@ import com.google.common.hash.Hashing;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -101,6 +102,7 @@ public final class PathStateRebuildCoordinator {
       PathStateRebuildCheckpoint checkpoint = stores.getRebuildCheckpoint();
       Map<Integer, StoreResult> completedStores = new TreeMap<>();
       if (checkpoint != null) {
+        root.restoreRebuildParticipants(checkpoint);
         for (StoreResult completed : checkpoint.getCompletedStores()) {
           completedStores.put(completed.getStoreId(), completed);
         }
@@ -124,8 +126,11 @@ public final class PathStateRebuildCoordinator {
           checkpoint.getSourceIdentityDigest())) {
         throw new IOException("path-state rebuild checkpoint source identity mismatch");
       }
-      buildStoresInParallel(admittedManifest, admittedSource, identity, sourceIdentityDigest,
-          root, stores, completedStores);
+      try (StoreBuilders builders = new StoreBuilders(admittedManifest, sourceIdentityDigest,
+          stores)) {
+        buildStoresInParallel(admittedManifest, admittedSource, identity, sourceIdentityDigest,
+            root, stores, builders, completedStores);
+      }
       List<StoreResult> storeResults = new ArrayList<>(completedStores.values());
       long totalEntries = 0;
       for (StoreResult completed : storeResults) {
@@ -155,7 +160,8 @@ public final class PathStateRebuildCoordinator {
 
   private void buildStoresInParallel(PathStateStoreManifest manifest, SnapshotSource source,
       SnapshotIdentity identity, byte[] sourceIdentityDigest, PathStateRoot root,
-      PathStateNodeStoreSet stores, Map<Integer, StoreResult> completedStores) throws IOException {
+      PathStateNodeStoreSet stores, StoreBuilders builders,
+      Map<Integer, StoreResult> completedStores) throws IOException {
     Object checkpointLock = new Object();
     ExecutorService largeExecutor = Executors.newFixedThreadPool(LARGE_STORE_WORKERS,
         rebuildThreadFactory("large"));
@@ -179,7 +185,7 @@ public final class PathStateRebuildCoordinator {
         ExecutorService executor = LARGE_STORES.contains(store.getDbName())
             ? largeExecutor : smallExecutor;
         Future<?> future = submitStore(executor, null, store, manifest, source, identity,
-            sourceIdentityDigest, root, stores, completedStores, checkpointLock);
+            sourceIdentityDigest, root, stores, builders, completedStores, checkpointLock);
         futures.add(future);
         if ("account".equals(store.getDbName())) {
           accountFuture = future;
@@ -187,7 +193,8 @@ public final class PathStateRebuildCoordinator {
       }
       if (accountAsset != null) {
         futures.add(submitStore(largeExecutor, accountFuture, accountAsset, manifest, source,
-            identity, sourceIdentityDigest, root, stores, completedStores, checkpointLock));
+            identity, sourceIdentityDigest, root, stores, builders, completedStores,
+            checkpointLock));
       }
       Throwable failure = null;
       for (Future<?> future : futures) {
@@ -219,11 +226,19 @@ public final class PathStateRebuildCoordinator {
   private Future<?> submitStore(ExecutorService executor, Future<?> dependency,
       StoreIdentity store, PathStateStoreManifest manifest, SnapshotSource source,
       SnapshotIdentity identity, byte[] sourceIdentityDigest, PathStateRoot root,
-      PathStateNodeStoreSet stores, Map<Integer, StoreResult> completedStores,
+      PathStateNodeStoreSet stores, StoreBuilders builders,
+      Map<Integer, StoreResult> completedStores,
       Object checkpointLock) {
     return executor.submit(() -> {
       awaitDependency(dependency);
-      StoreAccumulator accumulator = new StoreAccumulator(store, identity.getPhase(), root);
+      StoreAccumulator accumulator = new StoreAccumulator(store, identity.getPhase(), root,
+          builders);
+      if (!"account-asset".equals(store.getDbName())) {
+        builders.reset(store.getDbName());
+      }
+      if ("account".equals(store.getDbName())) {
+        builders.reset("account-asset");
+      }
       logger.info("Path-state rebuild Store started: storeId={}, dbName={}, tier={}",
           store.getStoreId(), store.getDbName(), storeTier(store));
       source.scan(store.getDbName(), accumulator::accept);
@@ -237,7 +252,7 @@ public final class PathStateRebuildCoordinator {
         PathStateRebuildCheckpoint next = new PathStateRebuildCheckpoint(
             manifest.getIdentityDigest(), sourceIdentityDigest, identity,
             new ArrayList<>(completedStores.values()));
-        stores.checkpointRebuild(next, checkpointStoreIds(store));
+        stores.checkpointStreamedRebuild(next);
         logger.info("Path-state rebuild Store checkpointed: storeId={}, dbName={}, entries={}, "
                 + "completedStores={}, remainingStores={}",
             result.getStoreId(), result.getDbName(), result.getEntryCount(),
@@ -260,13 +275,6 @@ public final class PathStateRebuildCoordinator {
     } catch (ExecutionException failed) {
       throw new IOException("path-state dependent Store rebuild failed", failed.getCause());
     }
-  }
-
-  private static Collection<Integer> checkpointStoreIds(StoreIdentity store) {
-    if ("account".equals(store.getDbName())) {
-      return Arrays.asList(store.getStoreId(), store.getStoreId() + 1);
-    }
-    return Collections.singletonList(store.getStoreId());
   }
 
   private static ThreadFactory rebuildThreadFactory(String tier) {
@@ -317,6 +325,7 @@ public final class PathStateRebuildCoordinator {
     private final StoreIdentity store;
     private final P66Phase phase;
     private final PathStateRoot root;
+    private final StoreBuilders builders;
     private final Hasher inputDigest;
     private final long startedNanos = System.nanoTime();
     private byte[] previousKey;
@@ -325,10 +334,12 @@ public final class PathStateRebuildCoordinator {
     private long valueBytes;
     private long lastProgressLogNanos = startedNanos;
 
-    private StoreAccumulator(StoreIdentity store, P66Phase phase, PathStateRoot root) {
+    private StoreAccumulator(StoreIdentity store, P66Phase phase, PathStateRoot root,
+        StoreBuilders builders) {
       this.store = store;
       this.phase = phase;
       this.root = root;
+      this.builders = builders;
       inputDigest = domainHasher(STORE_DIGEST_DOMAIN);
       putInt(inputDigest, store.getStoreId());
       putString(inputDigest, store.getDbName());
@@ -346,12 +357,14 @@ public final class PathStateRebuildCoordinator {
       }
       validateAccountLayout(key, value);
       PathStateMutation mutation = canonicalizer.put(phase, store.getDbName(), key, value);
-      root.applyRebuild(Collections.singletonList(mutation));
+      builders.put(mutation);
       if ("account".equals(store.getDbName())) {
         List<PathStateMutation> projected = canonicalizer.projectSnapshotAccountAssets(
             phase, key, value);
         if (!projected.isEmpty()) {
-          root.applyRebuild(projected);
+          for (PathStateMutation asset : projected) {
+            builders.put(asset);
+          }
         }
       }
       putBytes(inputDigest, key);
@@ -369,9 +382,11 @@ public final class PathStateRebuildCoordinator {
       }
     }
 
-    private StoreResult finish() {
+    private StoreResult finish() throws IOException {
+      byte[] storeRoot = builders.build(store.getDbName());
+      root.completeRebuildParticipant(store.getDbName(), storeRoot);
       return new StoreResult(store.getStoreId(), store.getDbName(), entryCount,
-          inputDigest.hash().asBytes(), root.participantRoot(store.getDbName()));
+          inputDigest.hash().asBytes(), storeRoot);
     }
 
     private void logProgressIfDue() {
@@ -398,6 +413,98 @@ public final class PathStateRebuildCoordinator {
               + "keyBytes={}, valueBytes={}, elapsedMs={}, rowsPerSecond={}",
           status, store.getStoreId(), store.getDbName(), storeTier(store), entryCount,
           keyBytes, valueBytes, elapsedMillis, entriesPerSecond);
+    }
+  }
+
+  private final class StoreBuilders implements AutoCloseable {
+
+    private final PathStateStoreManifest manifest;
+    private final byte[] generation;
+    private final PathStateNodeStoreSet stores;
+    private final Map<String, BuilderHandle> opened = new LinkedHashMap<>();
+
+    private StoreBuilders(PathStateStoreManifest manifest, byte[] generation,
+        PathStateNodeStoreSet stores) {
+      this.manifest = manifest;
+      this.generation = Arrays.copyOf(generation, generation.length);
+      this.stores = stores;
+    }
+
+    private synchronized void put(PathStateMutation mutation) throws IOException {
+      PathStateMutation present = Objects.requireNonNull(mutation, "mutation");
+      if (present.isDelete()) {
+        throw new IOException("snapshot rebuild cannot spool a delete mutation");
+      }
+      StoreIdentity identity = descriptor.require(present.getDbName());
+      byte[] secureKey = PathStateCommitmentCodec.storeLeafKey(identity.getStoreId(),
+          present.getCanonicalKey());
+      byte[] encodedValue = PathStateCommitmentCodec.presentLeafValue(
+          present.getCanonicalValue());
+      handle(identity).builder.put(secureKey, encodedValue);
+    }
+
+    private synchronized byte[] build(String dbName) throws IOException {
+      BuilderHandle handle = handle(descriptor.require(dbName));
+      byte[] root = handle.builder.build();
+      handle.writer.close();
+      return root;
+    }
+
+    private synchronized void reset(String dbName) throws IOException {
+      handle(descriptor.require(dbName)).builder.reset();
+    }
+
+    private BuilderHandle handle(StoreIdentity identity) throws IOException {
+      BuilderHandle existing = opened.get(identity.getDbName());
+      if (existing != null) {
+        return existing;
+      }
+      Path spool = manifest.getBaseDirectory().resolve("rebuild-spool")
+          .resolve(Integer.toString(identity.getStoreId()));
+      PathStateNodeStoreSet.RebuildWriter writer = stores.openRebuildWriter(
+          identity.getStoreId());
+      try {
+        PathStateStoreTrieBuilder builder = new PathStateStoreTrieBuilder(spool,
+            manifest.getEngine(), generation, writer::putNode, writer::putLeaf);
+        BuilderHandle created = new BuilderHandle(builder, writer);
+        opened.put(identity.getDbName(), created);
+        return created;
+      } catch (IOException | RuntimeException failure) {
+        writer.close();
+        throw failure;
+      }
+    }
+
+    @Override
+    public synchronized void close() throws IOException {
+      IOException failure = null;
+      for (BuilderHandle handle : opened.values()) {
+        try {
+          handle.builder.close();
+          handle.writer.close();
+        } catch (IOException closeFailure) {
+          if (failure == null) {
+            failure = closeFailure;
+          } else {
+            failure.addSuppressed(closeFailure);
+          }
+        }
+      }
+      if (failure != null) {
+        throw failure;
+      }
+    }
+  }
+
+  private static final class BuilderHandle {
+
+    private final PathStateStoreTrieBuilder builder;
+    private final PathStateNodeStoreSet.RebuildWriter writer;
+
+    private BuilderHandle(PathStateStoreTrieBuilder builder,
+        PathStateNodeStoreSet.RebuildWriter writer) {
+      this.builder = builder;
+      this.writer = writer;
     }
   }
 

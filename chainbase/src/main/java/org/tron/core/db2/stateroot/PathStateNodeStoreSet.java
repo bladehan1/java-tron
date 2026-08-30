@@ -9,6 +9,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -30,6 +31,10 @@ public final class PathStateNodeStoreSet implements Closeable {
   private static final byte[] REBUILD_CHECKPOINT_KEY = new byte[]{
       (byte) 0xff, (byte) 0xff, (byte) 0xff, (byte) 0xff,
       'r', 'e', 'b', 'u', 'i', 'l', 'd'};
+  private static final byte[] STREAMED_REBUILD_KEY = new byte[]{
+      (byte) 0xff, (byte) 0xff, (byte) 0xff, (byte) 0xff,
+      's', 't', 'r', 'e', 'a', 'm', 'e', 'd'};
+  private static final byte[] STREAMED_REBUILD_VALUE = new byte[]{1};
   private static final byte[] LEAF_OVERLAY_KEY = new byte[]{
       (byte) 0xff, (byte) 0xff, (byte) 0xff, (byte) 0xff,
       'l', 'e', 'a', 'f', '-', 'o', 'v', 'e', 'r', 'l', 'a', 'y'};
@@ -45,6 +50,7 @@ public final class PathStateNodeStoreSet implements Closeable {
   private static final int LEAF_KEY_LENGTH = Integer.BYTES * 2 + PathMerkleTrie.SECURE_KEY_LENGTH;
   private static final byte[] LEAF_TOMBSTONE_PREFIX = ByteBuffer.allocate(Integer.BYTES)
       .putInt(LEAF_TOMBSTONE_DOMAIN).array();
+  private static final int REBUILD_WRITE_BATCH_ENTRIES = 4096;
 
   private final Path directory;
   private final PathStateParticipantScope scope;
@@ -52,6 +58,7 @@ public final class PathStateNodeStoreSet implements Closeable {
   private final Map<Integer, LinkedHashMap<BytesKey, byte[]>> pending = new LinkedHashMap<>();
   private final Map<BytesKey, byte[]> localLeaves = new LinkedHashMap<>();
   private final Map<BytesKey, byte[]> persistedLeaves = new LinkedHashMap<>();
+  private final Map<BytesKey, byte[]> resolvedLeafValues = new LinkedHashMap<>();
   private final Set<BytesKey> leafTombstones = new LinkedHashSet<>();
   private final PathStateNativeNodeStore nativeStore;
   private final PathStateNodeStoreSet parentStores;
@@ -64,6 +71,8 @@ public final class PathStateNodeStoreSet implements Closeable {
   private PathStateRebuildCheckpoint rebuildCheckpoint;
   private Long logicalBytes;
   private boolean leafOverlay;
+  private boolean streamedRebuild;
+  private boolean lazyRoots;
   private PathStateRoot root;
   private boolean rootClaimed;
   private boolean closed;
@@ -84,6 +93,14 @@ public final class PathStateNodeStoreSet implements Closeable {
       progress = decodeProgress(nativeStore.get(PROGRESS_KEY));
       logicalBytes = decodeLogicalBytes(nativeStore.get(LOGICAL_BYTES_KEY));
       rebuildCheckpoint = decodeRebuildCheckpoint(nativeStore.get(REBUILD_CHECKPOINT_KEY));
+      byte[] streamedValue = nativeStore.get(STREAMED_REBUILD_KEY);
+      if (streamedValue != null && (kind != Kind.BASE
+          || !Arrays.equals(streamedValue, STREAMED_REBUILD_VALUE))) {
+        throw new IOException("path-state streamed rebuild marker is invalid");
+      }
+      streamedRebuild = streamedValue != null;
+      lazyRoots = kind == Kind.BASE ? streamedRebuild
+          : parentStores != null && parentStores.lazyRoots;
       byte[] leafOverlayValue = nativeStore.get(LEAF_OVERLAY_KEY);
       if ((progress == null) != (logicalBytes == null)) {
         throw new IOException("path-state native progress and logical bytes marker differ");
@@ -106,13 +123,15 @@ public final class PathStateNodeStoreSet implements Closeable {
       }
       leafOverlay = leafOverlayValue != null
           || kind == Kind.LAYER && progress == null && parentStores != null;
-      inheritParentLeaves();
-      loadPersistedLeaves();
-      loadLeafTombstones();
+      if (!lazyRoots) {
+        inheritParentLeaves();
+        loadPersistedLeaves();
+        loadLeafTombstones();
+      }
       validateNodeTombstones();
       boolean hasUnexpectedLeaves = kind == Kind.BASE
           ? !persistedLeaves.isEmpty() : !localLeaves.isEmpty();
-      if (progress == null && rebuildCheckpoint == null
+      if (progress == null && rebuildCheckpoint == null && !streamedRebuild
           && (hasUnexpectedLeaves || !leafTombstones.isEmpty())) {
         throw new IOException("path-state leaf inventory exists without native progress");
       }
@@ -213,8 +232,10 @@ public final class PathStateNodeStoreSet implements Closeable {
         participant -> participantStores.get(participant.getDbName()),
         superStore);
     if (progress != null || rebuildCheckpoint != null) {
-      if (progress == null && rebuildCheckpoint.hasIndependentStores()) {
-        candidate.restoreRebuildLeaves(restoredLeafRecords(), rebuildCheckpoint);
+      if (progress == null && rebuildCheckpoint.hasIndependentStores() && streamedRebuild) {
+        candidate.restoreRebuildParticipants(rebuildCheckpoint);
+      } else if (progress != null && lazyRoots) {
+        candidate.restoreStoredRoots(progress.getStateRoot());
       } else {
         byte[] expectedRoot = progress == null ? rebuildCheckpoint.getPartialRoot()
             : progress.getStateRoot();
@@ -423,6 +444,74 @@ public final class PathStateNodeStoreSet implements Closeable {
     return rebuildCheckpoint;
   }
 
+  /** Opens a bounded direct writer for one not-yet-checkpointed rebuild participant. */
+  synchronized RebuildWriter openRebuildWriter(int storeId) throws IOException {
+    requireOpen();
+    if (kind != Kind.BASE || sealed || progress != null || root == null) {
+      throw new IOException("path-state direct rebuild writer is not admissible");
+    }
+    requireParticipant(storeId);
+    if (!streamedRebuild) {
+      nativeStore.writeBatch(Collections.singletonList(
+          PathStateNativeNodeStore.BatchMutation.put(
+              STREAMED_REBUILD_KEY, STREAMED_REBUILD_VALUE)));
+      streamedRebuild = true;
+    }
+    clearRebuildPrefix(ByteBuffer.allocate(Integer.BYTES).putInt(storeId).array());
+    clearRebuildPrefix(ByteBuffer.allocate(Integer.BYTES * 2)
+        .putInt(LEAF_DOMAIN).putInt(storeId).array());
+    return new RebuildWriter(storeId);
+  }
+
+  private void clearRebuildPrefix(byte[] prefix) throws IOException {
+    List<PathStateNativeNodeStore.BatchMutation> deletes =
+        new ArrayList<>(REBUILD_WRITE_BATCH_ENTRIES);
+    nativeStore.scanPrefix(prefix, entry -> {
+      deletes.add(PathStateNativeNodeStore.BatchMutation.delete(entry.getKey()));
+      if (deletes.size() >= REBUILD_WRITE_BATCH_ENTRIES) {
+        nativeStore.writeBatch(new ArrayList<>(deletes));
+        deletes.clear();
+      }
+    });
+    if (!deletes.isEmpty()) {
+      nativeStore.writeBatch(deletes);
+    }
+  }
+
+  /** Publishes only the Store-completion marker after its streamed nodes and leaves are durable. */
+  synchronized void checkpointStreamedRebuild(PathStateRebuildCheckpoint checkpoint)
+      throws IOException {
+    requireOpen();
+    if (kind != Kind.BASE || sealed || progress != null || root == null) {
+      throw new IOException("path-state streamed rebuild checkpoint is not admissible");
+    }
+    PathStateRebuildCheckpoint next = Objects.requireNonNull(checkpoint, "checkpoint");
+    requireRebuildCheckpointIdentity(next);
+    int previousCount = rebuildCheckpoint == null ? 0
+        : rebuildCheckpoint.getCompletedStores().size();
+    if (next.getCompletedStores().size() != previousCount + 1) {
+      throw new IOException("path-state streamed rebuild checkpoint must advance one Store");
+    }
+    if (rebuildCheckpoint != null) {
+      for (PathStateRebuildCoordinator.StoreResult previous
+          : rebuildCheckpoint.getCompletedStores()) {
+        boolean retained = false;
+        for (PathStateRebuildCoordinator.StoreResult advanced : next.getCompletedStores()) {
+          if (sameStoreResult(previous, advanced)) {
+            retained = true;
+            break;
+          }
+        }
+        if (!retained) {
+          throw new IOException("path-state streamed rebuild rewrites completed Store");
+        }
+      }
+    }
+    nativeStore.writeBatch(Collections.singletonList(
+        PathStateNativeNodeStore.BatchMutation.put(REBUILD_CHECKPOINT_KEY, next.encode())));
+    rebuildCheckpoint = next;
+  }
+
   synchronized long projectedLogicalBytes(PathStateRootMetadata metadata) throws IOException {
     requireOpen();
     if (root == null) {
@@ -510,6 +599,21 @@ public final class PathStateNodeStoreSet implements Closeable {
     requireOpen();
     if (parentStores != null) {
       parentStores.close();
+    }
+  }
+
+  /** Resolves only this block's changed leaf baselines before inherited database handles close. */
+  synchronized void resolvePendingLeafValues() {
+    requireOpen();
+    if (root == null) {
+      throw new IllegalStateException("path-state node database set has no trie owner");
+    }
+    for (PathStateRoot.LeafMutationRecord mutation : root.pendingLeafMutations()) {
+      byte[] key = leafKey(mutation);
+      BytesKey owned = new BytesKey(key);
+      if (!resolvedLeafValues.containsKey(owned)) {
+        resolvedLeafValues.put(owned, persistedLeafValue(key));
+      }
     }
   }
 
@@ -651,7 +755,7 @@ public final class PathStateNodeStoreSet implements Closeable {
       if (localLeaves.containsKey(leafKey)) {
         throw new IOException("path-state leaf and tombstone coexist");
       }
-      if (!persistedLeaves.containsKey(leafKey)) {
+      if (parentStores == null || parentStores.persistedLeafValue(leafKey.copy()) == null) {
         throw new IOException("path-state leaf tombstone does not mask a parent leaf");
       }
       leafTombstones.add(leafKey);
@@ -834,7 +938,7 @@ public final class PathStateNodeStoreSet implements Closeable {
     for (PathStateRoot.LeafMutationRecord mutation : leafMutations) {
       byte[] key = leafKey(mutation);
       byte[] value = mutation.getEncodedValue();
-      if (!Arrays.equals(persistedLeaves.get(new BytesKey(key)), value)) {
+      if (!Arrays.equals(persistedLeafValue(key), value)) {
         appendLeafMutation(mutations, key, value);
       }
     }
@@ -860,7 +964,7 @@ public final class PathStateNodeStoreSet implements Closeable {
     for (PathStateRoot.LeafMutationRecord mutation : leafMutations) {
       byte[] key = leafKey(mutation);
       byte[] value = mutation.getEncodedValue();
-      if (!Arrays.equals(persistedLeaves.get(new BytesKey(key)), value)) {
+      if (!Arrays.equals(persistedLeafValue(key), value)) {
         projected = projectedLeafMutation(projected, key, value);
       }
     }
@@ -903,11 +1007,41 @@ public final class PathStateNodeStoreSet implements Closeable {
     }
   }
 
+  private byte[] persistedLeafValue(byte[] key) {
+    BytesKey leafKey = new BytesKey(key);
+    if (resolvedLeafValues.containsKey(leafKey)) {
+      return resolvedLeafValues.get(leafKey);
+    }
+    if (persistedLeaves.containsKey(leafKey)) {
+      return persistedLeaves.get(leafKey);
+    }
+    byte[] local = nativeStore.get(key);
+    if (local != null) {
+      return local;
+    }
+    if (leafOverlay && nativeStore.get(leafTombstoneKey(key)) != null) {
+      return null;
+    }
+    return parentStores == null ? null : parentStores.persistedLeafValue(key);
+  }
+
   private static byte[] leafKey(PathStateRoot.LeafMutationRecord mutation) {
     return ByteBuffer.allocate(LEAF_KEY_LENGTH)
         .putInt(LEAF_DOMAIN)
         .putInt(mutation.getStoreId())
         .put(mutation.getSecureKey())
+        .array();
+  }
+
+  private static byte[] rebuildLeafKey(int storeId, byte[] secureKey) {
+    byte[] key = Arrays.copyOf(Objects.requireNonNull(secureKey, "secureKey"), secureKey.length);
+    if (key.length != PathMerkleTrie.SECURE_KEY_LENGTH) {
+      throw new IllegalArgumentException("secureKey must contain exactly 32 bytes");
+    }
+    return ByteBuffer.allocate(LEAF_KEY_LENGTH)
+        .putInt(LEAF_DOMAIN)
+        .putInt(storeId)
+        .put(key)
         .array();
   }
 
@@ -1080,6 +1214,54 @@ public final class PathStateNodeStoreSet implements Closeable {
           .putInt(storeId)
           .put(ownedPath)
           .array();
+    }
+  }
+
+  final class RebuildWriter implements Closeable {
+
+    private final int storeId;
+    private final NamespacedNodeStore namespace;
+    private final List<PathStateNativeNodeStore.BatchMutation> mutations =
+        new ArrayList<>(REBUILD_WRITE_BATCH_ENTRIES);
+    private boolean writerClosed;
+
+    private RebuildWriter(int storeId) {
+      this.storeId = storeId;
+      namespace = new NamespacedNodeStore(PathStateNodeStoreSet.this, storeId);
+    }
+
+    void putNode(byte[] path, byte[] encodedNode) {
+      add(PathStateNativeNodeStore.BatchMutation.put(namespace.key(path), encodedNode));
+    }
+
+    void putLeaf(byte[] secureKey, byte[] encodedValue) {
+      add(PathStateNativeNodeStore.BatchMutation.put(
+          rebuildLeafKey(storeId, secureKey), encodedValue));
+    }
+
+    private void add(PathStateNativeNodeStore.BatchMutation mutation) {
+      if (writerClosed) {
+        throw new IllegalStateException("path-state rebuild writer is closed");
+      }
+      mutations.add(mutation);
+      if (mutations.size() >= REBUILD_WRITE_BATCH_ENTRIES) {
+        flush();
+      }
+    }
+
+    void flush() {
+      if (!mutations.isEmpty()) {
+        nativeStore.writeBatch(new ArrayList<>(mutations));
+        mutations.clear();
+      }
+    }
+
+    @Override
+    public void close() {
+      if (!writerClosed) {
+        flush();
+        writerClosed = true;
+      }
     }
   }
 
