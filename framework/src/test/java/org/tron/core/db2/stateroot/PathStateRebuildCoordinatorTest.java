@@ -101,7 +101,7 @@ public class PathStateRebuildCoordinatorTest {
   public void schedulesLargeAndSmallStoresInParallelAndOrdersAccountAsset() throws Exception {
     PathStateStoreManifest manifest = manifest("parallel-tiers", Engine.ROCKSDB);
     TestSnapshotSource delegate = exactSource(identity());
-    CountDownLatch concurrentScans = new CountDownLatch(3);
+    CountDownLatch concurrentScans = new CountDownLatch(2);
     Map<String, String> threads = Collections.synchronizedMap(new LinkedHashMap<>());
     AtomicBoolean accountReturned = new AtomicBoolean();
     SnapshotSource source = new SnapshotSource() {
@@ -126,8 +126,7 @@ public class PathStateRebuildCoordinatorTest {
         if ("account-asset".equals(dbName) && !accountReturned.get()) {
           throw new IOException("account-asset started before account completed");
         }
-        if ("account".equals(dbName) || "accountid-index".equals(dbName)
-            || "abi".equals(dbName)) {
+        if ("account".equals(dbName) || "abi".equals(dbName)) {
           concurrentScans.countDown();
           try {
             if (!concurrentScans.await(5, TimeUnit.SECONDS)) {

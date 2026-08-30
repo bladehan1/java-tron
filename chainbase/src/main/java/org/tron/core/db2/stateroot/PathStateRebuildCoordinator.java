@@ -21,7 +21,10 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.tron.core.capsule.utils.MarketUtils;
 import org.tron.core.db2.stateroot.PathStateCanonicalizer.P66Phase;
 import org.tron.core.db2.stateroot.PathStateParticipantDescriptor.StoreIdentity;
@@ -29,10 +32,13 @@ import org.tron.core.db2.stateroot.PathStateParticipantDescriptor.StoreIdentity;
 /** Builds and atomically publishes the first current path-state root from one admitted snapshot. */
 public final class PathStateRebuildCoordinator {
 
+  private static final Logger logger = LoggerFactory.getLogger("DB");
   private static final String STORE_DIGEST_DOMAIN = "path-state-rebuild-store/v1";
   private static final String SOURCE_DIGEST_DOMAIN = "path-state-rebuild-source/v1";
+  private static final long PROGRESS_LOG_INTERVAL_NANOS = TimeUnit.SECONDS.toNanos(30);
+  private static final long PROGRESS_LOG_ROW_MASK = 1023L;
   private static final int LARGE_STORE_WORKERS = 1;
-  private static final int SMALL_STORE_WORKERS = 2;
+  private static final int SMALL_STORE_WORKERS = 1;
   private static final Set<String> LARGE_STORES = Collections.unmodifiableSet(
       new LinkedHashSet<>(Arrays.asList(
           "account", "account-asset", "delegation", "storage-row")));
@@ -98,6 +104,14 @@ public final class PathStateRebuildCoordinator {
         for (StoreResult completed : checkpoint.getCompletedStores()) {
           completedStores.put(completed.getStoreId(), completed);
         }
+        logger.info("Path-state rebuild checkpoint restored: completedStores={}, "
+                + "remainingStores={}, reuseScope=completed-store, "
+                + "inProgressStoreResume=from-beginning",
+            completedStores.size(), descriptor.getStores().size() - completedStores.size());
+      } else {
+        logger.info("Path-state rebuild starting without checkpoint: stores={}, "
+                + "reuseScope=completed-store, inProgressStoreResume=from-beginning",
+            descriptor.getStores().size());
       }
       if (checkpoint != null && !identity.sameAs(checkpoint.getIdentity())) {
         throw new IOException("path-state rebuild checkpoint snapshot identity mismatch");
@@ -153,6 +167,9 @@ public final class PathStateRebuildCoordinator {
     try {
       for (StoreIdentity store : descriptor.getStores()) {
         if (completedStores.containsKey(store.getStoreId())) {
+          StoreResult completed = completedStores.get(store.getStoreId());
+          logger.info("Path-state rebuild Store reused: storeId={}, dbName={}, entries={}",
+              store.getStoreId(), store.getDbName(), completed.getEntryCount());
           continue;
         }
         if ("account-asset".equals(store.getDbName())) {
@@ -207,8 +224,11 @@ public final class PathStateRebuildCoordinator {
     return executor.submit(() -> {
       awaitDependency(dependency);
       StoreAccumulator accumulator = new StoreAccumulator(store, identity.getPhase(), root);
+      logger.info("Path-state rebuild Store started: storeId={}, dbName={}, tier={}",
+          store.getStoreId(), store.getDbName(), storeTier(store));
       source.scan(store.getDbName(), accumulator::accept);
       StoreResult result = accumulator.finish();
+      accumulator.logCompleted();
       if ("account".equals(store.getDbName())) {
         root.participantRoot("account-asset");
       }
@@ -218,6 +238,10 @@ public final class PathStateRebuildCoordinator {
             manifest.getIdentityDigest(), sourceIdentityDigest, identity,
             new ArrayList<>(completedStores.values()));
         stores.checkpointRebuild(next, checkpointStoreIds(store));
+        logger.info("Path-state rebuild Store checkpointed: storeId={}, dbName={}, entries={}, "
+                + "completedStores={}, remainingStores={}",
+            result.getStoreId(), result.getDbName(), result.getEntryCount(),
+            completedStores.size(), descriptor.getStores().size() - completedStores.size());
       }
       faultHook.afterStore(result);
       return null;
@@ -255,6 +279,10 @@ public final class PathStateRebuildCoordinator {
     };
   }
 
+  private static String storeTier(StoreIdentity store) {
+    return LARGE_STORES.contains(store.getDbName()) ? "large" : "small";
+  }
+
   private static Throwable appendFailure(Throwable previous, Throwable next) {
     if (previous == null) {
       return next;
@@ -290,8 +318,12 @@ public final class PathStateRebuildCoordinator {
     private final P66Phase phase;
     private final PathStateRoot root;
     private final Hasher inputDigest;
+    private final long startedNanos = System.nanoTime();
     private byte[] previousKey;
     private long entryCount;
+    private long keyBytes;
+    private long valueBytes;
+    private long lastProgressLogNanos = startedNanos;
 
     private StoreAccumulator(StoreIdentity store, P66Phase phase, PathStateRoot root) {
       this.store = store;
@@ -326,6 +358,9 @@ public final class PathStateRebuildCoordinator {
       putBytes(inputDigest, value);
       previousKey = key;
       entryCount = Math.addExact(entryCount, 1L);
+      keyBytes = Math.addExact(keyBytes, key.length);
+      valueBytes = Math.addExact(valueBytes, value.length);
+      logProgressIfDue();
     }
 
     private void validateAccountLayout(byte[] key, byte[] value) {
@@ -337,6 +372,32 @@ public final class PathStateRebuildCoordinator {
     private StoreResult finish() {
       return new StoreResult(store.getStoreId(), store.getDbName(), entryCount,
           inputDigest.hash().asBytes(), root.participantRoot(store.getDbName()));
+    }
+
+    private void logProgressIfDue() {
+      if ((entryCount & PROGRESS_LOG_ROW_MASK) != 0) {
+        return;
+      }
+      long now = System.nanoTime();
+      if (now - lastProgressLogNanos < PROGRESS_LOG_INTERVAL_NANOS) {
+        return;
+      }
+      lastProgressLogNanos = now;
+      logProgress("scanning", now);
+    }
+
+    private void logCompleted() {
+      logProgress("completed", System.nanoTime());
+    }
+
+    private void logProgress(String status, long now) {
+      long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(now - startedNanos);
+      long entriesPerSecond = elapsedMillis == 0 ? entryCount
+          : (long) (entryCount * 1000.0d / elapsedMillis);
+      logger.info("Path-state rebuild Store {}: storeId={}, dbName={}, tier={}, rows={}, "
+              + "keyBytes={}, valueBytes={}, elapsedMs={}, rowsPerSecond={}",
+          status, store.getStoreId(), store.getDbName(), storeTier(store), entryCount,
+          keyBytes, valueBytes, elapsedMillis, entriesPerSecond);
     }
   }
 
