@@ -71,6 +71,8 @@ public class PathStateRebuildCoordinatorTest {
       assertArrayEquals(oracle.stateRoot, result.getMetadata().getStateRoot());
       for (StoreResult store : result.getStores()) {
         assertArrayEquals(oracle.storeRoots.get(store.getDbName()), store.getStoreRoot());
+        assertFalse(Files.exists(manifest.getBaseDirectory().resolve("rebuild-spool")
+            .resolve(Integer.toString(store.getStoreId()))));
       }
 
       PathStateStoreManifest reopenedManifest = PathStateStoreManifest.validateExisting(
@@ -295,6 +297,8 @@ public class PathStateRebuildCoordinatorTest {
     assertFalse(Files.exists(manifest.getBaseDirectory()
         .resolve(PathStateCurrentStore.METADATA_FILE)));
     assertNull(PathStateNodeStoreSet.loadProgress(manifest.getBaseDirectory(), manifest));
+    assertFalse(Files.exists(manifest.getBaseDirectory().resolve("rebuild-spool/4")));
+    assertTrue(Files.exists(manifest.getBaseDirectory().resolve("rebuild-spool/5")));
 
     TestSnapshotSource resumed = exactSource(identity());
     resumed.add("account", lazyAddress, lazyAccount);

@@ -5,11 +5,14 @@ import com.google.common.hash.Hashing;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -24,6 +27,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Stream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.tron.core.capsule.utils.MarketUtils;
@@ -126,6 +130,7 @@ public final class PathStateRebuildCoordinator {
           checkpoint.getSourceIdentityDigest())) {
         throw new IOException("path-state rebuild checkpoint source identity mismatch");
       }
+      retireCompletedSpools(admittedManifest, completedStores.values());
       try (StoreBuilders builders = new StoreBuilders(admittedManifest, sourceIdentityDigest,
           stores)) {
         buildStoresInParallel(admittedManifest, admittedSource, identity, sourceIdentityDigest,
@@ -259,6 +264,9 @@ public final class PathStateRebuildCoordinator {
               result.getStoreId(), result.getDbName(), result.getEntryCount(),
               completedStores.size(), descriptor.getStores().size() - completedStores.size());
         }
+        builders.retire(store);
+        logger.info("Path-state rebuild Store spool retired: storeId={}, dbName={}",
+            result.getStoreId(), result.getDbName());
         faultHook.afterStore(result);
         return null;
       } catch (IOException | RuntimeException failure) {
@@ -463,6 +471,15 @@ public final class PathStateRebuildCoordinator {
       handle(descriptor.require(dbName)).builder.reset();
     }
 
+    private synchronized void retire(StoreIdentity identity) throws IOException {
+      BuilderHandle handle = opened.remove(identity.getDbName());
+      if (handle != null) {
+        handle.builder.close();
+        handle.writer.close();
+      }
+      deleteSpoolDirectory(manifest, identity);
+    }
+
     private BuilderHandle handle(StoreIdentity identity) throws IOException {
       BuilderHandle existing = opened.get(identity.getDbName());
       if (existing != null) {
@@ -515,6 +532,46 @@ public final class PathStateRebuildCoordinator {
         throw failure;
       }
     }
+  }
+
+  private void retireCompletedSpools(PathStateStoreManifest manifest,
+      Collection<StoreResult> completedStores) throws IOException {
+    for (StoreResult completed : completedStores) {
+      StoreIdentity identity = descriptor.require(completed.getDbName());
+      if (identity.getStoreId() != completed.getStoreId()) {
+        throw new IOException("path-state completed Store identity mismatch");
+      }
+      deleteSpoolDirectory(manifest, identity);
+      logger.info("Path-state rebuild completed Store spool absent: storeId={}, dbName={}",
+          identity.getStoreId(), identity.getDbName());
+    }
+  }
+
+  private static void deleteSpoolDirectory(PathStateStoreManifest manifest,
+      StoreIdentity identity) throws IOException {
+    Path spoolRoot = manifest.getBaseDirectory().resolve("rebuild-spool");
+    Path directory = spoolRoot.resolve(Integer.toString(identity.getStoreId()));
+    if (!Files.exists(directory, LinkOption.NOFOLLOW_LINKS)) {
+      return;
+    }
+    if (!Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS)
+        || Files.isSymbolicLink(directory)) {
+      throw new IOException("path-state rebuild spool is not a direct directory: " + directory);
+    }
+    List<Path> entries = new ArrayList<>();
+    try (Stream<Path> paths = Files.walk(directory)) {
+      paths.forEach(entries::add);
+    }
+    for (Path entry : entries) {
+      if (Files.isSymbolicLink(entry)) {
+        throw new IOException("path-state rebuild spool contains a symbolic link: " + entry);
+      }
+    }
+    entries.sort(Comparator.reverseOrder());
+    for (Path entry : entries) {
+      Files.deleteIfExists(entry);
+    }
+    PathStateMetadataFile.syncDirectory(spoolRoot);
   }
 
   private static final class BuilderHandle {
