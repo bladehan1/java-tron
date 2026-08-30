@@ -14,10 +14,12 @@ import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
 final class PathStateStoreTrieBuilder implements Closeable {
 
   static final int DEFAULT_WRITE_BATCH_ROWS = 4096;
+  private static final long BUILD_PROGRESS_ROWS = 1L << 20;
 
   private final PathStateNativeNodeStore spool;
   private final PathStateStackTrie.NodeSink nodeSink;
   private final LeafSink leafSink;
+  private final BuildProgress buildProgress;
   private final byte[] generationPrefix;
   private final List<BatchMutation> pendingRows = new ArrayList<>(DEFAULT_WRITE_BATCH_ROWS);
   private boolean built;
@@ -37,10 +39,18 @@ final class PathStateStoreTrieBuilder implements Closeable {
 
   PathStateStoreTrieBuilder(Path spoolDirectory, Engine engine, byte[] generationPrefix,
       PathStateStackTrie.NodeSink nodeSink, LeafSink leafSink) throws IOException {
+    this(spoolDirectory, engine, generationPrefix, nodeSink, leafSink,
+        (sortedRows, elapsedMillis) -> { });
+  }
+
+  PathStateStoreTrieBuilder(Path spoolDirectory, Engine engine, byte[] generationPrefix,
+      PathStateStackTrie.NodeSink nodeSink, LeafSink leafSink,
+      BuildProgress buildProgress) throws IOException {
     spool = PathStateNativeNodeStore.open(Objects.requireNonNull(spoolDirectory, "spoolDirectory"),
         Objects.requireNonNull(engine, "engine"));
     this.nodeSink = Objects.requireNonNull(nodeSink, "nodeSink");
     this.leafSink = Objects.requireNonNull(leafSink, "leafSink");
+    this.buildProgress = Objects.requireNonNull(buildProgress, "buildProgress");
     this.generationPrefix = Arrays.copyOf(
         Objects.requireNonNull(generationPrefix, "generationPrefix"), generationPrefix.length);
   }
@@ -91,20 +101,32 @@ final class PathStateStoreTrieBuilder implements Closeable {
     requireCollecting();
     flushRows();
     PathStateStackTrie trie = new PathStateStackTrie(nodeSink);
+    long startedNanos = System.nanoTime();
     PathStateNativeNodeStore.EntryConsumer consumer = entry -> {
       byte[] key = secureKey(entry.getKey());
       byte[] value = entry.getValue();
       trie.update(key, value);
       leafSink.put(key, value);
       sortedRows = Math.addExact(sortedRows, 1L);
+      if (sortedRows % BUILD_PROGRESS_ROWS == 0) {
+        buildProgress.report(sortedRows, elapsedMillis(startedNanos));
+      }
     };
     if (generationPrefix.length == 0) {
       spool.scanAll(consumer);
     } else {
       spool.scanPrefix(generationPrefix, consumer);
     }
+    if (sortedRows % BUILD_PROGRESS_ROWS != 0) {
+      buildProgress.report(sortedRows, elapsedMillis(startedNanos));
+    }
     built = true;
     return trie.rootHash();
+  }
+
+  private static long elapsedMillis(long startedNanos) {
+    return java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(
+        System.nanoTime() - startedNanos);
   }
 
   long getInputRows() {
@@ -174,5 +196,11 @@ final class PathStateStoreTrieBuilder implements Closeable {
   interface LeafSink {
 
     void put(byte[] secureKey, byte[] encodedValue);
+  }
+
+  @FunctionalInterface
+  interface BuildProgress {
+
+    void report(long sortedRows, long elapsedMillis);
   }
 }

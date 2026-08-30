@@ -7,6 +7,7 @@ import static org.junit.Assert.assertTrue;
 import java.nio.ByteBuffer;
 import java.nio.file.Path;
 import java.util.Random;
+import java.util.concurrent.atomic.AtomicLong;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
@@ -23,9 +24,11 @@ public class PathStateStoreTrieBuilderTest {
     PathMerkleTrie reference = new PathMerkleTrie(new MemoryNodeStore());
     Random random = new Random(71L);
     int count = PathStateStoreTrieBuilder.DEFAULT_WRITE_BATCH_ROWS * 3 + 17;
+    AtomicLong reportedRows = new AtomicLong();
 
     try (PathStateStoreTrieBuilder builder = new PathStateStoreTrieBuilder(spool,
-        Engine.ROCKSDB, (path, encoded) -> { })) {
+        Engine.ROCKSDB, new byte[0], (path, encoded) -> { },
+        (key, value) -> { }, (sortedRows, elapsedMillis) -> reportedRows.set(sortedRows))) {
       for (int index = count - 1; index >= 0; index--) {
         byte[] key = new byte[PathMerkleTrie.SECURE_KEY_LENGTH];
         ByteBuffer.wrap(key, key.length - Integer.BYTES, Integer.BYTES).putInt(index);
@@ -39,6 +42,7 @@ public class PathStateStoreTrieBuilderTest {
       assertArrayEquals(reference.rootHash(), builder.build());
       assertEquals(count, builder.getInputRows());
       assertEquals(count, builder.getSortedRows());
+      assertEquals(count, reportedRows.get());
       assertEquals(0, builder.getPendingRows());
     }
   }
