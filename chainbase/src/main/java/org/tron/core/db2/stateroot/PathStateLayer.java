@@ -148,7 +148,7 @@ public final class PathStateLayer implements Closeable {
       PathStateRoot childRoot = preparedTransition != null
           ? childStores.createRootFrom(preparedTransition)
           : parentSnapshot == null
-          ? childStores.createRootFrom(parentStores.leafRecords(), parentRoot.rootHash())
+          ? childStores.createRootFrom(parentRoot.snapshot(), parentRoot.rootHash())
           : childStores.createRootFrom(parentSnapshot, admittedParent.getStateRoot());
       return new PathStateLayer(admitted,
           new PathStateLayerPublication(admitted, admittedLimits, faultHook),

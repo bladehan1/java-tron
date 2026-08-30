@@ -60,7 +60,7 @@ public final class PathMerkleTrie {
     if (previous == null) {
       leafCount++;
     }
-    rootNode = update(rootNode, toNibbles(key.bytes), 0, value);
+    rootNode = update(rootNode, toNibbles(key.bytes), 0, EMPTY_PATH, value);
     dirty = true;
   }
 
@@ -70,7 +70,7 @@ public final class PathMerkleTrie {
     if (leafValue(key) != null) {
       leaves.put(key, null);
       leafCount--;
-      rootNode = update(rootNode, toNibbles(key.bytes), 0, null);
+      rootNode = update(rootNode, toNibbles(key.bytes), 0, EMPTY_PATH, null);
       dirty = true;
     }
   }
@@ -148,6 +148,38 @@ public final class PathMerkleTrie {
     materializedRoot = rootNode;
     indexNodes(rootNode, EMPTY_PATH, materializedNodes);
     rootHash = hash(rootNode);
+  }
+
+  /** Restores only the durable root node; descendants are decoded from path storage on demand. */
+  synchronized void restoreRoot(byte[] expectedRoot) {
+    if (!leaves.isEmpty() || inheritedSnapshot != null || rootNode != null
+        || materializedRoot != null || dirty) {
+      throw new IllegalStateException("path trie is not empty before root restoration");
+    }
+    byte[] expected = Arrays.copyOf(Objects.requireNonNull(expectedRoot, "expectedRoot"),
+        expectedRoot.length);
+    if (expected.length != SECURE_KEY_LENGTH) {
+      throw new IllegalArgumentException("expectedRoot must contain exactly 32 bytes");
+    }
+    if (Arrays.equals(expected, Hash.EMPTY_TRIE_HASH)) {
+      rootHash = expected;
+      return;
+    }
+    byte[] encoded = nodeStore.get(EMPTY_PATH);
+    if (encoded == null || !Arrays.equals(Hash.sha3(encoded), expected)) {
+      throw new IllegalStateException("durable path trie root is missing or corrupt");
+    }
+    rootNode = new StoredNode(encoded, EMPTY_PATH);
+    materializedRoot = rootNode;
+    materializedNodes.put(rootNode, new BytesKey(EMPTY_PATH));
+    rootHash = expected;
+  }
+
+  synchronized byte[] restoreRoot() {
+    byte[] encoded = nodeStore.get(EMPTY_PATH);
+    byte[] expected = encoded == null ? Hash.EMPTY_TRIE_HASH : Hash.sha3(encoded);
+    restoreRoot(expected);
+    return Arrays.copyOf(expected, expected.length);
   }
 
   private void importLeaves(Collection<LeafEntry> entries, String operation) {
@@ -251,7 +283,10 @@ public final class PathMerkleTrie {
     if (leaves.containsKey(key)) {
       return leaves.get(key);
     }
-    return inheritedSnapshot == null ? null : inheritedSnapshot.leafValue(key);
+    if (inheritedSnapshot != null && inheritedSnapshot.containsLeaf(key)) {
+      return inheritedSnapshot.leafValue(key);
+    }
+    return valueAt(rootNode, toNibbles(key.bytes), 0, EMPTY_PATH);
   }
 
   private Map<BytesKey, byte[]> effectiveLeaves() {
@@ -311,16 +346,17 @@ public final class PathMerkleTrie {
     return new BranchNode(children);
   }
 
-  private static Node update(Node node, byte[] key, int offset, byte[] value) {
+  private Node update(Node node, byte[] key, int offset, byte[] path, byte[] value) {
     if (node == null) {
       return value == null ? null
           : new LeafNode(Arrays.copyOfRange(key, offset, key.length), value);
     }
+    node = resolve(node, path);
     if (node instanceof LeafNode) {
       return updateLeaf((LeafNode) node, key, offset, value);
     }
     if (node instanceof ExtensionNode) {
-      return updateExtension((ExtensionNode) node, key, offset, value);
+      return updateExtension((ExtensionNode) node, key, offset, path, value);
     }
     BranchNode branch = (BranchNode) node;
     if (offset >= key.length) {
@@ -328,13 +364,14 @@ public final class PathMerkleTrie {
     }
     int nibble = key[offset];
     Node previous = branch.children[nibble];
-    Node changed = update(previous, key, offset + 1, value);
+    Node changed = update(previous, key, offset + 1,
+        append(path, new byte[]{(byte) nibble}), value);
     if (previous == changed) {
       return branch;
     }
     Node[] children = Arrays.copyOf(branch.children, branch.children.length);
     children[nibble] = changed;
-    return normalizeBranch(children);
+    return normalizeBranch(children, path);
   }
 
   private static Node updateLeaf(LeafNode leaf, byte[] key, int offset, byte[] value) {
@@ -364,15 +401,16 @@ public final class PathMerkleTrie {
         : new ExtensionNode(Arrays.copyOf(leaf.path, shared), branch);
   }
 
-  private static Node updateExtension(ExtensionNode extension, byte[] key, int offset,
-      byte[] value) {
+  private Node updateExtension(ExtensionNode extension, byte[] key, int offset,
+      byte[] path, byte[] value) {
     int shared = commonPrefix(extension.path, 0, key, offset);
     if (shared == extension.path.length) {
-      Node changed = update(extension.child, key, offset + shared, value);
+      Node changed = update(extension.child, key, offset + shared,
+          append(path, extension.path), value);
       if (changed == extension.child) {
         return extension;
       }
-      return normalizeExtension(extension.path, changed);
+      return normalizeExtension(extension.path, changed, path);
     }
     if (value == null) {
       return extension;
@@ -390,7 +428,7 @@ public final class PathMerkleTrie {
         : new ExtensionNode(Arrays.copyOf(extension.path, shared), branch);
   }
 
-  private static Node normalizeBranch(Node[] children) {
+  private Node normalizeBranch(Node[] children, byte[] path) {
     int count = 0;
     int only = -1;
     for (int i = 0; i < children.length; i++) {
@@ -405,7 +443,7 @@ public final class PathMerkleTrie {
     if (count > 1) {
       return new BranchNode(children);
     }
-    Node child = children[only];
+    Node child = resolve(children[only], append(path, new byte[]{(byte) only}));
     byte[] prefix = new byte[]{(byte) only};
     if (child instanceof LeafNode) {
       LeafNode leaf = (LeafNode) child;
@@ -418,19 +456,20 @@ public final class PathMerkleTrie {
     return new ExtensionNode(prefix, child);
   }
 
-  private static Node normalizeExtension(byte[] path, Node child) {
+  private Node normalizeExtension(byte[] extensionPath, Node child, byte[] parentPath) {
     if (child == null) {
       return null;
     }
+    child = resolve(child, append(parentPath, extensionPath));
     if (child instanceof LeafNode) {
       LeafNode leaf = (LeafNode) child;
-      return new LeafNode(append(path, leaf.path), leaf.value);
+      return new LeafNode(append(extensionPath, leaf.path), leaf.value);
     }
     if (child instanceof ExtensionNode) {
       ExtensionNode extension = (ExtensionNode) child;
-      return new ExtensionNode(append(path, extension.path), extension.child);
+      return new ExtensionNode(append(extensionPath, extension.path), extension.child);
     }
-    return new ExtensionNode(path, child);
+    return new ExtensionNode(extensionPath, child);
   }
 
   private static Map<BytesKey, byte[]> collectNodes(Node root) {
@@ -499,6 +538,176 @@ public final class PathMerkleTrie {
       shared++;
     }
     return shared;
+  }
+
+  private byte[] valueAt(Node node, byte[] key, int offset, byte[] path) {
+    if (node == null) {
+      return null;
+    }
+    Node present = resolve(node, path);
+    if (present instanceof LeafNode) {
+      LeafNode leaf = (LeafNode) present;
+      int remaining = key.length - offset;
+      return remaining == leaf.path.length
+          && commonPrefix(leaf.path, 0, key, offset) == remaining
+          ? Arrays.copyOf(leaf.value, leaf.value.length) : null;
+    }
+    if (present instanceof ExtensionNode) {
+      ExtensionNode extension = (ExtensionNode) present;
+      int shared = commonPrefix(extension.path, 0, key, offset);
+      return shared == extension.path.length
+          ? valueAt(extension.child, key, offset + shared, append(path, extension.path)) : null;
+    }
+    BranchNode branch = (BranchNode) present;
+    if (offset >= key.length) {
+      return null;
+    }
+    int nibble = key[offset];
+    return valueAt(branch.children[nibble], key, offset + 1,
+        append(path, new byte[]{(byte) nibble}));
+  }
+
+  private Node resolve(Node node, byte[] expectedPath) {
+    if (!(node instanceof StoredNode)) {
+      return node;
+    }
+    StoredNode stored = (StoredNode) node;
+    byte[] storedEncoding = node.encoded;
+    if (!Arrays.equals(stored.path, expectedPath)) {
+      throw new IllegalStateException("stored path trie node moved from its durable path");
+    }
+    List<RlpElement> elements = decodeList(storedEncoding);
+    Node decoded;
+    if (elements.size() == 17) {
+      if (!elements.get(16).isEmptyString()) {
+        throw new IllegalStateException("path-state branch contains a value slot");
+      }
+      Node[] children = new Node[16];
+      for (int index = 0; index < children.length; index++) {
+        byte[] childPath = append(expectedPath, new byte[]{(byte) index});
+        children[index] = storedChild(elements.get(index), childPath);
+      }
+      decoded = new BranchNode(children);
+    } else if (elements.size() == 2 && !elements.get(0).list) {
+      Compact compact = decodeCompact(elements.get(0).payload);
+      if (compact.leaf) {
+        if (elements.get(1).list) {
+          throw new IllegalStateException("path-state leaf value must be an RLP item");
+        }
+        decoded = new LeafNode(compact.path, elements.get(1).payload);
+      } else {
+        if (compact.path.length == 0) {
+          throw new IllegalStateException("path-state extension path must not be empty");
+        }
+        decoded = new ExtensionNode(compact.path,
+            requiredStoredChild(elements.get(1), append(expectedPath, compact.path)));
+      }
+    } else {
+      throw new IllegalStateException("path-state durable node has invalid arity");
+    }
+    if (!Arrays.equals(decoded.encoded, storedEncoding)) {
+      throw new IllegalStateException("path-state durable node is not canonically encoded");
+    }
+    return decoded;
+  }
+
+  private Node requiredStoredChild(RlpElement reference, byte[] path) {
+    Node child = storedChild(reference, path);
+    if (child == null) {
+      throw new IllegalStateException("path-state extension has an empty child");
+    }
+    return child;
+  }
+
+  private Node storedChild(RlpElement reference, byte[] path) {
+    if (reference.isEmptyString()) {
+      return null;
+    }
+    if (reference.list) {
+      return new StoredNode(reference.encoded, path);
+    }
+    if (reference.payload.length != SECURE_KEY_LENGTH) {
+      throw new IllegalStateException("path-state child hash must contain exactly 32 bytes");
+    }
+    byte[] encoded = nodeStore.get(path);
+    if (encoded == null || !Arrays.equals(Hash.sha3(encoded), reference.payload)) {
+      throw new IllegalStateException("path-state durable child is missing or corrupt");
+    }
+    return new StoredNode(encoded, path);
+  }
+
+  private static List<RlpElement> decodeList(byte[] encoded) {
+    RlpElement root = decodeElement(encoded, 0);
+    if (!root.list || root.encoded.length != encoded.length) {
+      throw new IllegalStateException("path-state durable node must be one RLP list");
+    }
+    List<RlpElement> elements = new ArrayList<>();
+    int offset = 0;
+    while (offset < root.payload.length) {
+      RlpElement child = decodeElement(root.payload, offset);
+      elements.add(child);
+      offset += child.encoded.length;
+    }
+    return elements;
+  }
+
+  private static RlpElement decodeElement(byte[] encoded, int offset) {
+    if (offset < 0 || offset >= encoded.length) {
+      throw new IllegalStateException("path-state RLP offset is invalid");
+    }
+    int marker = encoded[offset] & 0xff;
+    if (marker < 0x80) {
+      return new RlpElement(false, new byte[]{encoded[offset]}, new byte[]{encoded[offset]});
+    }
+    boolean list = marker >= 0xc0;
+    int shortBase = list ? 0xc0 : 0x80;
+    int longBase = list ? 0xf7 : 0xb7;
+    int payloadOffset;
+    int payloadLength;
+    if (marker <= longBase) {
+      payloadOffset = offset + 1;
+      payloadLength = marker - shortBase;
+    } else {
+      int lengthBytes = marker - longBase;
+      if (lengthBytes > Integer.BYTES || offset + 1 + lengthBytes > encoded.length) {
+        throw new IllegalStateException("path-state RLP length is invalid");
+      }
+      payloadOffset = offset + 1 + lengthBytes;
+      payloadLength = 0;
+      for (int index = offset + 1; index < payloadOffset; index++) {
+        payloadLength = Math.addExact(Math.multiplyExact(payloadLength, 256),
+            encoded[index] & 0xff);
+      }
+    }
+    int end = Math.addExact(payloadOffset, payloadLength);
+    if (end > encoded.length) {
+      throw new IllegalStateException("path-state RLP payload exceeds its node");
+    }
+    return new RlpElement(list, Arrays.copyOfRange(encoded, offset, end),
+        Arrays.copyOfRange(encoded, payloadOffset, end));
+  }
+
+  private static Compact decodeCompact(byte[] encoded) {
+    if (encoded.length == 0) {
+      throw new IllegalStateException("path-state compact path must not be empty");
+    }
+    int flags = (encoded[0] >>> 4) & 0x0f;
+    if (flags > 3) {
+      throw new IllegalStateException("path-state compact path has invalid flags");
+    }
+    boolean odd = (flags & 1) != 0;
+    byte[] path = new byte[encoded.length * 2 - (odd ? 1 : 2)];
+    int target = 0;
+    if (odd) {
+      path[target++] = (byte) (encoded[0] & 0x0f);
+    } else if ((encoded[0] & 0x0f) != 0) {
+      throw new IllegalStateException("path-state compact path has non-zero padding");
+    }
+    for (int index = 1; index < encoded.length; index++) {
+      path[target++] = (byte) ((encoded[index] >>> 4) & 0x0f);
+      path[target++] = (byte) (encoded[index] & 0x0f);
+    }
+    return new Compact((flags & 2) != 0, path);
   }
 
   private static byte[] nodeReference(byte[] encodedNode) {
@@ -606,6 +815,16 @@ public final class PathMerkleTrie {
     }
   }
 
+  private static final class StoredNode extends Node {
+
+    private final byte[] path;
+
+    private StoredNode(byte[] encoded, byte[] path) {
+      super(Arrays.copyOf(Objects.requireNonNull(encoded, "encoded"), encoded.length));
+      this.path = Arrays.copyOf(Objects.requireNonNull(path, "path"), path.length);
+    }
+  }
+
   private static final class LeafNode extends Node {
 
     private final byte[] path;
@@ -683,6 +902,34 @@ public final class PathMerkleTrie {
     }
   }
 
+  private static final class RlpElement {
+
+    private final boolean list;
+    private final byte[] encoded;
+    private final byte[] payload;
+
+    private RlpElement(boolean list, byte[] encoded, byte[] payload) {
+      this.list = list;
+      this.encoded = encoded;
+      this.payload = payload;
+    }
+
+    private boolean isEmptyString() {
+      return !list && payload.length == 0;
+    }
+  }
+
+  private static final class Compact {
+
+    private final boolean leaf;
+    private final byte[] path;
+
+    private Compact(boolean leaf, byte[] path) {
+      this.leaf = leaf;
+      this.path = path;
+    }
+  }
+
   @FunctionalInterface
   private interface NodeVisitor {
 
@@ -714,6 +961,10 @@ public final class PathMerkleTrie {
         return leaves.get(key);
       }
       return parent == null ? null : parent.leafValue(key);
+    }
+
+    private boolean containsLeaf(BytesKey key) {
+      return leaves.containsKey(key) || parent != null && parent.containsLeaf(key);
     }
 
     private void populateLeaves(Map<BytesKey, byte[]> target) {
