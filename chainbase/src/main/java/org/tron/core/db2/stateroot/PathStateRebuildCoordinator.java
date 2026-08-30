@@ -31,7 +31,7 @@ public final class PathStateRebuildCoordinator {
 
   private static final String STORE_DIGEST_DOMAIN = "path-state-rebuild-store/v1";
   private static final String SOURCE_DIGEST_DOMAIN = "path-state-rebuild-source/v1";
-  private static final int LARGE_STORE_WORKERS = 2;
+  private static final int LARGE_STORE_WORKERS = 1;
   private static final int SMALL_STORE_WORKERS = 2;
   private static final Set<String> LARGE_STORES = Collections.unmodifiableSet(
       new LinkedHashSet<>(Arrays.asList(

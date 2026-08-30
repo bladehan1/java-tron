@@ -126,7 +126,7 @@ public class PathStateRebuildCoordinatorTest {
         if ("account-asset".equals(dbName) && !accountReturned.get()) {
           throw new IOException("account-asset started before account completed");
         }
-        if ("account".equals(dbName) || "storage-row".equals(dbName)
+        if ("account".equals(dbName) || "accountid-index".equals(dbName)
             || "abi".equals(dbName)) {
           concurrentScans.countDown();
           try {
