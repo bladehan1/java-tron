@@ -230,7 +230,10 @@ public class PathStateRebuildCoordinatorTest {
     PathStateStoreManifest lazyManifest = manifest("p66-on-lazy", Engine.ROCKSDB);
     TestSnapshotSource lazy = exactSource(identity(P66Phase.P66_ON));
     lazy.add("account", address,
-        account(address).toBuilder().putAssetV2(tokenId, 11L).build().toByteArray());
+        account(address).toBuilder()
+            .putAssetV2(tokenId, 11L)
+            .putAssetV2("1000002", 0L)
+            .build().toByteArray());
     RebuildResult lazyResult = new PathStateRebuildCoordinator().rebuild(lazyManifest, lazy);
     assertEquals(1, lazyResult.requireStore("account").getEntryCount());
     assertEquals(0, lazyResult.requireStore("account-asset").getEntryCount());
