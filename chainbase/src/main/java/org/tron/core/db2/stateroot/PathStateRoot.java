@@ -31,6 +31,7 @@ public final class PathStateRoot {
 
   private final PathStateParticipantScope scope;
   private final Map<String, PathMerkleTrie> participantTries = new LinkedHashMap<>();
+  private final Map<String, byte[]> rebuiltParticipantRoots = new LinkedHashMap<>();
   private final Map<Integer, LinkedHashMap<MutationKey, PathStateParticipant>>
       pendingLeafMutations = new LinkedHashMap<>();
   private final PathMerkleTrie superTrie;
@@ -114,6 +115,41 @@ public final class PathStateRoot {
     rootMaterialized = false;
   }
 
+  /** Records a fully streamed participant root without retaining that Store's leaves or tree. */
+  void completeRebuildParticipant(String dbName, byte[] storeRoot) {
+    PathStateParticipant participant = scope.require(dbName);
+    byte[] root = Arrays.copyOf(Objects.requireNonNull(storeRoot, "storeRoot"),
+        storeRoot.length);
+    if (root.length != PathStateCommitmentCodec.ROOT_LENGTH) {
+      throw new IllegalArgumentException("Store root must contain exactly 32 bytes");
+    }
+    synchronized (rebuiltParticipantRoots) {
+      byte[] previous = rebuiltParticipantRoots.put(participant.getDbName(), root);
+      if (previous != null && !Arrays.equals(previous, root)) {
+        throw new IllegalStateException("path-state rebuild Store root changed");
+      }
+    }
+    rootMaterialized = false;
+  }
+
+  void restoreRebuildParticipants(PathStateRebuildCheckpoint checkpoint) {
+    for (PathStateRebuildCoordinator.StoreResult result
+        : Objects.requireNonNull(checkpoint, "checkpoint").getCompletedStores()) {
+      completeRebuildParticipant(result.getDbName(), result.getStoreRoot());
+    }
+  }
+
+  synchronized void restoreStoredRoots(byte[] expectedRoot) {
+    for (PathStateParticipant participant : scope.getParticipants()) {
+      participantTries.get(participant.getDbName()).restoreRoot();
+    }
+    superTrie.restoreRoot(expectedRoot);
+    if (!Arrays.equals(superTrie.rootHash(), expectedRoot)) {
+      throw new IllegalStateException("restored path-state root differs from durable progress");
+    }
+    rootMaterialized = true;
+  }
+
   synchronized void recordPendingLeafMutations(Collection<PathStateMutation> mutations) {
     recordPendingLeafMutations(prepare(mutations));
   }
@@ -131,6 +167,12 @@ public final class PathStateRoot {
 
   public synchronized byte[] participantRoot(String dbName) {
     PathStateParticipant participant = scope.require(dbName);
+    synchronized (rebuiltParticipantRoots) {
+      byte[] rebuilt = rebuiltParticipantRoots.get(participant.getDbName());
+      if (rebuilt != null) {
+        return Arrays.copyOf(rebuilt, rebuilt.length);
+      }
+    }
     return participantTries.get(participant.getDbName()).rootHash();
   }
 
@@ -140,7 +182,7 @@ public final class PathStateRoot {
       return superTrie.rootHash();
     }
     for (PathStateParticipant participant : scope.getParticipants()) {
-      byte[] storeRoot = participantTries.get(participant.getDbName()).rootHash();
+      byte[] storeRoot = participantRoot(participant.getDbName());
       superTrie.put(PathStateCommitmentCodec.superLeafKey(participant.getStoreId()),
           PathStateCommitmentCodec.superLeafValue(participant.getStoreId(),
               participant.getDbName(), participant.getStoreFormatVersion(), storeRoot));
