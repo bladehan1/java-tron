@@ -474,7 +474,9 @@ public final class PathStateRebuildCoordinator {
           identity.getStoreId());
       try {
         PathStateStoreTrieBuilder builder = new PathStateStoreTrieBuilder(spool,
-            manifest.getEngine(), generation, writer::putNode, writer::putLeaf);
+            manifest.getEngine(), generation, writer::putNode, writer::putLeaf,
+            (sortedRows, elapsedMillis) -> logBuildProgress(identity, writer, sortedRows,
+                elapsedMillis));
         BuilderHandle created = new BuilderHandle(builder, writer);
         opened.put(identity.getDbName(), created);
         return created;
@@ -482,6 +484,16 @@ public final class PathStateRebuildCoordinator {
         writer.close();
         throw failure;
       }
+    }
+
+    private void logBuildProgress(StoreIdentity identity,
+        PathStateNodeStoreSet.RebuildWriter writer, long sortedRows, long elapsedMillis) {
+      long rowsPerSecond = elapsedMillis == 0 ? sortedRows
+          : (long) (sortedRows * 1000.0d / elapsedMillis);
+      logger.info("Path-state rebuild Store building: storeId={}, dbName={}, tier={}, "
+              + "sortedRows={}, nodeEntries={}, leafEntries={}, elapsedMs={}, rowsPerSecond={}",
+          identity.getStoreId(), identity.getDbName(), storeTier(identity), sortedRows,
+          writer.getNodeEntries(), writer.getLeafEntries(), elapsedMillis, rowsPerSecond);
     }
 
     @Override

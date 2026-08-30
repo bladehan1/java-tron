@@ -1224,6 +1224,8 @@ public final class PathStateNodeStoreSet implements Closeable {
     private final NamespacedNodeStore namespace;
     private final List<PathStateNativeNodeStore.BatchMutation> mutations =
         new ArrayList<>(REBUILD_WRITE_BATCH_ENTRIES);
+    private long nodeEntries;
+    private long leafEntries;
     private boolean writerClosed;
 
     private RebuildWriter(int storeId) {
@@ -1233,11 +1235,21 @@ public final class PathStateNodeStoreSet implements Closeable {
 
     void putNode(byte[] path, byte[] encodedNode) {
       add(PathStateNativeNodeStore.BatchMutation.put(namespace.key(path), encodedNode));
+      nodeEntries = Math.addExact(nodeEntries, 1L);
     }
 
     void putLeaf(byte[] secureKey, byte[] encodedValue) {
       add(PathStateNativeNodeStore.BatchMutation.put(
           rebuildLeafKey(storeId, secureKey), encodedValue));
+      leafEntries = Math.addExact(leafEntries, 1L);
+    }
+
+    long getNodeEntries() {
+      return nodeEntries;
+    }
+
+    long getLeafEntries() {
+      return leafEntries;
     }
 
     private void add(PathStateNativeNodeStore.BatchMutation mutation) {
