@@ -230,36 +230,42 @@ public final class PathStateRebuildCoordinator {
       Map<Integer, StoreResult> completedStores,
       Object checkpointLock) {
     return executor.submit(() -> {
-      awaitDependency(dependency);
-      StoreAccumulator accumulator = new StoreAccumulator(store, identity.getPhase(), root,
-          builders);
-      if (!"account-asset".equals(store.getDbName())) {
-        builders.reset(store.getDbName());
+      try {
+        awaitDependency(dependency);
+        StoreAccumulator accumulator = new StoreAccumulator(store, identity.getPhase(), root,
+            builders);
+        if (!"account-asset".equals(store.getDbName())) {
+          builders.reset(store.getDbName());
+        }
+        if ("account".equals(store.getDbName())) {
+          builders.reset("account-asset");
+        }
+        logger.info("Path-state rebuild Store started: storeId={}, dbName={}, tier={}",
+            store.getStoreId(), store.getDbName(), storeTier(store));
+        source.scan(store.getDbName(), accumulator::accept);
+        StoreResult result = accumulator.finish();
+        accumulator.logCompleted();
+        if ("account".equals(store.getDbName())) {
+          root.participantRoot("account-asset");
+        }
+        synchronized (checkpointLock) {
+          completedStores.put(result.getStoreId(), result);
+          PathStateRebuildCheckpoint next = new PathStateRebuildCheckpoint(
+              manifest.getIdentityDigest(), sourceIdentityDigest, identity,
+              new ArrayList<>(completedStores.values()));
+          stores.checkpointStreamedRebuild(next);
+          logger.info("Path-state rebuild Store checkpointed: storeId={}, dbName={}, entries={}, "
+                  + "completedStores={}, remainingStores={}",
+              result.getStoreId(), result.getDbName(), result.getEntryCount(),
+              completedStores.size(), descriptor.getStores().size() - completedStores.size());
+        }
+        faultHook.afterStore(result);
+        return null;
+      } catch (IOException | RuntimeException failure) {
+        logger.error("Path-state rebuild Store failed: storeId={}, dbName={}, tier={}",
+            store.getStoreId(), store.getDbName(), storeTier(store), failure);
+        throw failure;
       }
-      if ("account".equals(store.getDbName())) {
-        builders.reset("account-asset");
-      }
-      logger.info("Path-state rebuild Store started: storeId={}, dbName={}, tier={}",
-          store.getStoreId(), store.getDbName(), storeTier(store));
-      source.scan(store.getDbName(), accumulator::accept);
-      StoreResult result = accumulator.finish();
-      accumulator.logCompleted();
-      if ("account".equals(store.getDbName())) {
-        root.participantRoot("account-asset");
-      }
-      synchronized (checkpointLock) {
-        completedStores.put(result.getStoreId(), result);
-        PathStateRebuildCheckpoint next = new PathStateRebuildCheckpoint(
-            manifest.getIdentityDigest(), sourceIdentityDigest, identity,
-            new ArrayList<>(completedStores.values()));
-        stores.checkpointStreamedRebuild(next);
-        logger.info("Path-state rebuild Store checkpointed: storeId={}, dbName={}, entries={}, "
-                + "completedStores={}, remainingStores={}",
-            result.getStoreId(), result.getDbName(), result.getEntryCount(),
-            completedStores.size(), descriptor.getStores().size() - completedStores.size());
-      }
-      faultHook.afterStore(result);
-      return null;
     });
   }
 
@@ -363,7 +369,10 @@ public final class PathStateRebuildCoordinator {
             phase, key, value);
         if (!projected.isEmpty()) {
           for (PathStateMutation asset : projected) {
-            builders.put(asset);
+            // A zero embedded balance projects to ABSENT; snapshot rebuilds spool PRESENT rows.
+            if (!asset.isDelete()) {
+              builders.put(asset);
+            }
           }
         }
       }
