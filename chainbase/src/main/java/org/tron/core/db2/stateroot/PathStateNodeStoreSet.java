@@ -100,6 +100,7 @@ public final class PathStateNodeStoreSet implements Closeable {
       }
       streamedRebuild = streamedValue != null;
       lazyRoots = kind == Kind.BASE ? streamedRebuild
+          || rebuildCheckpoint != null && rebuildCheckpoint.hasIndependentStores()
           : parentStores != null && parentStores.lazyRoots;
       byte[] leafOverlayValue = nativeStore.get(LEAF_OVERLAY_KEY);
       if ((progress == null) != (logicalBytes == null)) {
@@ -232,7 +233,7 @@ public final class PathStateNodeStoreSet implements Closeable {
         participant -> participantStores.get(participant.getDbName()),
         superStore);
     if (progress != null || rebuildCheckpoint != null) {
-      if (progress == null && rebuildCheckpoint.hasIndependentStores() && streamedRebuild) {
+      if (progress == null && rebuildCheckpoint.hasIndependentStores()) {
         candidate.restoreRebuildParticipants(rebuildCheckpoint);
       } else if (progress != null && lazyRoots) {
         candidate.restoreStoredRoots(progress.getStateRoot());
