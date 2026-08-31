@@ -164,6 +164,12 @@ public final class PathStateNativeSnapshotSource
 
   @Override
   public void scan(String dbName, EntryConsumer consumer) throws IOException {
+    scanAfter(dbName, null, consumer);
+  }
+
+  @Override
+  public void scanAfter(String dbName, byte[] exclusivePhysicalCursor, EntryConsumer consumer)
+      throws IOException {
     ensureOpen();
     Objects.requireNonNull(consumer, "consumer");
     PathStateParticipantDescriptor.StoreIdentity participant = descriptor.require(dbName);
@@ -173,6 +179,9 @@ public final class PathStateNativeSnapshotSource
     }
     if (PathStateParticipantDescriptor.MARKET_PRICE_COMPARATOR.equals(
         participant.getComparatorId())) {
+      if (exclusivePhysicalCursor != null) {
+        throw new IOException("market-price snapshot scan does not support physical cursor resume");
+      }
       List<Map.Entry<byte[], byte[]>> entries = new ArrayList<>();
       scanLexical(snapshot, (key, value) -> {
         if (entries.size() >= marketEntryLimit) {
@@ -186,42 +195,50 @@ public final class PathStateNativeSnapshotSource
       }
       return;
     }
-    scanLexical(snapshot, consumer);
+    scanLexical(snapshot, consumer, exclusivePhysicalCursor);
   }
 
   private void scanLexical(StoreSnapshot snapshot, EntryConsumer consumer) throws IOException {
-    byte[] lower = new byte[0];
-    byte[] previous = null;
+    scanLexical(snapshot, consumer, null);
+  }
+
+  private void scanLexical(StoreSnapshot snapshot, EntryConsumer consumer, byte[] cursor)
+      throws IOException {
+    byte[] lower = cursor == null ? new byte[0] : Arrays.copyOf(cursor, cursor.length);
+    byte[] previous = cursor == null ? null : Arrays.copyOf(cursor, cursor.length);
     while (true) {
       List<Map.Entry<byte[], byte[]>> page;
       try {
-        page = snapshot.range(lower, null, pageSize);
+        page = snapshot.range(lower, null, pageSize + 1);
       } catch (UnsupportedOperationException unsupported) {
         throw new IOException("pinned Store does not support range scan: "
             + snapshot.getDbName(), unsupported);
       }
-      if (page == null || page.size() > pageSize) {
+      if (page == null || page.size() > pageSize + 1) {
         throw new IOException("pinned Store returned an invalid range page: "
             + snapshot.getDbName());
       }
       for (Map.Entry<byte[], byte[]> entry : page) {
         byte[] key = copy(entry.getKey(), "snapshot key");
         byte[] value = copy(entry.getValue(), "snapshot value");
-        if (previous != null && compareUnsigned(previous, key) >= 0) {
+        if (previous != null && compareUnsigned(previous, key) > 0) {
           throw new IOException("pinned Store range is not strictly lexical: "
               + snapshot.getDbName());
+        }
+        if (previous != null && Arrays.equals(previous, key)) {
+          continue;
         }
         consumer.accept(key, value);
         previous = key;
       }
-      if (page.size() < pageSize) {
+      if (page.size() < pageSize + 1) {
         return;
       }
       if (previous == null) {
         throw new IOException("pinned Store returned a full empty range page: "
             + snapshot.getDbName());
       }
-      lower = Arrays.copyOf(previous, previous.length + 1);
+      lower = Arrays.copyOf(previous, previous.length);
     }
   }
 

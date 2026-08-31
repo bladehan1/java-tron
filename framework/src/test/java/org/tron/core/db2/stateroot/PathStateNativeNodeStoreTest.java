@@ -2,15 +2,18 @@ package org.tron.core.db2.stateroot;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
+import static org.junit.Assert.assertTrue;
 
 import java.io.File;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -20,6 +23,9 @@ import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.tron.common.arch.Arch;
 import org.tron.core.db2.stateroot.PathStateCanonicalizer.P66Phase;
+import org.tron.core.db2.stateroot.PathStateRebuildCoordinator.EntryConsumer;
+import org.tron.core.db2.stateroot.PathStateRebuildCoordinator.SnapshotIdentity;
+import org.tron.core.db2.stateroot.PathStateRebuildCoordinator.SnapshotSource;
 import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
 
 public class PathStateNativeNodeStoreTest {
@@ -233,6 +239,722 @@ public class PathStateNativeNodeStoreTest {
         () -> PathStateNodeStoreSet.openLayer(manifest, layer));
   }
 
+  @Test
+  public void physicalStoreSetCreatesExact27PlusSuperWithDisjointFNMKeyspaces() throws Exception {
+    Path root = temporaryFolder.newFolder("physical-27-plus-super").toPath();
+    PathStateParticipantScope scope = new PathStateCanonicalizer().participantScope();
+    byte[] secureKey = PathStateCommitmentCodec.storeLeafKey(4, new byte[]{1, 2, 3});
+    byte[] sameSuffix = new byte[]{7, 8, 9};
+    try (PathStatePhysicalStoreSet stores = PathStatePhysicalStoreSet.open(root, scope,
+        Engine.ROCKSDB)) {
+      PathStatePhysicalStoreSet.PhysicalStore account = stores.participant("account");
+      account.putFlat(secureKey, sameSuffix);
+      account.nodeStore().put(secureKey, new byte[]{4, 5, 6});
+      account.putMetadata(secureKey, new byte[]{1});
+      assertArrayEquals(sameSuffix, account.getFlat(secureKey));
+      assertArrayEquals(new byte[]{4, 5, 6}, account.nodeStore().get(secureKey));
+      assertArrayEquals(new byte[]{1}, account.getMetadata(secureKey));
+
+      stores.superStore().putFlat(secureKey, new byte[]{2});
+      assertArrayEquals(new byte[]{2}, stores.superStore().getFlat(secureKey));
+      assertNull(stores.superStore().nodeStore().get(secureKey));
+      assertEquals(27, childDirectoryCount(root.resolve("stores")));
+      AtomicInteger flatEntries = new AtomicInteger();
+      account.scanFlat(ignored -> flatEntries.incrementAndGet());
+      assertEquals(1, flatEntries.get());
+      assertEquals(32, stores.getFormatDigest().length);
+
+      PathStateRoot stateRoot = stores.createRoot();
+      stateRoot.put("account", new byte[]{1, 2, 3}, new byte[]{4, 5, 6});
+      assertEquals(32, stateRoot.rootHash().length);
+      assertNotNull(account.nodeStore().get(new byte[0]));
+      assertNotNull(stores.superStore().nodeStore().get(new byte[0]));
+      assertThrows(IllegalStateException.class, stores::createRoot);
+    }
+    try (PathStatePhysicalStoreSet reopened = PathStatePhysicalStoreSet.open(root, scope,
+        Engine.ROCKSDB)) {
+      assertArrayEquals(sameSuffix, reopened.participant("account").getFlat(secureKey));
+      assertArrayEquals(new byte[]{4, 5, 6}, reopened.participant("account").nodeStore()
+          .get(secureKey));
+      AtomicInteger flatEntries = new AtomicInteger();
+      reopened.participant("account").scanFlat(ignored -> flatEntries.incrementAndGet());
+      assertEquals(1, flatEntries.get());
+    }
+  }
+
+  @Test
+  public void physicalStoreSetRejectsLegacySharedBaseNodes() throws Exception {
+    Path root = temporaryFolder.newFolder("physical-legacy-rejection").toPath();
+    Files.createDirectories(root.resolve("base").resolve("nodes"));
+    assertThrows(java.io.IOException.class,
+        () -> PathStatePhysicalStoreSet.open(root, new PathStateCanonicalizer().participantScope(),
+            Engine.ROCKSDB));
+  }
+
+  @Test
+  public void physicalStoreSetRejectsOldSharedManifestEvenWithoutNodeFiles() throws Exception {
+    Path root = temporaryFolder.newFolder("physical-old-manifest-rejection").toPath();
+    PathStateStoreManifest.createOrOpen(root, Engine.ROCKSDB);
+    assertThrows(java.io.IOException.class,
+        () -> PathStatePhysicalStoreSet.open(root, new PathStateCanonicalizer().participantScope(),
+            Engine.ROCKSDB));
+  }
+
+  @Test
+  public void physicalStoreSetRejectsAnExactNameScopeWithAChangedStableStoreId()
+      throws Exception {
+    Path root = temporaryFolder.newFolder("physical-store-id-rejection").toPath();
+    List<PathStateParticipant> changed = new ArrayList<>();
+    for (PathStateParticipant participant
+        : new PathStateCanonicalizer().participantScope().getParticipants()) {
+      changed.add("proposal".equals(participant.getDbName())
+          ? new PathStateParticipant(99, participant.getDbName(),
+              participant.getStoreFormatVersion()) : participant);
+    }
+    PathStateParticipantScope changedScope = new PathStateParticipantScope(changed);
+    assertThrows(IllegalArgumentException.class,
+        () -> PathStatePhysicalStoreSet.open(root, changedScope, Engine.ROCKSDB));
+  }
+
+  @Test
+  public void physicalFlatSnapshotRestoresAndVerifiesTheRoot() throws Exception {
+    Path root = temporaryFolder.newFolder("physical-flat-restore").toPath();
+    PathStateParticipantScope scope = new PathStateCanonicalizer().participantScope();
+    byte[] expectedRoot;
+    try (PathStatePhysicalStoreSet stores = PathStatePhysicalStoreSet.open(root, scope,
+        Engine.ROCKSDB)) {
+      PathStateRoot stateRoot = stores.createRoot();
+      stateRoot.put("account", new byte[]{1, 2}, new byte[]{3, 4});
+      stateRoot.put("proposal", new byte[]{5, 6}, new byte[]{7, 8});
+      expectedRoot = stateRoot.rootHash();
+      stores.persistFlatSnapshot(stateRoot);
+    }
+    try (PathStatePhysicalStoreSet reopened = PathStatePhysicalStoreSet.open(root, scope,
+        Engine.ROCKSDB)) {
+      assertArrayEquals(expectedRoot, reopened.restoreRootFromFlat().rootHash());
+    }
+  }
+
+  @Test
+  public void physicalFlatRestoreFailsClosedForMissingOrCorruptLeaf() throws Exception {
+    Path root = temporaryFolder.newFolder("physical-flat-corruption").toPath();
+    PathStateParticipantScope scope = new PathStateCanonicalizer().participantScope();
+    byte[] secureKey = PathStateCommitmentCodec.storeLeafKey(4, new byte[]{1, 2});
+    try (PathStatePhysicalStoreSet stores = PathStatePhysicalStoreSet.open(root, scope,
+        Engine.ROCKSDB)) {
+      PathStateRoot stateRoot = stores.createRoot();
+      stateRoot.put("account", new byte[]{1, 2}, new byte[]{3, 4});
+      stateRoot.rootHash();
+      stores.persistFlatSnapshot(stateRoot);
+    }
+    try (PathStatePhysicalStoreSet corrupted = PathStatePhysicalStoreSet.open(root, scope,
+        Engine.ROCKSDB)) {
+      corrupted.participant("account").putFlat(secureKey, new byte[]{1});
+      assertThrows(IllegalStateException.class, corrupted::restoreRootFromFlat);
+    }
+    try (PathStatePhysicalStoreSet missing = PathStatePhysicalStoreSet.open(root, scope,
+        Engine.ROCKSDB)) {
+      missing.participant("account").deleteFlat(secureKey);
+      assertThrows(IllegalStateException.class, missing::restoreRootFromFlat);
+    }
+  }
+
+  @Test
+  public void physicalFlatBuildStreamsIntoNAndReusesPerStoreCompletionOnRetry() throws Exception {
+    Path root = temporaryFolder.newFolder("physical-flat-stream-build").toPath();
+    PathStateParticipantScope scope = new PathStateCanonicalizer().participantScope();
+    byte[] expectedRoot;
+    try (PathStatePhysicalStoreSet stores = PathStatePhysicalStoreSet.open(root, scope,
+        Engine.ROCKSDB)) {
+      PathStateRoot stateRoot = stores.createRoot();
+      stateRoot.put("account", new byte[]{1, 2}, new byte[]{3, 4});
+      stateRoot.put("proposal", new byte[]{5, 6}, new byte[]{7, 8});
+      expectedRoot = stateRoot.rootHash();
+      stores.persistFlatSnapshot(stateRoot);
+    }
+    try (PathStatePhysicalStoreSet rebuilt = PathStatePhysicalStoreSet.open(root, scope,
+        Engine.ROCKSDB)) {
+      assertArrayEquals(expectedRoot, rebuilt.buildRootFromFlat().rootHash());
+      assertNotNull(rebuilt.participant("account").getMetadata(
+          "flat-complete".getBytes(java.nio.charset.StandardCharsets.US_ASCII)));
+      assertNotNull(rebuilt.participant("proposal").getMetadata(
+          "flat-complete".getBytes(java.nio.charset.StandardCharsets.US_ASCII)));
+    }
+    try (PathStatePhysicalStoreSet retried = PathStatePhysicalStoreSet.open(root, scope,
+        Engine.ROCKSDB)) {
+      assertArrayEquals(expectedRoot, retried.buildRootFromFlat().rootHash());
+    }
+  }
+
+  @Test
+  public void physicalFlatBuildClearsIncompleteNodesAndRetriesWithoutSource() throws Exception {
+    Path root = temporaryFolder.newFolder("physical-flat-incomplete-retry").toPath();
+    PathStateParticipantScope scope = new PathStateCanonicalizer().participantScope();
+    byte[] stalePath = new byte[]{15, 15, 15, 15};
+    byte[] expectedRoot;
+    try (PathStatePhysicalStoreSet stores = PathStatePhysicalStoreSet.open(root, scope,
+        Engine.ROCKSDB)) {
+      PathStateRoot stateRoot = stores.createRoot();
+      stateRoot.put("account", new byte[]{1, 2}, new byte[]{3, 4});
+      stateRoot.put("proposal", new byte[]{5, 6}, new byte[]{7, 8});
+      expectedRoot = stateRoot.rootHash();
+      stores.persistFlatSnapshot(stateRoot);
+    }
+
+    AtomicInteger injectedFailures = new AtomicInteger();
+    try (PathStatePhysicalStoreSet interrupted = PathStatePhysicalStoreSet.open(root, scope,
+        Engine.ROCKSDB)) {
+      assertThrows(java.io.IOException.class, () -> interrupted.buildRootFromFlat(
+          (participant, storeRoot) -> {
+            if ("proposal".equals(participant.getDbName())
+                && injectedFailures.getAndIncrement() == 0) {
+              throw new java.io.IOException("injected failure before FLAT_COMPLETE");
+            }
+          }));
+      interrupted.participant("proposal").nodeStore().put(stalePath, new byte[]{99});
+    }
+    assertEquals(1, injectedFailures.get());
+
+    try (PathStatePhysicalStoreSet retried = PathStatePhysicalStoreSet.open(root, scope,
+        Engine.ROCKSDB)) {
+      assertNotNull(retried.participant("proposal").nodeStore().get(stalePath));
+      assertArrayEquals(expectedRoot, retried.buildRootFromFlat().rootHash());
+      assertNull(retried.participant("proposal").nodeStore().get(stalePath));
+      assertNotNull(retried.participant("proposal").getMetadata(
+          "flat-complete".getBytes(java.nio.charset.StandardCharsets.US_ASCII)));
+    }
+
+    try (PathStatePhysicalStoreSet reopened = PathStatePhysicalStoreSet.open(root, scope,
+        Engine.ROCKSDB)) {
+      assertArrayEquals(expectedRoot, reopened.buildRootFromFlat().rootHash());
+    }
+  }
+
+  @Test
+  public void physicalGlobalPublicationRecoversEveryIntentCurrentCrashWindow() throws Exception {
+    PathStateParticipantScope scope = new PathStateCanonicalizer().participantScope();
+    for (PathStatePhysicalStoreSet.PublicationStage stage
+        : PathStatePhysicalStoreSet.PublicationStage.values()) {
+      Path root = new File(temporaryFolder.getRoot(), "physical-publish-" + stage).toPath();
+      byte[] expectedRoot = preparePhysicalTarget(root, scope);
+
+      try (PathStatePhysicalStoreSet interrupted = PathStatePhysicalStoreSet.open(root, scope,
+          Engine.ROCKSDB)) {
+        assertThrows(java.io.IOException.class, () -> interrupted.publishCurrent(present -> {
+          if (present == stage) {
+            throw new java.io.IOException("injected publication failure at " + stage);
+          }
+        }));
+      }
+
+      try (PathStatePhysicalStoreSet recovered = PathStatePhysicalStoreSet.open(root, scope,
+          Engine.ROCKSDB)) {
+        PathStatePhysicalStoreSet.PublicationRecovery action = recovered.recoverPublication();
+        assertEquals(stage == PathStatePhysicalStoreSet.PublicationStage.AFTER_RETIRE
+                ? PathStatePhysicalStoreSet.PublicationRecovery.NONE
+                : PathStatePhysicalStoreSet.PublicationRecovery.COMPLETED_INTENT,
+            action);
+        assertEquals(PathStatePhysicalStoreSet.PublicationRecovery.NONE,
+            recovered.recoverPublication());
+      }
+      assertFalse(Files.exists(root.resolve(PathStatePhysicalStoreSet.INTENT_FILE)));
+      assertTrue(Files.isRegularFile(root.resolve(PathStatePhysicalStoreSet.CURRENT_FILE)));
+      PathStatePhysicalGlobalIntent current = PathStatePhysicalGlobalIntent.decode(
+          Files.readAllBytes(root.resolve(PathStatePhysicalStoreSet.CURRENT_FILE)));
+      assertArrayEquals(expectedRoot, current.getSuperRoot());
+      assertEquals(27, current.getParticipants().size());
+    }
+  }
+
+  @Test
+  public void physicalBlockFinalTransitionPreviewsPublishesAndRestarts() throws Exception {
+    PathStateParticipantScope scope = new PathStateCanonicalizer().participantScope();
+    Path root = temporaryFolder.newFolder("physical-block-final").toPath();
+    preparePublishedPhysicalTarget(root, scope);
+    byte[] key = new byte[]{1, 2, 3};
+    byte[] blockHash = bytes(31);
+
+    try (PathStatePhysicalStoreSet stores = PathStatePhysicalStoreSet.open(root, scope,
+        Engine.ROCKSDB)) {
+      PathStateRootMetadata parent = stores.currentMetadata();
+      PathStateBlockTransition transition = new PathStateBlockTransition(1, blockHash,
+          parent.getBlockHash(), 3, P66Phase.P66_ON,
+          Collections.singletonList(PathStateMutation.put("code", key, new byte[]{4, 5})));
+      PathStateRootMetadata preview = stores.previewTransition(transition);
+      assertEquals(0, stores.currentMetadata().getBlockNumber());
+      PathStateRootMetadata committed = stores.applyAndPublish(transition);
+      assertArrayEquals(preview.encode(), committed.encode());
+      assertEquals(1, committed.getBlockNumber());
+      assertArrayEquals(PathStateCommitmentCodec.presentLeafValue(new byte[]{4, 5}),
+          stores.participant("code").getFlat(
+              PathStateCommitmentCodec.storeLeafKey(scope.require("code").getStoreId(), key)));
+    }
+
+    try (PathStatePhysicalSnapshotHead head = PathStatePhysicalSnapshotHead.open(root,
+        Engine.ROCKSDB)) {
+      assertEquals(1, head.getHead().getBlockNumber());
+      PathStateBlockTransition update = new PathStateBlockTransition(2, bytes(32), blockHash,
+          6, P66Phase.P66_ON, Arrays.asList(
+          PathStateMutation.put("code", key, new byte[]{6}),
+          PathStateMutation.put("proposal", new byte[]{7}, new byte[]{8})));
+      assertArrayEquals(head.preview(update), head.advance(update).getStateRoot());
+      PathStateBlockTransition delete = new PathStateBlockTransition(3, bytes(33), bytes(32),
+          9, P66Phase.P66_ON,
+          Collections.singletonList(PathStateMutation.delete("code", key)));
+      head.advance(delete);
+      assertEquals(3, head.getHead().getBlockNumber());
+    }
+
+    try (PathStatePhysicalStoreSet reopened = PathStatePhysicalStoreSet.openExisting(root, scope,
+        Engine.ROCKSDB)) {
+      assertEquals(PathStatePhysicalStoreSet.PublicationRecovery.NONE,
+          reopened.recoverPublication());
+      assertEquals(3, reopened.currentMetadata().getBlockNumber());
+      assertNull(reopened.participant("code").getFlat(
+          PathStateCommitmentCodec.storeLeafKey(scope.require("code").getStoreId(), key)));
+    }
+  }
+
+  @Test
+  public void physicalBlockFinalCrashAfterSuperCompletesIntentOnRestart() throws Exception {
+    PathStateParticipantScope scope = new PathStateCanonicalizer().participantScope();
+    Path root = temporaryFolder.newFolder("physical-block-final-super-crash").toPath();
+    preparePublishedPhysicalTarget(root, scope);
+    PathStateBlockTransition transition = new PathStateBlockTransition(1, bytes(41),
+        new byte[32], 3, P66Phase.P66_ON,
+        Collections.singletonList(PathStateMutation.put("code", new byte[]{1}, new byte[]{2})));
+    try (PathStatePhysicalStoreSet stores = PathStatePhysicalStoreSet.open(root, scope,
+        Engine.ROCKSDB)) {
+      assertThrows(java.io.IOException.class, () -> stores.applyAndPublish(transition, stage -> {
+        if (stage == PathStatePhysicalStoreSet.TransitionStage.AFTER_SUPER_BATCH) {
+          throw new java.io.IOException("injected failure after super batch");
+        }
+      }));
+    }
+    try (PathStatePhysicalStoreSet reopened = PathStatePhysicalStoreSet.openExisting(root, scope,
+        Engine.ROCKSDB)) {
+      assertEquals(PathStatePhysicalStoreSet.PublicationRecovery.COMPLETED_INTENT,
+          reopened.recoverPublication());
+      assertEquals(1, reopened.currentMetadata().getBlockNumber());
+    }
+  }
+
+  @Test
+  public void physicalBlockFinalCrashAfterParticipantBatchFailsClosed() throws Exception {
+    PathStateParticipantScope scope = new PathStateCanonicalizer().participantScope();
+    Path root = temporaryFolder.newFolder("physical-block-final-participant-crash").toPath();
+    preparePublishedPhysicalTarget(root, scope);
+    PathStateBlockTransition transition = new PathStateBlockTransition(1, bytes(51),
+        new byte[32], 3, P66Phase.P66_ON,
+        Collections.singletonList(PathStateMutation.put("code", new byte[]{1}, new byte[]{2})));
+    try (PathStatePhysicalStoreSet stores = PathStatePhysicalStoreSet.open(root, scope,
+        Engine.ROCKSDB)) {
+      assertThrows(java.io.IOException.class, () -> stores.applyAndPublish(transition, stage -> {
+        if (stage == PathStatePhysicalStoreSet.TransitionStage.AFTER_PARTICIPANT_BATCH) {
+          throw new java.io.IOException("injected failure after participant batch");
+        }
+      }));
+    }
+    try (PathStatePhysicalStoreSet reopened = PathStatePhysicalStoreSet.openExisting(root, scope,
+        Engine.ROCKSDB)) {
+      assertThrows(java.io.IOException.class, reopened::recoverPublication);
+    }
+    assertTrue(Files.isRegularFile(root.resolve(PathStatePhysicalStoreSet.INTENT_FILE)));
+    assertTrue(Files.isRegularFile(root.resolve(PathStatePhysicalStoreSet.CURRENT_FILE)));
+  }
+
+  @Test
+  public void physicalShortReorgRestoresAncestorAndAdvancesSiblingAcrossRestart()
+      throws Exception {
+    PathStateParticipantScope scope = new PathStateCanonicalizer().participantScope();
+    Path root = temporaryFolder.newFolder("physical-short-reorg").toPath();
+    byte[] baseRoot = preparePublishedPhysicalTarget(root, scope);
+    byte[] key = new byte[]{1, 2};
+    PathStateLayerLimits limits = new PathStateLayerLimits(4, 1L << 20);
+
+    try (PathStatePhysicalSnapshotHead head = PathStatePhysicalSnapshotHead.open(root,
+        Engine.ROCKSDB, limits)) {
+      head.advance(new PathStateBlockTransition(1, bytes(61), new byte[32], 3,
+          P66Phase.P66_ON, Collections.singletonList(
+          PathStateMutation.put("code", key, new byte[]{3}))));
+      head.advance(new PathStateBlockTransition(2, bytes(62), bytes(61), 6,
+          P66Phase.P66_ON, Arrays.asList(
+          PathStateMutation.put("code", key, new byte[]{4}),
+          PathStateMutation.put("proposal", new byte[]{5}, new byte[]{6}))));
+      PathStateRootMetadata rewound = head.rewindTo(0, new byte[32]);
+      assertEquals(0, rewound.getBlockNumber());
+      assertArrayEquals(baseRoot, rewound.getStateRoot());
+      PathStateRootMetadata sibling = head.advance(new PathStateBlockTransition(1, bytes(63),
+          new byte[32], 9, P66Phase.P66_ON, Collections.singletonList(
+          PathStateMutation.put("code", key, new byte[]{9}))));
+      assertEquals(1, sibling.getBlockNumber());
+      assertArrayEquals(bytes(63), sibling.getBlockHash());
+    }
+
+    try (PathStatePhysicalStoreSet reopened = PathStatePhysicalStoreSet.openExisting(root, scope,
+        Engine.ROCKSDB)) {
+      assertEquals(1, reopened.currentMetadata().getBlockNumber());
+      assertArrayEquals(PathStateCommitmentCodec.presentLeafValue(new byte[]{9}),
+          reopened.participant("code").getFlat(
+              PathStateCommitmentCodec.storeLeafKey(scope.require("code").getStoreId(), key)));
+      assertNull(reopened.participant("proposal").getFlat(
+          PathStateCommitmentCodec.storeLeafKey(scope.require("proposal").getStoreId(),
+              new byte[]{5})));
+    }
+  }
+
+  @Test
+  public void physicalShortReorgIsBoundedAndFailsBeforeAuthorityMoves() throws Exception {
+    PathStateParticipantScope scope = new PathStateCanonicalizer().participantScope();
+    Path root = temporaryFolder.newFolder("physical-short-reorg-bounded").toPath();
+    preparePublishedPhysicalTarget(root, scope);
+    PathStateLayerLimits limits = new PathStateLayerLimits(2, 1L << 20);
+    try (PathStatePhysicalStoreSet stores = PathStatePhysicalStoreSet.open(root, scope,
+        Engine.ROCKSDB)) {
+      stores.applyAndPublish(new PathStateBlockTransition(1, bytes(71), new byte[32], 3,
+          P66Phase.P66_ON, Collections.emptyList()), limits, stage -> { });
+      stores.applyAndPublish(new PathStateBlockTransition(2, bytes(72), bytes(71), 6,
+          P66Phase.P66_ON, Collections.emptyList()), limits, stage -> { });
+      stores.applyAndPublish(new PathStateBlockTransition(3, bytes(73), bytes(72), 9,
+          P66Phase.P66_ON, Collections.emptyList()), limits, stage -> { });
+      byte[] current = stores.currentMetadata().encode();
+      assertThrows(java.io.IOException.class,
+          () -> stores.rewindTo(0, new byte[32], limits));
+      assertArrayEquals(current, stores.currentMetadata().encode());
+      assertEquals(1, stores.rewindTo(1, bytes(71), limits).getBlockNumber());
+    }
+  }
+
+  @Test
+  public void physicalShortReorgCrashWindowsCompleteOrFailClosed() throws Exception {
+    PathStateParticipantScope scope = new PathStateCanonicalizer().participantScope();
+    Path completed = temporaryFolder.newFolder("physical-rewind-super-crash").toPath();
+    preparePublishedPhysicalTarget(completed, scope);
+    PathStateLayerLimits limits = new PathStateLayerLimits(4, 1L << 20);
+    try (PathStatePhysicalStoreSet stores = PathStatePhysicalStoreSet.open(completed, scope,
+        Engine.ROCKSDB)) {
+      stores.applyAndPublish(new PathStateBlockTransition(1, bytes(81), new byte[32], 3,
+          P66Phase.P66_ON, Collections.singletonList(
+          PathStateMutation.put("code", new byte[]{1}, new byte[]{2}))));
+      assertThrows(java.io.IOException.class, () -> stores.rewindTo(0, new byte[32], limits,
+          stage -> {
+            if (stage == PathStatePhysicalStoreSet.RewindStage.AFTER_SUPER_BATCH) {
+              throw new java.io.IOException("injected rewind failure after super");
+            }
+          }));
+    }
+    try (PathStatePhysicalStoreSet stores = PathStatePhysicalStoreSet.openExisting(completed,
+        scope, Engine.ROCKSDB)) {
+      assertEquals(PathStatePhysicalStoreSet.PublicationRecovery.COMPLETED_INTENT,
+          stores.recoverPublication());
+      assertEquals(0, stores.currentMetadata().getBlockNumber());
+    }
+
+    Path partial = temporaryFolder.newFolder("physical-rewind-participant-crash").toPath();
+    preparePublishedPhysicalTarget(partial, scope);
+    try (PathStatePhysicalStoreSet stores = PathStatePhysicalStoreSet.open(partial, scope,
+        Engine.ROCKSDB)) {
+      stores.applyAndPublish(new PathStateBlockTransition(1, bytes(82), new byte[32], 3,
+          P66Phase.P66_ON, Collections.singletonList(
+          PathStateMutation.put("code", new byte[]{1}, new byte[]{2}))));
+      assertThrows(java.io.IOException.class, () -> stores.rewindTo(0, new byte[32], limits,
+          stage -> {
+            if (stage == PathStatePhysicalStoreSet.RewindStage.AFTER_PARTICIPANT_BATCH) {
+              throw new java.io.IOException("injected rewind failure after participant");
+            }
+          }));
+    }
+    try (PathStatePhysicalStoreSet stores = PathStatePhysicalStoreSet.openExisting(partial, scope,
+        Engine.ROCKSDB)) {
+      assertThrows(java.io.IOException.class, stores::recoverPublication);
+    }
+  }
+
+  @Test
+  public void physicalStartupRejectsCorruptReverseJournal() throws Exception {
+    PathStateParticipantScope scope = new PathStateCanonicalizer().participantScope();
+    Path root = temporaryFolder.newFolder("physical-reverse-corrupt").toPath();
+    preparePublishedPhysicalTarget(root, scope);
+    try (PathStatePhysicalStoreSet stores = PathStatePhysicalStoreSet.open(root, scope,
+        Engine.ROCKSDB)) {
+      stores.applyAndPublish(new PathStateBlockTransition(1, bytes(91), new byte[32], 3,
+          P66Phase.P66_ON, Collections.singletonList(
+          PathStateMutation.put("code", new byte[]{1}, new byte[]{2}))));
+    }
+    Path reverse;
+    try (Stream<Path> files = Files.list(root.resolve("reverse"))) {
+      reverse = files.findFirst().get();
+    }
+    byte[] corrupt = Files.readAllBytes(reverse);
+    corrupt[corrupt.length - 1] ^= 1;
+    Files.write(reverse, corrupt);
+    assertThrows(java.io.IOException.class,
+        () -> PathStatePhysicalSnapshotHead.open(root, Engine.ROCKSDB));
+  }
+
+  @Test
+  public void physicalGlobalPublicationAcceptsOnlyOldCurrentOrExactIntentTarget()
+      throws Exception {
+    PathStateParticipantScope scope = new PathStateCanonicalizer().participantScope();
+    Path uncommitted = temporaryFolder.newFolder("physical-publish-before-intent").toPath();
+    preparePhysicalTarget(uncommitted, scope);
+    try (PathStatePhysicalStoreSet stores = PathStatePhysicalStoreSet.open(uncommitted, scope,
+        Engine.ROCKSDB)) {
+      assertEquals(PathStatePhysicalStoreSet.PublicationRecovery.NONE,
+          stores.recoverPublication());
+    }
+    assertFalse(Files.exists(uncommitted.resolve(PathStatePhysicalStoreSet.CURRENT_FILE)));
+
+    Path tampered = temporaryFolder.newFolder("physical-publish-tampered-target").toPath();
+    preparePhysicalTarget(tampered, scope);
+    try (PathStatePhysicalStoreSet stores = PathStatePhysicalStoreSet.open(tampered, scope,
+        Engine.ROCKSDB)) {
+      assertThrows(java.io.IOException.class, () -> stores.publishCurrent(stage -> {
+        if (stage == PathStatePhysicalStoreSet.PublicationStage.AFTER_INTENT) {
+          throw new java.io.IOException("injected failure after INTENT");
+        }
+      }));
+    }
+    try (PathStatePhysicalStoreSet stores = PathStatePhysicalStoreSet.open(tampered, scope,
+        Engine.ROCKSDB)) {
+      stores.participant("proposal").putMetadata(
+          "store-generation".getBytes(java.nio.charset.StandardCharsets.US_ASCII), bytes(77));
+      assertThrows(java.io.IOException.class, stores::recoverPublication);
+    }
+    assertFalse(Files.exists(tampered.resolve(PathStatePhysicalStoreSet.CURRENT_FILE)));
+    assertTrue(Files.isRegularFile(tampered.resolve(PathStatePhysicalStoreSet.INTENT_FILE)));
+
+    Path oldCurrent = temporaryFolder.newFolder("physical-publish-old-current").toPath();
+    byte[] expectedRoot = preparePhysicalTarget(oldCurrent, scope);
+    try (PathStatePhysicalStoreSet stores = PathStatePhysicalStoreSet.open(oldCurrent, scope,
+        Engine.ROCKSDB)) {
+      assertArrayEquals(expectedRoot, stores.publishCurrent());
+    }
+    PathStateMetadataFile.publishImmutableBytes(
+        oldCurrent.resolve(PathStatePhysicalStoreSet.INTENT_FILE), new byte[]{1});
+    try (PathStatePhysicalStoreSet stores = PathStatePhysicalStoreSet.open(oldCurrent, scope,
+        Engine.ROCKSDB)) {
+      assertEquals(PathStatePhysicalStoreSet.PublicationRecovery.RETAINED_CURRENT,
+          stores.recoverPublication());
+    }
+    assertFalse(Files.exists(oldCurrent.resolve(PathStatePhysicalStoreSet.INTENT_FILE)));
+    assertArrayEquals(expectedRoot, PathStatePhysicalGlobalIntent.decode(Files.readAllBytes(
+        oldCurrent.resolve(PathStatePhysicalStoreSet.CURRENT_FILE))).getSuperRoot());
+  }
+
+  @Test
+  public void physicalGlobalRecordRejectsTruncationChecksumAndCorruptCurrent() throws Exception {
+    PathStateParticipantScope scope = new PathStateCanonicalizer().participantScope();
+    Path root = temporaryFolder.newFolder("physical-global-record-corruption").toPath();
+    preparePublishedPhysicalTarget(root, scope);
+    Path currentPath = root.resolve(PathStatePhysicalStoreSet.CURRENT_FILE);
+    byte[] encoded = Files.readAllBytes(currentPath);
+
+    assertThrows(IllegalArgumentException.class,
+        () -> PathStatePhysicalGlobalIntent.decode(Arrays.copyOf(encoded, encoded.length - 1)));
+    byte[] corruptBody = Arrays.copyOf(encoded, encoded.length);
+    corruptBody[20] ^= 1;
+    assertThrows(IllegalArgumentException.class,
+        () -> PathStatePhysicalGlobalIntent.decode(corruptBody));
+    byte[] corruptChecksum = Arrays.copyOf(encoded, encoded.length);
+    corruptChecksum[corruptChecksum.length - 1] ^= 1;
+    assertThrows(IllegalArgumentException.class,
+        () -> PathStatePhysicalGlobalIntent.decode(corruptChecksum));
+
+    Files.write(currentPath, corruptChecksum);
+    try (PathStatePhysicalStoreSet stores = PathStatePhysicalStoreSet.open(root, scope,
+        Engine.ROCKSDB)) {
+      assertThrows(java.io.IOException.class, stores::recoverPublication);
+    }
+  }
+
+  @Test
+  public void physicalPublicationRejectsMissingCompletionMetadataAndRootNodes()
+      throws Exception {
+    PathStateParticipantScope scope = new PathStateCanonicalizer().participantScope();
+
+    Path missingRoot = temporaryFolder.newFolder("physical-missing-store-root").toPath();
+    preparePublishedPhysicalTarget(missingRoot, scope);
+    try (PathStatePhysicalStoreSet stores = PathStatePhysicalStoreSet.open(missingRoot, scope,
+        Engine.ROCKSDB)) {
+      stores.participant("proposal").deleteMetadata(metadata("flat-complete"));
+    }
+    assertPublicationRejected(missingRoot, scope);
+
+    Path missingDigest = temporaryFolder.newFolder("physical-missing-flat-digest").toPath();
+    preparePublishedPhysicalTarget(missingDigest, scope);
+    try (PathStatePhysicalStoreSet stores = PathStatePhysicalStoreSet.open(missingDigest, scope,
+        Engine.ROCKSDB)) {
+      stores.participant("proposal").deleteMetadata(metadata("flat-digest"));
+    }
+    assertPublicationRejected(missingDigest, scope);
+
+    Path corruptGeneration = temporaryFolder.newFolder(
+        "physical-corrupt-store-generation").toPath();
+    preparePublishedPhysicalTarget(corruptGeneration, scope);
+    try (PathStatePhysicalStoreSet stores = PathStatePhysicalStoreSet.open(corruptGeneration,
+        scope, Engine.ROCKSDB)) {
+      stores.participant("proposal").putMetadata(metadata("store-generation"), bytes(88));
+    }
+    assertPublicationRejected(corruptGeneration, scope);
+
+    Path missingSuperGeneration = temporaryFolder.newFolder(
+        "physical-missing-super-generation").toPath();
+    preparePublishedPhysicalTarget(missingSuperGeneration, scope);
+    try (PathStatePhysicalStoreSet stores = PathStatePhysicalStoreSet.open(
+        missingSuperGeneration, scope, Engine.ROCKSDB)) {
+      stores.superStore().deleteMetadata(metadata("super-generation"));
+    }
+    assertPublicationRejected(missingSuperGeneration, scope);
+
+    Path missingNode = temporaryFolder.newFolder("physical-missing-root-node").toPath();
+    preparePublishedPhysicalTarget(missingNode, scope);
+    try (PathStatePhysicalStoreSet stores = PathStatePhysicalStoreSet.open(missingNode, scope,
+        Engine.ROCKSDB)) {
+      stores.participant("proposal").nodeStore().delete(new byte[0]);
+    }
+    assertPublicationRejected(missingNode, scope);
+  }
+
+  @Test
+  public void physicalDeleteRecomputesSecureKeyCommitsChangedPathsAndPublishesCurrent()
+      throws Exception {
+    PathStateParticipantScope scope = new PathStateCanonicalizer().participantScope();
+    Path root = temporaryFolder.newFolder("physical-delete-publish").toPath();
+    byte[] originalRoot = preparePublishedPhysicalTarget(root, scope);
+    byte[] expectedRoot = rootWithOnlyAccount(scope);
+    byte[] proposalKey = new byte[]{5, 6};
+    byte[] secureKey = PathStateCommitmentCodec.storeLeafKey(21, proposalKey);
+
+    try (PathStatePhysicalStoreSet stores = PathStatePhysicalStoreSet.open(root, scope,
+        Engine.ROCKSDB)) {
+      PathStatePhysicalStoreSet.PhysicalDeleteResult result = stores.deleteAndPublish(
+          "proposal", proposalKey, stage -> { });
+      assertFalse(Arrays.equals(originalRoot, result.getStateRoot()));
+      assertArrayEquals(expectedRoot, result.getStateRoot());
+      assertTrue(result.getParticipantNodeDeletes() > 0);
+      assertTrue(result.getSuperNodePuts() > 0);
+      assertNull(stores.participant("proposal").getFlat(secureKey));
+    }
+
+    try (PathStatePhysicalStoreSet reopened = PathStatePhysicalStoreSet.open(root, scope,
+        Engine.ROCKSDB)) {
+      assertEquals(PathStatePhysicalStoreSet.PublicationRecovery.NONE,
+          reopened.recoverPublication());
+      PathStatePhysicalGlobalIntent current = PathStatePhysicalGlobalIntent.decode(
+          Files.readAllBytes(root.resolve(PathStatePhysicalStoreSet.CURRENT_FILE)));
+      assertArrayEquals(expectedRoot, current.getSuperRoot());
+      PathStateRoot restored = reopened.createRoot();
+      restored.restoreStoredRoots(current.getSuperRoot());
+      restored.verifyNodeStores();
+      assertArrayEquals(expectedRoot, restored.rootHash());
+    }
+  }
+
+  @Test
+  public void physicalDeleteFailsClosedBetweenParticipantSuperAndCurrent() throws Exception {
+    PathStateParticipantScope scope = new PathStateCanonicalizer().participantScope();
+    Path participantFailure = temporaryFolder.newFolder(
+        "physical-delete-participant-failure").toPath();
+    preparePublishedPhysicalTarget(participantFailure, scope);
+    try (PathStatePhysicalStoreSet stores = PathStatePhysicalStoreSet.open(participantFailure,
+        scope, Engine.ROCKSDB)) {
+      assertThrows(java.io.IOException.class, () -> stores.deleteAndPublish("proposal",
+          new byte[]{5, 6}, stage -> {
+            if (stage == PathStatePhysicalStoreSet.DeleteStage.AFTER_PARTICIPANT_BATCH) {
+              throw new java.io.IOException("injected failure after participant batch");
+            }
+          }));
+    }
+    try (PathStatePhysicalStoreSet reopened = PathStatePhysicalStoreSet.open(participantFailure,
+        scope, Engine.ROCKSDB)) {
+      assertThrows(java.io.IOException.class, reopened::recoverPublication);
+      assertThrows(java.io.IOException.class, reopened::publishCurrent);
+    }
+
+    Path superFailure = temporaryFolder.newFolder("physical-delete-super-failure").toPath();
+    preparePublishedPhysicalTarget(superFailure, scope);
+    byte[] expectedRoot = rootWithOnlyAccount(scope);
+    try (PathStatePhysicalStoreSet stores = PathStatePhysicalStoreSet.open(superFailure, scope,
+        Engine.ROCKSDB)) {
+      assertThrows(java.io.IOException.class, () -> stores.deleteAndPublish("proposal",
+          new byte[]{5, 6}, stage -> {
+            if (stage == PathStatePhysicalStoreSet.DeleteStage.AFTER_SUPER_BATCH) {
+              throw new java.io.IOException("injected failure after super batch");
+            }
+          }));
+    }
+    try (PathStatePhysicalStoreSet reopened = PathStatePhysicalStoreSet.open(superFailure, scope,
+        Engine.ROCKSDB)) {
+      assertThrows(java.io.IOException.class, reopened::recoverPublication);
+      assertArrayEquals(expectedRoot, reopened.publishCurrent());
+    }
+    try (PathStatePhysicalStoreSet reopened = PathStatePhysicalStoreSet.open(superFailure, scope,
+        Engine.ROCKSDB)) {
+      assertEquals(PathStatePhysicalStoreSet.PublicationRecovery.NONE,
+          reopened.recoverPublication());
+      PathStatePhysicalGlobalIntent current = PathStatePhysicalGlobalIntent.decode(
+          Files.readAllBytes(superFailure.resolve(PathStatePhysicalStoreSet.CURRENT_FILE)));
+      assertArrayEquals(expectedRoot, current.getSuperRoot());
+      assertThrows(java.io.IOException.class,
+          () -> reopened.deleteAndPublish("proposal", new byte[]{5, 6}));
+    }
+  }
+
+  @Test
+  public void physicalIngestResumesAfterFailureThenBuildsAndReopensTheSameRoot()
+      throws Exception {
+    Path directory = temporaryFolder.newFolder("physical-ingest-e2e").toPath();
+    Path referenceDirectory = temporaryFolder.newFolder("physical-ingest-reference").toPath();
+    PathStateParticipantScope scope = new PathStateCanonicalizer().participantScope();
+    List<PhysicalRow> rows = Arrays.asList(
+        new PhysicalRow(new byte[]{1}, new byte[]{11}),
+        new PhysicalRow(new byte[]{1, 0}, new byte[]{12}),
+        new PhysicalRow(new byte[]{2}, new byte[]{22}));
+    byte[] sourceIdentity = bytes(42);
+    ResumablePhysicalSource interrupted = new ResumablePhysicalSource(
+        "proposal", rows, sourceIdentity, 2);
+
+    try (PathStatePhysicalStoreSet stores = PathStatePhysicalStoreSet.open(directory, scope,
+        Engine.ROCKSDB)) {
+      assertThrows(java.io.IOException.class,
+          () -> stores.ingestAndBuild(interrupted, 1, Long.MAX_VALUE));
+      PathStatePhysicalIngestCheckpoint checkpoint = stores.ingestCheckpoint("proposal");
+      assertEquals(2, checkpoint.getRows());
+      assertArrayEquals(new byte[]{1, 0}, checkpoint.getCursor());
+    }
+
+    ResumablePhysicalSource resumed = new ResumablePhysicalSource(
+        "proposal", rows, sourceIdentity, Integer.MAX_VALUE);
+    byte[] rebuiltRoot;
+    try (PathStatePhysicalStoreSet stores = PathStatePhysicalStoreSet.open(directory, scope,
+        Engine.ROCKSDB)) {
+      rebuiltRoot = stores.ingestAndBuild(resumed, 1, Long.MAX_VALUE).rootHash();
+      assertEquals(1, resumed.getScanCount("proposal"));
+      assertEquals(0, resumed.getScanCount("abi"));
+      assertArrayEquals(new byte[]{1, 0}, resumed.getLastCursor("proposal"));
+      PathStatePhysicalIngestCheckpoint checkpoint = stores.ingestCheckpoint("proposal");
+      assertEquals(3, checkpoint.getRows());
+      assertArrayEquals(new byte[]{2}, checkpoint.getCursor());
+    }
+
+    byte[] referenceRoot;
+    try (PathStatePhysicalStoreSet reference = PathStatePhysicalStoreSet.open(
+        referenceDirectory, scope, Engine.ROCKSDB)) {
+      PathStateRoot root = reference.createRoot();
+      for (PhysicalRow row : rows) {
+        root.put("proposal", row.key, row.value);
+      }
+      referenceRoot = root.rootHash();
+    }
+    assertArrayEquals(referenceRoot, rebuiltRoot);
+
+    try (PathStatePhysicalStoreSet reopened = PathStatePhysicalStoreSet.open(directory, scope,
+        Engine.ROCKSDB)) {
+      assertArrayEquals(referenceRoot, reopened.buildRootFromFlat().rootHash());
+    }
+  }
+
   private byte[] rootFor(PathStateStoreManifest manifest) throws Exception {
     byte[] stateRoot;
     PathStateRootMetadata progress;
@@ -251,6 +973,56 @@ public class PathStateNativeNodeStoreTest {
       assertArrayEquals(stateRoot, reopened.createRoot().rootHash());
     }
     return stateRoot;
+  }
+
+  private byte[] preparePhysicalTarget(Path directory, PathStateParticipantScope scope)
+      throws Exception {
+    byte[] expectedRoot;
+    try (PathStatePhysicalStoreSet stores = PathStatePhysicalStoreSet.open(directory, scope,
+        Engine.ROCKSDB)) {
+      PathStateRoot stateRoot = stores.createRoot();
+      stateRoot.put("account", new byte[]{1, 2}, new byte[]{3, 4});
+      stateRoot.put("proposal", new byte[]{5, 6}, new byte[]{7, 8});
+      expectedRoot = stateRoot.rootHash();
+      stores.persistFlatSnapshot(stateRoot);
+    }
+    try (PathStatePhysicalStoreSet stores = PathStatePhysicalStoreSet.open(directory, scope,
+        Engine.ROCKSDB)) {
+      assertArrayEquals(expectedRoot, stores.buildRootFromFlat().rootHash());
+    }
+    return expectedRoot;
+  }
+
+  private byte[] rootWithOnlyAccount(PathStateParticipantScope scope) throws Exception {
+    Path directory = temporaryFolder.newFolder("physical-delete-reference").toPath();
+    try (PathStatePhysicalStoreSet stores = PathStatePhysicalStoreSet.open(directory, scope,
+        Engine.ROCKSDB)) {
+      PathStateRoot root = stores.createRoot();
+      root.put("account", new byte[]{1, 2}, new byte[]{3, 4});
+      return root.rootHash();
+    }
+  }
+
+  private byte[] preparePublishedPhysicalTarget(Path directory,
+      PathStateParticipantScope scope) throws Exception {
+    byte[] expectedRoot = preparePhysicalTarget(directory, scope);
+    try (PathStatePhysicalStoreSet stores = PathStatePhysicalStoreSet.open(directory, scope,
+        Engine.ROCKSDB)) {
+      assertArrayEquals(expectedRoot, stores.publishCurrent());
+    }
+    return expectedRoot;
+  }
+
+  private void assertPublicationRejected(Path directory, PathStateParticipantScope scope)
+      throws Exception {
+    try (PathStatePhysicalStoreSet stores = PathStatePhysicalStoreSet.open(directory, scope,
+        Engine.ROCKSDB)) {
+      assertThrows(java.io.IOException.class, stores::recoverPublication);
+    }
+  }
+
+  private static byte[] metadata(String name) {
+    return name.getBytes(java.nio.charset.StandardCharsets.US_ASCII);
   }
 
   private PathStateStoreManifest manifest(String name, Engine engine) throws Exception {
@@ -286,5 +1058,103 @@ public class PathStateNativeNodeStoreTest {
       value[index] = (byte) (seed + index);
     }
     return value;
+  }
+
+  private static final class PhysicalRow {
+
+    private final byte[] key;
+    private final byte[] value;
+
+    private PhysicalRow(byte[] key, byte[] value) {
+      this.key = key;
+      this.value = value;
+    }
+  }
+
+  private static final class ResumablePhysicalSource implements SnapshotSource {
+
+    private final String dbName;
+    private final List<PhysicalRow> rows;
+    private final byte[] identity;
+    private final int failAfter;
+    private final java.util.Map<String, Integer> scanCounts = new java.util.LinkedHashMap<>();
+    private final java.util.Map<String, byte[]> lastCursors = new java.util.LinkedHashMap<>();
+
+    private ResumablePhysicalSource(String dbName, List<PhysicalRow> rows, byte[] identity,
+        int failAfter) {
+      this.dbName = dbName;
+      this.rows = rows;
+      this.identity = identity;
+      this.failAfter = failAfter;
+    }
+
+    @Override
+    public SnapshotIdentity identity() {
+      return new SnapshotIdentity(100, bytes(1), bytes(2), 300, P66Phase.P66_ON);
+    }
+
+    @Override
+    public Collection<String> databases() {
+      List<String> names = new ArrayList<>();
+      for (PathStateParticipantDescriptor.StoreIdentity store
+          : PathStateParticipantDescriptor.current().getStores()) {
+        names.add(store.getDbName());
+      }
+      return names;
+    }
+
+    @Override
+    public byte[] sourceIdentityDigest() {
+      return Arrays.copyOf(identity, identity.length);
+    }
+
+    @Override
+    public void scan(String name, EntryConsumer consumer) throws java.io.IOException {
+      scanAfter(name, null, consumer);
+    }
+
+    @Override
+    public void scanAfter(String name, byte[] cursor, EntryConsumer consumer)
+        throws java.io.IOException {
+      scanCounts.put(name, scanCounts.getOrDefault(name, 0) + 1);
+      lastCursors.put(name, cursor == null ? null : Arrays.copyOf(cursor, cursor.length));
+      if (!dbName.equals(name)) {
+        return;
+      }
+      int emitted = 0;
+      for (PhysicalRow row : rows) {
+        if (cursor != null && compareUnsigned(row.key, cursor) <= 0) {
+          continue;
+        }
+        consumer.accept(row.key, row.value);
+        emitted++;
+        if (emitted >= failAfter) {
+          throw new java.io.IOException("injected physical ingest interruption");
+        }
+      }
+    }
+
+    @Override
+    public void verifyIdentity(SnapshotIdentity expected) {
+    }
+
+    private int getScanCount(String name) {
+      return scanCounts.getOrDefault(name, 0);
+    }
+
+    private byte[] getLastCursor(String name) {
+      byte[] cursor = lastCursors.get(name);
+      return cursor == null ? null : Arrays.copyOf(cursor, cursor.length);
+    }
+  }
+
+  private static int compareUnsigned(byte[] left, byte[] right) {
+    for (int index = 0; index < Math.min(left.length, right.length); index++) {
+      int compared = Integer.compare(left[index] & 0xff, right[index] & 0xff);
+      if (compared != 0) {
+        return compared;
+      }
+    }
+    return Integer.compare(left.length, right.length);
   }
 }

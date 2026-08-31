@@ -14,6 +14,7 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.Rule;
@@ -26,6 +27,8 @@ import org.tron.core.capsule.BlockCapsule;
 import org.tron.core.capsule.BlockCapsule.BlockId;
 import org.tron.core.config.args.Storage;
 import org.tron.core.db.Manager;
+import org.tron.core.db2.ISession;
+import org.tron.core.db2.archive.BlockSnapshotMeta;
 import org.tron.core.db2.archive.LatestStateGenerationAdapter.SnapshotCapableStore;
 import org.tron.core.db2.archive.LatestStateGenerationAdapter.StoreSnapshot;
 import org.tron.core.db2.common.DB;
@@ -61,14 +64,7 @@ public class PathStateManagerStartupIntegrationTest {
   public void readyCurrentAttachesExactCanonicalHeadAndCloses() throws Exception {
     Path output = temporaryFolder.newFolder("startup-ready").toPath();
     Path root = output.resolve("path-state-root");
-    PathStateStoreManifest manifest = PathStateStoreManifest.createOrOpen(root, Engine.ROCKSDB);
-    PathStateRootMetadata base;
-    try (PathStateNodeStoreSet stores = PathStateNodeStoreSet.openBase(manifest)) {
-      PathStateRoot state = stores.createRoot();
-      base = PathStateRootMetadata.base(100, bytes(1), bytes(2), 300,
-          P66Phase.P66_ON, manifest.getIdentityDigest(), state.rootHash(), bytes(3));
-      new PathStateBasePublication(manifest).publish(stores, base);
-    }
+    PathStateRootMetadata base = publishEmptyPhysicalCurrent(root, 100, 1, 2);
 
     DynamicPropertiesStore dynamic = mock(DynamicPropertiesStore.class);
     when(dynamic.getLatestBlockHeaderNumber()).thenReturn(100L);
@@ -91,6 +87,12 @@ public class PathStateManagerStartupIntegrationTest {
     assertNull(manager.getPathStateSnapshotHead());
     assertNull(manager.getPathStateRuntime());
 
+    withConfig(output, true, () -> invoke(manager, "initPathStateRoot"));
+    assertArrayEquals(base.encode(), manager.getPathStateSnapshotHead().getHead().encode());
+    assertEquals(PathStateRuntimeAttachment.State.READY,
+        manager.getPathStateRuntime().status().getState());
+    invoke(manager, "closePathStateRoot");
+
     when(dynamic.getLatestBlockHeaderNumber()).thenReturn(101L);
     assertThrows(IllegalStateException.class,
         () -> withConfig(output, true, () -> invoke(manager, "initPathStateRoot")));
@@ -98,27 +100,60 @@ public class PathStateManagerStartupIntegrationTest {
   }
 
   @Test
-  public void shortReorgRewindsToChainbaseHeadAndRetiresOldSuffix() throws Exception {
-    Path output = temporaryFolder.newFolder("short-reorg").toPath();
+  public void readyManagerPublishesOneBlockFinalAndRestartsAtTheNewHead() throws Exception {
+    Path output = temporaryFolder.newFolder("startup-one-block").toPath();
     Path root = output.resolve("path-state-root");
-    PathStateStoreManifest manifest = PathStateStoreManifest.createOrOpen(root, Engine.ROCKSDB);
-    PathStateRootMetadata base;
-    try (PathStateNodeStoreSet stores = PathStateNodeStoreSet.openBase(manifest)) {
-      PathStateRoot state = stores.createRoot();
-      base = PathStateRootMetadata.base(100, bytes(1), bytes(2), 300,
-          P66Phase.P66_ON, manifest.getIdentityDigest(), state.rootHash(), bytes(3));
-      new PathStateBasePublication(manifest).publish(stores, base);
-    }
-    PathStateSnapshotHead builder = PathStateSnapshotHead.open(
-        manifest, PathStateLayerLimits.defaults());
-    PathStateRootMetadata first = builder.advance(transition(101, 11, base.getBlockHash()));
-    PathStateRootMetadata oldSecond = builder.advance(transition(102, 12,
-        first.getBlockHash()));
+    PathStateRootMetadata base = publishEmptyPhysicalCurrent(root, 100, 1, 2);
 
     DynamicPropertiesStore dynamic = mock(DynamicPropertiesStore.class);
-    when(dynamic.getLatestBlockHeaderNumber()).thenReturn(102L);
-    when(dynamic.getLatestBlockHeaderHash()).thenReturn(
-        Sha256Hash.wrap(oldSecond.getBlockHash()));
+    when(dynamic.getLatestBlockHeaderNumber()).thenReturn(100L);
+    when(dynamic.getLatestBlockHeaderHash()).thenReturn(Sha256Hash.wrap(base.getBlockHash()));
+    ChainBaseManager chainBase = mock(ChainBaseManager.class);
+    when(chainBase.getDynamicPropertiesStore()).thenReturn(dynamic);
+    when(chainBase.getAccountAssetStore()).thenReturn(mock(AccountAssetStore.class));
+    Manager manager = new Manager();
+    setChainBaseManager(manager, chainBase);
+    SnapshotManager[] snapshotHolder = new SnapshotManager[1];
+
+    byte[] childHash = bytes(9);
+    withConfig(output, true, () -> {
+      SnapshotManager snapshots = new SnapshotManager("");
+      snapshots.getDbs().add(propertiesStoreWithP66Enabled());
+      snapshots.enable();
+      snapshotHolder[0] = snapshots;
+      setField(manager, "revokingStore", snapshots);
+      invoke(manager, "initPathStateRoot");
+    });
+    SnapshotManager snapshots = snapshotHolder[0];
+    try (ISession session = snapshots.buildSession()) {
+      byte[] preview = snapshots.previewPathStateRoot(BlockSnapshotMeta.forBlock(
+          101, childHash, base.getBlockHash(), 303));
+      assertNotNull(preview);
+      assertArrayEquals(base.getStateRoot(), preview);
+      session.commit(BlockSnapshotMeta.forBlock(101, childHash, base.getBlockHash(), 303));
+    }
+    assertEquals(101, manager.getPathStateSnapshotHead().getHead().getBlockNumber());
+    assertEquals(PathStateRuntimeAttachment.State.READY,
+        manager.getPathStateRuntime().status().getState());
+    invoke(manager, "closePathStateRoot");
+
+    when(dynamic.getLatestBlockHeaderNumber()).thenReturn(101L);
+    when(dynamic.getLatestBlockHeaderHash()).thenReturn(Sha256Hash.wrap(childHash));
+    withConfig(output, true, () -> invoke(manager, "initPathStateRoot"));
+    assertEquals(101, manager.getPathStateSnapshotHead().getHead().getBlockNumber());
+    assertArrayEquals(childHash, manager.getPathStateSnapshotHead().getHead().getBlockHash());
+    invoke(manager, "closePathStateRoot");
+  }
+
+  @Test
+  public void shortReorgBeyondPhysicalJournalFailsClosed() throws Exception {
+    Path output = temporaryFolder.newFolder("short-reorg").toPath();
+    Path root = output.resolve("path-state-root");
+    PathStateRootMetadata base = publishEmptyPhysicalCurrent(root, 100, 1, 2);
+
+    DynamicPropertiesStore dynamic = mock(DynamicPropertiesStore.class);
+    when(dynamic.getLatestBlockHeaderNumber()).thenReturn(100L);
+    when(dynamic.getLatestBlockHeaderHash()).thenReturn(Sha256Hash.wrap(base.getBlockHash()));
     ChainBaseManager chainBase = mock(ChainBaseManager.class);
     when(chainBase.getDynamicPropertiesStore()).thenReturn(dynamic);
     when(chainBase.getAccountAssetStore()).thenReturn(mock(AccountAssetStore.class));
@@ -127,28 +162,69 @@ public class PathStateManagerStartupIntegrationTest {
     setField(manager, "revokingStore", new SnapshotManager(""));
 
     withConfig(output, true, () -> invoke(manager, "initPathStateRoot"));
-    when(dynamic.getLatestBlockHeaderNumber()).thenReturn(101L);
-    when(dynamic.getLatestBlockHeaderHash()).thenReturn(Sha256Hash.wrap(first.getBlockHash()));
-    invoke(manager, "rewindPathStateRootAfterPop");
-
-    assertArrayEquals(first.encode(), manager.getPathStateSnapshotHead().getHead().encode());
-    assertArrayEquals(first.encode(), new PathStateCurrentStore(manifest).current().encode());
-    assertFalse(Files.exists(manifest.getLayerDirectory(
-        oldSecond.getBlockNumber(), oldSecond.getBlockHash())));
-    assertFalse(manager.getPathStateRuntime().isFailed());
-    assertEquals(PathStateRuntimeAttachment.State.READY,
-        manager.getPathStateRuntime().status().getState());
-    assertEquals(101L, manager.getPathStateRuntime().status().getReadyBlockNumber());
-
-    when(dynamic.getLatestBlockHeaderNumber()).thenReturn(100L);
+    when(dynamic.getLatestBlockHeaderNumber()).thenReturn(99L);
     when(dynamic.getLatestBlockHeaderHash()).thenReturn(Sha256Hash.wrap(bytes(99)));
     invoke(manager, "rewindPathStateRootAfterPop");
     assertNotNull(manager.getPathStateRuntime().getFailure());
     assertEquals(PathStateRuntimeAttachment.FailureStage.REORG,
         manager.getPathStateRuntime().status().getFailureStage());
-    assertEquals(100L, manager.getPathStateRuntime().status().getObservedBlockNumber());
+    assertEquals(99L, manager.getPathStateRuntime().status().getObservedBlockNumber());
     assertEquals(1L, manager.getPathStateRuntime().status().getRootLag());
-    assertArrayEquals(first.encode(), new PathStateCurrentStore(manifest).current().encode());
+    assertArrayEquals(base.encode(), manager.getPathStateSnapshotHead().getHead().encode());
+    invoke(manager, "closePathStateRoot");
+    try (PathStatePhysicalSnapshotHead reopened = PathStatePhysicalSnapshotHead.open(
+        root, Engine.ROCKSDB)) {
+      assertArrayEquals(base.encode(), reopened.getHead().encode());
+    }
+  }
+
+  @Test
+  public void managerPopsPhysicalChildAdvancesSiblingAndRestarts() throws Exception {
+    Path output = temporaryFolder.newFolder("physical-manager-short-reorg").toPath();
+    Path root = output.resolve("path-state-root");
+    PathStateRootMetadata base = publishEmptyPhysicalCurrent(root, 100, 1, 2);
+
+    DynamicPropertiesStore dynamic = mock(DynamicPropertiesStore.class);
+    when(dynamic.getLatestBlockHeaderNumber()).thenReturn(100L);
+    when(dynamic.getLatestBlockHeaderHash()).thenReturn(Sha256Hash.wrap(base.getBlockHash()));
+    ChainBaseManager chainBase = mock(ChainBaseManager.class);
+    when(chainBase.getDynamicPropertiesStore()).thenReturn(dynamic);
+    when(chainBase.getAccountAssetStore()).thenReturn(mock(AccountAssetStore.class));
+    SnapshotManager snapshots = new SnapshotManager("");
+    Manager manager = new Manager();
+    setChainBaseManager(manager, chainBase);
+
+    withConfig(output, true, () -> {
+      snapshots.getDbs().add(propertiesStoreWithP66Enabled());
+      snapshots.enable();
+      setField(manager, "revokingStore", snapshots);
+      invoke(manager, "initPathStateRoot");
+    });
+    byte[] oldChildHash = bytes(21);
+    try (ISession session = snapshots.buildSession()) {
+      session.commit(BlockSnapshotMeta.forBlock(101, oldChildHash, base.getBlockHash(), 303));
+    }
+    assertEquals(101, manager.getPathStateSnapshotHead().getHead().getBlockNumber());
+
+    snapshots.fastPop();
+    invoke(manager, "rewindPathStateRootAfterPop");
+    assertEquals(PathStateRuntimeAttachment.State.READY,
+        manager.getPathStateRuntime().status().getState());
+    assertArrayEquals(base.encode(), manager.getPathStateSnapshotHead().getHead().encode());
+
+    byte[] siblingHash = bytes(22);
+    try (ISession session = snapshots.buildSession()) {
+      session.commit(BlockSnapshotMeta.forBlock(101, siblingHash, base.getBlockHash(), 306));
+    }
+    assertArrayEquals(siblingHash, manager.getPathStateSnapshotHead().getHead().getBlockHash());
+    invoke(manager, "closePathStateRoot");
+
+    when(dynamic.getLatestBlockHeaderNumber()).thenReturn(101L);
+    when(dynamic.getLatestBlockHeaderHash()).thenReturn(Sha256Hash.wrap(siblingHash));
+    withConfig(output, true, () -> invoke(manager, "initPathStateRoot"));
+    assertArrayEquals(siblingHash, manager.getPathStateSnapshotHead().getHead().getBlockHash());
+    assertEquals(PathStateRuntimeAttachment.State.READY,
+        manager.getPathStateRuntime().status().getState());
     invoke(manager, "closePathStateRoot");
   }
 
@@ -177,6 +253,7 @@ public class PathStateManagerStartupIntegrationTest {
     AtomicInteger closed = new AtomicInteger();
     Manager manager = new Manager();
     setChainBaseManager(manager, chainBase);
+    SnapshotManager[] snapshotHolder = new SnapshotManager[1];
 
     withConfig(output, true, () -> {
       SnapshotManager snapshots = new SnapshotManager("");
@@ -185,6 +262,8 @@ public class PathStateManagerStartupIntegrationTest {
         snapshots.getDbs().add(emptyNativeStore(participant.getDbName(), blockNumber,
             blockId.getBytes(), closed));
       }
+      snapshots.enable();
+      snapshotHolder[0] = snapshots;
       setField(manager, "revokingStore", snapshots);
       invoke(manager, "initPathStateRoot");
     });
@@ -192,9 +271,40 @@ public class PathStateManagerStartupIntegrationTest {
     PathStateRootMetadata head = manager.getPathStateSnapshotHead().getHead();
     assertArrayEquals(blockId.getBytes(), head.getBlockHash());
     assertArrayEquals(parentHash.getBytes(), head.getParentHash());
-    assertNotNull(PathStateStoreManifest.validateExisting(
+    assertNotNull(PathStatePhysicalStoreManifest.validateExisting(
         output.resolve("path-state-root"), Engine.ROCKSDB));
+    assertFalse(Files.exists(output.resolve("path-state-root/base/nodes")));
+    assertFalse(Files.exists(output.resolve("path-state-root/rebuild-spool")));
     assertEquals(PathStateParticipantDescriptor.current().getStores().size(), closed.get());
+
+    byte[] childHash = bytes(4);
+    try (ISession session = snapshotHolder[0].buildSession()) {
+      BlockSnapshotMeta child = BlockSnapshotMeta.forBlock(101, childHash,
+          blockId.getBytes(), 303);
+      assertNotNull(snapshotHolder[0].previewPathStateRoot(child));
+      session.commit(child);
+    }
+    assertEquals(101, manager.getPathStateSnapshotHead().getHead().getBlockNumber());
+    invoke(manager, "closePathStateRoot");
+    when(dynamic.getLatestBlockHeaderNumber()).thenReturn(101L);
+    when(dynamic.getLatestBlockHeaderHash()).thenReturn(Sha256Hash.wrap(childHash));
+    withConfig(output, true, () -> invoke(manager, "initPathStateRoot"));
+    assertEquals(101, manager.getPathStateSnapshotHead().getHead().getBlockNumber());
+    assertFalse(Files.exists(output.resolve("path-state-root/base/nodes")));
+    assertFalse(Files.exists(output.resolve("path-state-root/rebuild-spool")));
+    invoke(manager, "closePathStateRoot");
+  }
+
+  @SuppressWarnings("unchecked")
+  private static Chainbase propertiesStoreWithP66Enabled() {
+    DB<byte[], byte[]> database = mock(DB.class);
+    when(database.getDbName()).thenReturn("properties");
+    when(database.iterator()).thenReturn(Collections.emptyIterator());
+    when(database.get(org.mockito.ArgumentMatchers.any(byte[].class)))
+        .thenAnswer(invocation -> Arrays.equals((byte[]) invocation.getArgument(0),
+            "ALLOW_ASSET_OPTIMIZATION".getBytes(java.nio.charset.StandardCharsets.UTF_8))
+            ? java.nio.ByteBuffer.allocate(Long.BYTES).putLong(1L).array() : null);
+    return new Chainbase(new SnapshotRoot(database));
   }
 
   @SuppressWarnings("unchecked")
@@ -204,6 +314,13 @@ public class PathStateManagerStartupIntegrationTest {
         withSettings().extraInterfaces(SnapshotCapableStore.class));
     SnapshotCapableStore capable = (SnapshotCapableStore) database;
     when(database.getDbName()).thenReturn(dbName);
+    when(database.iterator()).thenReturn(Collections.emptyIterator());
+    if ("properties".equals(dbName)) {
+      when(database.get(org.mockito.ArgumentMatchers.any(byte[].class)))
+          .thenAnswer(invocation -> Arrays.equals((byte[]) invocation.getArgument(0),
+              "ALLOW_ASSET_OPTIMIZATION".getBytes(java.nio.charset.StandardCharsets.UTF_8))
+              ? java.nio.ByteBuffer.allocate(Long.BYTES).putLong(1L).array() : null);
+    }
     when(capable.getDbName()).thenReturn(dbName);
     when(capable.getSourceIdentity()).thenReturn("source-" + dbName);
     StoreSnapshot snapshot = mock(StoreSnapshot.class);
@@ -275,6 +392,19 @@ public class PathStateManagerStartupIntegrationTest {
       value[index] = (byte) (seed + index);
     }
     return value;
+  }
+
+  private static PathStateRootMetadata publishEmptyPhysicalCurrent(Path root,
+      long blockNumber, int blockSeed, int parentSeed) throws Exception {
+    try (PathStatePhysicalStoreSet stores = PathStatePhysicalStoreSet.open(root,
+        new PathStateCanonicalizer().participantScope(), Engine.ROCKSDB)) {
+      PathStateRoot state = stores.buildRootFromFlat();
+      PathStateRootMetadata metadata = PathStateRootMetadata.base(blockNumber, bytes(blockSeed),
+          bytes(parentSeed), 300, P66Phase.P66_ON, stores.getFormatDigest(), state.rootHash(),
+          bytes(3));
+      stores.publishCurrent(metadata);
+      return metadata;
+    }
   }
 
   private static PathStateBlockTransition transition(long blockNumber, int seed,

@@ -72,6 +72,14 @@ final class PathStateMetadataFile {
     replaceCurrent(path, metadata, temporary -> { });
   }
 
+  static void replaceCurrentBytes(Path path, byte[] encoded) throws IOException {
+    byte[] value = Arrays.copyOf(Objects.requireNonNull(encoded, "encoded"), encoded.length);
+    if (value.length == 0) {
+      throw new IllegalArgumentException("path-state CURRENT record must not be empty");
+    }
+    publish(Objects.requireNonNull(path, "path"), value, true, temporary -> { });
+  }
+
   static void replaceCurrent(Path path, PathStateRootMetadata metadata, FaultHook faultHook)
       throws IOException {
     publish(Objects.requireNonNull(path, "path"),

@@ -32,10 +32,10 @@ public final class PathStateCommitmentCodec {
   private PathStateCommitmentCodec() {
   }
 
-  /** Returns the secure per-Store trie key for one canonical present value. */
-  public static byte[] storeLeafKey(int stableStoreId, byte[] canonicalKey) {
+  /** Returns the secure per-Store trie key for one exact physical raw key. */
+  public static byte[] storeLeafKey(int stableStoreId, byte[] physicalRawKey) {
     requireStoreId(stableStoreId);
-    byte[] key = copy(canonicalKey, "canonicalKey");
+    byte[] key = copy(physicalRawKey, "physicalRawKey");
     ByteBuffer material = ByteBuffer.allocate(Short.BYTES + STORE_LEAF_KEY_DOMAIN.length
         + Short.BYTES + Integer.BYTES + Integer.BYTES + key.length);
     putDomain(material, STORE_LEAF_KEY_DOMAIN);
@@ -47,9 +47,9 @@ public final class PathStateCommitmentCodec {
   }
 
   /** Encodes PRESENT(empty) distinctly from PRESENT(0x00); ABSENT has no leaf. */
-  public static byte[] presentLeafValue(byte[] canonicalValue) {
-    byte[] value = Arrays.copyOf(Objects.requireNonNull(canonicalValue, "canonicalValue"),
-        canonicalValue.length);
+  public static byte[] presentLeafValue(byte[] physicalRawValue) {
+    byte[] value = Arrays.copyOf(Objects.requireNonNull(physicalRawValue, "physicalRawValue"),
+        physicalRawValue.length);
     return rlpList(new byte[]{PRESENT_TAG}, value);
   }
 

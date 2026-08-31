@@ -1,0 +1,1521 @@
+package org.tron.core.db2.stateroot;
+
+import com.google.common.hash.Hasher;
+import com.google.common.hash.Hashing;
+import java.io.Closeable;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.LinkOption;
+import java.nio.file.Path;
+import java.util.HashSet;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.stream.Stream;
+import org.tron.common.crypto.Hash;
+import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
+
+/**
+ * Fresh-format physical owner for the TASK-018 27 participant databases and one super database.
+ *
+ * <p>Each native database owns three disjoint domains: {@code F|secureKey -> encodedLeaf},
+ * {@code N|path -> nodeRlp}, and {@code M|name -> metadata}. This class deliberately does not
+ * provide an upgrade path from the old shared {@code base/nodes} layout.
+ */
+public final class PathStatePhysicalStoreSet implements Closeable {
+
+  static final long DEFAULT_CHECKPOINT_ROWS = 1_000_000L;
+  static final long DEFAULT_CHECKPOINT_BYTES = 256L * 1024 * 1024;
+
+  private static final String STORES_DIRECTORY = "stores";
+  private static final String SUPER_DIRECTORY = "super";
+  private static final String NODES_DIRECTORY = "nodes";
+  private static final String REVERSE_DIRECTORY = "reverse";
+  static final String INTENT_FILE = "INTENT";
+  static final String CURRENT_FILE = "CURRENT";
+  private static final byte FLAT_PREFIX = 'F';
+  private static final byte NODE_PREFIX = 'N';
+  private static final byte META_PREFIX = 'M';
+  private static final byte[] FLAT_ROOT_METADATA = new byte[]{'f', 'l', 'a', 't', '-', 'r', 'o',
+      'o', 't'};
+  private static final byte[] FLAT_COMPLETE_METADATA = new byte[]{'f', 'l', 'a', 't', '-', 'c',
+      'o', 'm', 'p', 'l', 'e', 't', 'e'};
+  private static final byte[] FLAT_INGEST_CHECKPOINT = new byte[]{'f', 'l', 'a', 't', '-', 'i',
+      'n', 'g', 'e', 's', 't'};
+  private static final byte[] FLAT_INGEST_COMPLETE = new byte[]{'f', 'l', 'a', 't', '-', 'i', 'n',
+      'g', 'e', 's', 't', '-', 'c', 'o', 'm', 'p', 'l', 'e', 't', 'e'};
+  private static final byte[] FLAT_DIGEST_METADATA = new byte[]{'f', 'l', 'a', 't', '-', 'd', 'i',
+      'g', 'e', 's', 't'};
+  private static final byte[] STORE_GENERATION_METADATA = new byte[]{'s', 't', 'o', 'r', 'e', '-',
+      'g', 'e', 'n', 'e', 'r', 'a', 't', 'i', 'o', 'n'};
+  private static final byte[] SUPER_GENERATION_METADATA = new byte[]{'s', 'u', 'p', 'e', 'r', '-',
+      'g', 'e', 'n', 'e', 'r', 'a', 't', 'i', 'o', 'n'};
+
+  private final Path directory;
+  private final PathStatePhysicalStoreManifest manifest;
+  private final PathStateParticipantScope scope;
+  private final Map<String, PhysicalStore> participants = new LinkedHashMap<>();
+  private final PhysicalStore superStore;
+  private boolean rootClaimed;
+  private boolean closed;
+
+  private PathStatePhysicalStoreSet(PathStatePhysicalStoreManifest manifest,
+      PathStateParticipantScope scope)
+      throws IOException {
+    this.manifest = manifest;
+    this.directory = manifest.getDirectory();
+    this.scope = requireExactScope(scope);
+    try {
+      for (PathStateParticipant participant : scope.getParticipants()) {
+        Path participantDirectory = directory.resolve(STORES_DIRECTORY).resolve(String.format(
+            "%02d-%s", participant.getStoreId(), participant.getDbName())).resolve(NODES_DIRECTORY);
+        participants.put(participant.getDbName(), new PhysicalStore(participantDirectory,
+            manifest.getEngine()));
+      }
+      superStore = new PhysicalStore(directory.resolve(SUPER_DIRECTORY).resolve(NODES_DIRECTORY),
+          manifest.getEngine());
+    } catch (IOException | RuntimeException failure) {
+      closeAfterFailure(failure);
+      throw failure;
+    }
+  }
+
+  /** Creates or opens only the TASK-018 fresh physical layout. */
+  public static PathStatePhysicalStoreSet open(Path directory, PathStateParticipantScope scope,
+      Engine engine) throws IOException {
+    Path root = Objects.requireNonNull(directory, "directory").toAbsolutePath().normalize();
+    if (Files.isSymbolicLink(root)) {
+      throw new IOException("path-state physical root must not be a symbolic link: " + root);
+    }
+    rejectLegacySharedNodes(root);
+    PathStatePhysicalStoreManifest manifest = PathStatePhysicalStoreManifest.createOrOpen(root,
+        Objects.requireNonNull(engine, "engine"));
+    return new PathStatePhysicalStoreSet(manifest, Objects.requireNonNull(scope, "scope"));
+  }
+
+  /** Opens only a fully materialized physical layout; missing child databases fail closed. */
+  public static PathStatePhysicalStoreSet openExisting(Path directory,
+      PathStateParticipantScope scope, Engine engine) throws IOException {
+    Path root = Objects.requireNonNull(directory, "directory").toAbsolutePath().normalize();
+    rejectLegacySharedNodes(root);
+    PathStatePhysicalStoreManifest manifest = PathStatePhysicalStoreManifest.validateExisting(
+        root, Objects.requireNonNull(engine, "engine"));
+    PathStateParticipantScope admittedScope = requireExactScope(scope);
+    for (PathStateParticipant participant : admittedScope.getParticipants()) {
+      requireStoreDirectory(root.resolve(STORES_DIRECTORY).resolve(String.format(
+          "%02d-%s", participant.getStoreId(), participant.getDbName()))
+          .resolve(NODES_DIRECTORY));
+    }
+    requireStoreDirectory(root.resolve(SUPER_DIRECTORY).resolve(NODES_DIRECTORY));
+    return new PathStatePhysicalStoreSet(manifest, admittedScope);
+  }
+
+  public synchronized PhysicalStore participant(String dbName) {
+    requireOpen();
+    PhysicalStore store = participants.get(Objects.requireNonNull(dbName, "dbName"));
+    if (store == null) {
+      throw new IllegalArgumentException("unknown path-state participant: " + dbName);
+    }
+    return store;
+  }
+
+  public synchronized PhysicalStore superStore() {
+    requireOpen();
+    return superStore;
+  }
+
+  /** Creates the one in-memory root owner backed by this set's physically separate node stores. */
+  public synchronized PathStateRoot createRoot() {
+    requireOpen();
+    if (rootClaimed) {
+      throw new IllegalStateException("path-state physical store set already has a root owner");
+    }
+    rootClaimed = true;
+    return new PathStateRoot(scope, participant -> participant(participant.getDbName()).nodeStore(),
+        superStore.nodeStore());
+  }
+
+  public Path getDirectory() {
+    return directory;
+  }
+
+  public byte[] getFormatDigest() {
+    return manifest.getIdentityDigest();
+  }
+
+  synchronized void saveIngestCheckpoint(String dbName, PathStatePhysicalIngestCheckpoint value) {
+    participant(dbName).putMetadata(FLAT_INGEST_CHECKPOINT,
+        Objects.requireNonNull(value, "value").encode());
+  }
+
+  synchronized PathStatePhysicalIngestCheckpoint ingestCheckpoint(String dbName) {
+    byte[] encoded = participant(dbName).getMetadata(FLAT_INGEST_CHECKPOINT);
+    return encoded == null ? null : PathStatePhysicalIngestCheckpoint.decode(encoded);
+  }
+
+  /** Ingests exact physical rows into one F domain and durably advances its source cursor. */
+  synchronized void ingestFlat(String dbName, PathStateRebuildCoordinator.SnapshotSource source,
+      long rowThreshold, long byteThreshold) throws IOException {
+    if (rowThreshold <= 0 || byteThreshold <= 0) {
+      throw new IllegalArgumentException("ingest checkpoint thresholds must be positive");
+    }
+    PathStateParticipant participant = scope.require(dbName);
+    PathStateRebuildCoordinator.SnapshotSource pinned = Objects.requireNonNull(source, "source");
+    byte[] identity = pinned.sourceIdentityDigest();
+    if (identity.length != PathStateCommitmentCodec.ROOT_LENGTH) {
+      throw new IOException("physical ingest source identity must contain exactly 32 bytes");
+    }
+    byte[] complete = participant(dbName).getMetadata(FLAT_INGEST_COMPLETE);
+    if (complete != null) {
+      if (!Arrays.equals(complete, identity)) {
+        throw new IOException("physical ingest completion source identity differs: " + dbName);
+      }
+      return;
+    }
+    PathStatePhysicalIngestCheckpoint prior = ingestCheckpoint(dbName);
+    if (prior != null && !Arrays.equals(prior.getSourceIdentity(), identity)) {
+      throw new IOException("physical ingest checkpoint source identity differs: " + dbName);
+    }
+    long[] progress = prior == null ? new long[]{0, 0} : new long[]{prior.getRows(), prior.getBytes()};
+    byte[][] cursor = new byte[][]{prior == null ? null : prior.getCursor()};
+    long[] sinceCheckpoint = new long[2];
+    pinned.scanAfter(dbName, cursor[0], (physicalKey, physicalValue) -> {
+      byte[] key = Arrays.copyOf(physicalKey, physicalKey.length);
+      participant(dbName).putFlat(PathStateCommitmentCodec.storeLeafKey(participant.getStoreId(), key),
+          PathStateCommitmentCodec.presentLeafValue(physicalValue));
+      cursor[0] = key;
+      progress[0]++;
+      progress[1] += key.length + physicalValue.length;
+      sinceCheckpoint[0]++;
+      sinceCheckpoint[1] += key.length + physicalValue.length;
+      if (sinceCheckpoint[0] >= rowThreshold || sinceCheckpoint[1] >= byteThreshold) {
+        saveIngestCheckpoint(dbName, new PathStatePhysicalIngestCheckpoint(identity, cursor[0],
+            progress[0], progress[1]));
+        sinceCheckpoint[0] = 0;
+        sinceCheckpoint[1] = 0;
+      }
+    });
+    if (cursor[0] != null) {
+      saveIngestCheckpoint(dbName, new PathStatePhysicalIngestCheckpoint(identity, cursor[0],
+          progress[0], progress[1]));
+    }
+    participant(dbName).putMetadata(FLAT_INGEST_COMPLETE, identity);
+  }
+
+  /** Validates one exact-27 pinned source, resumes all unfinished F ingests, then builds the root. */
+  public synchronized PathStateRoot ingestAndBuild(
+      PathStateRebuildCoordinator.SnapshotSource source)
+      throws IOException {
+    return ingestAndBuild(source, DEFAULT_CHECKPOINT_ROWS, DEFAULT_CHECKPOINT_BYTES);
+  }
+
+  /** Validates one exact-27 pinned source, resumes all unfinished F ingests, then builds the root. */
+  synchronized PathStateRoot ingestAndBuild(PathStateRebuildCoordinator.SnapshotSource source,
+      long rowThreshold, long byteThreshold) throws IOException {
+    PathStateRebuildCoordinator.SnapshotSource pinned = Objects.requireNonNull(source, "source");
+    PathStateRebuildCoordinator.SnapshotIdentity identity = Objects.requireNonNull(
+        pinned.identity(), "source identity");
+    pinned.verifyIdentity(identity);
+    PathStateParticipantDescriptor.current().requireExactDatabases(pinned.databases());
+    for (PathStateParticipant participant : scope.getParticipants()) {
+      ingestFlat(participant.getDbName(), pinned, rowThreshold, byteThreshold);
+    }
+    return buildRootFromFlat();
+  }
+
+  /**
+   * Persists a complete local F-domain snapshot and its root marker.
+   *
+   * <p>This is intentionally not a 28-database global publication protocol. Callers must add the
+   * TASK-018 global intent before treating this marker as a runtime CURRENT authority.
+   */
+  public synchronized void persistFlatSnapshot(PathStateRoot root) {
+    requireOpen();
+    PathStateRoot supplied = Objects.requireNonNull(root, "root");
+    byte[] stateRoot = supplied.rootHash();
+    for (PathStateRoot.LeafRecord record : supplied.leafRecords()) {
+      PathStateParticipant participant = participant(record.getStoreId());
+      participant(participant.getDbName()).putFlat(record.getSecureKey(),
+          record.getEncodedValue());
+    }
+    superStore.putMetadata(FLAT_ROOT_METADATA, stateRoot);
+  }
+
+  /** Restores one root from every participant F domain and verifies the stored local root marker. */
+  public synchronized PathStateRoot restoreRootFromFlat() throws IOException {
+    requireOpen();
+    byte[] expectedRoot = superStore.getMetadata(FLAT_ROOT_METADATA);
+    if (expectedRoot == null || expectedRoot.length != PathStateCommitmentCodec.ROOT_LENGTH) {
+      throw new IllegalStateException("path-state physical F root marker is missing or invalid");
+    }
+    PathStateRoot root = createRoot();
+    List<PathStateRoot.LeafRecord> records = new ArrayList<>();
+    for (PathStateParticipant participant : scope.getParticipants()) {
+      PhysicalStore store = participant(participant.getDbName());
+      store.scanFlat(entry -> records.add(new PathStateRoot.LeafRecord(participant.getStoreId(),
+          unprefixedFlatKey(entry.getKey()), entry.getValue())));
+    }
+    root.restoreLeaves(records, expectedRoot);
+    return root;
+  }
+
+  /**
+   * Streams each participant F domain in secure-key order into its N domain and marks completion.
+   *
+   * <p>A valid per-Store completion marker skips that Store on retry. This method has no source
+   * database parameter and therefore cannot trigger a source rescan.
+   */
+  public synchronized PathStateRoot buildRootFromFlat() throws IOException {
+    return buildRootFromFlat((participant, storeRoot) -> { });
+  }
+
+  synchronized PathStateRoot buildRootFromFlat(BuildFaultHook faultHook) throws IOException {
+    requireOpen();
+    BuildFaultHook hook = Objects.requireNonNull(faultHook, "faultHook");
+    PathStateRoot root = createRoot();
+    List<PathStatePhysicalGlobalIntent.ParticipantTarget> targets = new ArrayList<>();
+    for (PathStateParticipant participant : scope.getParticipants()) {
+      PhysicalStore store = participant(participant.getDbName());
+      byte[] completedRoot = store.getMetadata(FLAT_COMPLETE_METADATA);
+      if (completedRoot != null) {
+        if (completedRoot.length != PathStateCommitmentCodec.ROOT_LENGTH) {
+          throw new IllegalStateException("path-state physical FLAT_COMPLETE marker is invalid");
+        }
+        byte[] flatDigest = requireDigest(store.getMetadata(FLAT_DIGEST_METADATA),
+            "path-state physical flat digest is missing or invalid");
+        byte[] generation = requireDigest(store.getMetadata(STORE_GENERATION_METADATA),
+            "path-state physical Store generation is missing or invalid");
+        requireSame(generation, participantGeneration(participant, flatDigest, completedRoot),
+            "path-state physical Store generation differs");
+        targets.add(new PathStatePhysicalGlobalIntent.ParticipantTarget(participant.getStoreId(),
+            generation, flatDigest, completedRoot));
+        root.completeRebuildParticipant(participant.getDbName(), completedRoot);
+        continue;
+      }
+      store.clearNodes();
+      PathStateStackTrie trie = new PathStateStackTrie(store.nodeStore()::put);
+      Hasher flatHasher = Hashing.sha256().newHasher();
+      store.scanFlat(entry -> {
+        byte[] secureKey = unprefixedFlatKey(entry.getKey());
+        byte[] encodedValue = entry.getValue();
+        flatHasher.putInt(secureKey.length).putBytes(secureKey)
+            .putInt(encodedValue.length).putBytes(encodedValue);
+        trie.update(secureKey, encodedValue);
+      });
+      byte[] storeRoot = trie.rootHash();
+      byte[] flatDigest = flatHasher.hash().asBytes();
+      byte[] generation = participantGeneration(participant, flatDigest, storeRoot);
+      store.putMetadata(FLAT_DIGEST_METADATA, flatDigest);
+      store.putMetadata(STORE_GENERATION_METADATA, generation);
+      hook.beforeCompletion(participant, storeRoot);
+      store.putMetadata(FLAT_COMPLETE_METADATA, storeRoot);
+      targets.add(new PathStatePhysicalGlobalIntent.ParticipantTarget(participant.getStoreId(),
+          generation, flatDigest, storeRoot));
+      root.completeRebuildParticipant(participant.getDbName(), storeRoot);
+    }
+    byte[] stateRoot = root.rootHash();
+    superStore.putMetadata(SUPER_GENERATION_METADATA,
+        superGeneration(targets, stateRoot));
+    superStore.putMetadata(FLAT_ROOT_METADATA, stateRoot);
+    return root;
+  }
+
+  /** Publishes the exact prepared 27+1 target through INTENT, CURRENT, and intent retirement. */
+  public synchronized byte[] publishCurrent() throws IOException {
+    return publishCurrent(syntheticMetadata(publicationTargetRoot()), stage -> { });
+  }
+
+  public synchronized byte[] publishCurrent(PathStateRootMetadata metadata) throws IOException {
+    return publishCurrent(metadata, stage -> { });
+  }
+
+  synchronized byte[] publishCurrent(PublicationFaultHook faultHook) throws IOException {
+    return publishCurrent(syntheticMetadata(publicationTargetRoot()), faultHook);
+  }
+
+  synchronized byte[] publishCurrent(PathStateRootMetadata metadata,
+      PublicationFaultHook faultHook) throws IOException {
+    requireOpen();
+    PublicationFaultHook hook = Objects.requireNonNull(faultHook, "faultHook");
+    PathStatePhysicalGlobalIntent target = publicationTarget(
+        Objects.requireNonNull(metadata, "metadata"));
+    byte[] encoded = target.encode();
+    Path intent = directory.resolve(INTENT_FILE);
+    Path current = directory.resolve(CURRENT_FILE);
+    PathStateMetadataFile.publishImmutableBytes(intent, encoded);
+    hook.after(PublicationStage.AFTER_INTENT);
+    PathStateMetadataFile.replaceCurrentBytes(current, encoded);
+    hook.after(PublicationStage.AFTER_CURRENT);
+    PathStateMetadataFile.deleteDurable(intent);
+    hook.after(PublicationStage.AFTER_RETIRE);
+    return target.getSuperRoot();
+  }
+
+  /** Returns the exact block-bound metadata bound into the validated physical CURRENT. */
+  public synchronized PathStateRootMetadata currentMetadata() throws IOException {
+    requireOpen();
+    PathStatePhysicalGlobalIntent current = currentTarget();
+    return current.getMetadata();
+  }
+
+  synchronized void verifyReverseJournals(PathStateLayerLimits limits) throws IOException {
+    requireOpen();
+    loadReverseJournals(Objects.requireNonNull(limits, "limits"));
+  }
+
+  /** Computes one exact child target without changing F/N/M, INTENT, or CURRENT. */
+  public synchronized PathStateRootMetadata previewTransition(PathStateBlockTransition transition)
+      throws IOException {
+    requireOpen();
+    recoverPublication();
+    return prepareTransition(transition).target.getMetadata();
+  }
+
+  /** Applies one block-final child to the physical 27+1 stores and publishes its CURRENT. */
+  public synchronized PathStateRootMetadata applyAndPublish(PathStateBlockTransition transition)
+      throws IOException {
+    return applyAndPublish(transition, PathStateLayerLimits.defaults(), stage -> { });
+  }
+
+  synchronized PathStateRootMetadata applyAndPublish(PathStateBlockTransition transition,
+      TransitionFaultHook faultHook) throws IOException {
+    return applyAndPublish(transition, PathStateLayerLimits.defaults(), faultHook);
+  }
+
+  synchronized PathStateRootMetadata applyAndPublish(PathStateBlockTransition transition,
+      PathStateLayerLimits limits, TransitionFaultHook faultHook) throws IOException {
+    requireOpen();
+    recoverPublication();
+    TransitionPlan plan = prepareTransition(transition);
+    TransitionFaultHook hook = Objects.requireNonNull(faultHook, "faultHook");
+    byte[] encoded = plan.target.encode();
+    byte[] encodedJournal = plan.journal.encode();
+    Path journal = reverseJournalPath(plan.target.getMetadata());
+    pruneReverseJournals(currentTarget(), Objects.requireNonNull(limits, "limits"), journal,
+        encodedJournal.length);
+    PathStateMetadataFile.publishImmutableBytes(journal, encodedJournal);
+    hook.after(TransitionStage.AFTER_JOURNAL);
+    Path intent = directory.resolve(INTENT_FILE);
+    Path current = directory.resolve(CURRENT_FILE);
+    PathStateMetadataFile.publishImmutableBytes(intent, encoded);
+    hook.after(TransitionStage.AFTER_INTENT);
+    for (ParticipantTransition participant : plan.participants) {
+      participant.store.applyParticipantTransition(participant.flatMutations,
+          participant.nodeMutations, participant.flatDigest, participant.generation,
+          participant.storeRoot);
+      hook.after(TransitionStage.AFTER_PARTICIPANT_BATCH);
+    }
+    plan.superStore.applySuperTransition(plan.superNodeMutations,
+        plan.target.getSuperGeneration(), plan.target.getSuperRoot());
+    hook.after(TransitionStage.AFTER_SUPER_BATCH);
+    PathStateMetadataFile.replaceCurrentBytes(current, encoded);
+    hook.after(TransitionStage.AFTER_CURRENT);
+    PathStateMetadataFile.deleteDurable(intent);
+    hook.after(TransitionStage.AFTER_RETIRE);
+    return plan.target.getMetadata();
+  }
+
+  /** Rewinds through validated direct-parent journals to one exact bounded ancestor. */
+  public synchronized PathStateRootMetadata rewindTo(long blockNumber, byte[] blockHash,
+      PathStateLayerLimits limits) throws IOException {
+    return rewindTo(blockNumber, blockHash, limits, stage -> { });
+  }
+
+  synchronized PathStateRootMetadata rewindTo(long blockNumber, byte[] blockHash,
+      PathStateLayerLimits limits, RewindFaultHook faultHook) throws IOException {
+    requireOpen();
+    recoverPublication();
+    byte[] targetHash = Arrays.copyOf(Objects.requireNonNull(blockHash, "blockHash"),
+        blockHash.length);
+    if (targetHash.length != PathStateRootMetadata.DIGEST_LENGTH) {
+      throw new IOException("physical rewind block hash must contain exactly 32 bytes");
+    }
+    List<PathStatePhysicalReverseJournal> chain = loadRewindChain(currentTarget(), blockNumber,
+        targetHash, Objects.requireNonNull(limits, "limits"));
+    RewindFaultHook hook = Objects.requireNonNull(faultHook, "faultHook");
+    for (PathStatePhysicalReverseJournal journal : chain) {
+      applyReverseJournal(journal, hook);
+    }
+    PathStateRootMetadata rewound = currentMetadata();
+    if (rewound.getBlockNumber() != blockNumber
+        || !Arrays.equals(rewound.getBlockHash(), targetHash)) {
+      throw new IOException("physical rewind did not reach the requested ancestor");
+    }
+    return rewound;
+  }
+
+  private TransitionPlan prepareTransition(PathStateBlockTransition supplied) throws IOException {
+    PathStateBlockTransition transition = Objects.requireNonNull(supplied, "transition");
+    PathStatePhysicalGlobalIntent current = currentTarget();
+    PathStateRootMetadata parent = current.getMetadata();
+    if (transition.getBlockNumber() != parent.getBlockNumber() + 1
+        || !Arrays.equals(transition.getParentHash(), parent.getBlockHash())) {
+      throw new IOException("physical path-state transition does not extend CURRENT");
+    }
+
+    Map<Integer, RecordingNodeStore> recordings = new LinkedHashMap<>();
+    PathStateRoot candidate = new PathStateRoot(scope,
+        participant -> recordings.computeIfAbsent(participant.getStoreId(), ignored ->
+            new RecordingNodeStore(participant(participant.getDbName()).nodeStore())),
+        recordings.computeIfAbsent(0, ignored ->
+            new RecordingNodeStore(superStore.nodeStore())));
+    candidate.restoreStoredRoots(current.getSuperRoot());
+    requireParticipantRoots(candidate, current);
+    if (!transition.getMutations().isEmpty()) {
+      candidate.apply(transition.getMutations());
+    }
+    byte[] stateRoot = candidate.rootHash();
+
+    Map<Integer, List<FlatMutation>> flatByStore = new LinkedHashMap<>();
+    for (PathStateMutation mutation : transition.getMutations()) {
+      PathStateParticipant participant = scope.require(mutation.getDbName());
+      byte[] secureKey = PathStateCommitmentCodec.storeLeafKey(participant.getStoreId(),
+          mutation.getPhysicalKey());
+      byte[] encodedValue = mutation.isDelete() ? null
+          : PathStateCommitmentCodec.presentLeafValue(mutation.getPhysicalValue());
+      flatByStore.computeIfAbsent(participant.getStoreId(), ignored -> new ArrayList<>())
+          .add(new FlatMutation(secureKey, encodedValue));
+    }
+
+    List<PathStatePhysicalGlobalIntent.ParticipantTarget> targets = new ArrayList<>();
+    List<ParticipantTransition> participantTransitions = new ArrayList<>();
+    List<PathStatePhysicalReverseJournal.StoreReverse> reverseStores = new ArrayList<>();
+    for (PathStatePhysicalGlobalIntent.ParticipantTarget oldTarget
+        : current.getParticipants()) {
+      List<FlatMutation> flatMutations = flatByStore.get(oldTarget.getStoreId());
+      if (flatMutations == null) {
+        targets.add(oldTarget);
+        continue;
+      }
+      PathStateParticipant participant = participant(oldTarget.getStoreId());
+      byte[] storeRoot = candidate.participantRoot(participant.getDbName());
+      byte[] flatDigest = nextFlatDigest(participant, oldTarget.getFlatDigest(), transition,
+          flatMutations);
+      byte[] generation = participantGeneration(participant, flatDigest, storeRoot);
+      targets.add(new PathStatePhysicalGlobalIntent.ParticipantTarget(participant.getStoreId(),
+          generation, flatDigest, storeRoot));
+      participantTransitions.add(new ParticipantTransition(
+          participant(participant.getDbName()), flatMutations,
+          recordings.get(participant.getStoreId()).mutations(), flatDigest, generation,
+          storeRoot));
+      List<PathStatePhysicalReverseJournal.Entry> reverseFlat = new ArrayList<>();
+      for (FlatMutation mutation : flatMutations) {
+        reverseFlat.add(new PathStatePhysicalReverseJournal.Entry(mutation.secureKey,
+            participant(participant.getDbName()).getFlat(mutation.secureKey)));
+      }
+      reverseStores.add(new PathStatePhysicalReverseJournal.StoreReverse(
+          participant.getStoreId(), reverseFlat,
+          recordings.get(participant.getStoreId()).reverseEntries()));
+    }
+    byte[] superGeneration = superGeneration(targets, stateRoot);
+    PathStateRootMetadata metadata = PathStateRootMetadata.layer(transition.getBlockNumber(),
+        transition.getBlockHash(), transition.getParentHash(), transition.getTimestamp(),
+        transition.getPhase(), manifest.getIdentityDigest(), parent.getStateRoot(), stateRoot,
+        transition.getPayloadDigest());
+    PathStatePhysicalGlobalIntent target = new PathStatePhysicalGlobalIntent(
+        manifest.getIdentityDigest(), metadata, targets, superGeneration, stateRoot);
+    PathStatePhysicalReverseJournal journal = new PathStatePhysicalReverseJournal(target.encode(),
+        current.encode(), reverseStores, recordings.get(0).reverseEntries());
+    return new TransitionPlan(target, participantTransitions, superStore,
+        recordings.get(0).mutations(), journal);
+  }
+
+  private void applyReverseJournal(PathStatePhysicalReverseJournal journal,
+      RewindFaultHook hook) throws IOException {
+    PathStatePhysicalGlobalIntent child = PathStatePhysicalGlobalIntent.decode(
+        journal.getChildTarget());
+    PathStatePhysicalGlobalIntent parent = PathStatePhysicalGlobalIntent.decode(
+        journal.getParentTarget());
+    if (!Arrays.equals(currentTarget().encode(), child.encode())) {
+      throw new IOException("physical reverse journal child differs from CURRENT");
+    }
+    Path intent = directory.resolve(INTENT_FILE);
+    Path current = directory.resolve(CURRENT_FILE);
+    PathStateMetadataFile.publishImmutableBytes(intent, parent.encode());
+    hook.after(RewindStage.AFTER_INTENT);
+    for (PathStatePhysicalReverseJournal.StoreReverse reverse : journal.getStores()) {
+      PathStatePhysicalGlobalIntent.ParticipantTarget target = participantTarget(parent,
+          reverse.getStoreId());
+      PhysicalStore store = participant(participant(reverse.getStoreId()).getDbName());
+      store.applyParticipantTransition(flatMutations(reverse.getFlatEntries()),
+          nodeMutations(reverse.getNodeEntries()), target.getFlatDigest(),
+          target.getGeneration(), target.getStoreRoot());
+      hook.after(RewindStage.AFTER_PARTICIPANT_BATCH);
+    }
+    superStore.applySuperTransition(nodeMutations(journal.getSuperNodes()),
+        parent.getSuperGeneration(), parent.getSuperRoot());
+    hook.after(RewindStage.AFTER_SUPER_BATCH);
+    PathStateMetadataFile.replaceCurrentBytes(current, parent.encode());
+    hook.after(RewindStage.AFTER_CURRENT);
+    PathStateMetadataFile.deleteDurable(intent);
+    hook.after(RewindStage.AFTER_RETIRE);
+  }
+
+  private List<PathStatePhysicalReverseJournal> loadRewindChain(
+      PathStatePhysicalGlobalIntent current, long targetNumber, byte[] targetHash,
+      PathStateLayerLimits limits) throws IOException {
+    if (targetNumber < 0 || targetNumber > current.getMetadata().getBlockNumber()) {
+      throw new IOException("physical rewind target height is outside CURRENT ancestry");
+    }
+    Map<BytesKey, PathStatePhysicalReverseJournal> journals = loadReverseJournals(limits);
+    List<PathStatePhysicalReverseJournal> chain = new ArrayList<>();
+    PathStatePhysicalGlobalIntent cursor = current;
+    while (cursor.getMetadata().getBlockNumber() > targetNumber) {
+      PathStatePhysicalReverseJournal journal = journals.get(new BytesKey(cursor.encode()));
+      if (journal == null) {
+        throw new IOException("physical reverse journal ancestry is missing");
+      }
+      chain.add(journal);
+      cursor = PathStatePhysicalGlobalIntent.decode(journal.getParentTarget());
+    }
+    if (cursor.getMetadata().getBlockNumber() != targetNumber
+        || !Arrays.equals(cursor.getMetadata().getBlockHash(), targetHash)) {
+      throw new IOException("physical rewind target is not an exact ancestor");
+    }
+    return chain;
+  }
+
+  private Map<BytesKey, PathStatePhysicalReverseJournal> loadReverseJournals(
+      PathStateLayerLimits limits) throws IOException {
+    Map<BytesKey, PathStatePhysicalReverseJournal> journals = new LinkedHashMap<>();
+    Path reverse = directory.resolve(REVERSE_DIRECTORY);
+    if (!Files.exists(reverse, LinkOption.NOFOLLOW_LINKS)) {
+      return journals;
+    }
+    if (!Files.isDirectory(reverse, LinkOption.NOFOLLOW_LINKS) || Files.isSymbolicLink(reverse)) {
+      throw new IOException("physical reverse journal root is not a direct directory");
+    }
+    long total = 0;
+    int count = 0;
+    try (Stream<Path> files = Files.list(reverse)) {
+      for (Path file : (Iterable<Path>) files::iterator) {
+        if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) {
+          throw new IOException("physical reverse journal is not a regular file: " + file);
+        }
+        long length = Files.size(file);
+        total = Math.addExact(total, length);
+        count = Math.addExact(count, 1);
+        PathStatePhysicalReverseJournal journal;
+        try {
+          journal = PathStatePhysicalReverseJournal.decode(
+              PathStateMetadataFile.loadImmutableBytes(file,
+                  PathStatePhysicalReverseJournal.MAX_ENCODED_LENGTH));
+        } catch (IllegalArgumentException invalid) {
+          throw new IOException("physical reverse journal is corrupt: " + file, invalid);
+        }
+        if (journals.put(new BytesKey(journal.getChildTarget()), journal) != null) {
+          throw new IOException("physical reverse journal child identity is duplicated");
+        }
+      }
+    } catch (ArithmeticException overflow) {
+      throw new IOException("physical reverse journal usage overflow", overflow);
+    }
+    if (count > limits.getMaxLayers() || total > limits.getMaxLogicalBytes()) {
+      throw new IOException("physical reverse journal exceeds configured bounds");
+    }
+    return journals;
+  }
+
+  private void pruneReverseJournals(PathStatePhysicalGlobalIntent current,
+      PathStateLayerLimits limits, Path candidate, long candidateBytes) throws IOException {
+    if (candidateBytes > limits.getMaxLogicalBytes()) {
+      throw new IOException("physical reverse journal candidate exceeds byte limit");
+    }
+    Path reverse = directory.resolve(REVERSE_DIRECTORY);
+    if (!Files.exists(reverse, LinkOption.NOFOLLOW_LINKS)) {
+      return;
+    }
+    Map<BytesKey, PathStatePhysicalReverseJournal> decoded = loadReverseJournals(
+        new PathStateLayerLimits(Integer.MAX_VALUE, Long.MAX_VALUE));
+    Set<BytesKey> keep = new HashSet<>();
+    byte[] cursor = current.encode();
+    int remainingCount = limits.getMaxLayers() - 1;
+    long remainingBytes = limits.getMaxLogicalBytes() - candidateBytes;
+    while (remainingCount > 0) {
+      BytesKey identity = new BytesKey(cursor);
+      PathStatePhysicalReverseJournal journal = decoded.get(identity);
+      if (journal == null) {
+        break;
+      }
+      Path path = reverseJournalPath(PathStatePhysicalGlobalIntent.decode(
+          journal.getChildTarget()).getMetadata());
+      long length = Files.size(path);
+      if (length > remainingBytes) {
+        break;
+      }
+      keep.add(identity);
+      remainingCount--;
+      remainingBytes -= length;
+      cursor = journal.getParentTarget();
+    }
+    try (Stream<Path> files = Files.list(reverse)) {
+      for (Path file : (Iterable<Path>) files::iterator) {
+        if (file.equals(candidate)) {
+          continue;
+        }
+        PathStatePhysicalReverseJournal journal = PathStatePhysicalReverseJournal.decode(
+            PathStateMetadataFile.loadImmutableBytes(file,
+                PathStatePhysicalReverseJournal.MAX_ENCODED_LENGTH));
+        if (!keep.contains(new BytesKey(journal.getChildTarget()))) {
+          PathStateMetadataFile.deleteDurable(file);
+        }
+      }
+    }
+  }
+
+  private Path reverseJournalPath(PathStateRootMetadata child) {
+    StringBuilder hash = new StringBuilder(child.getBlockHash().length * 2);
+    for (byte value : child.getBlockHash()) {
+      hash.append(String.format("%02x", value & 0xff));
+    }
+    return directory.resolve(REVERSE_DIRECTORY).resolve(String.format("%020d-%s.journal",
+        child.getBlockNumber(), hash));
+  }
+
+  private static PathStatePhysicalGlobalIntent.ParticipantTarget participantTarget(
+      PathStatePhysicalGlobalIntent target, int storeId) throws IOException {
+    for (PathStatePhysicalGlobalIntent.ParticipantTarget participant : target.getParticipants()) {
+      if (participant.getStoreId() == storeId) {
+        return participant;
+      }
+    }
+    throw new IOException("physical reverse target Store is absent");
+  }
+
+  private static List<FlatMutation> flatMutations(
+      List<PathStatePhysicalReverseJournal.Entry> entries) {
+    List<FlatMutation> mutations = new ArrayList<>();
+    for (PathStatePhysicalReverseJournal.Entry entry : entries) {
+      mutations.add(new FlatMutation(entry.getKey(), entry.getOldValue()));
+    }
+    return mutations;
+  }
+
+  private static List<NodeMutation> nodeMutations(
+      List<PathStatePhysicalReverseJournal.Entry> entries) {
+    List<NodeMutation> mutations = new ArrayList<>();
+    for (PathStatePhysicalReverseJournal.Entry entry : entries) {
+      mutations.add(new NodeMutation(entry.getKey(), entry.getOldValue()));
+    }
+    return mutations;
+  }
+
+  private byte[] nextFlatDigest(PathStateParticipant participant, byte[] previous,
+      PathStateBlockTransition transition, List<FlatMutation> mutations) {
+    Hasher hasher = Hashing.sha256().newHasher()
+        .putString("java-tron/path-state/flat-transition/v1", StandardCharsets.US_ASCII)
+        .putBytes(manifest.getIdentityDigest()).putInt(participant.getStoreId())
+        .putBytes(previous).putBytes(transition.getPayloadDigest()).putInt(mutations.size());
+    for (FlatMutation mutation : mutations) {
+      hasher.putInt(mutation.secureKey.length).putBytes(mutation.secureKey);
+      if (mutation.encodedValue == null) {
+        hasher.putInt(-1);
+      } else {
+        hasher.putInt(mutation.encodedValue.length).putBytes(mutation.encodedValue);
+      }
+    }
+    return hasher.hash().asBytes();
+  }
+
+  /** Reconciles an interrupted global publication without accepting a partial 28-DB target. */
+  public synchronized PublicationRecovery recoverPublication() throws IOException {
+    requireOpen();
+    Path intentPath = directory.resolve(INTENT_FILE);
+    Path currentPath = directory.resolve(CURRENT_FILE);
+    boolean hasIntent = Files.exists(intentPath, LinkOption.NOFOLLOW_LINKS);
+    boolean hasCurrent = Files.exists(currentPath, LinkOption.NOFOLLOW_LINKS);
+    boolean currentValid = false;
+    IOException invalidCurrent = null;
+    if (hasCurrent) {
+      try {
+        currentValid = matchesPreparedTarget(loadGlobalTarget(currentPath));
+      } catch (IOException failure) {
+        invalidCurrent = failure;
+      }
+    }
+    if (!hasIntent) {
+      if (hasCurrent && !currentValid) {
+        throw new IOException("path-state physical CURRENT is not the exact prepared 28-DB target",
+            invalidCurrent);
+      }
+      return PublicationRecovery.NONE;
+    }
+
+    PathStatePhysicalGlobalIntent intent;
+    boolean intentValid;
+    try {
+      intent = loadGlobalTarget(intentPath);
+      intentValid = matchesPreparedTarget(intent);
+    } catch (IOException invalidIntent) {
+      if (!currentValid) {
+        throw invalidIntent;
+      }
+      PathStateMetadataFile.deleteDurable(intentPath);
+      return PublicationRecovery.RETAINED_CURRENT;
+    }
+    if (!intentValid) {
+      if (!currentValid) {
+        throw new IOException("path-state physical INTENT is not the exact prepared 28-DB target");
+      }
+      PathStateMetadataFile.deleteDurable(intentPath);
+      return PublicationRecovery.RETAINED_CURRENT;
+    }
+    PathStateMetadataFile.replaceCurrentBytes(currentPath, intent.encode());
+    PathStateMetadataFile.deleteDurable(intentPath);
+    return PublicationRecovery.COMPLETED_INTENT;
+  }
+
+  /** Deletes one exact physical key, commits changed paths, and republishes the 28-DB target. */
+  public synchronized byte[] deleteAndPublish(String dbName, byte[] physicalKey)
+      throws IOException {
+    return deleteAndPublish(dbName, physicalKey, stage -> { }).getStateRoot();
+  }
+
+  synchronized PhysicalDeleteResult deleteAndPublish(String dbName, byte[] physicalKey,
+      DeleteFaultHook faultHook) throws IOException {
+    requireOpen();
+    DeleteFaultHook hook = Objects.requireNonNull(faultHook, "faultHook");
+    recoverPublication();
+    PathStatePhysicalGlobalIntent current = currentTarget();
+    PathStateRoot restored = createRoot();
+    restored.restoreStoredRoots(current.getSuperRoot());
+    requireParticipantRoots(restored, current);
+    PathStateRoot.Snapshot snapshot = restored.snapshot();
+
+    Map<Integer, RecordingNodeStore> recordings = new LinkedHashMap<>();
+    PathStateRoot candidate = PathStateRoot.fromSnapshot(scope,
+        participant -> recordings.computeIfAbsent(participant.getStoreId(), ignored ->
+            new RecordingNodeStore(participant(participant.getDbName()).nodeStore())),
+        recordings.computeIfAbsent(0, ignored -> new RecordingNodeStore(superStore.nodeStore())),
+        snapshot);
+    PathStateParticipant targetParticipant = scope.require(dbName);
+    byte[] rawKey = Arrays.copyOf(Objects.requireNonNull(physicalKey, "physicalKey"),
+        physicalKey.length);
+    byte[] secureKey = PathStateCommitmentCodec.storeLeafKey(targetParticipant.getStoreId(),
+        rawKey);
+    PhysicalStore targetStore = participant(targetParticipant.getDbName());
+    if (targetStore.getFlat(secureKey) == null) {
+      throw new IOException("path-state physical delete leaf is missing: " + dbName);
+    }
+    candidate.delete(targetParticipant.getDbName(), rawKey);
+    byte[] stateRoot = candidate.rootHash();
+    byte[] storeRoot = candidate.participantRoot(targetParticipant.getDbName());
+    RecordingNodeStore participantChanges = recordings.get(targetParticipant.getStoreId());
+    requireOnlyTargetParticipantChanged(recordings, targetParticipant.getStoreId());
+    byte[] flatDigest = flatDigestExcluding(targetStore, secureKey);
+    byte[] generation = participantGeneration(targetParticipant, flatDigest, storeRoot);
+    targetStore.applyParticipantDelete(secureKey, participantChanges.mutations(), flatDigest,
+        generation, storeRoot);
+    hook.after(DeleteStage.AFTER_PARTICIPANT_BATCH);
+
+    List<PathStatePhysicalGlobalIntent.ParticipantTarget> targets = replaceParticipantTarget(
+        current.getParticipants(), targetParticipant.getStoreId(), generation, flatDigest,
+        storeRoot);
+    RecordingNodeStore superChanges = recordings.get(0);
+    byte[] nextSuperGeneration = superGeneration(targets, stateRoot);
+    superStore.applySuperTransition(superChanges.mutations(), nextSuperGeneration, stateRoot);
+    hook.after(DeleteStage.AFTER_SUPER_BATCH);
+
+    byte[] published = publishCurrent(metadataWithRoot(current.getMetadata(), stateRoot));
+    hook.after(DeleteStage.AFTER_CURRENT);
+    return new PhysicalDeleteResult(published, participantChanges.putCount(),
+        participantChanges.deleteCount(), superChanges.putCount(), superChanges.deleteCount());
+  }
+
+  private PathStatePhysicalGlobalIntent currentTarget() throws IOException {
+    Path currentPath = directory.resolve(CURRENT_FILE);
+    if (!Files.exists(currentPath, LinkOption.NOFOLLOW_LINKS)) {
+      throw new IOException("path-state physical CURRENT is missing");
+    }
+    PathStatePhysicalGlobalIntent current = loadGlobalTarget(currentPath);
+    if (!matchesPreparedTarget(current)) {
+      throw new IOException("path-state physical CURRENT differs from prepared target");
+    }
+    return current;
+  }
+
+  private void requireParticipantRoots(PathStateRoot root,
+      PathStatePhysicalGlobalIntent current) throws IOException {
+    for (PathStatePhysicalGlobalIntent.ParticipantTarget target : current.getParticipants()) {
+      PathStateParticipant participant = participant(target.getStoreId());
+      requireSame(target.getStoreRoot(), root.participantRoot(participant.getDbName()),
+          "path-state physical participant root differs from CURRENT: "
+              + participant.getDbName());
+    }
+  }
+
+  private static void requireOnlyTargetParticipantChanged(
+      Map<Integer, RecordingNodeStore> recordings, int targetStoreId) {
+    for (Map.Entry<Integer, RecordingNodeStore> entry : recordings.entrySet()) {
+      if (entry.getKey() != 0 && entry.getKey() != targetStoreId
+          && !entry.getValue().isEmpty()) {
+        throw new IllegalStateException("physical delete changed another participant Store");
+      }
+    }
+  }
+
+  private static List<PathStatePhysicalGlobalIntent.ParticipantTarget> replaceParticipantTarget(
+      List<PathStatePhysicalGlobalIntent.ParticipantTarget> current, int storeId,
+      byte[] generation, byte[] flatDigest, byte[] storeRoot) {
+    List<PathStatePhysicalGlobalIntent.ParticipantTarget> targets = new ArrayList<>();
+    boolean replaced = false;
+    for (PathStatePhysicalGlobalIntent.ParticipantTarget target : current) {
+      if (target.getStoreId() == storeId) {
+        targets.add(new PathStatePhysicalGlobalIntent.ParticipantTarget(storeId, generation,
+            flatDigest, storeRoot));
+        replaced = true;
+      } else {
+        targets.add(target);
+      }
+    }
+    if (!replaced) {
+      throw new IllegalArgumentException("physical delete Store ID is not in CURRENT");
+    }
+    return targets;
+  }
+
+  private static byte[] flatDigestExcluding(PhysicalStore store, byte[] excludedSecureKey)
+      throws IOException {
+    Hasher hasher = Hashing.sha256().newHasher();
+    boolean[] excluded = new boolean[1];
+    store.scanFlat(entry -> {
+      byte[] secureKey = unprefixedFlatKey(entry.getKey());
+      if (Arrays.equals(secureKey, excludedSecureKey)) {
+        excluded[0] = true;
+        return;
+      }
+      byte[] encodedValue = entry.getValue();
+      hasher.putInt(secureKey.length).putBytes(secureKey)
+          .putInt(encodedValue.length).putBytes(encodedValue);
+    });
+    if (!excluded[0]) {
+      throw new IOException("path-state physical delete leaf disappeared during digest scan");
+    }
+    return hasher.hash().asBytes();
+  }
+
+  private byte[] publicationTargetRoot() throws IOException {
+    return requireDigest(superStore.getMetadata(FLAT_ROOT_METADATA),
+        "path-state physical super root is missing or invalid");
+  }
+
+  private PathStatePhysicalGlobalIntent publicationTarget(PathStateRootMetadata metadata)
+      throws IOException {
+    List<PathStatePhysicalGlobalIntent.ParticipantTarget> targets = new ArrayList<>();
+    for (PathStateParticipant participant : scope.getParticipants()) {
+      PhysicalStore store = participant(participant.getDbName());
+      byte[] storeRoot = requireDigest(store.getMetadata(FLAT_COMPLETE_METADATA),
+          "path-state physical Store root is missing or invalid: " + participant.getDbName());
+      requireRootNode(store, storeRoot,
+          "path-state physical Store root node differs: " + participant.getDbName());
+      byte[] flatDigest = requireDigest(store.getMetadata(FLAT_DIGEST_METADATA),
+          "path-state physical flat digest is missing or invalid: " + participant.getDbName());
+      byte[] generation = requireDigest(store.getMetadata(STORE_GENERATION_METADATA),
+          "path-state physical Store generation is missing or invalid: "
+              + participant.getDbName());
+      requireSame(generation, participantGeneration(participant, flatDigest, storeRoot),
+          "path-state physical Store generation differs: " + participant.getDbName());
+      targets.add(new PathStatePhysicalGlobalIntent.ParticipantTarget(participant.getStoreId(),
+          generation, flatDigest, storeRoot));
+    }
+    byte[] superRoot = requireDigest(superStore.getMetadata(FLAT_ROOT_METADATA),
+        "path-state physical super root is missing or invalid");
+    requireRootNode(superStore, superRoot,
+        "path-state physical super root node differs");
+    byte[] generation = requireDigest(superStore.getMetadata(SUPER_GENERATION_METADATA),
+        "path-state physical super generation is missing or invalid");
+    requireSame(generation, superGeneration(targets, superRoot),
+        "path-state physical super generation differs");
+    return new PathStatePhysicalGlobalIntent(manifest.getIdentityDigest(), metadata, targets,
+        generation, superRoot);
+  }
+
+  private boolean matchesPreparedTarget(PathStatePhysicalGlobalIntent target) throws IOException {
+    try {
+      return Arrays.equals(target.encode(), publicationTarget(target.getMetadata()).encode());
+    } catch (IllegalArgumentException invalidTarget) {
+      throw new IOException("path-state physical target metadata differs from prepared storage",
+          invalidTarget);
+    }
+  }
+
+  private PathStateRootMetadata syntheticMetadata(byte[] stateRoot) {
+    byte[] zero = new byte[PathStateRootMetadata.DIGEST_LENGTH];
+    return PathStateRootMetadata.base(0, zero, zero, 0,
+        PathStateCanonicalizer.P66Phase.P66_OFF, manifest.getIdentityDigest(), stateRoot, zero);
+  }
+
+  private PathStateRootMetadata metadataWithRoot(PathStateRootMetadata previous,
+      byte[] stateRoot) {
+    if (previous.getKind() == PathStateRootMetadata.Kind.BASE) {
+      return PathStateRootMetadata.base(previous.getBlockNumber(), previous.getBlockHash(),
+          previous.getParentHash(), previous.getTimestamp(), previous.getPhase(),
+          manifest.getIdentityDigest(), stateRoot, previous.getPayloadDigest());
+    }
+    return PathStateRootMetadata.layer(previous.getBlockNumber(), previous.getBlockHash(),
+        previous.getParentHash(), previous.getTimestamp(), previous.getPhase(),
+        manifest.getIdentityDigest(), previous.getParentStateRoot(), stateRoot,
+        previous.getPayloadDigest());
+  }
+
+  private static PathStatePhysicalGlobalIntent loadGlobalTarget(Path path) throws IOException {
+    try {
+      return PathStatePhysicalGlobalIntent.decode(PathStateMetadataFile.loadImmutableBytes(path,
+          PathStatePhysicalGlobalIntent.MAX_ENCODED_LENGTH));
+    } catch (IllegalArgumentException invalid) {
+      throw new IOException("path-state physical global target is corrupt: " + path, invalid);
+    }
+  }
+
+  private byte[] participantGeneration(PathStateParticipant participant, byte[] flatDigest,
+      byte[] storeRoot) {
+    return Hashing.sha256().newHasher()
+        .putString("java-tron/path-state/participant-generation/v1", StandardCharsets.US_ASCII)
+        .putBytes(manifest.getIdentityDigest()).putInt(participant.getStoreId())
+        .putBytes(flatDigest).putBytes(storeRoot).hash().asBytes();
+  }
+
+  private byte[] superGeneration(
+      List<PathStatePhysicalGlobalIntent.ParticipantTarget> targets, byte[] superRoot) {
+    Hasher hasher = Hashing.sha256().newHasher()
+        .putString("java-tron/path-state/super-generation/v1", StandardCharsets.US_ASCII)
+        .putBytes(manifest.getIdentityDigest()).putInt(targets.size());
+    for (PathStatePhysicalGlobalIntent.ParticipantTarget target : targets) {
+      hasher.putInt(target.getStoreId()).putBytes(target.getGeneration())
+          .putBytes(target.getFlatDigest()).putBytes(target.getStoreRoot());
+    }
+    return hasher.putBytes(superRoot).hash().asBytes();
+  }
+
+  private static byte[] requireDigest(byte[] value, String error) throws IOException {
+    if (value == null || value.length != PathStatePhysicalGlobalIntent.DIGEST_LENGTH) {
+      throw new IOException(error);
+    }
+    return Arrays.copyOf(value, value.length);
+  }
+
+  private static void requireSame(byte[] expected, byte[] actual, String error)
+      throws IOException {
+    if (!Arrays.equals(expected, actual)) {
+      throw new IOException(error);
+    }
+  }
+
+  private static void requireRootNode(PhysicalStore store, byte[] expectedRoot, String error)
+      throws IOException {
+    byte[] encodedRoot = store.nodeStore().get(new byte[0]);
+    if (Arrays.equals(expectedRoot, Hash.EMPTY_TRIE_HASH)) {
+      if (encodedRoot != null) {
+        throw new IOException(error);
+      }
+    } else if (encodedRoot == null || !Arrays.equals(expectedRoot, Hash.sha3(encodedRoot))) {
+      throw new IOException(error);
+    }
+  }
+
+  @Override
+  public synchronized void close() throws IOException {
+    if (closed) {
+      return;
+    }
+    closed = true;
+    IOException failure = null;
+    for (PhysicalStore store : participants.values()) {
+      try {
+        store.close();
+      } catch (IOException closeFailure) {
+        failure = append(failure, closeFailure);
+      }
+    }
+    try {
+      superStore.close();
+    } catch (IOException closeFailure) {
+      failure = append(failure, closeFailure);
+    }
+    if (failure != null) {
+      throw failure;
+    }
+  }
+
+  private void closeAfterFailure(Throwable original) {
+    for (PhysicalStore store : participants.values()) {
+      try {
+        store.close();
+      } catch (IOException closeFailure) {
+        original.addSuppressed(closeFailure);
+      }
+    }
+  }
+
+  private static void rejectLegacySharedNodes(Path root) throws IOException {
+    Path oldNodes = root.resolve(PathStateStoreManifest.BASE_DIRECTORY).resolve(NODES_DIRECTORY);
+    if (Files.exists(oldNodes, LinkOption.NOFOLLOW_LINKS)) {
+      throw new IOException("TASK-018 physical layout rejects legacy shared base/nodes: "
+          + oldNodes);
+    }
+  }
+
+  private static void requireStoreDirectory(Path path) throws IOException {
+    if (!Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS)) {
+      throw new IOException("path-state physical Store directory is missing: " + path);
+    }
+  }
+
+  private void requireOpen() {
+    if (closed) {
+      throw new IllegalStateException("path-state physical store set is closed: " + directory);
+    }
+  }
+
+  private PathStateParticipant participant(int storeId) {
+    for (PathStateParticipant participant : scope.getParticipants()) {
+      if (participant.getStoreId() == storeId) {
+        return participant;
+      }
+    }
+    throw new IllegalArgumentException("unknown path-state Store ID: " + storeId);
+  }
+
+  private static IOException append(IOException previous, IOException next) {
+    if (previous == null) {
+      return next;
+    }
+    previous.addSuppressed(next);
+    return previous;
+  }
+
+  private static PathStateParticipantScope requireExactScope(PathStateParticipantScope scope) {
+    PathStateParticipantScope supplied = Objects.requireNonNull(scope, "scope");
+    List<String> dbNames = new ArrayList<>();
+    for (PathStateParticipant participant : supplied.getParticipants()) {
+      dbNames.add(participant.getDbName());
+    }
+    PathStateParticipantDescriptor descriptor = PathStateParticipantDescriptor.current();
+    descriptor.requireExactDatabases(dbNames);
+    for (PathStateParticipant participant : supplied.getParticipants()) {
+      if (descriptor.require(participant.getDbName()).getStoreId() != participant.getStoreId()) {
+        throw new IllegalArgumentException("path-state physical Store ID differs: "
+            + participant.getDbName());
+      }
+    }
+    return supplied;
+  }
+
+  private static byte[] unprefixedFlatKey(byte[] storedKey) {
+    byte[] key = Arrays.copyOf(Objects.requireNonNull(storedKey, "storedKey"), storedKey.length);
+    if (key.length != PathStateCommitmentCodec.ROOT_LENGTH + 1 || key[0] != FLAT_PREFIX) {
+      throw new IllegalStateException("path-state physical F key is corrupt");
+    }
+    return Arrays.copyOfRange(key, 1, key.length);
+  }
+
+  /** One participant or super database with independent F/N/M key domains. */
+  public static final class PhysicalStore implements Closeable {
+
+    private final PathStateNativeNodeStore nativeStore;
+
+    private PhysicalStore(Path directory, Engine engine) throws IOException {
+      nativeStore = PathStateNativeNodeStore.open(directory, engine);
+    }
+
+    public void putFlat(byte[] secureKey, byte[] encodedLeaf) {
+      nativeStore.put(prefixed(FLAT_PREFIX, secureKey, "secureKey"), encodedLeaf);
+    }
+
+    public byte[] getFlat(byte[] secureKey) {
+      return nativeStore.get(prefixed(FLAT_PREFIX, secureKey, "secureKey"));
+    }
+
+    public void deleteFlat(byte[] secureKey) {
+      nativeStore.delete(prefixed(FLAT_PREFIX, secureKey, "secureKey"));
+    }
+
+    void scanFlat(PathStateNativeNodeStore.EntryConsumer consumer) throws IOException {
+      nativeStore.scanPrefix(new byte[]{FLAT_PREFIX}, Objects.requireNonNull(consumer, "consumer"));
+    }
+
+    public PathNodeStore nodeStore() {
+      return new PhysicalNodeStore(nativeStore);
+    }
+
+    void clearNodes() throws IOException {
+      List<PathStateNativeNodeStore.BatchMutation> pending = new ArrayList<>(4096);
+      nativeStore.scanPrefix(new byte[]{NODE_PREFIX}, entry -> {
+        pending.add(PathStateNativeNodeStore.BatchMutation.delete(entry.getKey()));
+        if (pending.size() == 4096) {
+          nativeStore.writeBatch(new ArrayList<>(pending));
+          pending.clear();
+        }
+      });
+      if (!pending.isEmpty()) {
+        nativeStore.writeBatch(pending);
+      }
+    }
+
+    void applyParticipantDelete(byte[] secureKey, List<NodeMutation> nodeMutations,
+        byte[] flatDigest, byte[] generation, byte[] storeRoot) {
+      List<PathStateNativeNodeStore.BatchMutation> mutations = new ArrayList<>();
+      mutations.add(PathStateNativeNodeStore.BatchMutation.delete(
+          prefixed(FLAT_PREFIX, secureKey, "secureKey")));
+      appendNodeMutations(mutations, nodeMutations);
+      mutations.add(metadataMutation(FLAT_DIGEST_METADATA, flatDigest));
+      mutations.add(metadataMutation(STORE_GENERATION_METADATA, generation));
+      mutations.add(metadataMutation(FLAT_COMPLETE_METADATA, storeRoot));
+      nativeStore.writeBatch(mutations);
+    }
+
+    void applyParticipantTransition(List<FlatMutation> flatMutations,
+        List<NodeMutation> nodeMutations, byte[] flatDigest, byte[] generation,
+        byte[] storeRoot) {
+      List<PathStateNativeNodeStore.BatchMutation> mutations = new ArrayList<>();
+      for (FlatMutation mutation : Objects.requireNonNull(flatMutations, "flatMutations")) {
+        byte[] key = prefixed(FLAT_PREFIX, mutation.secureKey, "secureKey");
+        mutations.add(mutation.encodedValue == null
+            ? PathStateNativeNodeStore.BatchMutation.delete(key)
+            : PathStateNativeNodeStore.BatchMutation.put(key, mutation.encodedValue));
+      }
+      appendNodeMutations(mutations, nodeMutations);
+      mutations.add(metadataMutation(FLAT_DIGEST_METADATA, flatDigest));
+      mutations.add(metadataMutation(STORE_GENERATION_METADATA, generation));
+      mutations.add(metadataMutation(FLAT_COMPLETE_METADATA, storeRoot));
+      nativeStore.writeBatch(mutations);
+    }
+
+    void applySuperTransition(List<NodeMutation> nodeMutations, byte[] generation,
+        byte[] superRoot) {
+      List<PathStateNativeNodeStore.BatchMutation> mutations = new ArrayList<>();
+      appendNodeMutations(mutations, nodeMutations);
+      mutations.add(metadataMutation(SUPER_GENERATION_METADATA, generation));
+      mutations.add(metadataMutation(FLAT_ROOT_METADATA, superRoot));
+      nativeStore.writeBatch(mutations);
+    }
+
+    private static void appendNodeMutations(
+        List<PathStateNativeNodeStore.BatchMutation> target,
+        List<NodeMutation> nodeMutations) {
+      for (NodeMutation mutation : Objects.requireNonNull(nodeMutations, "nodeMutations")) {
+        byte[] key = prefixed(NODE_PREFIX, mutation.path, "path");
+        target.add(mutation.encodedNode == null
+            ? PathStateNativeNodeStore.BatchMutation.delete(key)
+            : PathStateNativeNodeStore.BatchMutation.put(key, mutation.encodedNode));
+      }
+    }
+
+    private static PathStateNativeNodeStore.BatchMutation metadataMutation(byte[] name,
+        byte[] value) {
+      return PathStateNativeNodeStore.BatchMutation.put(prefixed(META_PREFIX, name,
+          "metadata name"), value);
+    }
+
+    public void putMetadata(byte[] name, byte[] value) {
+      nativeStore.put(prefixed(META_PREFIX, name, "metadata name"), value);
+    }
+
+    public byte[] getMetadata(byte[] name) {
+      return nativeStore.get(prefixed(META_PREFIX, name, "metadata name"));
+    }
+
+    void deleteMetadata(byte[] name) {
+      nativeStore.delete(prefixed(META_PREFIX, name, "metadata name"));
+    }
+
+    public Path getDirectory() {
+      return nativeStore.getDirectory();
+    }
+
+    @Override
+    public void close() throws IOException {
+      nativeStore.close();
+    }
+  }
+
+  private static final class PhysicalNodeStore implements PathNodeStore {
+
+    private final PathStateNativeNodeStore nativeStore;
+
+    private PhysicalNodeStore(PathStateNativeNodeStore nativeStore) {
+      this.nativeStore = nativeStore;
+    }
+
+    @Override
+    public byte[] get(byte[] path) {
+      return nativeStore.get(prefixed(NODE_PREFIX, path, "path"));
+    }
+
+    @Override
+    public void put(byte[] path, byte[] encodedNode) {
+      nativeStore.put(prefixed(NODE_PREFIX, path, "path"), encodedNode);
+    }
+
+    @Override
+    public void delete(byte[] path) {
+      nativeStore.delete(prefixed(NODE_PREFIX, path, "path"));
+    }
+  }
+
+  private static final class RecordingNodeStore implements PathNodeStore {
+
+    private final PathNodeStore base;
+    private final Map<BytesKey, byte[]> changes = new LinkedHashMap<>();
+
+    private RecordingNodeStore(PathNodeStore base) {
+      this.base = Objects.requireNonNull(base, "base");
+    }
+
+    @Override
+    public byte[] get(byte[] path) {
+      BytesKey key = new BytesKey(path);
+      if (changes.containsKey(key)) {
+        byte[] value = changes.get(key);
+        return value == null ? null : Arrays.copyOf(value, value.length);
+      }
+      return base.get(path);
+    }
+
+    @Override
+    public void put(byte[] path, byte[] encodedNode) {
+      changes.put(new BytesKey(path), Arrays.copyOf(
+          Objects.requireNonNull(encodedNode, "encodedNode"), encodedNode.length));
+    }
+
+    @Override
+    public void delete(byte[] path) {
+      changes.put(new BytesKey(path), null);
+    }
+
+    private boolean isEmpty() {
+      return changes.isEmpty();
+    }
+
+    private List<NodeMutation> mutations() {
+      List<NodeMutation> mutations = new ArrayList<>();
+      for (Map.Entry<BytesKey, byte[]> change : changes.entrySet()) {
+        mutations.add(new NodeMutation(change.getKey().bytes, change.getValue()));
+      }
+      return mutations;
+    }
+
+    private List<PathStatePhysicalReverseJournal.Entry> reverseEntries() {
+      List<PathStatePhysicalReverseJournal.Entry> entries = new ArrayList<>();
+      for (BytesKey key : changes.keySet()) {
+        entries.add(new PathStatePhysicalReverseJournal.Entry(key.bytes, base.get(key.bytes)));
+      }
+      return entries;
+    }
+
+    private int putCount() {
+      int count = 0;
+      for (byte[] value : changes.values()) {
+        if (value != null) {
+          count++;
+        }
+      }
+      return count;
+    }
+
+    private int deleteCount() {
+      return changes.size() - putCount();
+    }
+  }
+
+  private static final class NodeMutation {
+
+    private final byte[] path;
+    private final byte[] encodedNode;
+
+    private NodeMutation(byte[] path, byte[] encodedNode) {
+      this.path = Arrays.copyOf(Objects.requireNonNull(path, "path"), path.length);
+      this.encodedNode = encodedNode == null ? null
+          : Arrays.copyOf(encodedNode, encodedNode.length);
+    }
+  }
+
+  private static final class FlatMutation {
+
+    private final byte[] secureKey;
+    private final byte[] encodedValue;
+
+    private FlatMutation(byte[] secureKey, byte[] encodedValue) {
+      this.secureKey = Arrays.copyOf(Objects.requireNonNull(secureKey, "secureKey"),
+          secureKey.length);
+      this.encodedValue = encodedValue == null ? null
+          : Arrays.copyOf(encodedValue, encodedValue.length);
+    }
+  }
+
+  private static final class ParticipantTransition {
+
+    private final PhysicalStore store;
+    private final List<FlatMutation> flatMutations;
+    private final List<NodeMutation> nodeMutations;
+    private final byte[] flatDigest;
+    private final byte[] generation;
+    private final byte[] storeRoot;
+
+    private ParticipantTransition(PhysicalStore store, List<FlatMutation> flatMutations,
+        List<NodeMutation> nodeMutations, byte[] flatDigest, byte[] generation,
+        byte[] storeRoot) {
+      this.store = store;
+      this.flatMutations = flatMutations;
+      this.nodeMutations = nodeMutations;
+      this.flatDigest = flatDigest;
+      this.generation = generation;
+      this.storeRoot = storeRoot;
+    }
+  }
+
+  private static final class TransitionPlan {
+
+    private final PathStatePhysicalGlobalIntent target;
+    private final List<ParticipantTransition> participants;
+    private final PhysicalStore superStore;
+    private final List<NodeMutation> superNodeMutations;
+    private final PathStatePhysicalReverseJournal journal;
+
+    private TransitionPlan(PathStatePhysicalGlobalIntent target,
+        List<ParticipantTransition> participants, PhysicalStore superStore,
+        List<NodeMutation> superNodeMutations, PathStatePhysicalReverseJournal journal) {
+      this.target = target;
+      this.participants = participants;
+      this.superStore = superStore;
+      this.superNodeMutations = superNodeMutations;
+      this.journal = journal;
+    }
+  }
+
+  private static final class BytesKey {
+
+    private final byte[] bytes;
+
+    private BytesKey(byte[] bytes) {
+      this.bytes = Arrays.copyOf(Objects.requireNonNull(bytes, "bytes"), bytes.length);
+    }
+
+    @Override
+    public boolean equals(Object other) {
+      return this == other || other instanceof BytesKey
+          && Arrays.equals(bytes, ((BytesKey) other).bytes);
+    }
+
+    @Override
+    public int hashCode() {
+      return Arrays.hashCode(bytes);
+    }
+  }
+
+  @FunctionalInterface
+  interface BuildFaultHook {
+
+    void beforeCompletion(PathStateParticipant participant, byte[] storeRoot) throws IOException;
+  }
+
+  enum PublicationStage {
+    AFTER_INTENT,
+    AFTER_CURRENT,
+    AFTER_RETIRE
+  }
+
+  public enum PublicationRecovery {
+    NONE,
+    RETAINED_CURRENT,
+    COMPLETED_INTENT
+  }
+
+  enum DeleteStage {
+    AFTER_PARTICIPANT_BATCH,
+    AFTER_SUPER_BATCH,
+    AFTER_CURRENT
+  }
+
+  enum TransitionStage {
+    AFTER_JOURNAL,
+    AFTER_INTENT,
+    AFTER_PARTICIPANT_BATCH,
+    AFTER_SUPER_BATCH,
+    AFTER_CURRENT,
+    AFTER_RETIRE
+  }
+
+  @FunctionalInterface
+  interface TransitionFaultHook {
+
+    void after(TransitionStage stage) throws IOException;
+  }
+
+  enum RewindStage {
+    AFTER_INTENT,
+    AFTER_PARTICIPANT_BATCH,
+    AFTER_SUPER_BATCH,
+    AFTER_CURRENT,
+    AFTER_RETIRE
+  }
+
+  @FunctionalInterface
+  interface RewindFaultHook {
+
+    void after(RewindStage stage) throws IOException;
+  }
+
+  static final class PhysicalDeleteResult {
+
+    private final byte[] stateRoot;
+    private final int participantNodePuts;
+    private final int participantNodeDeletes;
+    private final int superNodePuts;
+    private final int superNodeDeletes;
+
+    private PhysicalDeleteResult(byte[] stateRoot, int participantNodePuts,
+        int participantNodeDeletes, int superNodePuts, int superNodeDeletes) {
+      this.stateRoot = Arrays.copyOf(stateRoot, stateRoot.length);
+      this.participantNodePuts = participantNodePuts;
+      this.participantNodeDeletes = participantNodeDeletes;
+      this.superNodePuts = superNodePuts;
+      this.superNodeDeletes = superNodeDeletes;
+    }
+
+    byte[] getStateRoot() {
+      return Arrays.copyOf(stateRoot, stateRoot.length);
+    }
+
+    int getParticipantNodePuts() {
+      return participantNodePuts;
+    }
+
+    int getParticipantNodeDeletes() {
+      return participantNodeDeletes;
+    }
+
+    int getSuperNodePuts() {
+      return superNodePuts;
+    }
+
+    int getSuperNodeDeletes() {
+      return superNodeDeletes;
+    }
+  }
+
+  @FunctionalInterface
+  interface PublicationFaultHook {
+
+    void after(PublicationStage stage) throws IOException;
+  }
+
+  @FunctionalInterface
+  interface DeleteFaultHook {
+
+    void after(DeleteStage stage) throws IOException;
+  }
+
+  private static byte[] prefixed(byte prefix, byte[] suffix, String name) {
+    byte[] supplied = Arrays.copyOf(Objects.requireNonNull(suffix, name), suffix.length);
+    byte[] key = new byte[supplied.length + 1];
+    key[0] = prefix;
+    System.arraycopy(supplied, 0, key, 1, supplied.length);
+    return key;
+  }
+}

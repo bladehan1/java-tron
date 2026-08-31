@@ -676,6 +676,12 @@ public final class PathStateRebuildCoordinator {
 
     void scan(String dbName, EntryConsumer consumer) throws IOException;
 
+    /** Scans strictly after one physical cursor; unsupported comparators must fail closed. */
+    default void scanAfter(String dbName, byte[] exclusivePhysicalCursor, EntryConsumer consumer)
+        throws IOException {
+      throw new IOException("path-state snapshot source does not support resumable scan: " + dbName);
+    }
+
     void verifyIdentity(SnapshotIdentity expected) throws IOException;
   }
 
