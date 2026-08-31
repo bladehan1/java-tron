@@ -72,30 +72,6 @@ final class PathStateStoreTrieBuilder implements Closeable {
     }
   }
 
-  /** Removes an incomplete current-generation spool before that Store is rescanned. */
-  void reset() throws IOException {
-    requireCollecting();
-    pendingRows.clear();
-    List<BatchMutation> deletes = new ArrayList<>(DEFAULT_WRITE_BATCH_ROWS);
-    PathStateNativeNodeStore.EntryConsumer consumer = entry -> {
-      deletes.add(BatchMutation.delete(entry.getKey()));
-      if (deletes.size() >= DEFAULT_WRITE_BATCH_ROWS) {
-        spool.writeBatch(new ArrayList<>(deletes));
-        deletes.clear();
-      }
-    };
-    if (generationPrefix.length == 0) {
-      spool.scanAll(consumer);
-    } else {
-      spool.scanPrefix(generationPrefix, consumer);
-    }
-    if (!deletes.isEmpty()) {
-      spool.writeBatch(deletes);
-    }
-    inputRows = 0;
-    sortedRows = 0;
-  }
-
   /** Flushes the spool, streams it in secure-key order, and returns the canonical Store root. */
   byte[] build() throws IOException {
     requireCollecting();

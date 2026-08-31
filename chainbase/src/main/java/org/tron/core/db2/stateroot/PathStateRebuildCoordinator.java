@@ -27,6 +27,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Stream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -173,6 +174,7 @@ public final class PathStateRebuildCoordinator {
     ExecutorService smallExecutor = Executors.newFixedThreadPool(SMALL_STORE_WORKERS,
         rebuildThreadFactory("small"));
     List<Future<?>> futures = new ArrayList<>();
+    AtomicReference<Throwable> abort = new AtomicReference<>();
     Future<?> accountFuture = null;
     StoreIdentity accountAsset = null;
     try {
@@ -190,7 +192,7 @@ public final class PathStateRebuildCoordinator {
         ExecutorService executor = LARGE_STORES.contains(store.getDbName())
             ? largeExecutor : smallExecutor;
         Future<?> future = submitStore(executor, null, store, manifest, source, identity,
-            sourceIdentityDigest, root, stores, builders, completedStores, checkpointLock);
+            sourceIdentityDigest, root, stores, builders, completedStores, checkpointLock, abort);
         futures.add(future);
         if ("account".equals(store.getDbName())) {
           accountFuture = future;
@@ -199,7 +201,7 @@ public final class PathStateRebuildCoordinator {
       if (accountAsset != null) {
         futures.add(submitStore(largeExecutor, accountFuture, accountAsset, manifest, source,
             identity, sourceIdentityDigest, root, stores, builders, completedStores,
-            checkpointLock));
+            checkpointLock, abort));
       }
       Throwable failure = null;
       for (Future<?> future : futures) {
@@ -209,11 +211,16 @@ public final class PathStateRebuildCoordinator {
           Thread.currentThread().interrupt();
           failure = appendFailure(failure,
               new IOException("path-state rebuild interrupted", interrupted));
+          cancelOutstanding(futures);
+          break;
         } catch (ExecutionException failed) {
-          Throwable cause = failed.getCause();
+          Throwable firstFailure = abort.get();
+          Throwable cause = firstFailure == null ? failed.getCause() : firstFailure;
           failure = appendFailure(failure, cause instanceof IOException
               || cause instanceof RuntimeException ? cause
               : new IOException("path-state Store rebuild failed", cause));
+          cancelOutstanding(futures);
+          break;
         }
       }
       if (failure != null) {
@@ -233,12 +240,14 @@ public final class PathStateRebuildCoordinator {
       SnapshotIdentity identity, byte[] sourceIdentityDigest, PathStateRoot root,
       PathStateNodeStoreSet stores, StoreBuilders builders,
       Map<Integer, StoreResult> completedStores,
-      Object checkpointLock) {
+      Object checkpointLock, AtomicReference<Throwable> abort) {
     return executor.submit(() -> {
       try {
+        requireNotAborted(abort);
         awaitDependency(dependency);
+        requireNotAborted(abort);
         StoreAccumulator accumulator = new StoreAccumulator(store, identity.getPhase(), root,
-            builders);
+            builders, abort);
         if (!"account-asset".equals(store.getDbName())) {
           builders.reset(store.getDbName());
         }
@@ -270,11 +279,27 @@ public final class PathStateRebuildCoordinator {
         faultHook.afterStore(result);
         return null;
       } catch (IOException | RuntimeException failure) {
+        abort.compareAndSet(null, failure);
         logger.error("Path-state rebuild Store failed: storeId={}, dbName={}, tier={}",
             store.getStoreId(), store.getDbName(), storeTier(store), failure);
         throw failure;
       }
     });
+  }
+
+  private static void cancelOutstanding(List<Future<?>> futures) {
+    for (Future<?> future : futures) {
+      if (!future.isDone()) {
+        future.cancel(true);
+      }
+    }
+  }
+
+  private static void requireNotAborted(AtomicReference<Throwable> abort) throws IOException {
+    Throwable failure = abort.get();
+    if (failure != null || Thread.currentThread().isInterrupted()) {
+      throw new IOException("path-state Store rebuild aborted after peer failure", failure);
+    }
   }
 
   private static void awaitDependency(Future<?> dependency) throws IOException {
@@ -340,6 +365,7 @@ public final class PathStateRebuildCoordinator {
     private final P66Phase phase;
     private final PathStateRoot root;
     private final StoreBuilders builders;
+    private final AtomicReference<Throwable> abort;
     private final Hasher inputDigest;
     private final long startedNanos = System.nanoTime();
     private byte[] previousKey;
@@ -349,11 +375,12 @@ public final class PathStateRebuildCoordinator {
     private long lastProgressLogNanos = startedNanos;
 
     private StoreAccumulator(StoreIdentity store, P66Phase phase, PathStateRoot root,
-        StoreBuilders builders) {
+        StoreBuilders builders, AtomicReference<Throwable> abort) {
       this.store = store;
       this.phase = phase;
       this.root = root;
       this.builders = builders;
+      this.abort = abort;
       inputDigest = domainHasher(STORE_DIGEST_DOMAIN);
       putInt(inputDigest, store.getStoreId());
       putString(inputDigest, store.getDbName());
@@ -362,6 +389,7 @@ public final class PathStateRebuildCoordinator {
     }
 
     private void accept(byte[] physicalKey, byte[] rawValue) throws IOException {
+      requireNotAborted(abort);
       byte[] key = copy(physicalKey, "physicalKey");
       byte[] value = Arrays.copyOf(Objects.requireNonNull(rawValue, "rawValue"),
           rawValue.length);
@@ -468,7 +496,15 @@ public final class PathStateRebuildCoordinator {
     }
 
     private synchronized void reset(String dbName) throws IOException {
-      handle(descriptor.require(dbName)).builder.reset();
+      StoreIdentity identity = descriptor.require(dbName);
+      BuilderHandle handle = opened.remove(identity.getDbName());
+      if (handle != null) {
+        handle.builder.close();
+        handle.writer.close();
+      }
+      deleteSpoolDirectory(manifest, identity);
+      logger.info("Path-state rebuild incomplete Store spool reset: storeId={}, dbName={}",
+          identity.getStoreId(), identity.getDbName());
     }
 
     private synchronized void retire(StoreIdentity identity) throws IOException {
