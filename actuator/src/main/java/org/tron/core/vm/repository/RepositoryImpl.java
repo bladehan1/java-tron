@@ -924,7 +924,6 @@ public class RepositoryImpl implements Repository {
     }
 
     if (lastTime != now) {
-      assert now > lastTime;
       if (lastTime + windowSize > now) {
         long delta = now - lastTime;
         double decay = (windowSize - delta) / (double) windowSize;
@@ -972,8 +971,6 @@ public class RepositoryImpl implements Repository {
     long energyWeight = frozeBalance / TRX_PRECISION;
     long totalEnergyLimit = getDynamicPropertiesStore().getTotalEnergyCurrentLimit();
     long totalEnergyWeight = getDynamicPropertiesStore().getTotalEnergyWeight();
-
-    assert totalEnergyWeight > 0;
 
     if (hardenResourceCalculation()) {
       return BigInteger.valueOf(energyWeight)
