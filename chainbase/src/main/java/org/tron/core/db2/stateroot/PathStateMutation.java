@@ -7,39 +7,53 @@ import java.util.Objects;
 public final class PathStateMutation {
 
   private final String dbName;
-  private final byte[] canonicalKey;
-  private final byte[] canonicalValue;
+  private final byte[] physicalKey;
+  private final byte[] physicalValue;
 
-  private PathStateMutation(String dbName, byte[] canonicalKey, byte[] canonicalValue) {
+  private PathStateMutation(String dbName, byte[] physicalKey, byte[] physicalValue) {
     this.dbName = Objects.requireNonNull(dbName, "dbName");
-    this.canonicalKey = copy(canonicalKey, "canonicalKey");
-    this.canonicalValue = canonicalValue == null ? null
-        : Arrays.copyOf(canonicalValue, canonicalValue.length);
+    this.physicalKey = copy(physicalKey, "physicalKey");
+    this.physicalValue = physicalValue == null ? null
+        : Arrays.copyOf(physicalValue, physicalValue.length);
   }
 
-  public static PathStateMutation put(String dbName, byte[] canonicalKey, byte[] canonicalValue) {
-    return new PathStateMutation(dbName, canonicalKey,
-        Objects.requireNonNull(canonicalValue, "canonicalValue"));
+  public static PathStateMutation put(String dbName, byte[] physicalKey, byte[] physicalValue) {
+    return new PathStateMutation(dbName, physicalKey,
+        Objects.requireNonNull(physicalValue, "physicalValue"));
   }
 
-  public static PathStateMutation delete(String dbName, byte[] canonicalKey) {
-    return new PathStateMutation(dbName, canonicalKey, null);
+  public static PathStateMutation delete(String dbName, byte[] physicalKey) {
+    return new PathStateMutation(dbName, physicalKey, null);
   }
 
   public String getDbName() {
     return dbName;
   }
 
+  /** Exact physical key bytes supplied by the Chainbase mutation/source boundary. */
+  public byte[] getPhysicalKey() {
+    return Arrays.copyOf(physicalKey, physicalKey.length);
+  }
+
+  /** Exact physical value bytes, or {@code null} for an absent/delete mutation. */
+  public byte[] getPhysicalValue() {
+    return physicalValue == null ? null : Arrays.copyOf(physicalValue, physicalValue.length);
+  }
+
+  /** @deprecated Use {@link #getPhysicalKey()}; this alias is retained for old-format callers. */
+  @Deprecated
   public byte[] getCanonicalKey() {
-    return Arrays.copyOf(canonicalKey, canonicalKey.length);
+    return getPhysicalKey();
   }
 
   public boolean isDelete() {
-    return canonicalValue == null;
+    return physicalValue == null;
   }
 
+  /** @deprecated Use {@link #getPhysicalValue()}; this alias is retained for old-format callers. */
+  @Deprecated
   public byte[] getCanonicalValue() {
-    return canonicalValue == null ? null : Arrays.copyOf(canonicalValue, canonicalValue.length);
+    return getPhysicalValue();
   }
 
   private static byte[] copy(byte[] value, String name) {

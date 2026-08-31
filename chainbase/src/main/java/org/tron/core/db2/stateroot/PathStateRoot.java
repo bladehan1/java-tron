@@ -373,12 +373,12 @@ public final class PathStateRoot {
       PathStateMutation present = Objects.requireNonNull(mutation, "mutation");
       PathStateParticipant participant = scope.require(present.getDbName());
       byte[] secureKey = PathStateCommitmentCodec.storeLeafKey(participant.getStoreId(),
-          present.getCanonicalKey());
+          present.getPhysicalKey());
       if (!uniqueKeys.add(new MutationKey(participant.getStoreId(), secureKey))) {
         throw new IllegalArgumentException("duplicate path-state mutation key");
       }
       byte[] encodedValue = present.isDelete() ? null
-          : PathStateCommitmentCodec.presentLeafValue(present.getCanonicalValue());
+          : PathStateCommitmentCodec.presentLeafValue(present.getPhysicalValue());
       prepared.add(new PreparedMutation(participant, secureKey, encodedValue));
     }
     Collections.sort(prepared, MUTATION_COMPARATOR);

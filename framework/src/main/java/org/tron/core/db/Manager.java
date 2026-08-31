@@ -131,15 +131,18 @@ import org.tron.core.db2.archive.StateArchiveRuntimeOwner;
 import org.tron.core.db2.core.Chainbase;
 import org.tron.core.db2.core.SnapshotManager;
 import org.tron.core.db2.stateroot.PathStateBlockTransition;
+import org.tron.core.db2.stateroot.PathStateCanonicalizer;
 import org.tron.core.db2.stateroot.PathStateCanonicalizer.P66Phase;
+import org.tron.core.db2.stateroot.PathStateHead;
 import org.tron.core.db2.stateroot.PathStateLayerLimits;
 import org.tron.core.db2.stateroot.PathStateNativeSnapshotSource;
-import org.tron.core.db2.stateroot.PathStateRebuildCoordinator;
+import org.tron.core.db2.stateroot.PathStatePhysicalRuntimeAdmission;
+import org.tron.core.db2.stateroot.PathStatePhysicalSnapshotHead;
+import org.tron.core.db2.stateroot.PathStatePhysicalStoreSet;
 import org.tron.core.db2.stateroot.PathStateRebuildCoordinator.SnapshotIdentity;
+import org.tron.core.db2.stateroot.PathStateRoot;
 import org.tron.core.db2.stateroot.PathStateRootMetadata;
-import org.tron.core.db2.stateroot.PathStateRuntimeAdmission;
 import org.tron.core.db2.stateroot.PathStateRuntimeAttachment;
-import org.tron.core.db2.stateroot.PathStateSnapshotHead;
 import org.tron.core.db2.stateroot.PathStateStoreManifest;
 import org.tron.core.exception.AccountResourceInsufficientException;
 import org.tron.core.exception.BadBlockException;
@@ -220,7 +223,7 @@ public class Manager {
   @Getter
   private StateArchiveRuntimeOwner stateArchiveRuntime;
   @Getter
-  private PathStateSnapshotHead pathStateSnapshotHead;
+  private PathStateHead pathStateSnapshotHead;
   @Getter
   private PathStateRuntimeAttachment pathStateRuntime;
   private StateArchiveRuntimeOwner.ServingIndexFaultHook stateArchiveServingIndexFaultHook =
@@ -735,7 +738,7 @@ public class Manager {
     org.tron.core.config.args.Storage storage = Args.getInstance().getStorage();
     if (!storage.isPathStateRootEnabled()) {
       try {
-        PathStateRuntimeAdmission.inspect(false, null, null);
+        PathStatePhysicalRuntimeAdmission.inspect(false, null, null);
       } catch (java.io.IOException impossible) {
         throw new IllegalStateException("Disabled path-state admission failed", impossible);
       }
@@ -743,29 +746,28 @@ public class Manager {
     }
     Path directory = Paths.get(Args.getInstance().getOutputDirectory(),
         storage.getPathStateRootDirectory()).normalize();
+    PathStateHead recovered = null;
     try {
       PathStateStoreManifest.Engine engine = PathStateStoreManifest.Engine.valueOf(
           storage.getDbEngine());
-      PathStateRuntimeAdmission.Result admission = PathStateRuntimeAdmission.inspect(
-          true, directory, engine);
-      if (admission.getStatus() == PathStateRuntimeAdmission.Status.REBUILD_REQUIRED) {
+      PathStatePhysicalRuntimeAdmission.Result admission =
+          PathStatePhysicalRuntimeAdmission.inspect(true, directory, engine);
+      if (admission.getStatus()
+          == PathStatePhysicalRuntimeAdmission.Status.REBUILD_REQUIRED) {
         if (!(revokingStore instanceof SnapshotManager)) {
           throw new IllegalStateException("Path-state rebuild requires SnapshotManager");
         }
-        PathStateStoreManifest rebuildManifest = admission.getManifest() == null
-            ? PathStateStoreManifest.createOrOpen(directory, engine) : admission.getManifest();
-        rebuildPathStateRoot((SnapshotManager) revokingStore, rebuildManifest);
-        admission = PathStateRuntimeAdmission.inspect(true, directory, engine);
+        rebuildPathStateRoot((SnapshotManager) revokingStore, directory, engine);
+        admission = PathStatePhysicalRuntimeAdmission.inspect(true, directory, engine);
       }
-      if (admission.getStatus() != PathStateRuntimeAdmission.Status.CURRENT_READY) {
+      if (admission.getStatus()
+          != PathStatePhysicalRuntimeAdmission.Status.CURRENT_CANDIDATE) {
         throw new IllegalStateException(
             "Path-state startup requires a completed admitted rebuild");
       }
-      PathStateLayerLimits limits = new PathStateLayerLimits(
-          storage.getPathStateRootReversibleLayerLimit(),
-          storage.getPathStateRootReversibleLayerBytes());
-      PathStateSnapshotHead recovered = PathStateSnapshotHead.open(
-          admission.getManifest(), limits);
+      recovered = PathStatePhysicalSnapshotHead.open(directory, engine,
+          new PathStateLayerLimits(storage.getPathStateRootReversibleLayerLimit(),
+              storage.getPathStateRootReversibleLayerBytes()));
       PathStateRootMetadata recoveredHead = recovered.getHead();
       if (recoveredHead.getBlockNumber()
           != getDynamicPropertiesStore().getLatestBlockHeaderNumber()
@@ -778,8 +780,16 @@ public class Manager {
       attachPathStateBlockFinalRuntime();
       logger.info("Path-state current root attached: directory={}, head={}, engine={}",
           directory, recoveredHead.getBlockNumber(), storage.getDbEngine());
+      recovered = null;
     } catch (java.io.IOException | RuntimeException failure) {
       pathStateSnapshotHead = null;
+      if (recovered != null) {
+        try {
+          recovered.close();
+        } catch (java.io.IOException closeFailure) {
+          failure.addSuppressed(closeFailure);
+        }
+      }
       throw new IllegalStateException("Failed to recover path-state startup", failure);
     }
   }
@@ -797,7 +807,7 @@ public class Manager {
         new SnapshotPathStateTransitionCollector(accountAssetStore::prefixQuery,
             this::scanPathStateActivationAccounts),
         this::advancePathStateRoot, this::flushPathStateBaseThrough,
-        transition -> pathStateSnapshotHead.prepare(transition).getStateRoot());
+        transition -> pathStateSnapshotHead.preview(transition));
     attachment.synchronizeReadyHead(pathStateSnapshotHead.getHead());
     ((SnapshotManager) revokingStore).attachPathStateRuntime(attachment);
     pathStateRuntime = attachment;
@@ -825,7 +835,7 @@ public class Manager {
 
   private void advancePathStateRoot(PathStateBlockTransition transition)
       throws java.io.IOException {
-    PathStateSnapshotHead owner = pathStateSnapshotHead;
+    PathStateHead owner = pathStateSnapshotHead;
     if (owner == null) {
       throw new java.io.IOException("Path-state snapshot owner is unavailable");
     }
@@ -834,15 +844,15 @@ public class Manager {
 
   private void flushPathStateBaseThrough(long blockNumber, byte[] blockHash)
       throws java.io.IOException {
-    PathStateSnapshotHead owner = pathStateSnapshotHead;
+    PathStateHead owner = pathStateSnapshotHead;
     if (owner == null) {
       throw new java.io.IOException("Path-state snapshot owner is unavailable");
     }
     owner.flushBaseThrough(blockNumber, blockHash);
   }
 
-  private void rebuildPathStateRoot(SnapshotManager snapshotManager,
-      PathStateStoreManifest manifest) throws java.io.IOException {
+  private void rebuildPathStateRoot(SnapshotManager snapshotManager, Path directory,
+      PathStateStoreManifest.Engine engine) throws java.io.IOException {
     java.util.Map<String,
         org.tron.core.db2.archive.LatestStateGenerationAdapter.SnapshotCapableStore>
         supplementalStores = java.util.Collections.emptyMap();
@@ -863,11 +873,18 @@ public class Manager {
     try (PathStateNativeSnapshotSource source = PathStateNativeSnapshotSource.acquire(
         snapshotManager, supplementalStores, this::readPathStateSnapshotIdentity,
         PATH_STATE_REBUILD_PAGE_SIZE, PATH_STATE_REBUILD_MARKET_ENTRY_LIMIT)) {
-      PathStateRebuildCoordinator.RebuildResult result = new PathStateRebuildCoordinator()
-          .rebuild(manifest, source);
+      SnapshotIdentity identity = source.identity();
+      PathStateRootMetadata metadata;
+      try (PathStatePhysicalStoreSet stores = PathStatePhysicalStoreSet.open(directory,
+          new PathStateCanonicalizer().participantScope(), engine)) {
+        PathStateRoot rebuilt = stores.ingestAndBuild(source);
+        metadata = PathStateRootMetadata.base(identity.getBlockNumber(), identity.getBlockHash(),
+            identity.getParentHash(), identity.getTimestamp(), identity.getPhase(),
+            stores.getFormatDigest(), rebuilt.rootHash(), source.sourceIdentityDigest());
+        stores.publishCurrent(metadata);
+      }
       logger.info("Path-state initial root rebuilt: directory={}, head={}, entries={}",
-          manifest.getDirectory(), result.getMetadata().getBlockNumber(),
-          result.getTotalEntries());
+          directory, metadata.getBlockNumber(), "exact-27");
     }
   }
 
@@ -1430,7 +1447,7 @@ public class Manager {
 
   /** Keeps the non-consensus path-state head aligned after Chainbase owns a successful pop. */
   private void rewindPathStateRootAfterPop() {
-    PathStateSnapshotHead owner = pathStateSnapshotHead;
+    PathStateHead owner = pathStateSnapshotHead;
     if (owner == null) {
       return;
     }
@@ -1509,7 +1526,7 @@ public class Manager {
     }
     byte[] localRoot = null;
     try {
-      PathStateSnapshotHead owner = pathStateSnapshotHead;
+      PathStateHead owner = pathStateSnapshotHead;
       if (owner != null) {
         PathStateRootMetadata local = owner.getHead();
         if (local.getBlockNumber() == block.getNum()
@@ -3144,7 +3161,15 @@ public class Manager {
       ((SnapshotManager) revokingStore).detachPathStateRuntime(runtime);
       pathStateRuntime = null;
     }
+    PathStateHead owner = pathStateSnapshotHead;
     pathStateSnapshotHead = null;
+    if (owner != null) {
+      try {
+        owner.close();
+      } catch (java.io.IOException failure) {
+        throw new IllegalStateException("Failed to close path-state current head", failure);
+      }
+    }
   }
 
   private static class ValidateSignTask implements Callable<Boolean> {

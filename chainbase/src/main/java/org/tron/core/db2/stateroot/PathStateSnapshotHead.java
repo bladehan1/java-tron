@@ -5,7 +5,7 @@ import java.util.Arrays;
 import java.util.Objects;
 
 /** In-process snapshot authority that advances only with the durable block-final CURRENT head. */
-public final class PathStateSnapshotHead {
+public final class PathStateSnapshotHead implements PathStateHead {
 
   private final PathStateStoreManifest manifest;
   private final PathStateLayerLimits limits;
@@ -100,6 +100,11 @@ public final class PathStateSnapshotHead {
     return PreparedPathStateTransition.prepare(head, snapshot, admitted);
   }
 
+  @Override
+  public synchronized byte[] preview(PathStateBlockTransition transition) throws IOException {
+    return prepare(transition).getStateRoot();
+  }
+
   /** Publishes one exact prepared child and adopts it only after CURRENT confirms durability. */
   public synchronized PathStateRootMetadata advancePrepared(
       PreparedPathStateTransition prepared) throws IOException {
@@ -144,6 +149,11 @@ public final class PathStateSnapshotHead {
 
   public synchronized boolean isFailed() {
     return failed;
+  }
+
+  @Override
+  public void close() {
+    // The legacy head opens native stores only inside bounded operations.
   }
 
   private void requireChild(PathStateBlockTransition transition) throws IOException {

@@ -86,6 +86,37 @@ public class PathStateNativeSnapshotSourceTest {
   }
 
   @Test
+  public void lexicalPagingPreservesAKeyThatExtendsThePreviousPageBoundary() throws Exception {
+    Registry registry = registry();
+    registry.probes.get("proposal").add(new byte[]{1}, new byte[]{11});
+    registry.probes.get("proposal").add(new byte[]{1, 0}, new byte[]{12});
+    List<byte[]> keys = new ArrayList<>();
+    try (PathStateNativeSnapshotSource source = PathStateNativeSnapshotSource.acquire(
+        registry.manager, Collections.emptyMap(), PathStateNativeSnapshotSourceTest::identity,
+        1, 10)) {
+      source.scan("proposal", (key, value) -> keys.add(key));
+    }
+    assertEquals(2, keys.size());
+    assertArrayEquals(new byte[]{1}, keys.get(0));
+    assertArrayEquals(new byte[]{1, 0}, keys.get(1));
+  }
+
+  @Test
+  public void resumableLexicalScanStartsStrictlyAfterThePhysicalCursor() throws Exception {
+    Registry registry = registry();
+    registry.probes.get("proposal").add(new byte[]{1}, new byte[]{11});
+    registry.probes.get("proposal").add(new byte[]{1, 0}, new byte[]{12});
+    List<byte[]> keys = new ArrayList<>();
+    try (PathStateNativeSnapshotSource source = PathStateNativeSnapshotSource.acquire(
+        registry.manager, Collections.emptyMap(), PathStateNativeSnapshotSourceTest::identity,
+        1, 10)) {
+      source.scanAfter("proposal", new byte[]{1}, (key, value) -> keys.add(key));
+    }
+    assertEquals(1, keys.size());
+    assertArrayEquals(new byte[]{1, 0}, keys.get(0));
+  }
+
+  @Test
   public void acceptsSupplementalAccountAssetAndRejectsMarketOverflow() throws Exception {
     Registry registry = registry();
     Probe accountAsset = registry.probes.get("account-asset");
