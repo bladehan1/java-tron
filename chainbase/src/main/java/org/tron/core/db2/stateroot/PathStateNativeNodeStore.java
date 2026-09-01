@@ -29,6 +29,8 @@ final class PathStateNativeNodeStore implements Closeable {
   private final Path directory;
   private final Engine engine;
   private final Delegate delegate;
+  private long writeBatchCalls;
+  private long writeBatchMutations;
   private volatile boolean closed;
 
   private PathStateNativeNodeStore(Path directory, Engine engine, Delegate delegate) {
@@ -78,6 +80,16 @@ final class PathStateNativeNodeStore implements Closeable {
       Objects.requireNonNull(mutation, "mutation");
     }
     delegate.writeBatch(supplied);
+    writeBatchCalls = Math.addExact(writeBatchCalls, 1L);
+    writeBatchMutations = Math.addExact(writeBatchMutations, supplied.size());
+  }
+
+  synchronized long getWriteBatchCalls() {
+    return writeBatchCalls;
+  }
+
+  synchronized long getWriteBatchMutations() {
+    return writeBatchMutations;
   }
 
   synchronized List<KeyValue> scanPrefix(byte[] prefix) throws IOException {

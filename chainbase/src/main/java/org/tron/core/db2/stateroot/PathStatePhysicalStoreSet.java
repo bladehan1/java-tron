@@ -8,15 +8,21 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
-import java.util.HashSet;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.List;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.stream.Stream;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.tron.common.crypto.Hash;
 import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
 
@@ -29,8 +35,15 @@ import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
  */
 public final class PathStatePhysicalStoreSet implements Closeable {
 
+  private static final Logger logger = LoggerFactory.getLogger("DB");
+
   static final long DEFAULT_CHECKPOINT_ROWS = 1_000_000L;
   static final long DEFAULT_CHECKPOINT_BYTES = 256L * 1024 * 1024;
+  static final int BOOTSTRAP_WRITE_BATCH_ENTRIES = 4096;
+  static final long BOOTSTRAP_WRITE_BATCH_BYTES = 8L * 1024 * 1024;
+  private static final Set<String> LARGE_BOOTSTRAP_STORES = java.util.Collections.unmodifiableSet(
+      new HashSet<>(Arrays.asList(
+          "account", "account-asset", "delegation", "storage-row")));
 
   private static final String STORES_DIRECTORY = "stores";
   private static final String SUPER_DIRECTORY = "super";
@@ -159,52 +172,100 @@ public final class PathStatePhysicalStoreSet implements Closeable {
   }
 
   /** Ingests exact physical rows into one F domain and durably advances its source cursor. */
-  synchronized void ingestFlat(String dbName, PathStateRebuildCoordinator.SnapshotSource source,
+  void ingestFlat(String dbName, PathStateRebuildCoordinator.SnapshotSource source,
       long rowThreshold, long byteThreshold) throws IOException {
     if (rowThreshold <= 0 || byteThreshold <= 0) {
       throw new IllegalArgumentException("ingest checkpoint thresholds must be positive");
     }
     PathStateParticipant participant = scope.require(dbName);
+    PhysicalStore store = participants.get(dbName);
+    if (store == null) {
+      throw new IllegalArgumentException("unknown path-state participant: " + dbName);
+    }
     PathStateRebuildCoordinator.SnapshotSource pinned = Objects.requireNonNull(source, "source");
     byte[] identity = pinned.sourceIdentityDigest();
     if (identity.length != PathStateCommitmentCodec.ROOT_LENGTH) {
       throw new IOException("physical ingest source identity must contain exactly 32 bytes");
     }
-    byte[] complete = participant(dbName).getMetadata(FLAT_INGEST_COMPLETE);
+    byte[] complete = store.getMetadata(FLAT_INGEST_COMPLETE);
     if (complete != null) {
       if (!Arrays.equals(complete, identity)) {
         throw new IOException("physical ingest completion source identity differs: " + dbName);
       }
       return;
     }
-    PathStatePhysicalIngestCheckpoint prior = ingestCheckpoint(dbName);
+    byte[] encodedCheckpoint = store.getMetadata(FLAT_INGEST_CHECKPOINT);
+    PathStatePhysicalIngestCheckpoint prior = encodedCheckpoint == null ? null
+        : PathStatePhysicalIngestCheckpoint.decode(encodedCheckpoint);
     if (prior != null && !Arrays.equals(prior.getSourceIdentity(), identity)) {
       throw new IOException("physical ingest checkpoint source identity differs: " + dbName);
     }
     long[] progress = prior == null ? new long[]{0, 0} : new long[]{prior.getRows(), prior.getBytes()};
     byte[][] cursor = new byte[][]{prior == null ? null : prior.getCursor()};
+    List<PathStateNativeNodeStore.BatchMutation> pending =
+        new ArrayList<>(BOOTSTRAP_WRITE_BATCH_ENTRIES + 2);
+    long[] pendingBytes = new long[1];
     long[] sinceCheckpoint = new long[2];
+    long startedNanos = System.nanoTime();
+    long initialRows = progress[0];
+    long initialBatchCalls = store.getWriteBatchCalls();
+    long initialBatchMutations = store.getWriteBatchMutations();
     pinned.scanAfter(dbName, cursor[0], (physicalKey, physicalValue) -> {
       byte[] key = Arrays.copyOf(physicalKey, physicalKey.length);
-      participant(dbName).putFlat(PathStateCommitmentCodec.storeLeafKey(participant.getStoreId(), key),
-          PathStateCommitmentCodec.presentLeafValue(physicalValue));
+      byte[] secureKey = PathStateCommitmentCodec.storeLeafKey(participant.getStoreId(), key);
+      byte[] encodedLeaf = PathStateCommitmentCodec.presentLeafValue(physicalValue);
+      byte[] storedKey = prefixed(FLAT_PREFIX, secureKey, "secureKey");
+      long mutationBytes = storedKey.length + encodedLeaf.length;
+      if (!pending.isEmpty()
+          && pendingBytes[0] + mutationBytes > BOOTSTRAP_WRITE_BATCH_BYTES) {
+        store.writeBatch(pending);
+        pending.clear();
+        pendingBytes[0] = 0;
+      }
+      pending.add(PathStateNativeNodeStore.BatchMutation.put(storedKey, encodedLeaf));
+      pendingBytes[0] = Math.addExact(pendingBytes[0], mutationBytes);
       cursor[0] = key;
       progress[0]++;
       progress[1] += key.length + physicalValue.length;
       sinceCheckpoint[0]++;
       sinceCheckpoint[1] += key.length + physicalValue.length;
-      if (sinceCheckpoint[0] >= rowThreshold || sinceCheckpoint[1] >= byteThreshold) {
-        saveIngestCheckpoint(dbName, new PathStatePhysicalIngestCheckpoint(identity, cursor[0],
-            progress[0], progress[1]));
+      boolean checkpointDue = sinceCheckpoint[0] >= rowThreshold
+          || sinceCheckpoint[1] >= byteThreshold;
+      if (checkpointDue) {
+        pending.add(PhysicalStore.metadataMutation(FLAT_INGEST_CHECKPOINT,
+            new PathStatePhysicalIngestCheckpoint(identity, cursor[0], progress[0], progress[1])
+                .encode()));
+      }
+      if (checkpointDue || pending.size() >= BOOTSTRAP_WRITE_BATCH_ENTRIES
+          || pendingBytes[0] >= BOOTSTRAP_WRITE_BATCH_BYTES) {
+        store.writeBatch(pending);
+        pending.clear();
+        pendingBytes[0] = 0;
+      }
+      if (checkpointDue) {
+        logger.info("Path-state physical ingest checkpointed: storeId={}, dbName={}, rows={}, "
+                + "inputBytes={}, batches={}, mutations={}, elapsedMs={}, rowsPerSecond={}",
+            participant.getStoreId(), dbName, progress[0], progress[1],
+            store.getWriteBatchCalls() - initialBatchCalls,
+            store.getWriteBatchMutations() - initialBatchMutations,
+            elapsedMillis(startedNanos), rowsPerSecond(progress[0] - initialRows, startedNanos));
         sinceCheckpoint[0] = 0;
         sinceCheckpoint[1] = 0;
       }
     });
     if (cursor[0] != null) {
-      saveIngestCheckpoint(dbName, new PathStatePhysicalIngestCheckpoint(identity, cursor[0],
-          progress[0], progress[1]));
+      pending.add(PhysicalStore.metadataMutation(FLAT_INGEST_CHECKPOINT,
+          new PathStatePhysicalIngestCheckpoint(identity, cursor[0], progress[0], progress[1])
+              .encode()));
     }
-    participant(dbName).putMetadata(FLAT_INGEST_COMPLETE, identity);
+    pending.add(PhysicalStore.metadataMutation(FLAT_INGEST_COMPLETE, identity));
+    store.writeBatch(pending);
+    logger.info("Path-state physical ingest completed: storeId={}, dbName={}, rows={}, "
+            + "inputBytes={}, batches={}, mutations={}, elapsedMs={}, rowsPerSecond={}",
+        participant.getStoreId(), dbName, progress[0], progress[1],
+        store.getWriteBatchCalls() - initialBatchCalls,
+        store.getWriteBatchMutations() - initialBatchMutations,
+        elapsedMillis(startedNanos), rowsPerSecond(progress[0] - initialRows, startedNanos));
   }
 
   /** Validates one exact-27 pinned source, resumes all unfinished F ingests, then builds the root. */
@@ -222,10 +283,64 @@ public final class PathStatePhysicalStoreSet implements Closeable {
         pinned.identity(), "source identity");
     pinned.verifyIdentity(identity);
     PathStateParticipantDescriptor.current().requireExactDatabases(pinned.databases());
-    for (PathStateParticipant participant : scope.getParticipants()) {
-      ingestFlat(participant.getDbName(), pinned, rowThreshold, byteThreshold);
-    }
+    ingestFlatParticipants(pinned, rowThreshold, byteThreshold);
+    pinned.verifyIdentity(identity);
     return buildRootFromFlat();
+  }
+
+  private void ingestFlatParticipants(PathStateRebuildCoordinator.SnapshotSource source,
+      long rowThreshold, long byteThreshold) throws IOException {
+    ExecutorService largeExecutor = newBootstrapExecutor("large");
+    ExecutorService smallExecutor = newBootstrapExecutor("small");
+    List<Future<?>> futures = new ArrayList<>();
+    try {
+      for (PathStateParticipant participant : scope.getParticipants()) {
+        ExecutorService executor = LARGE_BOOTSTRAP_STORES.contains(participant.getDbName())
+            ? largeExecutor : smallExecutor;
+        futures.add(executor.submit(() -> {
+          ingestFlat(participant.getDbName(), source, rowThreshold, byteThreshold);
+          return null;
+        }));
+      }
+      for (Future<?> future : futures) {
+        try {
+          future.get();
+        } catch (InterruptedException interrupted) {
+          Thread.currentThread().interrupt();
+          cancelOutstanding(futures);
+          throw new IOException("path-state physical ingest interrupted", interrupted);
+        } catch (ExecutionException failed) {
+          cancelOutstanding(futures);
+          Throwable cause = failed.getCause();
+          if (cause instanceof IOException) {
+            throw (IOException) cause;
+          }
+          if (cause instanceof RuntimeException) {
+            throw (RuntimeException) cause;
+          }
+          throw new IOException("path-state physical ingest failed", cause);
+        }
+      }
+    } finally {
+      largeExecutor.shutdownNow();
+      smallExecutor.shutdownNow();
+    }
+  }
+
+  private static ExecutorService newBootstrapExecutor(String tier) {
+    return Executors.newSingleThreadExecutor(task -> {
+      Thread thread = new Thread(task, "path-state-physical-bootstrap-" + tier);
+      thread.setDaemon(true);
+      return thread;
+    });
+  }
+
+  private static void cancelOutstanding(List<Future<?>> futures) {
+    for (Future<?> future : futures) {
+      if (!future.isDone()) {
+        future.cancel(true);
+      }
+    }
   }
 
   /**
@@ -298,7 +413,12 @@ public final class PathStatePhysicalStoreSet implements Closeable {
         continue;
       }
       store.clearNodes();
-      PathStateStackTrie trie = new PathStateStackTrie(store.nodeStore()::put);
+      long startedNanos = System.nanoTime();
+      long initialBatchCalls = store.getWriteBatchCalls();
+      long initialBatchMutations = store.getWriteBatchMutations();
+      long[] rows = new long[1];
+      PhysicalNodeBatchWriter nodeWriter = store.nodeBatchWriter();
+      PathStateStackTrie trie = new PathStateStackTrie(nodeWriter::put);
       Hasher flatHasher = Hashing.sha256().newHasher();
       store.scanFlat(entry -> {
         byte[] secureKey = unprefixedFlatKey(entry.getKey());
@@ -306,14 +426,20 @@ public final class PathStatePhysicalStoreSet implements Closeable {
         flatHasher.putInt(secureKey.length).putBytes(secureKey)
             .putInt(encodedValue.length).putBytes(encodedValue);
         trie.update(secureKey, encodedValue);
+        rows[0]++;
       });
       byte[] storeRoot = trie.rootHash();
+      nodeWriter.flush();
       byte[] flatDigest = flatHasher.hash().asBytes();
       byte[] generation = participantGeneration(participant, flatDigest, storeRoot);
-      store.putMetadata(FLAT_DIGEST_METADATA, flatDigest);
-      store.putMetadata(STORE_GENERATION_METADATA, generation);
       hook.beforeCompletion(participant, storeRoot);
-      store.putMetadata(FLAT_COMPLETE_METADATA, storeRoot);
+      store.completeFlatBuild(flatDigest, generation, storeRoot);
+      logger.info("Path-state physical trie completed: storeId={}, dbName={}, rows={}, "
+              + "batches={}, mutations={}, elapsedMs={}, rowsPerSecond={}",
+          participant.getStoreId(), participant.getDbName(), rows[0],
+          store.getWriteBatchCalls() - initialBatchCalls,
+          store.getWriteBatchMutations() - initialBatchMutations,
+          elapsedMillis(startedNanos), rowsPerSecond(rows[0], startedNanos));
       targets.add(new PathStatePhysicalGlobalIntent.ParticipantTarget(participant.getStoreId(),
           generation, flatDigest, storeRoot));
       root.completeRebuildParticipant(participant.getDbName(), storeRoot);
@@ -1114,6 +1240,16 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     return Arrays.copyOfRange(key, 1, key.length);
   }
 
+  private static long elapsedMillis(long startedNanos) {
+    return java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(
+        System.nanoTime() - startedNanos);
+  }
+
+  private static long rowsPerSecond(long rows, long startedNanos) {
+    long elapsedNanos = Math.max(1L, System.nanoTime() - startedNanos);
+    return (long) (rows * 1_000_000_000D / elapsedNanos);
+  }
+
   /** One participant or super database with independent F/N/M key domains. */
   public static final class PhysicalStore implements Closeable {
 
@@ -1125,6 +1261,10 @@ public final class PathStatePhysicalStoreSet implements Closeable {
 
     public void putFlat(byte[] secureKey, byte[] encodedLeaf) {
       nativeStore.put(prefixed(FLAT_PREFIX, secureKey, "secureKey"), encodedLeaf);
+    }
+
+    private void writeBatch(List<PathStateNativeNodeStore.BatchMutation> mutations) {
+      nativeStore.writeBatch(new ArrayList<>(mutations));
     }
 
     public byte[] getFlat(byte[] secureKey) {
@@ -1141,6 +1281,26 @@ public final class PathStatePhysicalStoreSet implements Closeable {
 
     public PathNodeStore nodeStore() {
       return new PhysicalNodeStore(nativeStore);
+    }
+
+    private PhysicalNodeBatchWriter nodeBatchWriter() {
+      return new PhysicalNodeBatchWriter(nativeStore);
+    }
+
+    private void completeFlatBuild(byte[] flatDigest, byte[] generation, byte[] storeRoot) {
+      List<PathStateNativeNodeStore.BatchMutation> mutations = new ArrayList<>(3);
+      mutations.add(metadataMutation(FLAT_DIGEST_METADATA, flatDigest));
+      mutations.add(metadataMutation(STORE_GENERATION_METADATA, generation));
+      mutations.add(metadataMutation(FLAT_COMPLETE_METADATA, storeRoot));
+      nativeStore.writeBatch(mutations);
+    }
+
+    long getWriteBatchCalls() {
+      return nativeStore.getWriteBatchCalls();
+    }
+
+    long getWriteBatchMutations() {
+      return nativeStore.getWriteBatchMutations();
     }
 
     void clearNodes() throws IOException {
@@ -1255,6 +1415,65 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     @Override
     public void delete(byte[] path) {
       nativeStore.delete(prefixed(NODE_PREFIX, path, "path"));
+    }
+  }
+
+  private static final class PhysicalNodeBatchWriter implements PathNodeStore {
+
+    private final PathStateNativeNodeStore nativeStore;
+    private final List<PathStateNativeNodeStore.BatchMutation> pending =
+        new ArrayList<>(BOOTSTRAP_WRITE_BATCH_ENTRIES);
+    private long pendingBytes;
+
+    private PhysicalNodeBatchWriter(PathStateNativeNodeStore nativeStore) {
+      this.nativeStore = nativeStore;
+    }
+
+    @Override
+    public byte[] get(byte[] path) {
+      flush();
+      return nativeStore.get(prefixed(NODE_PREFIX, path, "path"));
+    }
+
+    @Override
+    public void put(byte[] path, byte[] encodedNode) {
+      byte[] key = prefixed(NODE_PREFIX, path, "path");
+      byte[] value = Arrays.copyOf(Objects.requireNonNull(encodedNode, "encodedNode"),
+          encodedNode.length);
+      flushBeforeOversizedMutation(key.length + value.length);
+      pending.add(PathStateNativeNodeStore.BatchMutation.put(key, value));
+      pendingBytes = Math.addExact(pendingBytes, key.length + value.length);
+      flushIfFull();
+    }
+
+    @Override
+    public void delete(byte[] path) {
+      byte[] key = prefixed(NODE_PREFIX, path, "path");
+      flushBeforeOversizedMutation(key.length);
+      pending.add(PathStateNativeNodeStore.BatchMutation.delete(key));
+      pendingBytes = Math.addExact(pendingBytes, key.length);
+      flushIfFull();
+    }
+
+    private void flushIfFull() {
+      if (pending.size() >= BOOTSTRAP_WRITE_BATCH_ENTRIES
+          || pendingBytes >= BOOTSTRAP_WRITE_BATCH_BYTES) {
+        flush();
+      }
+    }
+
+    private void flushBeforeOversizedMutation(long mutationBytes) {
+      if (!pending.isEmpty() && pendingBytes + mutationBytes > BOOTSTRAP_WRITE_BATCH_BYTES) {
+        flush();
+      }
+    }
+
+    private void flush() {
+      if (!pending.isEmpty()) {
+        nativeStore.writeBatch(new ArrayList<>(pending));
+        pending.clear();
+        pendingBytes = 0;
+      }
     }
   }
 
