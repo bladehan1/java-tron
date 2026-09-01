@@ -41,6 +41,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
   static final long DEFAULT_CHECKPOINT_BYTES = 256L * 1024 * 1024;
   static final int BOOTSTRAP_WRITE_BATCH_ENTRIES = 4096;
   static final long BOOTSTRAP_WRITE_BATCH_BYTES = 8L * 1024 * 1024;
+  private static final int MAX_PARALLEL_PARTICIPANT_WRITES = 4;
   private static final Set<String> LARGE_BOOTSTRAP_STORES = java.util.Collections.unmodifiableSet(
       new HashSet<>(Arrays.asList(
           "account", "account-asset", "delegation", "storage-row")));
@@ -74,6 +75,8 @@ public final class PathStatePhysicalStoreSet implements Closeable {
   private final PathStateParticipantScope scope;
   private final Map<String, PhysicalStore> participants = new LinkedHashMap<>();
   private final PhysicalStore superStore;
+  private final ExecutorService participantWriteExecutor;
+  private Map<BytesKey, ReverseJournalIndexEntry> reverseJournalIndex;
   private boolean rootClaimed;
   private boolean closed;
 
@@ -83,6 +86,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     this.manifest = manifest;
     this.directory = manifest.getDirectory();
     this.scope = requireExactScope(scope);
+    this.participantWriteExecutor = newParticipantWriteExecutor();
     try {
       for (PathStateParticipant participant : scope.getParticipants()) {
         Path participantDirectory = directory.resolve(STORES_DIRECTORY).resolve(String.format(
@@ -335,6 +339,14 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     });
   }
 
+  private static ExecutorService newParticipantWriteExecutor() {
+    return Executors.newFixedThreadPool(MAX_PARALLEL_PARTICIPANT_WRITES, task -> {
+      Thread thread = new Thread(task, "path-state-physical-participant-write");
+      thread.setDaemon(true);
+      return thread;
+    });
+  }
+
   private static void cancelOutstanding(List<Future<?>> futures) {
     for (Future<?> future : futures) {
       if (!future.isDone()) {
@@ -491,7 +503,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
 
   synchronized void verifyReverseJournals(PathStateLayerLimits limits) throws IOException {
     requireOpen();
-    loadReverseJournals(Objects.requireNonNull(limits, "limits"));
+    reverseJournalIndex = loadReverseJournalIndex(Objects.requireNonNull(limits, "limits"));
   }
 
   /** Computes one exact child target without changing F/N/M, INTENT, or CURRENT. */
@@ -505,19 +517,33 @@ public final class PathStatePhysicalStoreSet implements Closeable {
   /** Applies one block-final child to the physical 27+1 stores and publishes its CURRENT. */
   public synchronized PathStateRootMetadata applyAndPublish(PathStateBlockTransition transition)
       throws IOException {
-    return applyAndPublish(transition, PathStateLayerLimits.defaults(), stage -> { });
+    return applyAndPublishInternal(transition, PathStateLayerLimits.defaults(), stage -> { },
+        true);
+  }
+
+  synchronized PathStateRootMetadata applyAndPublish(PathStateBlockTransition transition,
+      PathStateLayerLimits limits) throws IOException {
+    return applyAndPublishInternal(transition, limits, stage -> { }, true);
   }
 
   synchronized PathStateRootMetadata applyAndPublish(PathStateBlockTransition transition,
       TransitionFaultHook faultHook) throws IOException {
-    return applyAndPublish(transition, PathStateLayerLimits.defaults(), faultHook);
+    return applyAndPublishInternal(transition, PathStateLayerLimits.defaults(), faultHook, false);
   }
 
   synchronized PathStateRootMetadata applyAndPublish(PathStateBlockTransition transition,
       PathStateLayerLimits limits, TransitionFaultHook faultHook) throws IOException {
+    return applyAndPublishInternal(transition, limits, faultHook, false);
+  }
+
+  private PathStateRootMetadata applyAndPublishInternal(PathStateBlockTransition transition,
+      PathStateLayerLimits limits, TransitionFaultHook faultHook, boolean parallelParticipants)
+      throws IOException {
     requireOpen();
+    long startedNanos = System.nanoTime();
     recoverPublication();
     TransitionPlan plan = prepareTransition(transition);
+    long preparedNanos = System.nanoTime();
     TransitionFaultHook hook = Objects.requireNonNull(faultHook, "faultHook");
     byte[] encoded = plan.target.encode();
     byte[] encodedJournal = plan.journal.encode();
@@ -525,17 +551,26 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     pruneReverseJournals(currentTarget(), Objects.requireNonNull(limits, "limits"), journal,
         encodedJournal.length);
     PathStateMetadataFile.publishImmutableBytes(journal, encodedJournal);
+    rememberReverseJournal(plan.journal, journal, encodedJournal.length);
+    long journalNanos = System.nanoTime();
     hook.after(TransitionStage.AFTER_JOURNAL);
     Path intent = directory.resolve(INTENT_FILE);
     Path current = directory.resolve(CURRENT_FILE);
     PathStateMetadataFile.publishImmutableBytes(intent, encoded);
     hook.after(TransitionStage.AFTER_INTENT);
-    for (ParticipantTransition participant : plan.participants) {
-      participant.store.applyParticipantTransition(participant.flatMutations,
-          participant.nodeMutations, participant.flatDigest, participant.generation,
-          participant.storeRoot);
-      hook.after(TransitionStage.AFTER_PARTICIPANT_BATCH);
+    long intentNanos = System.nanoTime();
+    if (parallelParticipants) {
+      applyParticipantTransitionsInParallel(plan.participants);
+      for (int completed = 0; completed < plan.participants.size(); completed++) {
+        hook.after(TransitionStage.AFTER_PARTICIPANT_BATCH);
+      }
+    } else {
+      for (ParticipantTransition participant : plan.participants) {
+        applyParticipantTransition(participant);
+        hook.after(TransitionStage.AFTER_PARTICIPANT_BATCH);
+      }
     }
+    long participantsNanos = System.nanoTime();
     plan.superStore.applySuperTransition(plan.superNodeMutations,
         plan.target.getSuperGeneration(), plan.target.getSuperRoot());
     hook.after(TransitionStage.AFTER_SUPER_BATCH);
@@ -543,6 +578,16 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     hook.after(TransitionStage.AFTER_CURRENT);
     PathStateMetadataFile.deleteDurable(intent);
     hook.after(TransitionStage.AFTER_RETIRE);
+    long completedNanos = System.nanoTime();
+    logger.info("Path-state physical transition completed: head={}, changedStores={}, "
+            + "journalBytes={}, journalCount={}, journalWindowBytes={}, prepareMs={}, "
+            + "journalMs={}, intentMs={}, participantWaitMs={}, finalizeMs={}, totalMs={}",
+        plan.target.getMetadata().getBlockNumber(), plan.participants.size(),
+        encodedJournal.length, reverseJournalCount(), reverseJournalBytes(),
+        elapsedMillis(startedNanos, preparedNanos), elapsedMillis(preparedNanos, journalNanos),
+        elapsedMillis(journalNanos, intentNanos), elapsedMillis(intentNanos, participantsNanos),
+        elapsedMillis(participantsNanos, completedNanos),
+        elapsedMillis(startedNanos, completedNanos));
     return plan.target.getMetadata();
   }
 
@@ -651,6 +696,58 @@ public final class PathStatePhysicalStoreSet implements Closeable {
         recordings.get(0).mutations(), journal);
   }
 
+  private void applyParticipantTransitionsInParallel(List<ParticipantTransition> transitions)
+      throws IOException {
+    List<Runnable> writes = new ArrayList<>();
+    for (ParticipantTransition participant : transitions) {
+      writes.add(() -> applyParticipantTransition(participant));
+    }
+    awaitParallelWrites(participantWriteExecutor, writes);
+  }
+
+  static void awaitParallelWrites(ExecutorService executor, List<Runnable> writes)
+      throws IOException {
+    List<Future<?>> futures = new ArrayList<>();
+    for (Runnable write : Objects.requireNonNull(writes, "writes")) {
+      futures.add(Objects.requireNonNull(executor, "executor").submit(
+          Objects.requireNonNull(write, "write")));
+    }
+    IOException failure = null;
+    boolean interrupted = false;
+    for (Future<?> future : futures) {
+      boolean complete = false;
+      while (!complete) {
+        try {
+          future.get();
+          complete = true;
+        } catch (InterruptedException interruptedFailure) {
+          interrupted = true;
+        } catch (ExecutionException writeFailure) {
+          complete = true;
+          Throwable cause = writeFailure.getCause();
+          IOException participantFailure = cause instanceof IOException
+              ? (IOException) cause
+              : new IOException("path-state participant batch failed", cause);
+          failure = append(failure, participantFailure);
+        }
+      }
+    }
+    if (interrupted) {
+      Thread.currentThread().interrupt();
+      failure = append(failure,
+          new IOException("path-state participant batch wait was interrupted"));
+    }
+    if (failure != null) {
+      throw failure;
+    }
+  }
+
+  private static void applyParticipantTransition(ParticipantTransition participant) {
+    participant.store.applyParticipantTransition(participant.flatMutations,
+        participant.nodeMutations, participant.flatDigest, participant.generation,
+        participant.storeRoot);
+  }
+
   private void applyReverseJournal(PathStatePhysicalReverseJournal journal,
       RewindFaultHook hook) throws IOException {
     PathStatePhysicalGlobalIntent child = PathStatePhysicalGlobalIntent.decode(
@@ -688,16 +785,17 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     if (targetNumber < 0 || targetNumber > current.getMetadata().getBlockNumber()) {
       throw new IOException("physical rewind target height is outside CURRENT ancestry");
     }
-    Map<BytesKey, PathStatePhysicalReverseJournal> journals = loadReverseJournals(limits);
+    Map<BytesKey, ReverseJournalIndexEntry> journals = reverseJournalIndex(limits);
     List<PathStatePhysicalReverseJournal> chain = new ArrayList<>();
     PathStatePhysicalGlobalIntent cursor = current;
     while (cursor.getMetadata().getBlockNumber() > targetNumber) {
-      PathStatePhysicalReverseJournal journal = journals.get(new BytesKey(cursor.encode()));
-      if (journal == null) {
+      ReverseJournalIndexEntry entry = journals.get(new BytesKey(cursor.encode()));
+      if (entry == null) {
         throw new IOException("physical reverse journal ancestry is missing");
       }
+      PathStatePhysicalReverseJournal journal = loadReverseJournal(entry.path);
       chain.add(journal);
-      cursor = PathStatePhysicalGlobalIntent.decode(journal.getParentTarget());
+      cursor = PathStatePhysicalGlobalIntent.decode(entry.parentTarget);
     }
     if (cursor.getMetadata().getBlockNumber() != targetNumber
         || !Arrays.equals(cursor.getMetadata().getBlockHash(), targetHash)) {
@@ -706,9 +804,9 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     return chain;
   }
 
-  private Map<BytesKey, PathStatePhysicalReverseJournal> loadReverseJournals(
+  private Map<BytesKey, ReverseJournalIndexEntry> loadReverseJournalIndex(
       PathStateLayerLimits limits) throws IOException {
-    Map<BytesKey, PathStatePhysicalReverseJournal> journals = new LinkedHashMap<>();
+    Map<BytesKey, ReverseJournalIndexEntry> journals = new LinkedHashMap<>();
     Path reverse = directory.resolve(REVERSE_DIRECTORY);
     if (!Files.exists(reverse, LinkOption.NOFOLLOW_LINKS)) {
       return journals;
@@ -726,15 +824,10 @@ public final class PathStatePhysicalStoreSet implements Closeable {
         long length = Files.size(file);
         total = Math.addExact(total, length);
         count = Math.addExact(count, 1);
-        PathStatePhysicalReverseJournal journal;
-        try {
-          journal = PathStatePhysicalReverseJournal.decode(
-              PathStateMetadataFile.loadImmutableBytes(file,
-                  PathStatePhysicalReverseJournal.MAX_ENCODED_LENGTH));
-        } catch (IllegalArgumentException invalid) {
-          throw new IOException("physical reverse journal is corrupt: " + file, invalid);
-        }
-        if (journals.put(new BytesKey(journal.getChildTarget()), journal) != null) {
+        PathStatePhysicalReverseJournal journal = loadReverseJournal(file);
+        ReverseJournalIndexEntry entry = new ReverseJournalIndexEntry(file, length,
+            journal.getChildTarget(), journal.getParentTarget());
+        if (journals.put(new BytesKey(entry.childTarget), entry) != null) {
           throw new IOException("physical reverse journal child identity is duplicated");
         }
       }
@@ -747,6 +840,75 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     return journals;
   }
 
+  private PathStatePhysicalReverseJournal loadReverseJournal(Path file) throws IOException {
+    try {
+      return PathStatePhysicalReverseJournal.decode(
+          PathStateMetadataFile.loadImmutableBytes(file,
+              PathStatePhysicalReverseJournal.MAX_ENCODED_LENGTH));
+    } catch (IllegalArgumentException invalid) {
+      throw new IOException("physical reverse journal is corrupt: " + file, invalid);
+    }
+  }
+
+  private Map<BytesKey, ReverseJournalIndexEntry> reverseJournalIndex(
+      PathStateLayerLimits limits) throws IOException {
+    if (reverseJournalIndex == null) {
+      reverseJournalIndex = loadReverseJournalIndex(limits);
+    } else {
+      requireReverseJournalLimits(reverseJournalIndex, limits);
+    }
+    return reverseJournalIndex;
+  }
+
+  private static void requireReverseJournalLimits(
+      Map<BytesKey, ReverseJournalIndexEntry> journals, PathStateLayerLimits limits)
+      throws IOException {
+    long total = 0;
+    try {
+      for (ReverseJournalIndexEntry entry : journals.values()) {
+        total = Math.addExact(total, entry.length);
+      }
+    } catch (ArithmeticException overflow) {
+      throw new IOException("physical reverse journal usage overflow", overflow);
+    }
+    if (journals.size() > limits.getMaxLayers() || total > limits.getMaxLogicalBytes()) {
+      throw new IOException("physical reverse journal exceeds configured bounds");
+    }
+  }
+
+  private void rememberReverseJournal(PathStatePhysicalReverseJournal journal, Path path,
+      long length) throws IOException {
+    Map<BytesKey, ReverseJournalIndexEntry> journals = reverseJournalIndex(
+        new PathStateLayerLimits(Integer.MAX_VALUE, Long.MAX_VALUE));
+    ReverseJournalIndexEntry entry = new ReverseJournalIndexEntry(path, length,
+        journal.getChildTarget(), journal.getParentTarget());
+    BytesKey identity = new BytesKey(entry.childTarget);
+    ReverseJournalIndexEntry previous = journals.put(identity, entry);
+    if (previous != null && !previous.path.equals(entry.path)) {
+      journals.put(identity, previous);
+      throw new IOException("physical reverse journal child identity is duplicated");
+    }
+  }
+
+  private int reverseJournalCount() {
+    return reverseJournalIndex == null ? 0 : reverseJournalIndex.size();
+  }
+
+  private long reverseJournalBytes() throws IOException {
+    if (reverseJournalIndex == null) {
+      return 0;
+    }
+    long total = 0;
+    try {
+      for (ReverseJournalIndexEntry entry : reverseJournalIndex.values()) {
+        total = Math.addExact(total, entry.length);
+      }
+      return total;
+    } catch (ArithmeticException overflow) {
+      throw new IOException("physical reverse journal usage overflow", overflow);
+    }
+  }
+
   private void pruneReverseJournals(PathStatePhysicalGlobalIntent current,
       PathStateLayerLimits limits, Path candidate, long candidateBytes) throws IOException {
     if (candidateBytes > limits.getMaxLogicalBytes()) {
@@ -756,7 +918,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     if (!Files.exists(reverse, LinkOption.NOFOLLOW_LINKS)) {
       return;
     }
-    Map<BytesKey, PathStatePhysicalReverseJournal> decoded = loadReverseJournals(
+    Map<BytesKey, ReverseJournalIndexEntry> indexed = reverseJournalIndex(
         new PathStateLayerLimits(Integer.MAX_VALUE, Long.MAX_VALUE));
     Set<BytesKey> keep = new HashSet<>();
     byte[] cursor = current.encode();
@@ -764,32 +926,26 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     long remainingBytes = limits.getMaxLogicalBytes() - candidateBytes;
     while (remainingCount > 0) {
       BytesKey identity = new BytesKey(cursor);
-      PathStatePhysicalReverseJournal journal = decoded.get(identity);
-      if (journal == null) {
+      ReverseJournalIndexEntry entry = indexed.get(identity);
+      if (entry == null) {
         break;
       }
-      Path path = reverseJournalPath(PathStatePhysicalGlobalIntent.decode(
-          journal.getChildTarget()).getMetadata());
-      long length = Files.size(path);
-      if (length > remainingBytes) {
+      if (entry.length > remainingBytes) {
         break;
       }
       keep.add(identity);
       remainingCount--;
-      remainingBytes -= length;
-      cursor = journal.getParentTarget();
+      remainingBytes -= entry.length;
+      cursor = entry.parentTarget;
     }
-    try (Stream<Path> files = Files.list(reverse)) {
-      for (Path file : (Iterable<Path>) files::iterator) {
-        if (file.equals(candidate)) {
-          continue;
-        }
-        PathStatePhysicalReverseJournal journal = PathStatePhysicalReverseJournal.decode(
-            PathStateMetadataFile.loadImmutableBytes(file,
-                PathStatePhysicalReverseJournal.MAX_ENCODED_LENGTH));
-        if (!keep.contains(new BytesKey(journal.getChildTarget()))) {
-          PathStateMetadataFile.deleteDurable(file);
-        }
+    java.util.Iterator<Map.Entry<BytesKey, ReverseJournalIndexEntry>> iterator =
+        indexed.entrySet().iterator();
+    while (iterator.hasNext()) {
+      Map.Entry<BytesKey, ReverseJournalIndexEntry> indexedJournal = iterator.next();
+      ReverseJournalIndexEntry entry = indexedJournal.getValue();
+      if (!entry.path.equals(candidate) && !keep.contains(indexedJournal.getKey())) {
+        PathStateMetadataFile.deleteDurable(entry.path);
+        iterator.remove();
       }
     }
   }
@@ -1150,6 +1306,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
       return;
     }
     closed = true;
+    participantWriteExecutor.shutdownNow();
     IOException failure = null;
     for (PhysicalStore store : participants.values()) {
       try {
@@ -1169,6 +1326,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
   }
 
   private void closeAfterFailure(Throwable original) {
+    participantWriteExecutor.shutdownNow();
     for (PhysicalStore store : participants.values()) {
       try {
         store.close();
@@ -1245,6 +1403,10 @@ public final class PathStatePhysicalStoreSet implements Closeable {
         System.nanoTime() - startedNanos);
   }
 
+  private static long elapsedMillis(long startedNanos, long completedNanos) {
+    return java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(completedNanos - startedNanos);
+  }
+
   private static long rowsPerSecond(long rows, long startedNanos) {
     long elapsedNanos = Math.max(1L, System.nanoTime() - startedNanos);
     return (long) (rows * 1_000_000_000D / elapsedNanos);
@@ -1303,6 +1465,14 @@ public final class PathStatePhysicalStoreSet implements Closeable {
       return nativeStore.getWriteBatchMutations();
     }
 
+    long getSyncedWriteBatchCalls() {
+      return nativeStore.getSyncedWriteBatchCalls();
+    }
+
+    long getUnsyncedWriteBatchCalls() {
+      return nativeStore.getUnsyncedWriteBatchCalls();
+    }
+
     void clearNodes() throws IOException {
       List<PathStateNativeNodeStore.BatchMutation> pending = new ArrayList<>(4096);
       nativeStore.scanPrefix(new byte[]{NODE_PREFIX}, entry -> {
@@ -1326,7 +1496,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
       mutations.add(metadataMutation(FLAT_DIGEST_METADATA, flatDigest));
       mutations.add(metadataMutation(STORE_GENERATION_METADATA, generation));
       mutations.add(metadataMutation(FLAT_COMPLETE_METADATA, storeRoot));
-      nativeStore.writeBatch(mutations);
+      nativeStore.writeBatchUnsynced(mutations);
     }
 
     void applyParticipantTransition(List<FlatMutation> flatMutations,
@@ -1343,7 +1513,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
       mutations.add(metadataMutation(FLAT_DIGEST_METADATA, flatDigest));
       mutations.add(metadataMutation(STORE_GENERATION_METADATA, generation));
       mutations.add(metadataMutation(FLAT_COMPLETE_METADATA, storeRoot));
-      nativeStore.writeBatch(mutations);
+      nativeStore.writeBatchUnsynced(mutations);
     }
 
     void applySuperTransition(List<NodeMutation> nodeMutations, byte[] generation,
@@ -1352,7 +1522,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
       appendNodeMutations(mutations, nodeMutations);
       mutations.add(metadataMutation(SUPER_GENERATION_METADATA, generation));
       mutations.add(metadataMutation(FLAT_ROOT_METADATA, superRoot));
-      nativeStore.writeBatch(mutations);
+      nativeStore.writeBatchUnsynced(mutations);
     }
 
     private static void appendNodeMutations(
@@ -1624,6 +1794,27 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     @Override
     public int hashCode() {
       return Arrays.hashCode(bytes);
+    }
+  }
+
+  private static final class ReverseJournalIndexEntry {
+
+    private final Path path;
+    private final long length;
+    private final byte[] childTarget;
+    private final byte[] parentTarget;
+
+    private ReverseJournalIndexEntry(Path path, long length, byte[] childTarget,
+        byte[] parentTarget) {
+      this.path = Objects.requireNonNull(path, "path").toAbsolutePath().normalize();
+      if (length <= 0) {
+        throw new IllegalArgumentException("reverse journal length must be positive");
+      }
+      this.length = length;
+      this.childTarget = Arrays.copyOf(Objects.requireNonNull(childTarget, "childTarget"),
+          childTarget.length);
+      this.parentTarget = Arrays.copyOf(Objects.requireNonNull(parentTarget, "parentTarget"),
+          parentTarget.length);
     }
   }
 
