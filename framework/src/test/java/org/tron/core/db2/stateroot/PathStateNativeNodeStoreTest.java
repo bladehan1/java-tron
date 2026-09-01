@@ -902,6 +902,79 @@ public class PathStateNativeNodeStoreTest {
   }
 
   @Test
+  public void physicalBootstrapBatchesFlatAndNodeWrites() throws Exception {
+    Path directory = temporaryFolder.newFolder("physical-batched-bootstrap").toPath();
+    PathStateParticipantScope scope = new PathStateCanonicalizer().participantScope();
+    List<PhysicalRow> rows = new ArrayList<>();
+    for (int index = 0; index < PathStatePhysicalStoreSet.BOOTSTRAP_WRITE_BATCH_ENTRIES * 2 + 1;
+        index++) {
+      rows.add(new PhysicalRow(new byte[]{
+          (byte) (index >>> 24), (byte) (index >>> 16), (byte) (index >>> 8), (byte) index},
+          new byte[]{(byte) (index + 1)}));
+    }
+    ResumablePhysicalSource source = new ResumablePhysicalSource(
+        "proposal", rows, bytes(43), Integer.MAX_VALUE);
+
+    try (PathStatePhysicalStoreSet stores = PathStatePhysicalStoreSet.open(directory, scope,
+        Engine.ROCKSDB)) {
+      PathStatePhysicalStoreSet.PhysicalStore proposal = stores.participant("proposal");
+      long ingestCalls = proposal.getWriteBatchCalls();
+      long ingestMutations = proposal.getWriteBatchMutations();
+      stores.ingestFlat("proposal", source, Long.MAX_VALUE, Long.MAX_VALUE);
+      assertEquals(3, proposal.getWriteBatchCalls() - ingestCalls);
+      assertEquals(rows.size() + 2, proposal.getWriteBatchMutations() - ingestMutations);
+
+      long buildCalls = proposal.getWriteBatchCalls();
+      long buildMutations = proposal.getWriteBatchMutations();
+      stores.buildRootFromFlat();
+      long nodeCalls = proposal.getWriteBatchCalls() - buildCalls;
+      long nodeMutations = proposal.getWriteBatchMutations() - buildMutations;
+      assertTrue(nodeMutations > rows.size());
+      assertTrue(nodeCalls < 16);
+      assertTrue(nodeCalls * 1000 < nodeMutations);
+    }
+  }
+
+  @Test
+  public void physicalFlatIngestFlushesBeforeByteLimit() throws Exception {
+    Path directory = temporaryFolder.newFolder("physical-byte-batched-bootstrap").toPath();
+    PathStateParticipantScope scope = new PathStateCanonicalizer().participantScope();
+    int valueBytes = 3 * 1024 * 1024;
+    List<PhysicalRow> rows = Arrays.asList(
+        new PhysicalRow(new byte[]{1}, new byte[valueBytes]),
+        new PhysicalRow(new byte[]{2}, new byte[valueBytes]),
+        new PhysicalRow(new byte[]{3}, new byte[valueBytes]));
+    ResumablePhysicalSource source = new ResumablePhysicalSource(
+        "proposal", rows, bytes(45), Integer.MAX_VALUE);
+
+    try (PathStatePhysicalStoreSet stores = PathStatePhysicalStoreSet.open(directory, scope,
+        Engine.ROCKSDB)) {
+      PathStatePhysicalStoreSet.PhysicalStore proposal = stores.participant("proposal");
+      long calls = proposal.getWriteBatchCalls();
+      long mutations = proposal.getWriteBatchMutations();
+      stores.ingestFlat("proposal", source, Long.MAX_VALUE, Long.MAX_VALUE);
+      assertEquals(2, proposal.getWriteBatchCalls() - calls);
+      assertEquals(rows.size() + 2, proposal.getWriteBatchMutations() - mutations);
+    }
+  }
+
+  @Test
+  public void physicalBootstrapRunsOneLargeAndOneSmallIngestQueue() throws Exception {
+    Path directory = temporaryFolder.newFolder("physical-tiered-bootstrap").toPath();
+    PathStateParticipantScope scope = new PathStateCanonicalizer().participantScope();
+    ConcurrentTierPhysicalSource source = new ConcurrentTierPhysicalSource();
+
+    try (PathStatePhysicalStoreSet stores = PathStatePhysicalStoreSet.open(directory, scope,
+        Engine.ROCKSDB)) {
+      stores.ingestAndBuild(source);
+    }
+
+    assertEquals(2, source.getMaxActive());
+    assertTrue(source.sawThread("path-state-physical-bootstrap-large"));
+    assertTrue(source.sawThread("path-state-physical-bootstrap-small"));
+  }
+
+  @Test
   public void physicalIngestResumesAfterFailureThenBuildsAndReopensTheSameRoot()
       throws Exception {
     Path directory = temporaryFolder.newFolder("physical-ingest-e2e").toPath();
@@ -952,6 +1025,38 @@ public class PathStateNativeNodeStoreTest {
     try (PathStatePhysicalStoreSet reopened = PathStatePhysicalStoreSet.open(directory, scope,
         Engine.ROCKSDB)) {
       assertArrayEquals(referenceRoot, reopened.buildRootFromFlat().rootHash());
+    }
+  }
+
+  @Test
+  public void physicalIngestReplaysUncheckpointedBatchAfterFailure() throws Exception {
+    Path directory = temporaryFolder.newFolder("physical-uncheckpointed-replay").toPath();
+    PathStateParticipantScope scope = new PathStateCanonicalizer().participantScope();
+    List<PhysicalRow> rows = Arrays.asList(
+        new PhysicalRow(new byte[]{1}, new byte[]{11}),
+        new PhysicalRow(new byte[]{2}, new byte[]{12}),
+        new PhysicalRow(new byte[]{3}, new byte[]{13}));
+    byte[] sourceIdentity = bytes(46);
+    ResumablePhysicalSource interrupted = new ResumablePhysicalSource(
+        "proposal", rows, sourceIdentity, 2);
+
+    try (PathStatePhysicalStoreSet stores = PathStatePhysicalStoreSet.open(directory, scope,
+        Engine.ROCKSDB)) {
+      assertThrows(java.io.IOException.class,
+          () -> stores.ingestFlat("proposal", interrupted, Long.MAX_VALUE, Long.MAX_VALUE));
+      assertNull(stores.ingestCheckpoint("proposal"));
+      assertEquals(0, stores.participant("proposal").getWriteBatchCalls());
+    }
+
+    ResumablePhysicalSource resumed = new ResumablePhysicalSource(
+        "proposal", rows, sourceIdentity, Integer.MAX_VALUE);
+    try (PathStatePhysicalStoreSet stores = PathStatePhysicalStoreSet.open(directory, scope,
+        Engine.ROCKSDB)) {
+      stores.ingestFlat("proposal", resumed, Long.MAX_VALUE, Long.MAX_VALUE);
+      assertNull(resumed.getLastCursor("proposal"));
+      PathStatePhysicalIngestCheckpoint checkpoint = stores.ingestCheckpoint("proposal");
+      assertEquals(3, checkpoint.getRows());
+      assertArrayEquals(new byte[]{3}, checkpoint.getCursor());
     }
   }
 
@@ -1114,7 +1219,7 @@ public class PathStateNativeNodeStoreTest {
     }
 
     @Override
-    public void scanAfter(String name, byte[] cursor, EntryConsumer consumer)
+    public synchronized void scanAfter(String name, byte[] cursor, EntryConsumer consumer)
         throws java.io.IOException {
       scanCounts.put(name, scanCounts.getOrDefault(name, 0) + 1);
       lastCursors.put(name, cursor == null ? null : Arrays.copyOf(cursor, cursor.length));
@@ -1138,13 +1243,83 @@ public class PathStateNativeNodeStoreTest {
     public void verifyIdentity(SnapshotIdentity expected) {
     }
 
-    private int getScanCount(String name) {
+    private synchronized int getScanCount(String name) {
       return scanCounts.getOrDefault(name, 0);
     }
 
-    private byte[] getLastCursor(String name) {
+    private synchronized byte[] getLastCursor(String name) {
       byte[] cursor = lastCursors.get(name);
       return cursor == null ? null : Arrays.copyOf(cursor, cursor.length);
+    }
+  }
+
+  private static final class ConcurrentTierPhysicalSource implements SnapshotSource {
+
+    private final java.util.concurrent.CountDownLatch started =
+        new java.util.concurrent.CountDownLatch(2);
+    private final AtomicInteger active = new AtomicInteger();
+    private final AtomicInteger maxActive = new AtomicInteger();
+    private final java.util.Set<String> threads = java.util.Collections.synchronizedSet(
+        new java.util.HashSet<>());
+
+    @Override
+    public SnapshotIdentity identity() {
+      return new SnapshotIdentity(100, bytes(1), bytes(2), 300, P66Phase.P66_ON);
+    }
+
+    @Override
+    public Collection<String> databases() {
+      List<String> names = new ArrayList<>();
+      for (PathStateParticipantDescriptor.StoreIdentity store
+          : PathStateParticipantDescriptor.current().getStores()) {
+        names.add(store.getDbName());
+      }
+      return names;
+    }
+
+    @Override
+    public byte[] sourceIdentityDigest() {
+      return bytes(44);
+    }
+
+    @Override
+    public void scan(String name, EntryConsumer consumer) throws java.io.IOException {
+      scanAfter(name, null, consumer);
+    }
+
+    @Override
+    public void scanAfter(String name, byte[] cursor, EntryConsumer consumer)
+        throws java.io.IOException {
+      if (!"account".equals(name) && !"proposal".equals(name)) {
+        return;
+      }
+      int current = active.incrementAndGet();
+      maxActive.accumulateAndGet(current, Math::max);
+      threads.add(Thread.currentThread().getName());
+      started.countDown();
+      try {
+        if (!started.await(5, java.util.concurrent.TimeUnit.SECONDS)) {
+          throw new java.io.IOException("physical tier queues did not overlap");
+        }
+        consumer.accept(new byte[]{1}, new byte[]{(byte) ("account".equals(name) ? 1 : 2)});
+      } catch (InterruptedException interrupted) {
+        Thread.currentThread().interrupt();
+        throw new java.io.IOException("physical tier queue test interrupted", interrupted);
+      } finally {
+        active.decrementAndGet();
+      }
+    }
+
+    @Override
+    public void verifyIdentity(SnapshotIdentity expected) {
+    }
+
+    private int getMaxActive() {
+      return maxActive.get();
+    }
+
+    private boolean sawThread(String name) {
+      return threads.contains(name);
     }
   }
 
