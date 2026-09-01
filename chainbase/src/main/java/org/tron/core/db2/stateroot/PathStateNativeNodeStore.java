@@ -31,6 +31,8 @@ final class PathStateNativeNodeStore implements Closeable {
   private final Delegate delegate;
   private long writeBatchCalls;
   private long writeBatchMutations;
+  private long syncedWriteBatchCalls;
+  private long unsyncedWriteBatchCalls;
   private volatile boolean closed;
 
   private PathStateNativeNodeStore(Path directory, Engine engine, Delegate delegate) {
@@ -39,7 +41,7 @@ final class PathStateNativeNodeStore implements Closeable {
     this.delegate = delegate;
   }
 
-  /** Opens one independent node database; every mutation is synchronously WAL-backed. */
+  /** Opens one independent node database; callers choose the WAL sync boundary per batch. */
   static PathStateNativeNodeStore open(Path directory, Engine engine) throws IOException {
     Path path = Objects.requireNonNull(directory, "directory").toAbsolutePath().normalize();
     Engine selected = Objects.requireNonNull(engine, "engine");
@@ -71,6 +73,14 @@ final class PathStateNativeNodeStore implements Closeable {
   }
 
   synchronized void writeBatch(List<BatchMutation> mutations) {
+    writeBatch(mutations, true);
+  }
+
+  synchronized void writeBatchUnsynced(List<BatchMutation> mutations) {
+    writeBatch(mutations, false);
+  }
+
+  private void writeBatch(List<BatchMutation> mutations, boolean sync) {
     requireOpen();
     List<BatchMutation> supplied = Objects.requireNonNull(mutations, "mutations");
     if (supplied.isEmpty()) {
@@ -79,9 +89,14 @@ final class PathStateNativeNodeStore implements Closeable {
     for (BatchMutation mutation : supplied) {
       Objects.requireNonNull(mutation, "mutation");
     }
-    delegate.writeBatch(supplied);
+    delegate.writeBatch(supplied, sync);
     writeBatchCalls = Math.addExact(writeBatchCalls, 1L);
     writeBatchMutations = Math.addExact(writeBatchMutations, supplied.size());
+    if (sync) {
+      syncedWriteBatchCalls = Math.addExact(syncedWriteBatchCalls, 1L);
+    } else {
+      unsyncedWriteBatchCalls = Math.addExact(unsyncedWriteBatchCalls, 1L);
+    }
   }
 
   synchronized long getWriteBatchCalls() {
@@ -90,6 +105,14 @@ final class PathStateNativeNodeStore implements Closeable {
 
   synchronized long getWriteBatchMutations() {
     return writeBatchMutations;
+  }
+
+  synchronized long getSyncedWriteBatchCalls() {
+    return syncedWriteBatchCalls;
+  }
+
+  synchronized long getUnsyncedWriteBatchCalls() {
+    return unsyncedWriteBatchCalls;
   }
 
   synchronized List<KeyValue> scanPrefix(byte[] prefix) throws IOException {
@@ -149,7 +172,7 @@ final class PathStateNativeNodeStore implements Closeable {
 
     byte[] get(byte[] key);
 
-    void writeBatch(List<BatchMutation> mutations);
+    void writeBatch(List<BatchMutation> mutations, boolean sync);
 
     void scanPrefix(byte[] prefix, EntryConsumer consumer) throws IOException;
 
@@ -160,6 +183,7 @@ final class PathStateNativeNodeStore implements Closeable {
 
     private final org.iq80.leveldb.Options options = DbOptionalsUtils.createDefaultDbOptions();
     private final WriteOptions syncWrites = new WriteOptions().sync(true);
+    private final WriteOptions unsyncedWrites = new WriteOptions().sync(false);
     private final DB database;
 
     private LevelDelegate(Path directory) throws IOException {
@@ -172,7 +196,7 @@ final class PathStateNativeNodeStore implements Closeable {
     }
 
     @Override
-    public void writeBatch(List<BatchMutation> mutations) {
+    public void writeBatch(List<BatchMutation> mutations, boolean sync) {
       try (org.iq80.leveldb.WriteBatch batch = database.createWriteBatch()) {
         for (BatchMutation mutation : mutations) {
           if (mutation.value == null) {
@@ -181,7 +205,7 @@ final class PathStateNativeNodeStore implements Closeable {
             batch.put(mutation.key, mutation.value);
           }
         }
-        database.write(batch, syncWrites);
+        database.write(batch, sync ? syncWrites : unsyncedWrites);
       } catch (IOException failure) {
         throw new IllegalStateException("failed to apply path-state LevelDB node batch", failure);
       }
@@ -224,12 +248,15 @@ final class PathStateNativeNodeStore implements Closeable {
         new org.rocksdb.Options().setCreateIfMissing(true).setParanoidChecks(true);
     private final org.rocksdb.WriteOptions syncWrites =
         new org.rocksdb.WriteOptions().setSync(true);
+    private final org.rocksdb.WriteOptions unsyncedWrites =
+        new org.rocksdb.WriteOptions().setSync(false);
     private final org.rocksdb.RocksDB database;
 
     private RocksDelegate(Path directory) throws IOException {
       try {
         database = org.rocksdb.RocksDB.open(options, directory.toString());
       } catch (RocksDBException failure) {
+        unsyncedWrites.close();
         syncWrites.close();
         options.close();
         throw new IOException("failed to open path-state RocksDB node database", failure);
@@ -246,7 +273,7 @@ final class PathStateNativeNodeStore implements Closeable {
     }
 
     @Override
-    public void writeBatch(List<BatchMutation> mutations) {
+    public void writeBatch(List<BatchMutation> mutations, boolean sync) {
       try (org.rocksdb.WriteBatch batch = new org.rocksdb.WriteBatch()) {
         for (BatchMutation mutation : mutations) {
           if (mutation.value == null) {
@@ -255,7 +282,7 @@ final class PathStateNativeNodeStore implements Closeable {
             batch.put(mutation.key, mutation.value);
           }
         }
-        database.write(syncWrites, batch);
+        database.write(sync ? syncWrites : unsyncedWrites, batch);
       } catch (RocksDBException failure) {
         throw new IllegalStateException("failed to apply path-state RocksDB node batch", failure);
       }
@@ -291,6 +318,7 @@ final class PathStateNativeNodeStore implements Closeable {
 
     @Override
     public void close() {
+      unsyncedWrites.close();
       syncWrites.close();
       database.close();
       options.close();

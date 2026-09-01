@@ -16,6 +16,11 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
 import org.junit.Rule;
@@ -482,9 +487,15 @@ public class PathStateNativeNodeStoreTest {
           Collections.singletonList(PathStateMutation.put("code", key, new byte[]{4, 5})));
       PathStateRootMetadata preview = stores.previewTransition(transition);
       assertEquals(0, stores.currentMetadata().getBlockNumber());
+      assertEquals(0, stores.participant("code").getSyncedWriteBatchCalls());
+      assertEquals(0, stores.participant("code").getUnsyncedWriteBatchCalls());
       PathStateRootMetadata committed = stores.applyAndPublish(transition);
       assertArrayEquals(preview.encode(), committed.encode());
       assertEquals(1, committed.getBlockNumber());
+      assertEquals(0, stores.participant("code").getSyncedWriteBatchCalls());
+      assertEquals(1, stores.participant("code").getUnsyncedWriteBatchCalls());
+      assertEquals(0, stores.superStore().getSyncedWriteBatchCalls());
+      assertEquals(1, stores.superStore().getUnsyncedWriteBatchCalls());
       assertArrayEquals(PathStateCommitmentCodec.presentLeafValue(new byte[]{4, 5}),
           stores.participant("code").getFlat(
               PathStateCommitmentCodec.storeLeafKey(scope.require("code").getStoreId(), key)));
@@ -690,6 +701,69 @@ public class PathStateNativeNodeStoreTest {
     Files.write(reverse, corrupt);
     assertThrows(java.io.IOException.class,
         () -> PathStatePhysicalSnapshotHead.open(root, Engine.ROCKSDB));
+  }
+
+  @Test
+  public void physicalSteadyTransitionDoesNotRereadIndexedReverseJournal() throws Exception {
+    PathStateParticipantScope scope = new PathStateCanonicalizer().participantScope();
+    Path root = temporaryFolder.newFolder("physical-reverse-runtime-index").toPath();
+    preparePublishedPhysicalTarget(root, scope);
+    try (PathStatePhysicalStoreSet stores = PathStatePhysicalStoreSet.open(root, scope,
+        Engine.ROCKSDB)) {
+      stores.applyAndPublish(new PathStateBlockTransition(1, bytes(92), new byte[32], 3,
+          P66Phase.P66_ON, Collections.singletonList(
+          PathStateMutation.put("code", new byte[]{1}, new byte[]{2}))));
+      Path reverse;
+      try (Stream<Path> files = Files.list(root.resolve("reverse"))) {
+        reverse = files.findFirst().get();
+      }
+      byte[] corrupt = Files.readAllBytes(reverse);
+      corrupt[corrupt.length - 1] ^= 1;
+      Files.write(reverse, corrupt);
+
+      assertEquals(2, stores.applyAndPublish(new PathStateBlockTransition(2, bytes(93), bytes(92),
+          6, P66Phase.P66_ON, Collections.emptyList())).getBlockNumber());
+    }
+    assertThrows(java.io.IOException.class,
+        () -> PathStatePhysicalSnapshotHead.open(root, Engine.ROCKSDB));
+  }
+
+  @Test
+  public void parallelParticipantWritesStartTogetherAndWaitForEveryCompletion() throws Exception {
+    ExecutorService executor = Executors.newFixedThreadPool(2);
+    try {
+      CountDownLatch started = new CountDownLatch(2);
+      CountDownLatch release = new CountDownLatch(1);
+      AtomicBoolean bothStarted = new AtomicBoolean();
+      List<Runnable> concurrentWrites = Arrays.asList(
+          () -> awaitTestLatch(started, release),
+          () -> awaitTestLatch(started, release));
+      Thread releaser = new Thread(() -> {
+        try {
+          bothStarted.set(started.await(5, TimeUnit.SECONDS));
+        } catch (InterruptedException failure) {
+          Thread.currentThread().interrupt();
+        } finally {
+          release.countDown();
+        }
+      });
+      releaser.start();
+      PathStatePhysicalStoreSet.awaitParallelWrites(executor, concurrentWrites);
+      releaser.join();
+      assertTrue(bothStarted.get());
+      assertEquals(0, started.getCount());
+
+      AtomicBoolean secondCompleted = new AtomicBoolean();
+      assertThrows(java.io.IOException.class,
+          () -> PathStatePhysicalStoreSet.awaitParallelWrites(executor, Arrays.asList(
+              () -> {
+                throw new IllegalStateException("injected participant failure");
+              },
+              () -> secondCompleted.set(true))));
+      assertTrue(secondCompleted.get());
+    } finally {
+      executor.shutdownNow();
+    }
   }
 
   @Test
@@ -1331,5 +1405,17 @@ public class PathStateNativeNodeStoreTest {
       }
     }
     return Integer.compare(left.length, right.length);
+  }
+
+  private static void awaitTestLatch(CountDownLatch started, CountDownLatch release) {
+    started.countDown();
+    try {
+      if (!release.await(10, TimeUnit.SECONDS)) {
+        throw new IllegalStateException("timed out waiting to release participant write");
+      }
+    } catch (InterruptedException failure) {
+      Thread.currentThread().interrupt();
+      throw new IllegalStateException("participant write test interrupted", failure);
+    }
   }
 }
