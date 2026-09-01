@@ -53,7 +53,7 @@ public final class PathStatePhysicalSnapshotHead implements PathStateHead {
     requireHealthy();
     PathStateRootMetadata previous = head;
     try {
-      PathStateRootMetadata committed = stores.applyAndPublish(transition, limits, stage -> { });
+      PathStateRootMetadata committed = stores.applyAndPublish(transition, limits);
       if (!same(committed, stores.currentMetadata())) {
         failed = true;
         throw new IOException("physical path-state committed CURRENT identity mismatch");
