@@ -63,6 +63,7 @@ import org.tron.core.capsule.BlockCapsule;
 import org.tron.core.capsule.TransactionCapsule;
 import org.tron.core.config.args.Args;
 import org.tron.core.db.Manager;
+import org.tron.core.db2.archive.HistoricalQuerySession;
 import org.tron.core.db2.core.Chainbase;
 import org.tron.core.exception.BadItemException;
 import org.tron.core.exception.ContractExeException;
@@ -389,6 +390,28 @@ public class TronJsonRpcImpl implements TronJsonRpc, Closeable {
     throw new JsonRpcInvalidParamsException(QUANTITY_NOT_SUPPORT_ERROR);
   }
 
+  private HistoricalQuerySession openHistoricalQuery(String blockNumOrTag)
+      throws JsonRpcInvalidParamsException {
+    if (JsonRpcApiUtil.isBlockTag(blockNumOrTag)) {
+      throw new JsonRpcInvalidParamsException(TAG_NOT_SUPPORT_ERROR);
+    }
+    long blockNumber = parseBlockNumber(blockNumOrTag);
+    if (manager == null || !manager.isArchiveHistoricalQueryEnabled()) {
+      throw new JsonRpcInvalidParamsException(QUANTITY_NOT_SUPPORT_ERROR);
+    }
+    Block block = wallet.getBlockByNum(blockNumber);
+    if (block == null) {
+      throw new JsonRpcInvalidParamsException(NO_BLOCK_HEADER);
+    }
+    byte[] blockHash = new BlockCapsule(block).getBlockId().getBytes();
+    try {
+      return manager.openArchiveHistoricalQuery(blockNumber, blockHash);
+    } catch (ItemNotFoundException | BadItemException | RuntimeException failure) {
+      throw new JsonRpcInvalidParamsException(
+          "historical state unavailable: " + failure.getMessage(), failure);
+    }
+  }
+
   private Block getBlockByJsonHash(String blockHash) throws JsonRpcInvalidParamsException {
     byte[] bHash = hashToByteArray(blockHash);
     return wallet.getBlockById(ByteString.copyFrom(bHash));
@@ -449,18 +472,20 @@ public class TronJsonRpcImpl implements TronJsonRpc, Closeable {
   @Override
   public String getTrxBalance(String address, String blockNumOrTag)
       throws JsonRpcInvalidParamsException {
-    requireLatestBlockTag(blockNumOrTag);
-
-    byte[] addressData = addressCompatibleToByteArray(address);
-
-    Account account = Account.newBuilder().setAddress(ByteString.copyFrom(addressData)).build();
-    Account reply = wallet.getAccount(account);
-    long balance = 0;
-
-    if (reply != null) {
-      balance = reply.getBalance();
+    if (LATEST_STR.equalsIgnoreCase(blockNumOrTag)) {
+      byte[] addressData = addressCompatibleToByteArray(address);
+      Account account = Account.newBuilder().setAddress(ByteString.copyFrom(addressData)).build();
+      Account reply = wallet.getAccount(account);
+      return ByteArray.toJsonHex(reply == null ? 0 : reply.getBalance());
     }
-    return ByteArray.toJsonHex(balance);
+    try (HistoricalQuerySession session = openHistoricalQuery(blockNumOrTag)) {
+      byte[] addressData = addressCompatibleToByteArray(address);
+      return ByteArray.toJsonHex(session.getAccount(addressData)
+          .map(Account::getBalance).orElse(0L));
+    } catch (RuntimeException failure) {
+      throw new JsonRpcInvalidParamsException(
+          "historical state unavailable: " + failure.getMessage(), failure);
+    }
   }
 
   private void callTriggerConstantContract(byte[] ownerAddressByte, byte[] contractAddressByte,
@@ -482,6 +507,23 @@ public class TronJsonRpcImpl implements TronJsonRpc, Closeable {
     Transaction trx =
         wallet.triggerConstantContract(triggerContract, trxCap, trxExtBuilder, retBuilder);
 
+    trxExtBuilder.setTransaction(trx);
+    trxExtBuilder.setTxid(trxCap.getTransactionId().getByteString());
+    trxExtBuilder.setResult(retBuilder);
+    retBuilder.setResult(true).setCode(response_code.SUCCESS);
+  }
+
+  private void callTriggerHistoricalConstantContract(byte[] ownerAddressByte,
+      byte[] contractAddressByte, long value, byte[] data,
+      TransactionExtention.Builder trxExtBuilder, Return.Builder retBuilder,
+      HistoricalQuerySession session)
+      throws ContractValidateException, ContractExeException, HeaderNotFound, VMIllegalException {
+    TriggerSmartContract triggerContract = triggerCallContract(ownerAddressByte,
+        contractAddressByte, value, data, 0, null);
+    TransactionCapsule trxCap = wallet.createTransactionCapsule(triggerContract,
+        ContractType.TriggerSmartContract);
+    Transaction trx = wallet.callHistoricalConstantContract(trxCap, trxExtBuilder, retBuilder,
+        session);
     trxExtBuilder.setTransaction(trx);
     trxExtBuilder.setTxid(trxCap.getTransactionId().getByteString());
     trxExtBuilder.setResult(retBuilder);
@@ -549,14 +591,25 @@ public class TronJsonRpcImpl implements TronJsonRpc, Closeable {
    */
   private String call(byte[] ownerAddressByte, byte[] contractAddressByte, long value,
       byte[] data) throws JsonRpcInvalidRequestException, JsonRpcInternalException {
+    return call(ownerAddressByte, contractAddressByte, value, data, null);
+  }
+
+  private String call(byte[] ownerAddressByte, byte[] contractAddressByte, long value,
+      byte[] data, HistoricalQuerySession historicalSession)
+      throws JsonRpcInvalidRequestException, JsonRpcInternalException {
 
     TransactionExtention.Builder trxExtBuilder = TransactionExtention.newBuilder();
     Return.Builder retBuilder = Return.newBuilder();
     TransactionExtention trxExt;
 
     try {
-      callTriggerConstantContract(ownerAddressByte, contractAddressByte, value, data,
-          trxExtBuilder, retBuilder);
+      if (historicalSession == null) {
+        callTriggerConstantContract(ownerAddressByte, contractAddressByte, value, data,
+            trxExtBuilder, retBuilder);
+      } else {
+        callTriggerHistoricalConstantContract(ownerAddressByte, contractAddressByte, value, data,
+            trxExtBuilder, retBuilder, historicalSession);
+      }
 
     } catch (ContractValidateException | VMIllegalException e) {
       String errString = CONTRACT_VALIDATE_ERROR;
@@ -603,20 +656,23 @@ public class TronJsonRpcImpl implements TronJsonRpc, Closeable {
   @Override
   public String getStorageAt(String address, String storageIdx, String blockNumOrTag)
       throws JsonRpcInvalidParamsException {
-    requireLatestBlockTag(blockNumOrTag);
-
-    if (storageIdx == null || storageIdx.length() > MAX_STORAGE_KEY_HEX_LEN) {
-      throw new JsonRpcInvalidParamsException("invalid storage key value");
+    if (!LATEST_STR.equalsIgnoreCase(blockNumOrTag)) {
+      try (HistoricalQuerySession session = openHistoricalQuery(blockNumOrTag)) {
+        byte[] addressByte = addressCompatibleToByteArray(address);
+        DataWord index = parseStorageIndex(storageIdx);
+        if (!session.getContract(addressByte).isPresent()) {
+          return ByteArray.toJsonHex(new byte[32]);
+        }
+        byte[] value = session.getStorage(addressByte, index.getData()).orElse(new byte[32]);
+        return ByteArray.toJsonHex(new DataWord(value).getData());
+      } catch (RuntimeException failure) {
+        throw new JsonRpcInvalidParamsException(
+            "historical state unavailable: " + failure.getMessage(), failure);
+      }
     }
 
     byte[] addressByte = addressCompatibleToByteArray(address);
-
-    DataWord index;
-    try {
-      index = new DataWord(ByteArray.fromHexString(storageIdx));
-    } catch (Exception e) {
-      throw new JsonRpcInvalidParamsException("invalid storage key value");
-    }
+    DataWord index = parseStorageIndex(storageIdx);
 
     // get contract from contractStore
     BytesMessage.Builder build = BytesMessage.newBuilder();
@@ -635,10 +691,29 @@ public class TronJsonRpcImpl implements TronJsonRpc, Closeable {
     return ByteArray.toJsonHex(value == null ? new byte[32] : value.getData());
   }
 
+  private DataWord parseStorageIndex(String storageIdx) throws JsonRpcInvalidParamsException {
+    if (storageIdx == null || storageIdx.length() > MAX_STORAGE_KEY_HEX_LEN) {
+      throw new JsonRpcInvalidParamsException("invalid storage key value");
+    }
+    try {
+      return new DataWord(ByteArray.fromHexString(storageIdx));
+    } catch (Exception failure) {
+      throw new JsonRpcInvalidParamsException("invalid storage key value", failure);
+    }
+  }
+
   @Override
   public String getABIOfSmartContract(String contractAddress, String blockNumOrTag)
       throws JsonRpcInvalidParamsException {
-    requireLatestBlockTag(blockNumOrTag);
+    if (!LATEST_STR.equalsIgnoreCase(blockNumOrTag)) {
+      try (HistoricalQuerySession session = openHistoricalQuery(blockNumOrTag)) {
+        byte[] addressData = addressCompatibleToByteArray(contractAddress);
+        return session.getCode(addressData).map(ByteArray::toJsonHex).orElse("0x");
+      } catch (RuntimeException failure) {
+        throw new JsonRpcInvalidParamsException(
+            "historical state unavailable: " + failure.getMessage(), failure);
+      }
+    }
 
     byte[] addressData = addressCompatibleToByteArray(contractAddress);
 
@@ -1003,6 +1078,7 @@ public class TronJsonRpcImpl implements TronJsonRpc, Closeable {
       JsonRpcInternalException {
 
     String blockNumOrTag;
+    byte[] requestedBlockHash = null;
     if (blockParamObj instanceof HashMap) {
       HashMap<String, String> paramMap;
       paramMap = (HashMap<String, String>) blockParamObj;
@@ -1014,6 +1090,11 @@ public class TronJsonRpcImpl implements TronJsonRpc, Closeable {
           throw new JsonRpcInvalidParamsException(JSON_ERROR);
         }
 
+        if (LATEST_STR.equalsIgnoreCase(blockNumOrTag)) {
+          return call(addressCompatibleToByteArray(transactionCall.getFrom()),
+              addressCompatibleToByteArray(transactionCall.getTo()), transactionCall.parseValue(),
+              ByteArray.fromHexString(transactionCall.resolveData()));
+        }
         long blockNumber = parseBlockNumber(blockNumOrTag);
 
         if (wallet.getBlockByNum(blockNumber) == null) {
@@ -1027,27 +1108,42 @@ public class TronJsonRpcImpl implements TronJsonRpc, Closeable {
           throw new JsonRpcInvalidParamsException(JSON_ERROR);
         }
 
-        if (getBlockByJsonHash(blockNumOrTag) == null) {
+        Block block = getBlockByJsonHash(blockNumOrTag);
+        if (block == null) {
           throw new JsonRpcInternalException(NO_BLOCK_HEADER_BY_HASH);
         }
+        requestedBlockHash = new BlockCapsule(block).getBlockId().getBytes();
+        blockNumOrTag = ByteArray.toJsonHex(
+            block.getBlockHeader().getRawData().getNumber());
       } else {
         throw new JsonRpcInvalidRequestException(JSON_ERROR);
       }
 
-      blockNumOrTag = LATEST_STR;
     } else if (blockParamObj instanceof String) {
       blockNumOrTag = (String) blockParamObj;
     } else {
       throw new JsonRpcInvalidRequestException(JSON_ERROR);
     }
 
-    requireLatestBlockTag(blockNumOrTag);
-
-    byte[] addressData = addressCompatibleToByteArray(transactionCall.getFrom());
-    byte[] contractAddressData = addressCompatibleToByteArray(transactionCall.getTo());
-
-    return call(addressData, contractAddressData, transactionCall.parseValue(),
-        ByteArray.fromHexString(transactionCall.resolveData()));
+    if (LATEST_STR.equalsIgnoreCase(blockNumOrTag)) {
+      return call(addressCompatibleToByteArray(transactionCall.getFrom()),
+          addressCompatibleToByteArray(transactionCall.getTo()), transactionCall.parseValue(),
+          ByteArray.fromHexString(transactionCall.resolveData()));
+    }
+    try (HistoricalQuerySession session = openHistoricalQuery(blockNumOrTag)) {
+      if (requestedBlockHash != null
+          && !Arrays.equals(requestedBlockHash, session.getTargetBlockHash())) {
+        throw new JsonRpcInvalidParamsException("historical block is not canonical");
+      }
+      return call(addressCompatibleToByteArray(transactionCall.getFrom()),
+          addressCompatibleToByteArray(transactionCall.getTo()), transactionCall.parseValue(),
+          ByteArray.fromHexString(transactionCall.resolveData()), session);
+    } catch (JsonRpcInvalidParamsException failure) {
+      throw failure;
+    } catch (RuntimeException failure) {
+      throw new JsonRpcInvalidParamsException(
+          "historical state unavailable: " + failure.getMessage(), failure);
+    }
   }
 
   @Override

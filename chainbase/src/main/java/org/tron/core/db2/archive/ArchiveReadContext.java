@@ -18,6 +18,7 @@ import org.tron.protos.contract.SmartContractOuterClass.SmartContract;
 public final class ArchiveReadContext implements Closeable {
 
   private final ArchiveReadSnapshot snapshot;
+  private final Closeable owner;
   private final Map<String, StoreAdapter<?>> adapters;
   private final HistoricalAccountAssetBalanceResolver accountAssetResolver =
       new HistoricalAccountAssetBalanceResolver();
@@ -26,8 +27,9 @@ public final class ArchiveReadContext implements Closeable {
   private boolean closed;
 
   private ArchiveReadContext(ArchiveReadSnapshot snapshot,
-      Collection<StoreAdapter<?>> adapters) {
+      Collection<StoreAdapter<?>> adapters, Closeable owner) {
     this.snapshot = Objects.requireNonNull(snapshot, "snapshot");
+    this.owner = Objects.requireNonNull(owner, "owner");
     this.adapters = validateAdapters(adapters);
   }
 
@@ -35,9 +37,21 @@ public final class ArchiveReadContext implements Closeable {
   public static ArchiveReadContext open(ArchiveReadSnapshot snapshot,
       Collection<StoreAdapter<?>> adapters) throws IOException {
     try {
-      return new ArchiveReadContext(snapshot, adapters);
+      return new ArchiveReadContext(snapshot, adapters, snapshot);
     } catch (RuntimeException failure) {
       closeAfterFailedOpen(snapshot, failure);
+      throw failure;
+    }
+  }
+
+  /** Takes ownership of {@code lease} so closing this context also releases gate accounting. */
+  public static ArchiveReadContext open(ArchiveRuntimeQueryGate.Lease lease,
+      Collection<StoreAdapter<?>> adapters) throws IOException {
+    Objects.requireNonNull(lease, "lease");
+    try {
+      return new ArchiveReadContext(lease.getSnapshot(), adapters, lease);
+    } catch (RuntimeException failure) {
+      closeAfterFailedOpen(lease, failure);
       throw failure;
     }
   }
@@ -56,12 +70,28 @@ public final class ArchiveReadContext implements Closeable {
     return Collections.unmodifiableSet(new LinkedHashSet<>(adapters.keySet()));
   }
 
+  /** Internal exact physical read; public RPC layers must use typed resolvers instead. */
+  public synchronized OldValue getExact(String dbName, byte[] physicalRawKey)
+      throws IOException {
+    ensureOpen();
+    if (!adapters.containsKey(Objects.requireNonNull(dbName, "dbName"))) {
+      throw new IllegalArgumentException(
+          "Store adapter does not belong to this archive read context: " + dbName);
+    }
+    return snapshot.get(dbName, Objects.requireNonNull(physicalRawKey, "physicalRawKey"));
+  }
+
   public long getTargetBlock() {
     return snapshot.getTargetBlock();
   }
 
   public long getPinnedBlock() {
     return snapshot.getPinnedBlock();
+  }
+
+  public synchronized void requirePinnedIdentity() {
+    ensureOpen();
+    snapshot.requirePinnedIdentity();
   }
 
   /** Resolves exact Account bytes and one P66-aware token balance from this request snapshot. */
@@ -107,7 +137,7 @@ public final class ArchiveReadContext implements Closeable {
   public synchronized void close() throws IOException {
     if (!closed) {
       closed = true;
-      snapshot.close();
+      owner.close();
     }
   }
 
@@ -140,13 +170,13 @@ public final class ArchiveReadContext implements Closeable {
     return Collections.unmodifiableMap(indexed);
   }
 
-  private static void closeAfterFailedOpen(ArchiveReadSnapshot snapshot,
+  private static void closeAfterFailedOpen(Closeable owner,
       RuntimeException failure) throws IOException {
-    if (snapshot == null) {
+    if (owner == null) {
       return;
     }
     try {
-      snapshot.close();
+      owner.close();
     } catch (IOException closeFailure) {
       failure.addSuppressed(closeFailure);
     }

@@ -124,6 +124,7 @@ import org.tron.core.db2.archive.BlockSnapshotMeta;
 import org.tron.core.db2.archive.HistoricalAccountAssetBalanceResolver;
 import org.tron.core.db2.archive.HistoricalAccountAssetPrefixResolver;
 import org.tron.core.db2.archive.HistoricalAccountBalanceReader;
+import org.tron.core.db2.archive.HistoricalQuerySession;
 import org.tron.core.db2.archive.OldValue;
 import org.tron.core.db2.archive.SnapshotOldValueCollector;
 import org.tron.core.db2.archive.SnapshotPathStateTransitionCollector;
@@ -925,6 +926,52 @@ public class Manager {
     } catch (java.io.IOException failure) {
       throw new org.tron.core.db2.archive.ArchivePersistenceException(
           "Failed to read request-owned historical account snapshot", failure);
+    }
+  }
+
+  public boolean isArchiveHistoricalQueryEnabled() {
+    return stateArchiveRuntime != null;
+  }
+
+  /** Opens one canonical request-owned exact-27 historical query view. */
+  public HistoricalQuerySession openArchiveHistoricalQuery(long blockNumber,
+      byte[] expectedBlockHash) throws ItemNotFoundException, BadItemException {
+    Objects.requireNonNull(expectedBlockHash, "expectedBlockHash");
+    if (expectedBlockHash.length != 32) {
+      throw new IllegalArgumentException("expectedBlockHash must be exactly 32 bytes");
+    }
+    StateArchiveRuntimeOwner runtime = stateArchiveRuntime;
+    if (runtime == null) {
+      throw new IllegalStateException("Experimental state archive is disabled");
+    }
+
+    BlockCapsule beforePin = chainBaseManager.getBlockByNum(blockNumber);
+    byte[] canonicalHash = beforePin.getBlockId().getBytes();
+    if (!Arrays.equals(expectedBlockHash, canonicalHash)) {
+      throw new IllegalArgumentException("Historical block number and hash do not match");
+    }
+
+    HistoricalQuerySession session;
+    try {
+      session = HistoricalQuerySession.open(runtime.pinHistoricalState(blockNumber),
+          canonicalHash);
+    } catch (java.io.IOException failure) {
+      throw new org.tron.core.db2.archive.ArchivePersistenceException(
+          "Failed to open request-owned historical query session", failure);
+    }
+
+    try {
+      BlockCapsule afterPin = chainBaseManager.getBlockByNum(blockNumber);
+      if (!Arrays.equals(canonicalHash, afterPin.getBlockId().getBytes())) {
+        session.close();
+        throw new org.tron.core.db2.archive.ArchivePersistenceException(
+            "Canonical historical block changed while opening query session");
+      }
+      session.requirePinnedIdentity();
+      return session;
+    } catch (ItemNotFoundException | BadItemException | RuntimeException failure) {
+      session.close();
+      throw failure;
     }
   }
 
