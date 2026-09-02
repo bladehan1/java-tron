@@ -866,6 +866,126 @@ public class PathStateNativeNodeStoreTest {
   }
 
   @Test
+  public void physicalOracleWindowLoadsOneExactReadOnlyAncestorChain() throws Exception {
+    PathStateParticipantScope scope = new PathStateCanonicalizer().participantScope();
+    Path root = temporaryFolder.newFolder("physical-oracle-window").toPath();
+    preparePublishedPhysicalTarget(root, scope);
+    PathStateLayerLimits limits = new PathStateLayerLimits(4, 1L << 20);
+    byte[] key = new byte[]{1, 2};
+
+    try (PathStatePhysicalStoreSet stores = PathStatePhysicalStoreSet.open(root, scope,
+        Engine.ROCKSDB)) {
+      stores.applyAndPublish(new PathStateBlockTransition(1, bytes(94), new byte[32], 3,
+          P66Phase.P66_ON, Collections.singletonList(
+          PathStateMutation.put("code", key, new byte[]{3}))), limits);
+      stores.applyAndPublish(new PathStateBlockTransition(2, bytes(95), bytes(94), 6,
+          P66Phase.P66_ON, Arrays.asList(
+          PathStateMutation.put("code", key, new byte[]{4}),
+          PathStateMutation.put("proposal", new byte[]{5}, new byte[]{6}))), limits);
+      stores.applyAndPublish(new PathStateBlockTransition(3, bytes(96), bytes(95), 9,
+          P66Phase.P66_ON, Collections.singletonList(
+          PathStateMutation.delete("code", key))), limits);
+
+      byte[] currentBefore = Files.readAllBytes(root.resolve(
+          PathStatePhysicalStoreSet.CURRENT_FILE));
+      PathStatePhysicalOracleWindow window = stores.loadOracleWindow(3, limits);
+      assertEquals(3, window.getBlockCount());
+      assertEquals(3, window.getCurrentMetadata().getBlockNumber());
+      assertEquals(0, window.getOldestMetadata().getBlockNumber());
+      assertArrayEquals(currentBefore, Files.readAllBytes(root.resolve(
+          PathStatePhysicalStoreSet.CURRENT_FILE)));
+      assertNull(stores.participant("code").getFlat(
+          PathStateCommitmentCodec.storeLeafKey(scope.require("code").getStoreId(), key)));
+
+      List<PathStatePhysicalReverseJournal> journals = window.journals();
+      assertEquals(3, journals.size());
+      for (int index = 0; index < journals.size(); index++) {
+        PathStatePhysicalGlobalIntent child = PathStatePhysicalGlobalIntent.decode(
+            journals.get(index).getChildTarget());
+        PathStatePhysicalGlobalIntent parent = PathStatePhysicalGlobalIntent.decode(
+            journals.get(index).getParentTarget());
+        assertEquals(3 - index, child.getMetadata().getBlockNumber());
+        assertEquals(2 - index, parent.getMetadata().getBlockNumber());
+      }
+
+    }
+
+    Path scratch = new File(temporaryFolder.getRoot(), "physical-oracle-scratch").toPath();
+    PathStatePhysicalOracle.Result result = PathStatePhysicalOracleTool.run(new String[]{
+        "--root", root.toString(), "--scratch", scratch.toString(), "--blocks", "3",
+        "--rows-per-flush", "2", "--engine", "ROCKSDB"});
+    assertEquals(3, result.getBlockCount());
+    assertEquals(3, result.getRowCount());
+    assertEquals(3, result.getCurrent().getBlockNumber());
+    assertEquals(0, result.getOldest().getBlockNumber());
+    assertFalse(Files.exists(scratch));
+  }
+
+  @Test
+  public void physicalOracleToolRejectsUnknownDuplicateAndInvalidOptions() {
+    assertThrows(IllegalArgumentException.class,
+        () -> PathStatePhysicalOracleTool.run(new String[]{"--unknown", "value"}));
+    assertThrows(IllegalArgumentException.class,
+        () -> PathStatePhysicalOracleTool.run(new String[]{
+            "--root", "one", "--root", "two", "--scratch", "scratch", "--blocks", "1"}));
+    assertThrows(IllegalArgumentException.class,
+        () -> PathStatePhysicalOracleTool.run(new String[]{
+            "--root", "root", "--scratch", "scratch", "--blocks", "0"}));
+  }
+
+  @Test
+  public void physicalOracleDetectsFlatValueDriftAndPreservesFailureScratch() throws Exception {
+    PathStateParticipantScope scope = new PathStateCanonicalizer().participantScope();
+    Path root = temporaryFolder.newFolder("physical-oracle-flat-drift").toPath();
+    preparePublishedPhysicalTarget(root, scope);
+    PathStateLayerLimits limits = new PathStateLayerLimits(2, 1L << 20);
+
+    try (PathStatePhysicalStoreSet stores = PathStatePhysicalStoreSet.open(root, scope,
+        Engine.ROCKSDB)) {
+      stores.applyAndPublish(new PathStateBlockTransition(1, bytes(99), new byte[32], 3,
+          P66Phase.P66_ON, Collections.emptyList()), limits);
+      PathStatePhysicalOracleWindow window = stores.loadOracleWindow(1, limits);
+      byte[] accountKey = PathStateCommitmentCodec.storeLeafKey(
+          scope.require("account").getStoreId(), new byte[]{1, 2});
+      stores.participant("account").putFlat(accountKey,
+          PathStateCommitmentCodec.presentLeafValue(new byte[]{9, 9}));
+
+      Path scratch = new File(temporaryFolder.getRoot(),
+          "physical-oracle-failure-scratch").toPath();
+      java.io.IOException failure = assertThrows(java.io.IOException.class,
+          () -> PathStatePhysicalOracle.verify(stores, window, scratch, 2));
+      assertTrue(failure.getMessage().contains("physical oracle root differs"));
+      assertTrue(Files.isDirectory(scratch));
+    }
+  }
+
+  @Test
+  public void physicalOracleWindowRejectsPartialUnsettledOrOverLimitInput() throws Exception {
+    PathStateParticipantScope scope = new PathStateCanonicalizer().participantScope();
+    Path root = temporaryFolder.newFolder("physical-oracle-window-invalid").toPath();
+    preparePublishedPhysicalTarget(root, scope);
+    PathStateLayerLimits limits = new PathStateLayerLimits(4, 1L << 20);
+
+    try (PathStatePhysicalStoreSet stores = PathStatePhysicalStoreSet.open(root, scope,
+        Engine.ROCKSDB)) {
+      stores.applyAndPublish(new PathStateBlockTransition(1, bytes(97), new byte[32], 3,
+          P66Phase.P66_ON, Collections.emptyList()), limits);
+      stores.applyAndPublish(new PathStateBlockTransition(2, bytes(98), bytes(97), 6,
+          P66Phase.P66_ON, Collections.emptyList()), limits);
+
+      assertThrows(java.io.IOException.class, () -> stores.loadOracleWindow(3, limits));
+      assertThrows(java.io.IOException.class,
+          () -> stores.loadOracleWindow(2, new PathStateLayerLimits(1, 1L << 20)));
+      assertThrows(IllegalArgumentException.class,
+          () -> stores.loadOracleWindow(0, limits));
+
+      Files.write(root.resolve(PathStatePhysicalStoreSet.INTENT_FILE),
+          Files.readAllBytes(root.resolve(PathStatePhysicalStoreSet.CURRENT_FILE)));
+      assertThrows(java.io.IOException.class, () -> stores.loadOracleWindow(1, limits));
+    }
+  }
+
+  @Test
   public void parallelParticipantWritesStartTogetherAndWaitForEveryCompletion() throws Exception {
     ExecutorService executor = Executors.newFixedThreadPool(2);
     try {
