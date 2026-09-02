@@ -74,6 +74,47 @@ public class PathStateNativeNodeStoreTest {
   }
 
   @Test
+  public void transitionRecordingStoreCachesBaseReadsAndOwnsReturnedBytes() {
+    AtomicInteger reads = new AtomicInteger();
+    PathNodeStore base = new PathNodeStore() {
+      @Override
+      public byte[] get(byte[] path) {
+        reads.incrementAndGet();
+        return path[0] == 1 ? new byte[]{4, 5, 6} : null;
+      }
+
+      @Override
+      public void put(byte[] path, byte[] encodedNode) {
+        throw new UnsupportedOperationException();
+      }
+
+      @Override
+      public void delete(byte[] path) {
+        throw new UnsupportedOperationException();
+      }
+    };
+    PathStatePhysicalStoreSet.RecordingNodeStore store =
+        new PathStatePhysicalStoreSet.RecordingNodeStore(base);
+
+    byte[] first = store.get(new byte[]{1});
+    first[0] = 9;
+    assertArrayEquals(new byte[]{4, 5, 6}, store.get(new byte[]{1}));
+    assertNull(store.get(new byte[]{2}));
+    assertNull(store.get(new byte[]{2}));
+    assertEquals(2, reads.get());
+    assertEquals(2, store.getBaseReadMisses());
+    assertEquals(2, store.getBaseReadHits());
+
+    store.put(new byte[]{1}, new byte[]{7, 8});
+    byte[] changed = store.get(new byte[]{1});
+    changed[0] = 9;
+    assertArrayEquals(new byte[]{7, 8}, store.get(new byte[]{1}));
+    assertEquals(2, reads.get());
+    assertEquals(2, store.getBaseReadMisses());
+    assertEquals(2, store.getBaseReadHits());
+  }
+
+  @Test
   public void streamsNativeScansWithoutCollectingTheResultSet() throws Exception {
     for (Engine engine : availableEngines()) {
       Path directory = new File(temporaryFolder.getRoot(), "stream-" + engine).toPath();
