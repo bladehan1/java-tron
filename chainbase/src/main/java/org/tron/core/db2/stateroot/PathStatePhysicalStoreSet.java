@@ -580,10 +580,12 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     hook.after(TransitionStage.AFTER_RETIRE);
     long completedNanos = System.nanoTime();
     logger.info("Path-state physical transition completed: head={}, changedStores={}, "
-            + "journalBytes={}, journalCount={}, journalWindowBytes={}, prepareMs={}, "
-            + "journalMs={}, intentMs={}, participantWaitMs={}, finalizeMs={}, totalMs={}",
+            + "journalBytes={}, journalCount={}, journalWindowBytes={}, nodeReadMisses={}, "
+            + "nodeReadHits={}, prepareMs={}, journalMs={}, intentMs={}, participantWaitMs={}, "
+            + "finalizeMs={}, totalMs={}",
         plan.target.getMetadata().getBlockNumber(), plan.participants.size(),
         encodedJournal.length, reverseJournalCount(), reverseJournalBytes(),
+        plan.nodeReadMisses, plan.nodeReadHits,
         elapsedMillis(startedNanos, preparedNanos), elapsedMillis(preparedNanos, journalNanos),
         elapsedMillis(journalNanos, intentNanos), elapsedMillis(intentNanos, participantsNanos),
         elapsedMillis(participantsNanos, completedNanos),
@@ -692,8 +694,12 @@ public final class PathStatePhysicalStoreSet implements Closeable {
         manifest.getIdentityDigest(), metadata, targets, superGeneration, stateRoot);
     PathStatePhysicalReverseJournal journal = new PathStatePhysicalReverseJournal(target.encode(),
         current.encode(), reverseStores, recordings.get(0).reverseEntries());
+    long nodeReadMisses = recordings.values().stream()
+        .mapToLong(RecordingNodeStore::getBaseReadMisses).sum();
+    long nodeReadHits = recordings.values().stream()
+        .mapToLong(RecordingNodeStore::getBaseReadHits).sum();
     return new TransitionPlan(target, participantTransitions, superStore,
-        recordings.get(0).mutations(), journal);
+        recordings.get(0).mutations(), journal, nodeReadMisses, nodeReadHits);
   }
 
   private void applyParticipantTransitionsInParallel(List<ParticipantTransition> transitions)
@@ -1647,12 +1653,15 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     }
   }
 
-  private static final class RecordingNodeStore implements PathNodeStore {
+  static final class RecordingNodeStore implements PathNodeStore {
 
     private final PathNodeStore base;
     private final Map<BytesKey, byte[]> changes = new LinkedHashMap<>();
+    private final Map<BytesKey, byte[]> baseReads = new LinkedHashMap<>();
+    private long baseReadMisses;
+    private long baseReadHits;
 
-    private RecordingNodeStore(PathNodeStore base) {
+    RecordingNodeStore(PathNodeStore base) {
       this.base = Objects.requireNonNull(base, "base");
     }
 
@@ -1663,7 +1672,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
         byte[] value = changes.get(key);
         return value == null ? null : Arrays.copyOf(value, value.length);
       }
-      return base.get(path);
+      return baseValue(key);
     }
 
     @Override
@@ -1692,9 +1701,29 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     private List<PathStatePhysicalReverseJournal.Entry> reverseEntries() {
       List<PathStatePhysicalReverseJournal.Entry> entries = new ArrayList<>();
       for (BytesKey key : changes.keySet()) {
-        entries.add(new PathStatePhysicalReverseJournal.Entry(key.bytes, base.get(key.bytes)));
+        entries.add(new PathStatePhysicalReverseJournal.Entry(key.bytes, baseValue(key)));
       }
       return entries;
+    }
+
+    private byte[] baseValue(BytesKey key) {
+      if (!baseReads.containsKey(key)) {
+        byte[] value = base.get(key.bytes);
+        baseReads.put(key, value == null ? null : Arrays.copyOf(value, value.length));
+        baseReadMisses++;
+      } else {
+        baseReadHits++;
+      }
+      byte[] value = baseReads.get(key);
+      return value == null ? null : Arrays.copyOf(value, value.length);
+    }
+
+    long getBaseReadMisses() {
+      return baseReadMisses;
+    }
+
+    long getBaseReadHits() {
+      return baseReadHits;
     }
 
     private int putCount() {
@@ -1765,15 +1794,20 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     private final PhysicalStore superStore;
     private final List<NodeMutation> superNodeMutations;
     private final PathStatePhysicalReverseJournal journal;
+    private final long nodeReadMisses;
+    private final long nodeReadHits;
 
     private TransitionPlan(PathStatePhysicalGlobalIntent target,
         List<ParticipantTransition> participants, PhysicalStore superStore,
-        List<NodeMutation> superNodeMutations, PathStatePhysicalReverseJournal journal) {
+        List<NodeMutation> superNodeMutations, PathStatePhysicalReverseJournal journal,
+        long nodeReadMisses, long nodeReadHits) {
       this.target = target;
       this.participants = participants;
       this.superStore = superStore;
       this.superNodeMutations = superNodeMutations;
       this.journal = journal;
+      this.nodeReadMisses = nodeReadMisses;
+      this.nodeReadHits = nodeReadHits;
     }
   }
 
