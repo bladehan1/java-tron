@@ -12,6 +12,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
 
 /**
  * Current-only per-Store trie and super-trie aggregator for TASK-016.
@@ -100,6 +103,54 @@ public final class PathStateRoot {
     rootMaterialized = false;
   }
 
+  synchronized void applyParallel(Collection<PathStateMutation> mutations,
+      ExecutorService participantExecutor, ExecutorService branchExecutor) {
+    List<PreparedMutation> prepared = prepare(mutations);
+    Map<Integer, List<PreparedMutation>> grouped = new LinkedHashMap<>();
+    for (PreparedMutation mutation : prepared) {
+      grouped.computeIfAbsent(mutation.participant.getStoreId(), ignored -> new ArrayList<>())
+          .add(mutation);
+    }
+    List<Future<?>> futures = new ArrayList<>();
+    for (List<PreparedMutation> participantMutations : grouped.values()) {
+      futures.add(Objects.requireNonNull(participantExecutor, "participantExecutor").submit(() -> {
+        PathStateParticipant participant = participantMutations.get(0).participant;
+        List<PathMerkleTrie.BatchMutation> batch = new ArrayList<>(participantMutations.size());
+        for (PreparedMutation mutation : participantMutations) {
+          batch.add(new PathMerkleTrie.BatchMutation(mutation.secureKey, mutation.encodedValue));
+        }
+        participantTries.get(participant.getDbName()).applyBatch(batch,
+            Objects.requireNonNull(branchExecutor, "branchExecutor"));
+      }));
+    }
+    try {
+      for (Future<?> future : futures) {
+        future.get();
+      }
+    } catch (InterruptedException interrupted) {
+      Thread.currentThread().interrupt();
+      cancel(futures);
+      throw new IllegalStateException("parallel path-state prepare interrupted", interrupted);
+    } catch (ExecutionException failed) {
+      cancel(futures);
+      Throwable cause = failed.getCause();
+      if (cause instanceof RuntimeException) {
+        throw (RuntimeException) cause;
+      }
+      throw new IllegalStateException("parallel path-state prepare failed", cause);
+    }
+    recordPendingLeafMutations(prepared);
+    rootMaterialized = false;
+  }
+
+  private static void cancel(List<? extends Future<?>> futures) {
+    for (Future<?> future : futures) {
+      if (!future.isDone()) {
+        future.cancel(true);
+      }
+    }
+  }
+
   /** Applies one rebuild batch while locking only the participant tries touched by that batch. */
   void applyRebuild(Collection<PathStateMutation> mutations) {
     List<PreparedMutation> prepared = prepare(mutations);
@@ -174,6 +225,22 @@ public final class PathStateRoot {
       }
     }
     return participantTries.get(participant.getDbName()).rootHash();
+  }
+
+  synchronized long nodeDecodeCount() {
+    long count = superTrie.getNodeDecodeCount();
+    for (PathMerkleTrie trie : participantTries.values()) {
+      count += trie.getNodeDecodeCount();
+    }
+    return count;
+  }
+
+  synchronized long nodeHashVerifyCount() {
+    long count = superTrie.getNodeHashVerifyCount();
+    for (PathMerkleTrie trie : participantTries.values()) {
+      count += trie.getNodeHashVerifyCount();
+    }
+    return count;
   }
 
   /** Returns the super root after binding every participant identity, format, and current root. */

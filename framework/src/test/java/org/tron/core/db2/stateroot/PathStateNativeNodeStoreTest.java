@@ -115,6 +115,102 @@ public class PathStateNativeNodeStoreTest {
   }
 
   @Test
+  public void residentNodeStoreIsBoundedAndTracksCommittedValues() {
+    java.util.Map<String, byte[]> durable = new java.util.HashMap<>();
+    durable.put("1", new byte[]{4});
+    AtomicInteger reads = new AtomicInteger();
+    PathNodeStore base = new PathNodeStore() {
+      @Override
+      public byte[] get(byte[] path) {
+        reads.incrementAndGet();
+        byte[] value = durable.get(Integer.toString(path[0]));
+        return value == null ? null : Arrays.copyOf(value, value.length);
+      }
+
+      @Override
+      public void put(byte[] path, byte[] encodedNode) {
+        durable.put(Integer.toString(path[0]), Arrays.copyOf(encodedNode, encodedNode.length));
+      }
+
+      @Override
+      public void delete(byte[] path) {
+        durable.remove(Integer.toString(path[0]));
+      }
+    };
+    PathStatePhysicalStoreSet.ResidentNodeCache cache =
+        new PathStatePhysicalStoreSet.ResidentNodeCache(150);
+    PathStatePhysicalStoreSet.ResidentNodeStore store =
+        new PathStatePhysicalStoreSet.ResidentNodeStore(base, cache, 1);
+
+    assertArrayEquals(new byte[]{4}, store.get(new byte[]{1}));
+    assertArrayEquals(new byte[]{4}, store.get(new byte[]{1}));
+    assertNull(store.get(new byte[]{2}));
+    assertEquals(2, reads.get());
+    assertEquals(1, store.getHits());
+    assertEquals(2, store.getNativeReads());
+
+    store.put(new byte[]{1}, new byte[]{7});
+    assertArrayEquals(new byte[]{7}, store.get(new byte[]{1}));
+    store.delete(new byte[]{2});
+    assertNull(store.get(new byte[]{2}));
+    assertEquals(2, reads.get());
+
+    assertNull(store.get(new byte[]{3}));
+    assertTrue(cache.bytes() <= 150);
+    assertTrue(cache.size() <= 2);
+    assertArrayEquals(new byte[]{7}, store.get(new byte[]{1}));
+    assertTrue(cache.bytes() <= 150);
+    assertTrue(cache.evictions() > 0);
+  }
+
+  @Test
+  public void residentNodeCacheSharesBudgetWithoutCrossStoreAliasing() {
+    AtomicInteger firstReads = new AtomicInteger();
+    AtomicInteger secondReads = new AtomicInteger();
+    PathNodeStore firstBase = fixedNodeStore(new byte[]{1}, firstReads);
+    PathNodeStore secondBase = fixedNodeStore(new byte[]{2}, secondReads);
+    PathStatePhysicalStoreSet.ResidentNodeCache cache =
+        new PathStatePhysicalStoreSet.ResidentNodeCache(300);
+    PathStatePhysicalStoreSet.ResidentNodeStore first =
+        new PathStatePhysicalStoreSet.ResidentNodeStore(firstBase, cache, 1);
+    PathStatePhysicalStoreSet.ResidentNodeStore second =
+        new PathStatePhysicalStoreSet.ResidentNodeStore(secondBase, cache, 2);
+
+    byte[] samePath = new byte[]{7};
+    assertArrayEquals(new byte[]{1}, first.get(samePath));
+    assertArrayEquals(new byte[]{2}, second.get(samePath));
+    assertArrayEquals(new byte[]{1}, first.get(samePath));
+    assertArrayEquals(new byte[]{2}, second.get(samePath));
+    assertEquals(1, firstReads.get());
+    assertEquals(1, secondReads.get());
+    assertTrue(cache.bytes() <= 300);
+
+    first.clear();
+    assertArrayEquals(new byte[]{2}, second.get(samePath));
+    assertEquals(1, secondReads.get());
+    assertArrayEquals(new byte[]{1}, first.get(samePath));
+    assertEquals(2, firstReads.get());
+  }
+
+  private static PathNodeStore fixedNodeStore(byte[] fixedValue, AtomicInteger reads) {
+    return new PathNodeStore() {
+      @Override
+      public byte[] get(byte[] path) {
+        reads.incrementAndGet();
+        return Arrays.copyOf(fixedValue, fixedValue.length);
+      }
+
+      @Override
+      public void put(byte[] path, byte[] encodedNode) {
+      }
+
+      @Override
+      public void delete(byte[] path) {
+      }
+    };
+  }
+
+  @Test
   public void streamsNativeScansWithoutCollectingTheResultSet() throws Exception {
     for (Engine engine : availableEngines()) {
       Path directory = new File(temporaryFolder.getRoot(), "stream-" + engine).toPath();
