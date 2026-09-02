@@ -11,6 +11,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.TreeMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicLong;
 import org.tron.common.crypto.Hash;
 
 /** Backend-neutral secure-key MPT with path-local immutable node updates. */
@@ -20,6 +24,7 @@ public final class PathMerkleTrie {
 
   private static final byte[] EMPTY_PATH = new byte[0];
   private static final byte[] EMPTY_RLP_ITEM = new byte[]{(byte) 0x80};
+  private static final int PARALLEL_UPDATE_THRESHOLD = 4;
   private static final Comparator<BytesKey> UNSIGNED_KEY_COMPARATOR = (left, right) -> {
     int length = Math.min(left.bytes.length, right.bytes.length);
     for (int i = 0; i < length; i++) {
@@ -43,6 +48,8 @@ public final class PathMerkleTrie {
   private boolean frozen;
   private int lastNodePuts;
   private int lastNodeDeletes;
+  private final AtomicLong nodeDecodeCount = new AtomicLong();
+  private final AtomicLong nodeHashVerifyCount = new AtomicLong();
 
   public PathMerkleTrie(PathNodeStore nodeStore) {
     this.nodeStore = Objects.requireNonNull(nodeStore, "nodeStore");
@@ -75,6 +82,136 @@ public final class PathMerkleTrie {
     }
   }
 
+  synchronized void applyBatch(List<BatchMutation> mutations, ExecutorService executor) {
+    requireMutable();
+    List<BatchMutation> batch = new ArrayList<>(Objects.requireNonNull(mutations, "mutations"));
+    Node resolvedRoot = resolve(rootNode, EMPTY_PATH);
+    rootNode = resolvedRoot;
+    if (batch.size() < PARALLEL_UPDATE_THRESHOLD || !(resolvedRoot instanceof BranchNode)) {
+      applySequential(batch);
+      return;
+    }
+    BranchNode root = (BranchNode) resolvedRoot;
+    List<List<BatchMutation>> groups = new ArrayList<>(16);
+    boolean[] deletes = new boolean[16];
+    for (int i = 0; i < 16; i++) {
+      groups.add(new ArrayList<>());
+    }
+    for (BatchMutation mutation : batch) {
+      BatchMutation present = Objects.requireNonNull(mutation, "mutation");
+      int nibble = (present.secureKey[0] >>> 4) & 0x0f;
+      groups.get(nibble).add(present);
+      deletes[nibble] |= present.encodedValue == null;
+    }
+    int guaranteedSurvivors = 0;
+    for (int i = 0; i < root.children.length; i++) {
+      if (root.children[i] != null && !deletes[i]) {
+        guaranteedSurvivors++;
+      }
+    }
+    if (guaranteedSurvivors < 2) {
+      applySequential(batch);
+      return;
+    }
+    List<Future<SubtreeResult>> futures = new ArrayList<>();
+    List<Integer> positions = new ArrayList<>();
+    for (int i = 0; i < groups.size(); i++) {
+      if (!groups.get(i).isEmpty()) {
+        final int position = i;
+        positions.add(position);
+        futures.add(Objects.requireNonNull(executor, "executor").submit(
+            () -> applySubtree(root.children[position], position, groups.get(position))));
+      }
+    }
+    Node[] children = Arrays.copyOf(root.children, root.children.length);
+    Map<BytesKey, byte[]> previous = new LinkedHashMap<>();
+    Map<BytesKey, byte[]> changed = new LinkedHashMap<>();
+    try {
+      for (int i = 0; i < futures.size(); i++) {
+        SubtreeResult result = futures.get(i).get();
+        children[positions.get(i)] = result.node;
+        previous.putAll(result.previous);
+        changed.putAll(result.changed);
+      }
+    } catch (InterruptedException interrupted) {
+      Thread.currentThread().interrupt();
+      cancel(futures);
+      throw new IllegalStateException("path trie batch update interrupted", interrupted);
+    } catch (ExecutionException failed) {
+      cancel(futures);
+      Throwable cause = failed.getCause();
+      if (cause instanceof RuntimeException) {
+        throw (RuntimeException) cause;
+      }
+      throw new IllegalStateException("path trie batch update failed", cause);
+    }
+    if (changed.isEmpty()) {
+      return;
+    }
+    for (BatchMutation mutation : batch) {
+      BytesKey key = new BytesKey(mutation.secureKey);
+      if (!changed.containsKey(key)) {
+        continue;
+      }
+      byte[] oldValue = previous.get(key);
+      leaves.put(key, mutation.encodedValue);
+      if (oldValue == null && mutation.encodedValue != null) {
+        leafCount++;
+      } else if (oldValue != null && mutation.encodedValue == null) {
+        leafCount--;
+      }
+    }
+    rootNode = new BranchNode(children);
+    dirty = true;
+  }
+
+  private void applySequential(List<BatchMutation> mutations) {
+    for (BatchMutation mutation : mutations) {
+      if (mutation.encodedValue == null) {
+        delete(mutation.secureKey);
+      } else {
+        put(mutation.secureKey, mutation.encodedValue);
+      }
+    }
+  }
+
+  private SubtreeResult applySubtree(Node initial, int nibble,
+      List<BatchMutation> mutations) {
+    Node node = initial;
+    byte[] path = new byte[]{(byte) nibble};
+    Map<BytesKey, byte[]> previous = new LinkedHashMap<>();
+    Map<BytesKey, byte[]> changed = new LinkedHashMap<>();
+    for (BatchMutation mutation : mutations) {
+      BytesKey key = new BytesKey(mutation.secureKey);
+      byte[] oldValue;
+      if (leaves.containsKey(key)) {
+        oldValue = leaves.get(key);
+      } else if (inheritedSnapshot != null && inheritedSnapshot.containsLeaf(key)) {
+        oldValue = inheritedSnapshot.leafValue(key);
+      } else {
+        byte[] nibbles = toNibbles(key.bytes);
+        ValueResult result = resolvedValueAt(node, nibbles, 1, path);
+        node = result.node;
+        oldValue = result.value;
+      }
+      previous.put(key, oldValue);
+      if (Arrays.equals(oldValue, mutation.encodedValue)) {
+        continue;
+      }
+      node = update(node, toNibbles(key.bytes), 1, path, mutation.encodedValue);
+      changed.put(key, mutation.encodedValue);
+    }
+    return new SubtreeResult(node, previous, changed);
+  }
+
+  private static void cancel(List<? extends Future<?>> futures) {
+    for (Future<?> future : futures) {
+      if (!future.isDone()) {
+        future.cancel(true);
+      }
+    }
+  }
+
   public synchronized byte[] get(byte[] secureKey) {
     byte[] value = leafValue(secureKey(secureKey));
     return value == null ? null : Arrays.copyOf(value, value.length);
@@ -98,6 +235,14 @@ public final class PathMerkleTrie {
 
   synchronized int getLastNodeDeletes() {
     return lastNodeDeletes;
+  }
+
+  synchronized long getNodeDecodeCount() {
+    return nodeDecodeCount.get();
+  }
+
+  synchronized long getNodeHashVerifyCount() {
+    return nodeHashVerifyCount.get();
   }
 
   synchronized List<LeafEntry> leafEntries() {
@@ -166,20 +311,30 @@ public final class PathMerkleTrie {
       return;
     }
     byte[] encoded = nodeStore.get(EMPTY_PATH);
+    nodeHashVerifyCount.incrementAndGet();
     if (encoded == null || !Arrays.equals(Hash.sha3(encoded), expected)) {
       throw new IllegalStateException("durable path trie root is missing or corrupt");
     }
-    rootNode = new StoredNode(encoded, EMPTY_PATH);
-    materializedRoot = rootNode;
-    materializedNodes.put(rootNode, new BytesKey(EMPTY_PATH));
-    rootHash = expected;
+    installStoredRoot(encoded, expected);
   }
 
   synchronized byte[] restoreRoot() {
     byte[] encoded = nodeStore.get(EMPTY_PATH);
-    byte[] expected = encoded == null ? Hash.EMPTY_TRIE_HASH : Hash.sha3(encoded);
-    restoreRoot(expected);
+    if (encoded == null) {
+      rootHash = Arrays.copyOf(Hash.EMPTY_TRIE_HASH, Hash.EMPTY_TRIE_HASH.length);
+      return Arrays.copyOf(rootHash, rootHash.length);
+    }
+    nodeHashVerifyCount.incrementAndGet();
+    byte[] expected = Hash.sha3(encoded);
+    installStoredRoot(encoded, expected);
     return Arrays.copyOf(expected, expected.length);
+  }
+
+  private void installStoredRoot(byte[] encoded, byte[] expected) {
+    rootNode = new StoredNode(encoded, EMPTY_PATH);
+    materializedRoot = rootNode;
+    rememberMaterialized(rootNode, EMPTY_PATH);
+    rootHash = Arrays.copyOf(expected, expected.length);
   }
 
   private void importLeaves(Collection<LeafEntry> entries, String operation) {
@@ -299,9 +454,29 @@ public final class PathMerkleTrie {
   }
 
   private BytesKey materializedPath(Node node) {
-    BytesKey path = materializedNodes.get(node);
+    BytesKey path;
+    synchronized (materializedNodes) {
+      path = materializedNodes.get(node);
+    }
     return path != null || inheritedSnapshot == null
         ? path : inheritedSnapshot.materializedPath(node);
+  }
+
+  private void rememberMaterialized(Node node, byte[] path) {
+    synchronized (materializedNodes) {
+      materializedNodes.put(node, new BytesKey(path));
+    }
+  }
+
+  private Node retainResolvedReplacement(Node original, Node replacement, byte[] path) {
+    BytesKey materialized = materializedPath(original);
+    if (materialized != null) {
+      if (!Arrays.equals(materialized.bytes, path)) {
+        throw new IllegalStateException("resolved path trie node moved from its durable path");
+      }
+      rememberMaterialized(replacement, path);
+    }
+    return replacement;
   }
 
   private void requireMutable() {
@@ -541,30 +716,55 @@ public final class PathMerkleTrie {
   }
 
   private byte[] valueAt(Node node, byte[] key, int offset, byte[] path) {
+    ValueResult result = resolvedValueAt(node, key, offset, path);
+    if (path.length == 0) {
+      rootNode = result.node;
+    }
+    return result.value;
+  }
+
+  private ValueResult resolvedValueAt(Node node, byte[] key, int offset, byte[] path) {
     if (node == null) {
-      return null;
+      return new ValueResult(null, null);
     }
     Node present = resolve(node, path);
     if (present instanceof LeafNode) {
       LeafNode leaf = (LeafNode) present;
       int remaining = key.length - offset;
-      return remaining == leaf.path.length
+      byte[] value = remaining == leaf.path.length
           && commonPrefix(leaf.path, 0, key, offset) == remaining
           ? Arrays.copyOf(leaf.value, leaf.value.length) : null;
+      return new ValueResult(value, present);
     }
     if (present instanceof ExtensionNode) {
       ExtensionNode extension = (ExtensionNode) present;
       int shared = commonPrefix(extension.path, 0, key, offset);
-      return shared == extension.path.length
-          ? valueAt(extension.child, key, offset + shared, append(path, extension.path)) : null;
+      if (shared != extension.path.length) {
+        return new ValueResult(null, present);
+      }
+      ValueResult child = resolvedValueAt(extension.child, key, offset + shared,
+          append(path, extension.path));
+      if (child.node == extension.child) {
+        return new ValueResult(child.value, present);
+      }
+      Node replacement = retainResolvedReplacement(present,
+          new ExtensionNode(extension.path, child.node), path);
+      return new ValueResult(child.value, replacement);
     }
     BranchNode branch = (BranchNode) present;
     if (offset >= key.length) {
-      return null;
+      return new ValueResult(null, present);
     }
     int nibble = key[offset];
-    return valueAt(branch.children[nibble], key, offset + 1,
+    ValueResult child = resolvedValueAt(branch.children[nibble], key, offset + 1,
         append(path, new byte[]{(byte) nibble}));
+    if (child.node == branch.children[nibble]) {
+      return new ValueResult(child.value, present);
+    }
+    Node[] children = Arrays.copyOf(branch.children, branch.children.length);
+    children[nibble] = child.node;
+    Node replacement = retainResolvedReplacement(present, new BranchNode(children), path);
+    return new ValueResult(child.value, replacement);
   }
 
   private Node resolve(Node node, byte[] expectedPath) {
@@ -572,6 +772,7 @@ public final class PathMerkleTrie {
       return node;
     }
     StoredNode stored = (StoredNode) node;
+    nodeDecodeCount.incrementAndGet();
     byte[] storedEncoding = node.encoded;
     if (!Arrays.equals(stored.path, expectedPath)) {
       throw new IllegalStateException("stored path trie node moved from its durable path");
@@ -608,7 +809,7 @@ public final class PathMerkleTrie {
     if (!Arrays.equals(decoded.encoded, storedEncoding)) {
       throw new IllegalStateException("path-state durable node is not canonically encoded");
     }
-    return decoded;
+    return retainResolvedReplacement(stored, decoded, expectedPath);
   }
 
   private Node requiredStoredChild(RlpElement reference, byte[] path) {
@@ -624,16 +825,21 @@ public final class PathMerkleTrie {
       return null;
     }
     if (reference.list) {
-      return new StoredNode(reference.encoded, path);
+      Node stored = new StoredNode(reference.encoded, path);
+      rememberMaterialized(stored, path);
+      return stored;
     }
     if (reference.payload.length != SECURE_KEY_LENGTH) {
       throw new IllegalStateException("path-state child hash must contain exactly 32 bytes");
     }
     byte[] encoded = nodeStore.get(path);
+    nodeHashVerifyCount.incrementAndGet();
     if (encoded == null || !Arrays.equals(Hash.sha3(encoded), reference.payload)) {
       throw new IllegalStateException("path-state durable child is missing or corrupt");
     }
-    return new StoredNode(encoded, path);
+    Node stored = new StoredNode(encoded, path);
+    rememberMaterialized(stored, path);
+    return stored;
   }
 
   private static List<RlpElement> decodeList(byte[] encoded) {
@@ -899,6 +1105,43 @@ public final class PathMerkleTrie {
     private NodePath(Node node, byte[] path) {
       this.node = node;
       this.path = Arrays.copyOf(path, path.length);
+    }
+  }
+
+  private static final class ValueResult {
+
+    private final byte[] value;
+    private final Node node;
+
+    private ValueResult(byte[] value, Node node) {
+      this.value = value;
+      this.node = node;
+    }
+  }
+
+  static final class BatchMutation {
+
+    private final byte[] secureKey;
+    private final byte[] encodedValue;
+
+    BatchMutation(byte[] secureKey, byte[] encodedValue) {
+      this.secureKey = PathMerkleTrie.secureKey(secureKey).copy();
+      this.encodedValue = encodedValue == null ? null
+          : nonEmpty(encodedValue, "encodedValue");
+    }
+  }
+
+  private static final class SubtreeResult {
+
+    private final Node node;
+    private final Map<BytesKey, byte[]> previous;
+    private final Map<BytesKey, byte[]> changed;
+
+    private SubtreeResult(Node node, Map<BytesKey, byte[]> previous,
+        Map<BytesKey, byte[]> changed) {
+      this.node = node;
+      this.previous = previous;
+      this.changed = changed;
     }
   }
 

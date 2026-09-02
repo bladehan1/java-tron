@@ -3,6 +3,7 @@ package org.tron.core.db2.stateroot;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertThrows;
+import static org.junit.Assert.assertTrue;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -14,6 +15,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import org.bouncycastle.util.encoders.Hex;
 import org.junit.Test;
+import org.tron.common.crypto.Hash;
 import org.tron.core.trie.TrieImpl;
 
 public class PathStateRootTest {
@@ -197,6 +199,77 @@ public class PathStateRootTest {
     assertArrayEquals(sequential.rootHash(), concurrent.rootHash());
   }
 
+  @Test
+  public void gethStyleParticipantAndRootBranchBatchMatchesSequentialRoot() {
+    PathStateRoot parallel = stateRoot(participants());
+    PathStateRoot sequential = stateRoot(participants());
+    List<PathStateMutation> initial = new ArrayList<>();
+    for (int i = 0; i < 96; i++) {
+      initial.add(PathStateMutation.put("account", bytes("initial-" + i),
+          bytes("value-" + i)));
+    }
+    parallel.apply(initial);
+    sequential.apply(initial);
+    parallel.rootHash();
+    sequential.rootHash();
+
+    List<PathStateMutation> changes = new ArrayList<>();
+    for (int i = 0; i < 32; i++) {
+      changes.add(PathStateMutation.put("account", bytes("initial-" + i),
+          bytes("updated-" + i)));
+    }
+    for (int i = 32; i < 48; i++) {
+      changes.add(PathStateMutation.delete("account", bytes("initial-" + i)));
+    }
+    for (int i = 0; i < 24; i++) {
+      changes.add(PathStateMutation.put("storage-row", bytes("slot-" + i),
+          bytes("storage-" + i)));
+      changes.add(PathStateMutation.put("abi", bytes("contract-" + i),
+          bytes("abi-" + i)));
+    }
+    sequential.apply(changes);
+    ExecutorService participants = Executors.newFixedThreadPool(4);
+    ExecutorService branches = Executors.newFixedThreadPool(8);
+    try {
+      parallel.applyParallel(changes, participants, branches);
+    } finally {
+      participants.shutdownNow();
+      branches.shutdownNow();
+    }
+    assertArrayEquals(sequential.rootHash(), parallel.rootHash());
+    assertEquals(sequential.pendingLeafMutations().size(),
+        parallel.pendingLeafMutations().size());
+  }
+
+  @Test
+  public void restoredTrieAttachesDecodedNodesForRepeatedReads() {
+    CountingPathNodeStore store = new CountingPathNodeStore();
+    PathMerkleTrie built = new PathMerkleTrie(store);
+    byte[] selectedKey = null;
+    byte[] selectedValue = null;
+    for (int i = 0; i < 64; i++) {
+      byte[] key = Hash.sha3(bytes("key-" + i));
+      byte[] value = bytes("value-" + i);
+      built.put(key, value);
+      if (i == 31) {
+        selectedKey = key;
+        selectedValue = value;
+      }
+    }
+    byte[] root = built.rootHash();
+
+    PathMerkleTrie restored = new PathMerkleTrie(store);
+    restored.restoreRoot(root);
+    int readsAfterRoot = store.reads;
+    assertArrayEquals(selectedValue, restored.get(selectedKey));
+    int readsAfterFirstLookup = store.reads;
+    assertTrue(readsAfterFirstLookup > readsAfterRoot);
+    assertTrue(restored.getNodeDecodeCount() > 0);
+
+    assertArrayEquals(selectedValue, restored.get(selectedKey));
+    assertEquals(readsAfterFirstLookup, store.reads);
+  }
+
   private static byte[] referenceRoot(List<PathStateParticipant> participants,
       Mutation[] mutations) {
     Map<String, TrieImpl> stores = new LinkedHashMap<>();
@@ -276,6 +349,29 @@ public class PathStateRootTest {
 
     @Override
     public byte[] get(byte[] path) {
+      byte[] node = nodes.get(Hex.toHexString(path));
+      return node == null ? null : Arrays.copyOf(node, node.length);
+    }
+
+    @Override
+    public void put(byte[] path, byte[] encodedNode) {
+      nodes.put(Hex.toHexString(path), Arrays.copyOf(encodedNode, encodedNode.length));
+    }
+
+    @Override
+    public void delete(byte[] path) {
+      nodes.remove(Hex.toHexString(path));
+    }
+  }
+
+  private static final class CountingPathNodeStore implements PathNodeStore {
+
+    private final Map<String, byte[]> nodes = new LinkedHashMap<>();
+    private int reads;
+
+    @Override
+    public byte[] get(byte[] path) {
+      reads++;
       byte[] node = nodes.get(Hex.toHexString(path));
       return node == null ? null : Arrays.copyOf(node, node.length);
     }

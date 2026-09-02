@@ -16,10 +16,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Stream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -41,7 +43,10 @@ public final class PathStatePhysicalStoreSet implements Closeable {
   static final long DEFAULT_CHECKPOINT_BYTES = 256L * 1024 * 1024;
   static final int BOOTSTRAP_WRITE_BATCH_ENTRIES = 4096;
   static final long BOOTSTRAP_WRITE_BATCH_BYTES = 8L * 1024 * 1024;
+  static final long STEADY_NODE_CACHE_BYTES = 256L * 1024 * 1024;
   private static final int MAX_PARALLEL_PARTICIPANT_WRITES = 4;
+  private static final int MAX_PARALLEL_PARTICIPANT_PREPARES = 4;
+  private static final int MAX_PARALLEL_TRIE_BRANCHES = 8;
   private static final Set<String> LARGE_BOOTSTRAP_STORES = java.util.Collections.unmodifiableSet(
       new HashSet<>(Arrays.asList(
           "account", "account-asset", "delegation", "storage-row")));
@@ -76,6 +81,9 @@ public final class PathStatePhysicalStoreSet implements Closeable {
   private final Map<String, PhysicalStore> participants = new LinkedHashMap<>();
   private final PhysicalStore superStore;
   private final ExecutorService participantWriteExecutor;
+  private final ExecutorService participantPrepareExecutor;
+  private final ExecutorService trieBranchExecutor;
+  private final ResidentNodeCache residentNodeCache;
   private Map<BytesKey, ReverseJournalIndexEntry> reverseJournalIndex;
   private boolean rootClaimed;
   private boolean closed;
@@ -87,15 +95,19 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     this.directory = manifest.getDirectory();
     this.scope = requireExactScope(scope);
     this.participantWriteExecutor = newParticipantWriteExecutor();
+    this.participantPrepareExecutor = newTrieExecutor("participant-prepare",
+        MAX_PARALLEL_PARTICIPANT_PREPARES);
+    this.trieBranchExecutor = newTrieExecutor("branch-prepare", MAX_PARALLEL_TRIE_BRANCHES);
+    this.residentNodeCache = new ResidentNodeCache(STEADY_NODE_CACHE_BYTES);
     try {
       for (PathStateParticipant participant : scope.getParticipants()) {
         Path participantDirectory = directory.resolve(STORES_DIRECTORY).resolve(String.format(
             "%02d-%s", participant.getStoreId(), participant.getDbName())).resolve(NODES_DIRECTORY);
         participants.put(participant.getDbName(), new PhysicalStore(participantDirectory,
-            manifest.getEngine()));
+            manifest.getEngine(), participant.getStoreId(), residentNodeCache));
       }
       superStore = new PhysicalStore(directory.resolve(SUPER_DIRECTORY).resolve(NODES_DIRECTORY),
-          manifest.getEngine());
+          manifest.getEngine(), 0, residentNodeCache);
     } catch (IOException | RuntimeException failure) {
       closeAfterFailure(failure);
       throw failure;
@@ -347,6 +359,14 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     });
   }
 
+  private static ExecutorService newTrieExecutor(String name, int threads) {
+    return Executors.newFixedThreadPool(threads, task -> {
+      Thread thread = new Thread(task, "path-state-physical-" + name);
+      thread.setDaemon(true);
+      return thread;
+    });
+  }
+
   private static void cancelOutstanding(List<Future<?>> futures) {
     for (Future<?> future : futures) {
       if (!future.isDone()) {
@@ -581,11 +601,17 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     long completedNanos = System.nanoTime();
     logger.info("Path-state physical transition completed: head={}, changedStores={}, "
             + "journalBytes={}, journalCount={}, journalWindowBytes={}, nodeReadMisses={}, "
-            + "nodeReadHits={}, prepareMs={}, journalMs={}, intentMs={}, participantWaitMs={}, "
-            + "finalizeMs={}, totalMs={}",
+            + "nodeReadHits={}, residentNodeHits={}, residentCleanHits={}, "
+            + "residentUpdatedHits={}, nativeNodeReads={}, residentCacheBytes={}, "
+            + "residentEvictions={}, nodeDecodes={}, nodeHashVerifies={}, prepareMs={}, "
+            + "journalMs={}, intentMs={}, participantWaitMs={}, finalizeMs={}, totalMs={}",
         plan.target.getMetadata().getBlockNumber(), plan.participants.size(),
         encodedJournal.length, reverseJournalCount(), reverseJournalBytes(),
-        plan.nodeReadMisses, plan.nodeReadHits,
+        plan.nodeReadMisses, plan.nodeReadHits, plan.residentNodeHits,
+        plan.residentCleanHits, plan.residentUpdatedHits, plan.nativeNodeReads,
+        residentNodeCache.bytes(), residentNodeCache.evictions() - plan.initialResidentEvictions,
+        plan.nodeDecodes,
+        plan.nodeHashVerifies,
         elapsedMillis(startedNanos, preparedNanos), elapsedMillis(preparedNanos, journalNanos),
         elapsedMillis(journalNanos, intentNanos), elapsedMillis(intentNanos, participantsNanos),
         elapsedMillis(participantsNanos, completedNanos),
@@ -623,6 +649,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
   }
 
   private TransitionPlan prepareTransition(PathStateBlockTransition supplied) throws IOException {
+    long initialResidentEvictions = residentNodeCache.evictions();
     PathStateBlockTransition transition = Objects.requireNonNull(supplied, "transition");
     PathStatePhysicalGlobalIntent current = currentTarget();
     PathStateRootMetadata parent = current.getMetadata();
@@ -640,7 +667,8 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     candidate.restoreStoredRoots(current.getSuperRoot());
     requireParticipantRoots(candidate, current);
     if (!transition.getMutations().isEmpty()) {
-      candidate.apply(transition.getMutations());
+      candidate.applyParallel(transition.getMutations(), participantPrepareExecutor,
+          trieBranchExecutor);
     }
     byte[] stateRoot = candidate.rootHash();
 
@@ -698,8 +726,19 @@ public final class PathStatePhysicalStoreSet implements Closeable {
         .mapToLong(RecordingNodeStore::getBaseReadMisses).sum();
     long nodeReadHits = recordings.values().stream()
         .mapToLong(RecordingNodeStore::getBaseReadHits).sum();
+    long residentNodeHits = recordings.values().stream()
+        .mapToLong(RecordingNodeStore::getResidentReadHits).sum();
+    long nativeNodeReads = recordings.values().stream()
+        .mapToLong(RecordingNodeStore::getNativeReads).sum();
+    long residentCleanHits = recordings.values().stream()
+        .mapToLong(RecordingNodeStore::getResidentCleanHits).sum();
+    long residentUpdatedHits = recordings.values().stream()
+        .mapToLong(RecordingNodeStore::getResidentUpdatedHits).sum();
     return new TransitionPlan(target, participantTransitions, superStore,
-        recordings.get(0).mutations(), journal, nodeReadMisses, nodeReadHits);
+        recordings.get(0).mutations(), journal, nodeReadMisses, nodeReadHits,
+        residentNodeHits, residentCleanHits, residentUpdatedHits, nativeNodeReads,
+        initialResidentEvictions, candidate.nodeDecodeCount(),
+        candidate.nodeHashVerifyCount());
   }
 
   private void applyParticipantTransitionsInParallel(List<ParticipantTransition> transitions)
@@ -1313,6 +1352,8 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     }
     closed = true;
     participantWriteExecutor.shutdownNow();
+    participantPrepareExecutor.shutdownNow();
+    trieBranchExecutor.shutdownNow();
     IOException failure = null;
     for (PhysicalStore store : participants.values()) {
       try {
@@ -1333,6 +1374,8 @@ public final class PathStatePhysicalStoreSet implements Closeable {
 
   private void closeAfterFailure(Throwable original) {
     participantWriteExecutor.shutdownNow();
+    participantPrepareExecutor.shutdownNow();
+    trieBranchExecutor.shutdownNow();
     for (PhysicalStore store : participants.values()) {
       try {
         store.close();
@@ -1422,9 +1465,13 @@ public final class PathStatePhysicalStoreSet implements Closeable {
   public static final class PhysicalStore implements Closeable {
 
     private final PathStateNativeNodeStore nativeStore;
+    private final ResidentNodeStore nodeStore;
 
-    private PhysicalStore(Path directory, Engine engine) throws IOException {
+    private PhysicalStore(Path directory, Engine engine, int storeId,
+        ResidentNodeCache residentNodeCache) throws IOException {
       nativeStore = PathStateNativeNodeStore.open(directory, engine);
+      nodeStore = new ResidentNodeStore(new PhysicalNodeStore(nativeStore), residentNodeCache,
+          storeId);
     }
 
     public void putFlat(byte[] secureKey, byte[] encodedLeaf) {
@@ -1448,7 +1495,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     }
 
     public PathNodeStore nodeStore() {
-      return new PhysicalNodeStore(nativeStore);
+      return nodeStore;
     }
 
     private PhysicalNodeBatchWriter nodeBatchWriter() {
@@ -1480,6 +1527,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     }
 
     void clearNodes() throws IOException {
+      nodeStore.clear();
       List<PathStateNativeNodeStore.BatchMutation> pending = new ArrayList<>(4096);
       nativeStore.scanPrefix(new byte[]{NODE_PREFIX}, entry -> {
         pending.add(PathStateNativeNodeStore.BatchMutation.delete(entry.getKey()));
@@ -1503,6 +1551,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
       mutations.add(metadataMutation(STORE_GENERATION_METADATA, generation));
       mutations.add(metadataMutation(FLAT_COMPLETE_METADATA, storeRoot));
       nativeStore.writeBatchUnsynced(mutations);
+      nodeStore.apply(nodeMutations);
     }
 
     void applyParticipantTransition(List<FlatMutation> flatMutations,
@@ -1520,6 +1569,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
       mutations.add(metadataMutation(STORE_GENERATION_METADATA, generation));
       mutations.add(metadataMutation(FLAT_COMPLETE_METADATA, storeRoot));
       nativeStore.writeBatchUnsynced(mutations);
+      nodeStore.apply(nodeMutations);
     }
 
     void applySuperTransition(List<NodeMutation> nodeMutations, byte[] generation,
@@ -1529,6 +1579,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
       mutations.add(metadataMutation(SUPER_GENERATION_METADATA, generation));
       mutations.add(metadataMutation(FLAT_ROOT_METADATA, superRoot));
       nativeStore.writeBatchUnsynced(mutations);
+      nodeStore.apply(nodeMutations);
     }
 
     private static void appendNodeMutations(
@@ -1566,6 +1617,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
 
     @Override
     public void close() throws IOException {
+      nodeStore.clear();
       nativeStore.close();
     }
   }
@@ -1591,6 +1643,206 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     @Override
     public void delete(byte[] path) {
       nativeStore.delete(prefixed(NODE_PREFIX, path, "path"));
+    }
+  }
+
+  static final class ResidentNodeStore implements PathNodeStore {
+
+    private final PathNodeStore base;
+    private final ResidentNodeCache cache;
+    private final int storeId;
+    private final AtomicLong hits = new AtomicLong();
+    private final AtomicLong cleanHits = new AtomicLong();
+    private final AtomicLong updatedHits = new AtomicLong();
+    private final AtomicLong nativeReads = new AtomicLong();
+
+    ResidentNodeStore(PathNodeStore base, ResidentNodeCache cache, int storeId) {
+      this.base = Objects.requireNonNull(base, "base");
+      this.cache = Objects.requireNonNull(cache, "cache");
+      this.storeId = storeId;
+    }
+
+    @Override
+    public byte[] get(byte[] path) {
+      ResidentNodeCache.Lookup lookup = cache.get(storeId, path);
+      if (lookup.found) {
+        hits.incrementAndGet();
+        if (lookup.updated) {
+          updatedHits.incrementAndGet();
+        } else {
+          cleanHits.incrementAndGet();
+        }
+        return owned(lookup.value);
+      }
+      byte[] value = base.get(path);
+      nativeReads.incrementAndGet();
+      cache.put(storeId, path, value, false);
+      return owned(value);
+    }
+
+    @Override
+    public void put(byte[] path, byte[] encodedNode) {
+      base.put(path, encodedNode);
+      cache.put(storeId, path, Objects.requireNonNull(encodedNode, "encodedNode"), true);
+    }
+
+    @Override
+    public void delete(byte[] path) {
+      base.delete(path);
+      cache.put(storeId, path, null, true);
+    }
+
+    void apply(List<NodeMutation> mutations) {
+      for (NodeMutation mutation : Objects.requireNonNull(mutations, "mutations")) {
+        cache.put(storeId, mutation.path, mutation.encodedNode, true);
+      }
+    }
+
+    void clear() {
+      cache.clear(storeId);
+    }
+
+    long getHits() {
+      return hits.get();
+    }
+
+    long getCleanHits() {
+      return cleanHits.get();
+    }
+
+    long getUpdatedHits() {
+      return updatedHits.get();
+    }
+
+    long getNativeReads() {
+      return nativeReads.get();
+    }
+
+    private static byte[] owned(byte[] value) {
+      return value == null ? null : Arrays.copyOf(value, value.length);
+    }
+  }
+
+  static final class ResidentNodeCache {
+
+    private static final long ENTRY_OVERHEAD_BYTES = 64;
+    private final long maxBytes;
+    private final Map<ResidentNodeCacheKey, ResidentNodeCacheValue> values =
+        new LinkedHashMap<>(1024, 0.75f, true);
+    private long bytes;
+    private long evictions;
+
+    ResidentNodeCache(long maxBytes) {
+      if (maxBytes <= 0) {
+        throw new IllegalArgumentException("resident node cache bytes must be positive");
+      }
+      this.maxBytes = maxBytes;
+    }
+
+    synchronized Lookup get(int storeId, byte[] path) {
+      ResidentNodeCacheValue value = values.get(new ResidentNodeCacheKey(storeId, path));
+      return value == null ? Lookup.missing() : Lookup.found(value.value, value.updated);
+    }
+
+    synchronized void put(int storeId, byte[] path, byte[] value, boolean updated) {
+      ResidentNodeCacheKey key = new ResidentNodeCacheKey(storeId, path);
+      ResidentNodeCacheValue replacement = new ResidentNodeCacheValue(value, updated,
+          ENTRY_OVERHEAD_BYTES + Integer.BYTES + key.path.length
+              + (value == null ? 0 : value.length));
+      ResidentNodeCacheValue previous = values.put(key, replacement);
+      if (previous != null) {
+        bytes -= previous.weight;
+      }
+      bytes += replacement.weight;
+      java.util.Iterator<Map.Entry<ResidentNodeCacheKey, ResidentNodeCacheValue>> iterator =
+          values.entrySet().iterator();
+      while (bytes > maxBytes && iterator.hasNext()) {
+        Map.Entry<ResidentNodeCacheKey, ResidentNodeCacheValue> eldest = iterator.next();
+        bytes -= eldest.getValue().weight;
+        iterator.remove();
+        evictions++;
+      }
+    }
+
+    synchronized void clear(int storeId) {
+      java.util.Iterator<Map.Entry<ResidentNodeCacheKey, ResidentNodeCacheValue>> iterator =
+          values.entrySet().iterator();
+      while (iterator.hasNext()) {
+        Map.Entry<ResidentNodeCacheKey, ResidentNodeCacheValue> entry = iterator.next();
+        if (entry.getKey().storeId == storeId) {
+          bytes -= entry.getValue().weight;
+          iterator.remove();
+        }
+      }
+    }
+
+    synchronized long bytes() {
+      return bytes;
+    }
+
+    synchronized int size() {
+      return values.size();
+    }
+
+    synchronized long evictions() {
+      return evictions;
+    }
+
+    static final class Lookup {
+
+      private final boolean found;
+      private final byte[] value;
+      private final boolean updated;
+
+      private Lookup(boolean found, byte[] value, boolean updated) {
+        this.found = found;
+        this.value = value == null ? null : Arrays.copyOf(value, value.length);
+        this.updated = updated;
+      }
+
+      private static Lookup missing() {
+        return new Lookup(false, null, false);
+      }
+
+      private static Lookup found(byte[] value, boolean updated) {
+        return new Lookup(true, value, updated);
+      }
+    }
+  }
+
+  private static final class ResidentNodeCacheKey {
+
+    private final int storeId;
+    private final byte[] path;
+
+    private ResidentNodeCacheKey(int storeId, byte[] path) {
+      this.storeId = storeId;
+      this.path = Arrays.copyOf(Objects.requireNonNull(path, "path"), path.length);
+    }
+
+    @Override
+    public boolean equals(Object other) {
+      return this == other || other instanceof ResidentNodeCacheKey
+          && storeId == ((ResidentNodeCacheKey) other).storeId
+          && Arrays.equals(path, ((ResidentNodeCacheKey) other).path);
+    }
+
+    @Override
+    public int hashCode() {
+      return 31 * storeId + Arrays.hashCode(path);
+    }
+  }
+
+  private static final class ResidentNodeCacheValue {
+
+    private final byte[] value;
+    private final boolean updated;
+    private final long weight;
+
+    private ResidentNodeCacheValue(byte[] value, boolean updated, long weight) {
+      this.value = value == null ? null : Arrays.copyOf(value, value.length);
+      this.updated = updated;
+      this.weight = weight;
     }
   }
 
@@ -1655,14 +1907,25 @@ public final class PathStatePhysicalStoreSet implements Closeable {
 
   static final class RecordingNodeStore implements PathNodeStore {
 
+    private static final byte[] ABSENT = new byte[0];
     private final PathNodeStore base;
     private final Map<BytesKey, byte[]> changes = new LinkedHashMap<>();
-    private final Map<BytesKey, byte[]> baseReads = new LinkedHashMap<>();
-    private long baseReadMisses;
-    private long baseReadHits;
+    private final Map<BytesKey, byte[]> baseReads = new ConcurrentHashMap<>();
+    private final long initialResidentReadHits;
+    private final long initialResidentCleanHits;
+    private final long initialResidentUpdatedHits;
+    private final long initialNativeReads;
+    private final AtomicLong baseReadMisses = new AtomicLong();
+    private final AtomicLong baseReadHits = new AtomicLong();
 
     RecordingNodeStore(PathNodeStore base) {
       this.base = Objects.requireNonNull(base, "base");
+      ResidentNodeStore resident = base instanceof ResidentNodeStore
+          ? (ResidentNodeStore) base : null;
+      initialResidentReadHits = resident == null ? 0 : resident.getHits();
+      initialResidentCleanHits = resident == null ? 0 : resident.getCleanHits();
+      initialResidentUpdatedHits = resident == null ? 0 : resident.getUpdatedHits();
+      initialNativeReads = resident == null ? 0 : resident.getNativeReads();
     }
 
     @Override
@@ -1707,23 +1970,46 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     }
 
     private byte[] baseValue(BytesKey key) {
-      if (!baseReads.containsKey(key)) {
-        byte[] value = base.get(key.bytes);
-        baseReads.put(key, value == null ? null : Arrays.copyOf(value, value.length));
-        baseReadMisses++;
-      } else {
-        baseReadHits++;
-      }
       byte[] value = baseReads.get(key);
-      return value == null ? null : Arrays.copyOf(value, value.length);
+      if (value == null) {
+        byte[] loaded = base.get(key.bytes);
+        baseReadMisses.incrementAndGet();
+        byte[] owned = loaded == null ? ABSENT : Arrays.copyOf(loaded, loaded.length);
+        byte[] raced = baseReads.putIfAbsent(key, owned);
+        value = raced == null ? owned : raced;
+      } else {
+        baseReadHits.incrementAndGet();
+      }
+      return value == ABSENT ? null : Arrays.copyOf(value, value.length);
     }
 
     long getBaseReadMisses() {
-      return baseReadMisses;
+      return baseReadMisses.get();
     }
 
     long getBaseReadHits() {
-      return baseReadHits;
+      return baseReadHits.get();
+    }
+
+    long getResidentReadHits() {
+      return base instanceof ResidentNodeStore
+          ? ((ResidentNodeStore) base).getHits() - initialResidentReadHits : 0;
+    }
+
+    long getResidentCleanHits() {
+      return base instanceof ResidentNodeStore
+          ? ((ResidentNodeStore) base).getCleanHits() - initialResidentCleanHits : 0;
+    }
+
+    long getResidentUpdatedHits() {
+      return base instanceof ResidentNodeStore
+          ? ((ResidentNodeStore) base).getUpdatedHits() - initialResidentUpdatedHits : 0;
+    }
+
+    long getNativeReads() {
+      return base instanceof ResidentNodeStore
+          ? ((ResidentNodeStore) base).getNativeReads() - initialNativeReads
+          : baseReadMisses.get();
     }
 
     private int putCount() {
@@ -1796,11 +2082,20 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     private final PathStatePhysicalReverseJournal journal;
     private final long nodeReadMisses;
     private final long nodeReadHits;
+    private final long residentNodeHits;
+    private final long residentCleanHits;
+    private final long residentUpdatedHits;
+    private final long nativeNodeReads;
+    private final long initialResidentEvictions;
+    private final long nodeDecodes;
+    private final long nodeHashVerifies;
 
     private TransitionPlan(PathStatePhysicalGlobalIntent target,
         List<ParticipantTransition> participants, PhysicalStore superStore,
         List<NodeMutation> superNodeMutations, PathStatePhysicalReverseJournal journal,
-        long nodeReadMisses, long nodeReadHits) {
+        long nodeReadMisses, long nodeReadHits, long residentNodeHits,
+        long residentCleanHits, long residentUpdatedHits, long nativeNodeReads,
+        long initialResidentEvictions, long nodeDecodes, long nodeHashVerifies) {
       this.target = target;
       this.participants = participants;
       this.superStore = superStore;
@@ -1808,6 +2103,13 @@ public final class PathStatePhysicalStoreSet implements Closeable {
       this.journal = journal;
       this.nodeReadMisses = nodeReadMisses;
       this.nodeReadHits = nodeReadHits;
+      this.residentNodeHits = residentNodeHits;
+      this.residentCleanHits = residentCleanHits;
+      this.residentUpdatedHits = residentUpdatedHits;
+      this.nativeNodeReads = nativeNodeReads;
+      this.initialResidentEvictions = initialResidentEvictions;
+      this.nodeDecodes = nodeDecodes;
+      this.nodeHashVerifies = nodeHashVerifies;
     }
   }
 
