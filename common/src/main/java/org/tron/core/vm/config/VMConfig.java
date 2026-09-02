@@ -46,6 +46,7 @@ public class VMConfig {
     public boolean allowTvmSelfdestructRestriction;
     public boolean allowTvmOsaka;
     public boolean allowHardenResourceCalculation;
+    public boolean energyLimitHardFork;
   }
 
   // HEAD / block-processing config, written by the consensus path; read by everyone with no
@@ -95,6 +96,7 @@ public class VMConfig {
 
   public static void initVmHardFork(boolean pass) {
     CommonParameter.ENERGY_LIMIT_HARD_FORK = pass;
+    globalSnapshot.energyLimitHardFork = pass;
   }
 
   // The init* setters below mutate the global (HEAD) config in place. They are kept for tests and
@@ -205,7 +207,9 @@ public class VMConfig {
   }
 
   public static boolean getEnergyLimitHardFork() {
-    return CommonParameter.ENERGY_LIMIT_HARD_FORK;
+    Snapshot local = localSnapshot.get();
+    return local == null ? CommonParameter.ENERGY_LIMIT_HARD_FORK
+        : local.energyLimitHardFork;
   }
 
   public static boolean allowTvmTransferTrc10() {

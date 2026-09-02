@@ -541,6 +541,11 @@ public class JsonrpcServiceTest extends BaseTest {
         () -> tronJsonRpc.getTrxBalance("", "safe"));
     Assert.assertEquals(TAG_NOT_SUPPORT_ERROR, e4.getMessage());
 
+    Exception e5 = Assert.assertThrows(Exception.class,
+        () -> tronJsonRpc.getTrxBalance("", "0x1"));
+    Assert.assertEquals(
+        "QUANTITY not supported, just support TAG as latest", e5.getMessage());
+
     try {
       balance = tronJsonRpc.getTrxBalance("0xabd4b9367799eaa3197fecb144eb71de1e049abc",
           "latest");
@@ -811,6 +816,13 @@ public class JsonrpcServiceTest extends BaseTest {
     Exception missingHashEx = Assert.assertThrows(Exception.class,
         () -> tronJsonRpc.getCall(null, missingHashParams));
     Assert.assertEquals("header for hash not found", missingHashEx.getMessage());
+
+    HashMap<String, String> historicalParams = new HashMap<>();
+    historicalParams.put("blockNumber", ByteArray.toJsonHex(blockCapsule1.getNum()));
+    Exception historicalEx = Assert.assertThrows(Exception.class,
+        () -> tronJsonRpc.getCall(null, historicalParams));
+    Assert.assertEquals(
+        "QUANTITY not supported, just support TAG as latest", historicalEx.getMessage());
   }
 
   /**

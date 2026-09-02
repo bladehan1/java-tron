@@ -166,6 +166,8 @@ import org.tron.core.db.BlockIndexStore;
 import org.tron.core.db.EnergyProcessor;
 import org.tron.core.db.Manager;
 import org.tron.core.db.TransactionContext;
+import org.tron.core.db.TransactionContext.ExecutionMode;
+import org.tron.core.db2.archive.HistoricalQuerySession;
 import org.tron.core.db2.core.Chainbase;
 import org.tron.core.db2.core.Chainbase.Cursor;
 import org.tron.core.exception.AccountResourceInsufficientException;
@@ -204,6 +206,7 @@ import org.tron.core.store.WitnessStore;
 import org.tron.core.utils.TransactionUtil;
 import org.tron.core.vm.config.VMConfig;
 import org.tron.core.vm.program.Program;
+import org.tron.core.vm.repository.HistoricalRepositoryProvider;
 import org.tron.core.zen.ShieldedTRC20ParametersBuilder;
 import org.tron.core.zen.ShieldedTRC20ParametersBuilder.ShieldedTRC20ParametersType;
 import org.tron.core.zen.ZenTransactionBuilder;
@@ -3153,10 +3156,40 @@ public class Wallet {
       headBlock = blockCapsuleList.get(0).getInstance();
     }
 
-    BlockCapsule headBlockCapsule = new BlockCapsule(headBlock);
-    TransactionContext context = new TransactionContext(headBlockCapsule, trxCap,
-        StoreFactory.getInstance(), true, false);
-    VMActuator vmActuator = new VMActuator(true);
+    return executeConstantContract(trxCap, builder, retBuilder, isEstimating,
+        new BlockCapsule(headBlock), null);
+  }
+
+  public Transaction callHistoricalConstantContract(TransactionCapsule trxCap,
+      Builder builder, Return.Builder retBuilder, HistoricalQuerySession session)
+      throws ContractValidateException, ContractExeException, HeaderNotFound, VMIllegalException {
+    if (!Args.getInstance().isSupportConstant()) {
+      throw new ContractValidateException("this node does not support constant");
+    }
+    BlockCapsule targetBlock;
+    try {
+      targetBlock = chainBaseManager.getBlockByNum(session.getTargetBlock());
+    } catch (BadItemException | ItemNotFoundException failure) {
+      throw new HeaderNotFound("historical block not found");
+    }
+    if (targetBlock == null
+        || !Arrays.equals(targetBlock.getBlockId().getBytes(), session.getTargetBlockHash())) {
+      throw new HeaderNotFound("historical block identity changed");
+    }
+    session.requirePinnedIdentity();
+    return executeConstantContract(trxCap, builder, retBuilder, false, targetBlock, session);
+  }
+
+  private Transaction executeConstantContract(TransactionCapsule trxCap,
+      Builder builder, Return.Builder retBuilder, boolean isEstimating,
+      BlockCapsule blockCapsule, HistoricalQuerySession session)
+      throws ContractValidateException, ContractExeException, VMIllegalException {
+    TransactionContext context = session == null
+        ? new TransactionContext(blockCapsule, trxCap, StoreFactory.getInstance(), true, false)
+        : new TransactionContext(blockCapsule, trxCap, StoreFactory.getInstance(), true, false,
+            ExecutionMode.HISTORICAL_CONSTANT, session);
+    VMActuator vmActuator = session == null
+        ? new VMActuator(true) : new VMActuator(true, HistoricalRepositoryProvider.INSTANCE);
 
     try {
       vmActuator.validate(context);
