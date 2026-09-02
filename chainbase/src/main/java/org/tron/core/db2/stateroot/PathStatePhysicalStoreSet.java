@@ -177,6 +177,10 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     return manifest.getIdentityDigest();
   }
 
+  PathStateParticipantScope participantScope() {
+    return scope;
+  }
+
   synchronized void saveIngestCheckpoint(String dbName, PathStatePhysicalIngestCheckpoint value) {
     participant(dbName).putMetadata(FLAT_INGEST_CHECKPOINT,
         Objects.requireNonNull(value, "value").encode());
@@ -524,6 +528,43 @@ public final class PathStatePhysicalStoreSet implements Closeable {
   synchronized void verifyReverseJournals(PathStateLayerLimits limits) throws IOException {
     requireOpen();
     reverseJournalIndex = loadReverseJournalIndex(Objects.requireNonNull(limits, "limits"));
+  }
+
+  /**
+   * Loads one exact canonical reverse window without changing physical storage authority.
+   *
+   * <p>This diagnostic entry requires an offline coherent checkpoint. It deliberately reloads and
+   * validates every retained journal instead of trusting the steady-state in-memory index. Missing
+   * ancestry fails rather than returning a shorter window.
+   */
+  synchronized PathStatePhysicalOracleWindow loadOracleWindow(int blockCount,
+      PathStateLayerLimits limits) throws IOException {
+    requireOpen();
+    if (blockCount <= 0) {
+      throw new IllegalArgumentException("physical oracle block count must be positive");
+    }
+    if (Files.exists(directory.resolve(INTENT_FILE), LinkOption.NOFOLLOW_LINKS)) {
+      throw new IOException("physical oracle requires a settled CURRENT without INTENT");
+    }
+    PathStatePhysicalGlobalIntent current = currentTarget();
+    Map<BytesKey, ReverseJournalIndexEntry> indexed = loadReverseJournalIndex(
+        Objects.requireNonNull(limits, "limits"));
+    List<PathStatePhysicalReverseJournal> journals = new ArrayList<>(blockCount);
+    PathStatePhysicalGlobalIntent cursor = current;
+    for (int index = 0; index < blockCount; index++) {
+      ReverseJournalIndexEntry entry = indexed.get(new BytesKey(cursor.encode()));
+      if (entry == null) {
+        throw new IOException("physical oracle fixed window ancestry is missing at height "
+            + cursor.getMetadata().getBlockNumber());
+      }
+      PathStatePhysicalReverseJournal journal = loadReverseJournal(entry.path);
+      if (!Arrays.equals(cursor.encode(), journal.getChildTarget())) {
+        throw new IOException("physical oracle journal child differs from canonical cursor");
+      }
+      journals.add(journal);
+      cursor = PathStatePhysicalGlobalIntent.decode(journal.getParentTarget());
+    }
+    return new PathStatePhysicalOracleWindow(current.encode(), journals);
   }
 
   /** Computes one exact child target without changing F/N/M, INTENT, or CURRENT. */
