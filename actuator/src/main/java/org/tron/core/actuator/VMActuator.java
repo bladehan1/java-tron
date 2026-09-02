@@ -13,6 +13,7 @@ import java.math.BigInteger;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
+import java.util.function.LongSupplier;
 import lombok.Getter;
 import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
@@ -54,8 +55,10 @@ import org.tron.core.vm.program.Program.TransferException;
 import org.tron.core.vm.program.ProgramPrecompile;
 import org.tron.core.vm.program.invoke.ProgramInvoke;
 import org.tron.core.vm.program.invoke.ProgramInvokeFactory;
+import org.tron.core.vm.repository.CurrentRepositoryProvider;
 import org.tron.core.vm.repository.Repository;
 import org.tron.core.vm.repository.RepositoryImpl;
+import org.tron.core.vm.repository.RepositoryProvider;
 import org.tron.core.vm.utils.MUtil;
 import org.tron.protos.Protocol;
 import org.tron.protos.Protocol.Block;
@@ -97,8 +100,15 @@ public class VMActuator implements Actuator2 {
 
   private LogInfoTriggerParser logInfoTriggerParser;
 
+  private final RepositoryProvider repositoryProvider;
+
   public VMActuator(boolean isConstantCall) {
+    this(isConstantCall, CurrentRepositoryProvider.INSTANCE);
+  }
+
+  public VMActuator(boolean isConstantCall, RepositoryProvider repositoryProvider) {
     this.isConstantCall = isConstantCall;
+    this.repositoryProvider = Objects.requireNonNull(repositoryProvider, "repositoryProvider");
     this.maxEnergyLimit = CommonParameter.getInstance().maxEnergyLimitForConstant;
   }
 
@@ -111,6 +121,11 @@ public class VMActuator implements Actuator2 {
         .divide(BigInteger.valueOf(callerEnergyTotal)).longValueExact();
   }
 
+  private long dynamicLong(String key, LongSupplier currentValue) {
+    return rootRepository.isHistorical()
+        ? ConfigLoader.property(rootRepository, key) : currentValue.getAsLong();
+  }
+
   @Override
   public void validate(Object object) throws ContractValidateException {
 
@@ -119,16 +134,24 @@ public class VMActuator implements Actuator2 {
       throw new RuntimeException("TransactionContext is null");
     }
 
-    // Load Config
-    ConfigLoader.load(context.getStoreFactory(), isConstantCall);
+    rootRepository = Objects.requireNonNull(repositoryProvider.createRoot(context),
+        "repositoryProvider returned null");
+    if (rootRepository.isHistorical()) {
+      if (!isConstantCall) {
+        throw new ContractValidateException("Historical execution must be a constant call");
+      }
+      ConfigLoader.load(rootRepository);
+    } else {
+      ConfigLoader.load(context.getStoreFactory(), isConstantCall);
+    }
     // Warm up registry class
     OperationRegistry.init();
     trx = context.getTrxCap().getInstance();
     // If tx`s fee limit is set, use it to calc max energy limit for constant call
     if (isConstantCall && trx.getRawData().getFeeLimit() > 0) {
       maxEnergyLimit = min(maxEnergyLimit, trx.getRawData().getFeeLimit()
-          / context.getStoreFactory().getChainBaseManager()
-          .getDynamicPropertiesStore().getEnergyFee(), VMConfig.disableJavaLangMath());
+          / dynamicLong("ENERGY_FEE", () -> context.getStoreFactory().getChainBaseManager()
+          .getDynamicPropertiesStore().getEnergyFee()), VMConfig.disableJavaLangMath());
     }
     blockCap = context.getBlockCap();
     if ((VMConfig.allowTvmFreeze() || VMConfig.allowTvmFreezeV2())
@@ -137,8 +160,10 @@ public class VMActuator implements Actuator2 {
     }
     //Route Type
     ContractType contractType = this.trx.getRawData().getContract(0).getType();
-    //Prepare Repository
-    rootRepository = RepositoryImpl.createRoot(context.getStoreFactory());
+    if (rootRepository.isHistorical() && contractType != ContractType.TriggerSmartContract) {
+      throw new ContractValidateException(
+          "Historical execution only supports TriggerSmartContract");
+    }
 
     enableEventListener = context.isEventPluginLoaded();
 
@@ -462,7 +487,8 @@ public class VMActuator implements Actuator2 {
   private void call()
       throws ContractValidateException {
 
-    if (!rootRepository.getDynamicPropertiesStore().supportVM()) {
+    if (dynamicLong("ALLOW_CREATION_OF_CONTRACTS",
+        () -> rootRepository.getDynamicPropertiesStore().getAllowCreationOfContracts()) != 1L) {
       logger.info("vm work is off, need to be opened by the committee");
       throw new ContractValidateException("VM work is off, need to be opened by the committee");
     }
@@ -507,10 +533,12 @@ public class VMActuator implements Actuator2 {
     byte[] code = rootRepository.getCode(contractAddress);
     if (isNotEmpty(code)) {
       long feeLimit = trx.getRawData().getFeeLimit();
-      if (feeLimit < 0 || feeLimit > rootRepository.getDynamicPropertiesStore().getMaxFeeLimit()) {
+      long maxFeeLimit = dynamicLong("MAX_FEE_LIMIT",
+          () -> rootRepository.getDynamicPropertiesStore().getMaxFeeLimit());
+      if (feeLimit < 0 || feeLimit > maxFeeLimit) {
         logger.info("invalid feeLimit {}", feeLimit);
         throw new ContractValidateException("feeLimit must be >= 0 and <= "
-            + rootRepository.getDynamicPropertiesStore().getMaxFeeLimit());
+            + maxFeeLimit);
       }
       AccountCapsule caller = rootRepository.getAccount(callerAddress);
       long energyLimit;
@@ -523,7 +551,8 @@ public class VMActuator implements Actuator2 {
       }
 
       long thisTxCPULimitInUs = calculateCpuLimitInUs(isConstantCall,
-          rootRepository.getDynamicPropertiesStore().getMaxCpuTimeOfOneTx(),
+          dynamicLong("MAX_CPU_TIME_OF_ONE_TX",
+              () -> rootRepository.getDynamicPropertiesStore().getMaxCpuTimeOfOneTx()),
           getCpuLimitInUsRatio(), CommonParameter.getInstance().getConstantCallTimeoutMs());
       long vmStartInUs = System.nanoTime() / VMConstant.ONE_THOUSAND;
       long vmShouldEndInUs = vmStartInUs + thisTxCPULimitInUs;

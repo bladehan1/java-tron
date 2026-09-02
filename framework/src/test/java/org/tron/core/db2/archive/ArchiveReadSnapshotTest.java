@@ -5,6 +5,10 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 import com.google.protobuf.ByteString;
 import java.io.IOException;
@@ -17,12 +21,21 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.stream.Collectors;
 import org.bouncycastle.util.encoders.Hex;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
+import org.tron.common.parameter.CommonParameter;
+import org.tron.common.runtime.vm.DataWord;
 import org.tron.common.utils.ByteArray;
+import org.tron.core.actuator.VMActuator;
+import org.tron.core.capsule.BlockCapsule;
+import org.tron.core.capsule.TransactionCapsule;
+import org.tron.core.db.TransactionContext;
+import org.tron.core.db.TransactionContext.ExecutionMode;
 import org.tron.core.db2.archive.ArchiveReadContext.HistoricalStore;
 import org.tron.core.db2.archive.ArchiveReadContext.StoreAdapter;
 import org.tron.core.db2.archive.ArchiveReadSnapshot.PinnedLatestState;
@@ -32,9 +45,25 @@ import org.tron.core.db2.archive.HistoricalRangeOverlay.KeyRange;
 import org.tron.core.db2.archive.HistoricalRangeOverlay.Limits;
 import org.tron.core.db2.archive.HistoryIndexRecord.KeyGroup;
 import org.tron.core.db2.archive.P66AccountAssetCodec.Phase;
+import org.tron.core.exception.ContractValidateException;
+import org.tron.core.store.DynamicPropertiesStore;
+import org.tron.core.store.StorageRowKeyCodec;
+import org.tron.core.vm.HistoricalCapabilityException;
+import org.tron.core.vm.HistoricalExecutionGuard;
+import org.tron.core.vm.OperationActions;
+import org.tron.core.vm.PrecompiledContracts;
+import org.tron.core.vm.config.ConfigLoader;
+import org.tron.core.vm.config.VMConfig;
+import org.tron.core.vm.program.Program;
+import org.tron.core.vm.repository.HistoricalRepositoryProvider;
+import org.tron.core.vm.repository.Repository;
+import org.tron.core.vm.repository.RepositoryImpl;
+import org.tron.protos.Protocol;
 import org.tron.protos.Protocol.Account;
 import org.tron.protos.Protocol.AccountType;
+import org.tron.protos.contract.SmartContractOuterClass.CreateSmartContract;
 import org.tron.protos.contract.SmartContractOuterClass.SmartContract;
+import org.tron.protos.contract.SmartContractOuterClass.TriggerSmartContract;
 
 public class ArchiveReadSnapshotTest {
 
@@ -345,6 +374,292 @@ public class ArchiveReadSnapshotTest {
         assertArrayEquals(bytes("historical-word"),
             context.getStorage(address, slot).orElseThrow(AssertionError::new));
       }
+    }
+  }
+
+  @Test
+  public void historicalQuerySessionOwnsExactTypedViewAndReleasesGateLease() throws Exception {
+    byte[] address = address(51);
+    byte[] slot = Hex.decode(
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f");
+    byte[] transactionHash = hash(91);
+    SmartContract contract = SmartContract.newBuilder().setVersion(1)
+        .setTrxHash(ByteString.copyFrom(transactionHash)).build();
+    byte[] physicalKey = StorageRowKeyCodec.physicalKey(address, slot,
+        contract.getVersion(), transactionHash);
+    byte[] historicalAccount = optimizedAccount(address, 77L);
+    byte[] historicalCode = bytes("historical-code");
+    byte[] historicalStorage = hash(17);
+
+    try (Fixture fixture = new Fixture(
+        temporaryFolder.newFolder("historical-query-session").toPath())) {
+      fixture.append(diff(1,
+          new DbGroup("account", Collections.singletonList(
+              new Entry(address, OldValue.present(historicalAccount)))),
+          new DbGroup("contract", Collections.singletonList(
+              new Entry(address, OldValue.present(contract.toByteArray())))),
+          new DbGroup("code", Collections.singletonList(
+              new Entry(address, OldValue.present(historicalCode)))),
+          new DbGroup("storage-row", Collections.singletonList(
+              new Entry(physicalKey, OldValue.present(historicalStorage)))),
+          new DbGroup("properties", historicalVmProperties())));
+      fixture.sync();
+      InMemoryLatest latest = InMemoryLatest.scoped(1, hash(1), Collections.emptyMap());
+      ArchiveRuntimeQueryGate gate = new ArchiveRuntimeQueryGate(
+          target -> fixture.snapshot(target, latest));
+      HistoricalQuerySession session = HistoricalQuerySession.open(gate.pin(0), hash(0));
+
+      assertEquals(1, gate.getActiveLeaseCount());
+      assertEquals(0L, session.getTargetBlock());
+      assertArrayEquals(hash(0), session.getTargetBlockHash());
+      assertEquals(77L, session.getAccount(address).orElseThrow(AssertionError::new)
+          .getBalance());
+      assertEquals(contract, session.getContract(address).orElseThrow(AssertionError::new));
+      assertArrayEquals(historicalCode,
+          session.getCode(address).orElseThrow(AssertionError::new));
+      assertArrayEquals(historicalStorage,
+          session.getStorage(address, slot).orElseThrow(AssertionError::new));
+
+      session.close();
+      assertEquals(0, gate.getActiveLeaseCount());
+      assertTrue(latest.closed);
+      assertThrows(IllegalStateException.class, session::getTargetBlock);
+      gate.close();
+    }
+  }
+
+  @Test
+  public void historicalQuerySessionFailsClosedWhenReadBudgetIsExceeded() throws Exception {
+    byte[] address = address(55);
+    try (Fixture fixture = new Fixture(
+        temporaryFolder.newFolder("historical-query-budget").toPath())) {
+      fixture.append(diff(1, new DbGroup("code", Collections.singletonList(
+          new Entry(address, OldValue.present(bytes("old-code")))))));
+      fixture.sync();
+      InMemoryLatest latest = InMemoryLatest.scoped(1, hash(1), Collections.emptyMap());
+      ArchiveRuntimeQueryGate gate = new ArchiveRuntimeQueryGate(
+          target -> fixture.snapshot(target, latest));
+      try (HistoricalQuerySession session = HistoricalQuerySession.open(gate.pin(0), hash(0),
+          new HistoricalQuerySession.Limits(1, 1024, 10_000))) {
+        assertArrayEquals(bytes("old-code"),
+            session.getCode(address).orElseThrow(AssertionError::new));
+        assertThrows(HistoricalQueryBudgetException.class, () -> session.getCode(address));
+      }
+      assertTrue(latest.closed);
+      gate.close();
+    }
+  }
+
+  @Test
+  public void historicalRepositoryUsesOneSourceAndKeepsWritesInOverlay() throws Exception {
+    byte[] address = address(52);
+    byte[] slot = hash(31);
+    byte[] historicalStorage = hash(32);
+    byte[] overlayStorage = hash(33);
+    byte[] historicalCode = bytes("historical-repository-code");
+    SmartContract contract = SmartContract.newBuilder().setVersion(0).build();
+    byte[] physicalKey = StorageRowKeyCodec.physicalKey(address, slot, 0, null);
+
+    try (Fixture fixture = new Fixture(
+        temporaryFolder.newFolder("historical-repository").toPath())) {
+      fixture.append(diff(1,
+          new DbGroup("account", Collections.singletonList(
+              new Entry(address, OldValue.present(optimizedAccount(address, 81L))))),
+          new DbGroup("contract", Collections.singletonList(
+              new Entry(address, OldValue.present(contract.toByteArray())))),
+          new DbGroup("code", Collections.singletonList(
+              new Entry(address, OldValue.present(historicalCode)))),
+          new DbGroup("storage-row", Collections.singletonList(
+              new Entry(physicalKey, OldValue.present(historicalStorage)))),
+          new DbGroup("properties", historicalVmProperties())));
+      fixture.sync();
+      InMemoryLatest latest = InMemoryLatest.scoped(1, hash(1), Collections.emptyMap());
+      ArchiveRuntimeQueryGate gate = new ArchiveRuntimeQueryGate(
+          target -> fixture.snapshot(target, latest));
+
+      try (HistoricalQuerySession session = HistoricalQuerySession.open(gate.pin(0), hash(0))) {
+        Repository root = RepositoryImpl.createHistoricalRoot(null, session);
+        assertTrue(root.isHistorical());
+        assertEquals(81L, root.getBalance(address));
+        assertArrayEquals(historicalCode, root.getCode(address));
+        assertEquals(new DataWord(historicalStorage),
+            root.getStorageValue(address, new DataWord(slot)));
+
+        Repository child = root.newRepositoryChild();
+        child.putStorageValue(address, new DataWord(slot), new DataWord(overlayStorage));
+        assertEquals(new DataWord(overlayStorage),
+            child.getStorageValue(address, new DataWord(slot)));
+        child.commit();
+        assertEquals(new DataWord(overlayStorage),
+            root.getStorageValue(address, new DataWord(slot)));
+        ConfigLoader.load(root);
+        assertTrue(VMConfig.allowTvmConstantinople());
+        assertTrue(VMConfig.getEnergyLimitHardFork());
+        VMConfig.clearLocalSnapshot();
+        assertThrows(HistoricalCapabilityException.class,
+            root::getDynamicPropertiesStore);
+
+        Program program = mock(Program.class);
+        when(program.getContractState()).thenReturn(root);
+        assertThrows(HistoricalCapabilityException.class,
+            () -> OperationActions.suicideAction(program));
+        verify(program, never()).stackPop();
+        HistoricalExecutionGuard.requirePrecompileAllowed(
+            new PrecompiledContracts.Identity());
+        assertThrows(HistoricalCapabilityException.class,
+            () -> HistoricalExecutionGuard.requirePrecompileAllowed(
+                new PrecompiledContracts.RewardBalance()));
+        assertThrows(IllegalStateException.class, root::commit);
+      }
+      assertTrue(latest.closed);
+      gate.close();
+    }
+  }
+
+  private static List<Entry> historicalVmProperties() {
+    List<Entry> properties = new ArrayList<>();
+    String[] enabled = {
+        "ALLOW_MULTI_SIGN", "ALLOW_TVM_TRANSFER_TRC10", "ALLOW_TVM_CONSTANTINOPLE",
+        "ALLOW_TVM_SOLIDITY_059", "ALLOW_SHIELDED_TRC20_TRANSACTION",
+        "ALLOW_TVM_ISTANBUL", "ALLOW_TVM_FREEZE", "ALLOW_TVM_VOTE", "ALLOW_TVM_LONDON",
+        "ALLOW_TVM_COMPATIBLE_EVM", "ALLOW_HIGHER_LIMIT_FOR_MAX_CPU_TIME_OF_ONE_TX",
+        "ALLOW_OPTIMIZED_RETURN_VALUE_OF_CHAIN_ID", "ALLOW_DYNAMIC_ENERGY",
+        "ALLOW_TVM_SHANGHAI", "ALLOW_ENERGY_ADJUSTMENT", "ALLOW_STRICT_MATH",
+        "ALLOW_TVM_CANCUN", "CONSENSUS_LOGIC_OPTIMIZATION", "ALLOW_TVM_BLOB",
+        "ALLOW_TVM_SELFDESTRUCT_RESTRICTION", "ALLOW_TVM_OSAKA",
+        "ALLOW_HARDEN_RESOURCE_CALCULATION", "ALLOW_CREATION_OF_CONTRACTS"
+    };
+    for (String key : enabled) {
+      properties.add(new Entry(bytes(key), OldValue.present(ByteArray.fromLong(1L))));
+    }
+    properties.add(new Entry(bytes("latest_block_header_number"),
+        OldValue.present(ByteArray.fromLong(Long.MAX_VALUE))));
+    String[] values = {
+        "UNFREEZE_DELAY_DAYS", "DYNAMIC_ENERGY_THRESHOLD",
+        "DYNAMIC_ENERGY_INCREASE_FACTOR", "DYNAMIC_ENERGY_MAX_FACTOR", "ENERGY_FEE",
+        "MAX_FEE_LIMIT", "MAX_CPU_TIME_OF_ONE_TX", "CURRENT_CYCLE_NUMBER"
+    };
+    for (String key : values) {
+      properties.add(new Entry(bytes(key), OldValue.present(ByteArray.fromLong(100L))));
+    }
+    return properties;
+  }
+
+  @Test
+  public void historicalRepositoryAppliesEveryTypedDynamicPropertyDefault() throws Exception {
+    Map<String, Long> defaults = DynamicPropertiesStore.getLongPropertyDefaults();
+    Set<String> expectedKeys = new java.util.HashSet<>(Arrays.asList(
+        "WITNESS_127_PAY_PER_BLOCK", "CURRENT_CYCLE_NUMBER", "ALLOW_TVM_SHANGHAI",
+        "ALLOW_CANCEL_ALL_UNFREEZE_V2", "MAX_DELEGATE_LOCK_PERIOD",
+        "ALLOW_OLD_REWARD_OPT", "ALLOW_ENERGY_ADJUSTMENT", "MAX_CREATE_ACCOUNT_TX_SIZE",
+        "ALLOW_STRICT_MATH", "CONSENSUS_LOGIC_OPTIMIZATION", "ALLOW_TVM_CANCUN",
+        "ALLOW_TVM_BLOB", "ALLOW_TVM_SELFDESTRUCT_RESTRICTION", "PROPOSAL_EXPIRE_TIME",
+        "ALLOW_TVM_OSAKA", "ALLOW_TVM_PRAGUE", "BLOCK_HASH_HISTORY_INSTALLED",
+        "ALLOW_HARDEN_RESOURCE_CALCULATION", "ALLOW_HARDEN_EXCHANGE_CALCULATION",
+        "TURKISH_KEY_MIGRATION_DONE"));
+    assertEquals(expectedKeys, defaults.keySet());
+
+    List<Entry> requiredProperties = historicalVmProperties().stream()
+        .filter(entry -> !defaults.containsKey(
+            new String(entry.getKey(), StandardCharsets.UTF_8)))
+        .collect(Collectors.toList());
+    try (Fixture fixture = new Fixture(
+        temporaryFolder.newFolder("historical-dynamic-defaults").toPath())) {
+      fixture.append(diff(1, new DbGroup("properties", requiredProperties)));
+      fixture.sync();
+      InMemoryLatest latest = InMemoryLatest.scoped(1, hash(1), Collections.emptyMap());
+      ArchiveRuntimeQueryGate gate = new ArchiveRuntimeQueryGate(
+          target -> fixture.snapshot(target, latest));
+
+      try (HistoricalQuerySession session = HistoricalQuerySession.open(gate.pin(0), hash(0))) {
+        Repository root = RepositoryImpl.createHistoricalRoot(null, session);
+        for (Map.Entry<String, Long> defaultEntry : defaults.entrySet()) {
+          assertEquals(defaultEntry.getKey(), defaultEntry.getValue().longValue(),
+              root.getDynamicPropertyLong(defaultEntry.getKey()));
+        }
+        assertThrows(IllegalArgumentException.class,
+            () -> root.getDynamicPropertyLong("UNKNOWN_REQUIRED_PROPERTY"));
+
+        ConfigLoader.load(root);
+        assertEquals(defaults.get("ALLOW_TVM_OSAKA").longValue(),
+            VMConfig.allowTvmOsaka() ? 1L : 0L);
+        assertEquals(defaults.get("ALLOW_HARDEN_RESOURCE_CALCULATION").longValue(),
+            VMConfig.allowHardenResourceCalculation() ? 1L : 0L);
+        VMConfig.clearLocalSnapshot();
+      }
+      assertTrue(latest.closed);
+      gate.close();
+    }
+  }
+
+  @Test
+  public void historicalVmExecutesTriggerAgainstPinnedState() throws Exception {
+    byte[] owner = address(53);
+    byte[] contractAddress = address(54);
+    byte[] code = Hex.decode("60005460005260206000f3");
+    byte[] storageValue = new DataWord(7).getData();
+    byte[] physicalStorageKey = StorageRowKeyCodec.physicalKey(
+        contractAddress, new byte[32], 0, null);
+    SmartContract contract = SmartContract.newBuilder().setVersion(0).build();
+
+    try (Fixture fixture = new Fixture(
+        temporaryFolder.newFolder("historical-vm-trigger").toPath())) {
+      fixture.append(diff(1,
+          new DbGroup("account", Collections.singletonList(
+              new Entry(contractAddress,
+                  OldValue.present(optimizedAccount(contractAddress, 0L))))),
+          new DbGroup("contract", Collections.singletonList(
+              new Entry(contractAddress, OldValue.present(contract.toByteArray())))),
+          new DbGroup("code", Collections.singletonList(
+              new Entry(contractAddress, OldValue.present(code)))),
+          new DbGroup("storage-row", Collections.singletonList(
+              new Entry(physicalStorageKey, OldValue.present(storageValue)))),
+          new DbGroup("properties", historicalVmProperties())));
+      fixture.sync();
+      InMemoryLatest latest = InMemoryLatest.scoped(1, hash(1), Collections.emptyMap());
+      ArchiveRuntimeQueryGate gate = new ArchiveRuntimeQueryGate(
+          target -> fixture.snapshot(target, latest));
+
+      try (HistoricalQuerySession session = HistoricalQuerySession.open(gate.pin(0), hash(0))) {
+        TriggerSmartContract trigger = TriggerSmartContract.newBuilder()
+            .setOwnerAddress(ByteString.copyFrom(owner))
+            .setContractAddress(ByteString.copyFrom(contractAddress)).build();
+        TransactionCapsule transaction = new TransactionCapsule(trigger,
+            Protocol.Transaction.Contract.ContractType.TriggerSmartContract);
+        TransactionContext context = new TransactionContext(
+            new BlockCapsule(Protocol.Block.newBuilder().build()), transaction, null, true, false,
+            ExecutionMode.HISTORICAL_CONSTANT, session);
+        VMActuator actuator = new VMActuator(true, HistoricalRepositoryProvider.INSTANCE);
+        long previousConstantCallTimeoutMs =
+            CommonParameter.getInstance().getConstantCallTimeoutMs();
+        CommonParameter.getInstance().setConstantCallTimeoutMs(5_000L);
+        try {
+          actuator.validate(context);
+          actuator.execute(context);
+          if (context.getProgramResult().getException() != null) {
+            throw context.getProgramResult().getException();
+          }
+          assertEquals(new DataWord(7), new DataWord(context.getProgramResult().getHReturn()));
+
+          TransactionCapsule createTransaction = new TransactionCapsule(
+              CreateSmartContract.getDefaultInstance(),
+              Protocol.Transaction.Contract.ContractType.CreateSmartContract);
+          TransactionContext createContext = new TransactionContext(
+              new BlockCapsule(Protocol.Block.newBuilder().build()), createTransaction, null,
+              true, false, ExecutionMode.HISTORICAL_CONSTANT, session);
+          VMActuator createActuator = new VMActuator(
+              true, HistoricalRepositoryProvider.INSTANCE);
+          ContractValidateException rejected = assertThrows(ContractValidateException.class,
+              () -> createActuator.validate(createContext));
+          assertEquals("Historical execution only supports TriggerSmartContract",
+              rejected.getMessage());
+        } finally {
+          CommonParameter.getInstance().setConstantCallTimeoutMs(previousConstantCallTimeoutMs);
+          VMConfig.clearLocalSnapshot();
+        }
+      }
+      assertTrue(latest.closed);
+      gate.close();
     }
   }
 

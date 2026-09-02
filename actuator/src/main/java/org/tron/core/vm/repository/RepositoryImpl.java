@@ -12,7 +12,6 @@ import java.math.BigInteger;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Optional;
-import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.tuple.Pair;
 import org.bouncycastle.util.Strings;
@@ -46,6 +45,7 @@ import org.tron.core.db.BlockIndexStore;
 import org.tron.core.db.BlockStore;
 import org.tron.core.db.KhaosDatabase;
 import org.tron.core.db.TransactionTrace;
+import org.tron.core.db2.archive.HistoricalQuerySession;
 import org.tron.core.exception.BadItemException;
 import org.tron.core.exception.ItemNotFoundException;
 import org.tron.core.exception.StoreException;
@@ -65,6 +65,7 @@ import org.tron.core.store.StoreFactory;
 import org.tron.core.store.VotesStore;
 import org.tron.core.store.WitnessStore;
 import org.tron.core.vm.config.VMConfig;
+import org.tron.core.vm.HistoricalCapabilityException;
 import org.tron.core.vm.program.Program.IllegalOperationException;
 import org.tron.core.vm.program.Storage;
 import org.tron.protos.Protocol;
@@ -87,42 +88,27 @@ public class RepositoryImpl implements Repository {
   private static final byte[] TOTAL_TRON_POWER_WEIGHT = "TOTAL_TRON_POWER_WEIGHT".getBytes();
 
   private StoreFactory storeFactory;
-  @Getter
   private DynamicPropertiesStore dynamicPropertiesStore;
-  @Getter
   private AccountStore accountStore;
-  @Getter
   private AssetIssueStore assetIssueStore;
-  @Getter
   private AssetIssueV2Store assetIssueV2Store;
-  @Getter
   private AbiStore abiStore;
-  @Getter
   private CodeStore codeStore;
-  @Getter
   private ContractStore contractStore;
-  @Getter
   private ContractStateStore contractStateStore;
-  @Getter
   private StorageRowStore storageRowStore;
-  @Getter
   private BlockStore blockStore;
-  @Getter
   private KhaosDatabase khaosDb;
-  @Getter
   private BlockIndexStore blockIndexStore;
-  @Getter
   private WitnessStore witnessStore;
-  @Getter
   private DelegatedResourceStore delegatedResourceStore;
-  @Getter
   private VotesStore votesStore;
-  @Getter
   private DelegationStore delegationStore;
-  @Getter
   private DelegatedResourceAccountIndexStore delegatedResourceAccountIndexStore;
 
   private Repository parent = null;
+  private RepositoryStateSource stateSource;
+  private boolean readOnlyRoot;
 
   private final HashMap<Key, Value<Account>> accountCache = new HashMap<>();
   private final HashMap<Key, Value<byte[]>> codeCache = new HashMap<>();
@@ -144,16 +130,117 @@ public class RepositoryImpl implements Repository {
   }
 
   public RepositoryImpl(StoreFactory storeFactory, RepositoryImpl repository) {
-    init(storeFactory, repository);
+    this(storeFactory, repository,
+        repository == null ? new CurrentStoreStateSource(storeFactory) : repository.stateSource,
+        repository != null && repository.readOnlyRoot);
+  }
+
+  private RepositoryImpl(StoreFactory storeFactory, Repository parent,
+      RepositoryStateSource stateSource, boolean readOnlyRoot) {
+    init(storeFactory, parent, !readOnlyRoot);
+    this.stateSource = stateSource;
+    this.readOnlyRoot = readOnlyRoot;
   }
 
   public static RepositoryImpl createRoot(StoreFactory storeFactory) {
     return new RepositoryImpl(storeFactory, null);
   }
 
-  protected void init(StoreFactory storeFactory, RepositoryImpl parent) {
+  public static RepositoryImpl createHistoricalRoot(StoreFactory storeFactory,
+      HistoricalQuerySession session) {
+    return new RepositoryImpl(storeFactory, null, new HistoricalArchiveStateSource(session), true);
+  }
+
+  @Override
+  public DynamicPropertiesStore getDynamicPropertiesStore() {
+    return currentStore(dynamicPropertiesStore, "DynamicPropertiesStore");
+  }
+
+  public AccountStore getAccountStore() {
+    return currentStore(accountStore, "AccountStore");
+  }
+
+  @Override
+  public AssetIssueStore getAssetIssueStore() {
+    return currentStore(assetIssueStore, "AssetIssueStore");
+  }
+
+  @Override
+  public AssetIssueV2Store getAssetIssueV2Store() {
+    return currentStore(assetIssueV2Store, "AssetIssueV2Store");
+  }
+
+  public AbiStore getAbiStore() {
+    return currentStore(abiStore, "AbiStore");
+  }
+
+  public CodeStore getCodeStore() {
+    return currentStore(codeStore, "CodeStore");
+  }
+
+  public ContractStore getContractStore() {
+    return currentStore(contractStore, "ContractStore");
+  }
+
+  public ContractStateStore getContractStateStore() {
+    return currentStore(contractStateStore, "ContractStateStore");
+  }
+
+  public StorageRowStore getStorageRowStore() {
+    return currentStore(storageRowStore, "StorageRowStore");
+  }
+
+  public BlockStore getBlockStore() {
+    return currentStore(blockStore, "BlockStore");
+  }
+
+  public KhaosDatabase getKhaosDb() {
+    return currentStore(khaosDb, "KhaosDatabase");
+  }
+
+  public BlockIndexStore getBlockIndexStore() {
+    return currentStore(blockIndexStore, "BlockIndexStore");
+  }
+
+  public WitnessStore getWitnessStore() {
+    return currentStore(witnessStore, "WitnessStore");
+  }
+
+  public DelegatedResourceStore getDelegatedResourceStore() {
+    return currentStore(delegatedResourceStore, "DelegatedResourceStore");
+  }
+
+  public VotesStore getVotesStore() {
+    return currentStore(votesStore, "VotesStore");
+  }
+
+  @Override
+  public DelegationStore getDelegationStore() {
+    return currentStore(delegationStore, "DelegationStore");
+  }
+
+  public DelegatedResourceAccountIndexStore getDelegatedResourceAccountIndexStore() {
+    return currentStore(delegatedResourceAccountIndexStore,
+        "DelegatedResourceAccountIndexStore");
+  }
+
+  private <T> T currentStore(T store, String capability) {
+    if (readOnlyRoot) {
+      throw new HistoricalCapabilityException(
+          "Direct " + capability + " access is not supported by historical execution");
+    }
+    return store;
+  }
+
+  protected void init(StoreFactory storeFactory, Repository parent) {
+    init(storeFactory, parent, true);
+  }
+
+  private void init(StoreFactory storeFactory, Repository parent, boolean bindCurrentStores) {
     if (storeFactory != null) {
       this.storeFactory = storeFactory;
+    }
+    if (bindCurrentStores) {
       ChainBaseManager manager = storeFactory.getChainBaseManager();
       dynamicPropertiesStore = manager.getDynamicPropertiesStore();
       accountStore = manager.getAccountStore();
@@ -177,8 +264,13 @@ public class RepositoryImpl implements Repository {
   }
 
   @Override
+  public boolean isHistorical() {
+    return readOnlyRoot;
+  }
+
+  @Override
   public Repository newRepositoryChild() {
-    return new RepositoryImpl(storeFactory, this);
+    return new RepositoryImpl(storeFactory, this, stateSource, readOnlyRoot);
   }
 
   @Override
@@ -316,7 +408,7 @@ public class RepositoryImpl implements Repository {
     if (parent != null) {
       accountCapsule = parent.getAccount(address);
     } else {
-      accountCapsule = getAccountStore().get(address);
+      accountCapsule = stateSource.getAccount(address);
     }
 
     if (accountCapsule != null) {
@@ -336,11 +428,9 @@ public class RepositoryImpl implements Repository {
     if (parent != null) {
       bytesCapsule = parent.getDynamicProperty(word);
     } else {
-      try {
-        bytesCapsule = getDynamicPropertiesStore().get(word);
-      } catch (BadItemException | ItemNotFoundException e) {
+      bytesCapsule = stateSource.getDynamicProperty(word);
+      if (bytesCapsule == null) {
         logger.warn("Not found dynamic property:" + Strings.fromUTF8ByteArray(word));
-        bytesCapsule = null;
       }
     }
 
@@ -392,7 +482,7 @@ public class RepositoryImpl implements Repository {
 
   @Override
   public WitnessCapsule getWitness(byte[] address) {
-    return witnessStore.get(address);
+    return getWitnessStore().get(address);
   }
 
   @Override
@@ -508,7 +598,7 @@ public class RepositoryImpl implements Repository {
     if (parent != null) {
       contractCapsule = parent.getContract(address);
     } else {
-      contractCapsule = getContractStore().get(address);
+      contractCapsule = stateSource.getContract(address);
     }
 
     if (contractCapsule != null) {
@@ -528,7 +618,7 @@ public class RepositoryImpl implements Repository {
     if (parent != null) {
       contractStateCapsule = parent.getContractState(address);
     } else {
-      contractStateCapsule = getContractStateStore().get(address);
+      contractStateCapsule = stateSource.getContractState(address);
     }
 
     if (contractStateCapsule != null) {
@@ -657,11 +747,7 @@ public class RepositoryImpl implements Repository {
     if (parent != null) {
       code = parent.getCode(address);
     } else {
-      if (null == getCodeStore().get(address)) {
-        code = null;
-      } else {
-        code = getCodeStore().get(address).getData();
-      }
+      code = stateSource.getCode(address);
     }
     if (code != null) {
       codeCache.put(key, Value.create(code));
@@ -715,7 +801,8 @@ public class RepositoryImpl implements Repository {
         storage = parentStorage;
       }
     } else {
-      storage = new Storage(address, getStorageRowStore());
+      StorageRowStore persistenceStore = stateSource.isReadOnly() ? null : getStorageRowStore();
+      storage = new Storage(address, persistenceStore, stateSource::getStorageRow);
     }
     ContractCapsule contract = getContract(address);
     if (contract != null) {
@@ -764,6 +851,9 @@ public class RepositoryImpl implements Repository {
 
   @Override
   public void commit() {
+    if (parent == null && readOnlyRoot) {
+      throw new IllegalStateException("Historical Repository root cannot be committed");
+    }
     Repository repository = null;
     if (parent != null) {
       repository = parent;
@@ -891,6 +981,10 @@ public class RepositoryImpl implements Repository {
 
   @Override
   public BlockCapsule getBlockByNum(long num) {
+    if (readOnlyRoot) {
+      throw new HistoricalCapabilityException(
+          "BLOCKHASH history is not supported by historical execution");
+    }
     try {
       Sha256Hash hash = getBlockIdByNum(num);
       BlockCapsule block = this.khaosDb.getBlock(hash);

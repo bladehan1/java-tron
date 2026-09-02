@@ -42,6 +42,11 @@ public class ContractState implements Repository, ProgramListenerAware {
   }
 
   @Override
+  public boolean isHistorical() {
+    return repository.isHistorical();
+  }
+
+  @Override
   public AssetIssueCapsule getAssetIssue(byte[] tokenId) {
     return repository.getAssetIssue(tokenId);
   }
