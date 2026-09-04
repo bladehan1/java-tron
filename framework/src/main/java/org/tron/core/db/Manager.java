@@ -1601,21 +1601,32 @@ public class Manager {
     if (runtime == null) {
       return;
     }
+    byte[] blockHash = block.getBlockId().getBytes();
+    byte[] carriedRoot = block.getStateRoot();
+    boolean carriedRootUsable = carriedRoot != null && carriedRoot.length == 32;
+    boolean ready = runtime.isReadyForHeaderDiagnostic(block.getNum(), blockHash);
     byte[] localRoot = null;
+    boolean ownerRead = false;
+    long ownerReadStartedNanos = System.nanoTime();
     try {
       PathStateHead owner = pathStateSnapshotHead;
-      if (owner != null) {
+      if (carriedRootUsable && ready && owner != null) {
+        ownerRead = true;
         PathStateRootMetadata local = owner.getHead();
         if (local.getBlockNumber() == block.getNum()
-            && Arrays.equals(local.getBlockHash(), block.getBlockId().getBytes())) {
+            && Arrays.equals(local.getBlockHash(), blockHash)) {
           localRoot = local.getStateRoot();
         }
       }
     } catch (java.io.IOException | RuntimeException diagnosticFailure) {
       logger.warn("Path-state local root unavailable for header diagnostic", diagnosticFailure);
     }
-    runtime.diagnoseHeader(block.getNum(), block.getBlockId().getBytes(), block.getStateRoot(),
-        localRoot);
+    long ownerReadMicros = TimeUnit.NANOSECONDS.toMicros(
+        System.nanoTime() - ownerReadStartedNanos);
+    runtime.diagnoseHeader(block.getNum(), blockHash, carriedRoot, localRoot);
+    logger.info("Path-state header diagnostic access: head={}, ownerRead={}, "
+            + "skippedNotReady={}, carriedRootUsable={}, ownerReadMicros={}",
+        block.getNum(), ownerRead, !ready, carriedRootUsable, ownerReadMicros);
   }
 
   private void switchFork(BlockCapsule newHead)

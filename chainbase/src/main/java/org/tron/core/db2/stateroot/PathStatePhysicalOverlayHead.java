@@ -121,7 +121,8 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
             + "participantWallMs={}, prepareMs={}, trieMs={}, artifactMs={}, "
             + "nodePlanWorkMs={}, nodeStoreWorkMs={}, nodeFinalizeWorkMs={}, "
             + "nodePuts={}, nodeDeletes={}, nodeRlpBytes={}, nodeRlpFinalBytes={}, "
-            + "uniqueNodePaths={}, overwriteWrites={}, nodeCreates={}, nodeKeccaks={}, "
+            + "uniqueNodePaths={}, overwriteWrites={}, nodeCreates={}, nodeEncodes={}, "
+            + "avoidedNodeEncodes={}, unencodedCreatesAfterTopLevelDecodes={}, nodeKeccaks={}, "
             + "nodeDecodes={}, nodeHashVerifies={}, hashRefsCreated={}, hashRefsResolved={}, "
             + "durableWrites=0, journal=0",
         head.getBlockNumber(), admitted.getMutations().size(), pending.nodeMutations,
@@ -136,7 +137,10 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
         pending.nodeFinalizeWorkMillis,
         pending.stats.nodePuts, pending.stats.nodeDeletes, pending.stats.nodeRlpBytes,
         pending.stats.nodeRlpFinalBytes, pending.stats.uniqueNodePaths,
-        pending.stats.overwriteWrites(), pending.nodeCreates, pending.nodeKeccaks,
+        pending.stats.overwriteWrites(), pending.nodeCreates, pending.nodeEncodes,
+        Math.max(0L, pending.nodeCreates - pending.nodeEncodes),
+        Math.max(0L, pending.nodeCreates - pending.nodeEncodes - pending.nodeDecodes),
+        pending.nodeKeccaks,
         pending.nodeDecodes, pending.nodeHashVerifies, pending.hashRefsCreated,
         pending.hashRefsResolved);
     logger.info("Path-state artifact stores: head={}, perStore={}",
@@ -225,6 +229,7 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
     requireChild(transition);
     long startedNanos = System.nanoTime();
     long nodeCreatesBefore = PathMerkleTrie.nodeCreateCountTotal();
+    long nodeEncodesBefore = PathMerkleTrie.nodeEncodeCountTotal();
     long nodeKeccaksBefore = PathMerkleTrie.nodeKeccakCountTotal();
     Map<Integer, RecordingStore> recordings = new LinkedHashMap<>();
     PathStateRoot candidate = PathStateRoot.fromSnapshot(scope,
@@ -280,6 +285,7 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
         TimeUnit.NANOSECONDS.toMillis(candidate.nodeCommitStoreNanos()),
         TimeUnit.NANOSECONDS.toMillis(candidate.nodeCommitFinalizeNanos()),
         PathMerkleTrie.nodeCreateCountTotal() - nodeCreatesBefore,
+        PathMerkleTrie.nodeEncodeCountTotal() - nodeEncodesBefore,
         PathMerkleTrie.nodeKeccakCountTotal() - nodeKeccaksBefore,
         candidate.nodeDecodeCount(), candidate.nodeHashVerifyCount(),
         candidate.hashReferenceCreateCount(), candidate.hashReferenceResolveCount(), stats);
@@ -358,6 +364,7 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
     private final long nodeStoreWorkMillis;
     private final long nodeFinalizeWorkMillis;
     private final long nodeCreates;
+    private final long nodeEncodes;
     private final long nodeKeccaks;
     private final long nodeDecodes;
     private final long nodeHashVerifies;
@@ -370,7 +377,8 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
         long nativeNodeReads, PathStateRoot.ParallelApplyStats parallelStats,
         long prepareMillis, long trieMillis, long artifactMillis, long nodePlanWorkMillis,
         long nodeStoreWorkMillis, long nodeFinalizeWorkMillis, long nodeCreates,
-        long nodeKeccaks, long nodeDecodes, long nodeHashVerifies, long hashRefsCreated,
+        long nodeEncodes, long nodeKeccaks, long nodeDecodes, long nodeHashVerifies,
+        long hashRefsCreated,
         long hashRefsResolved, RecordingStats stats) {
       this.transition = transition;
       this.metadata = metadata;
@@ -395,6 +403,7 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
       this.nodeStoreWorkMillis = nodeStoreWorkMillis;
       this.nodeFinalizeWorkMillis = nodeFinalizeWorkMillis;
       this.nodeCreates = nodeCreates;
+      this.nodeEncodes = nodeEncodes;
       this.nodeKeccaks = nodeKeccaks;
       this.nodeDecodes = nodeDecodes;
       this.nodeHashVerifies = nodeHashVerifies;
