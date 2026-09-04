@@ -3,6 +3,7 @@ package org.tron.core.db2.stateroot;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.Objects;
+import org.tron.core.db2.archive.BlockSnapshotMeta;
 import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
 
 /** Runtime owner for a block-bound physical 27+1 CURRENT. */
@@ -11,6 +12,7 @@ public final class PathStatePhysicalSnapshotHead implements PathStateHead {
   private final PathStatePhysicalStoreSet stores;
   private final PathStateLayerLimits limits;
   private PathStateRootMetadata head;
+  private PathStatePhysicalStoreSet.PreparedPhysicalTransition pending;
   private boolean failed;
   private boolean closed;
 
@@ -51,14 +53,21 @@ public final class PathStatePhysicalSnapshotHead implements PathStateHead {
   public synchronized PathStateRootMetadata advance(PathStateBlockTransition transition)
       throws IOException {
     requireHealthy();
+    if (pending != null && !pending.matches(transition)) {
+      throw new IOException("physical path-state publication differs from prepared transition");
+    }
     PathStateRootMetadata previous = head;
     try {
-      PathStateRootMetadata committed = stores.applyAndPublish(transition, limits);
+      PathStatePhysicalStoreSet.PreparedPhysicalTransition prepared = pending;
+      PathStateRootMetadata committed = prepared != null && prepared.matches(transition)
+          ? stores.applyAndPublish(prepared, limits)
+          : stores.applyAndPublish(transition, limits);
       if (!same(committed, stores.currentMetadata())) {
         failed = true;
         throw new IOException("physical path-state committed CURRENT identity mismatch");
       }
       head = committed;
+      pending = null;
       return PathStateRootMetadata.decode(committed.encode());
     } catch (IOException | RuntimeException failure) {
       try {
@@ -77,6 +86,7 @@ public final class PathStatePhysicalSnapshotHead implements PathStateHead {
   public synchronized PathStateRootMetadata rewindTo(long blockNumber, byte[] blockHash)
       throws IOException {
     requireHealthy();
+    pending = null;
     PathStateRootMetadata previous = head;
     try {
       PathStateRootMetadata rewound = stores.rewindTo(blockNumber, blockHash, limits);
@@ -111,6 +121,18 @@ public final class PathStatePhysicalSnapshotHead implements PathStateHead {
     requireHealthy();
     return stores.previewTransition(Objects.requireNonNull(transition, "transition"))
         .getStateRoot();
+  }
+
+  @Override
+  public synchronized PathStateSnapshotDelta prepareSnapshotDelta(BlockSnapshotMeta meta,
+      PathStateBlockTransition transition) throws IOException {
+    requireHealthy();
+    if (pending != null) {
+      throw new IOException("physical path-state transition is already prepared");
+    }
+    pending = stores.prepareSnapshotDelta(Objects.requireNonNull(meta, "meta"),
+        Objects.requireNonNull(transition, "transition"));
+    return pending.getSnapshotDelta();
   }
 
   @Override

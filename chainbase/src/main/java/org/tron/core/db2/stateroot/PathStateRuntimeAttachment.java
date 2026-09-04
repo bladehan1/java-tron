@@ -4,8 +4,12 @@ import java.io.IOException;
 import java.util.Arrays;
 import java.util.Locale;
 import java.util.Objects;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.TimeUnit;
 import lombok.extern.slf4j.Slf4j;
 import org.tron.core.db2.archive.BlockChangeView;
+import org.tron.core.db2.archive.BlockSnapshotMeta;
 
 /** Independent non-consensus runtime installed at the metadata-aware block commit boundary. */
 @Slf4j(topic = "DB")
@@ -15,6 +19,10 @@ public final class PathStateRuntimeAttachment {
   private final TransitionSink sink;
   private final BaseFlushSink baseFlushSink;
   private final TransitionPreviewer previewer;
+  private final SnapshotDeltaPreparer snapshotDeltaPreparer;
+  private final boolean deferredCapture;
+  private final BlockingQueue<BlockChangeView> deferredQueue;
+  private final Thread deferredWorker;
   private Throwable failure;
   private FailureStage failureStage;
   private long readyBlockNumber = -1;
@@ -22,6 +30,9 @@ public final class PathStateRuntimeAttachment {
   private long observedBlockNumber = -1;
   private byte[] observedBlockHash;
   private PathStateBlockTransition pending;
+  private PathStateSnapshotDelta pendingSnapshotDelta;
+  private BlockChangeView pendingView;
+  private volatile boolean closed;
   private HeaderDiagnostic headerDiagnostic = HeaderDiagnostic.NONE;
   private long headerDiagnosticBlockNumber = -1;
   private byte[] headerDiagnosticBlockHash;
@@ -37,10 +48,39 @@ public final class PathStateRuntimeAttachment {
 
   public PathStateRuntimeAttachment(PathStateTransitionCollector collector, TransitionSink sink,
       BaseFlushSink baseFlushSink, TransitionPreviewer previewer) {
+    this(collector, sink, baseFlushSink, previewer, null);
+  }
+
+  public PathStateRuntimeAttachment(PathStateTransitionCollector collector, TransitionSink sink,
+      BaseFlushSink baseFlushSink, TransitionPreviewer previewer,
+      SnapshotDeltaPreparer snapshotDeltaPreparer) {
+    this(collector, sink, baseFlushSink, previewer, snapshotDeltaPreparer, false);
+  }
+
+  /** Creates a benchmark runtime that defers collect, delta preparation, and head advance. */
+  public static PathStateRuntimeAttachment deferred(PathStateTransitionCollector collector,
+      TransitionSink sink, BaseFlushSink baseFlushSink, TransitionPreviewer previewer,
+      SnapshotDeltaPreparer snapshotDeltaPreparer) {
+    return new PathStateRuntimeAttachment(collector, sink, baseFlushSink, previewer,
+        snapshotDeltaPreparer, true);
+  }
+
+  private PathStateRuntimeAttachment(PathStateTransitionCollector collector, TransitionSink sink,
+      BaseFlushSink baseFlushSink, TransitionPreviewer previewer,
+      SnapshotDeltaPreparer snapshotDeltaPreparer, boolean deferredCapture) {
     this.collector = Objects.requireNonNull(collector, "collector");
     this.sink = Objects.requireNonNull(sink, "sink");
     this.baseFlushSink = Objects.requireNonNull(baseFlushSink, "baseFlushSink");
     this.previewer = previewer;
+    this.snapshotDeltaPreparer = snapshotDeltaPreparer;
+    this.deferredCapture = deferredCapture;
+    deferredQueue = deferredCapture ? new ArrayBlockingQueue<>(64) : null;
+    deferredWorker = deferredCapture
+        ? new Thread(this::runDeferred, "path-state-deferred-capture") : null;
+    if (deferredWorker != null) {
+      deferredWorker.setDaemon(true);
+      deferredWorker.start();
+    }
   }
 
   /** Computes producer metadata without observing, publishing, or failing this runtime. */
@@ -69,9 +109,17 @@ public final class PathStateRuntimeAttachment {
     if (failure != null) {
       return null;
     }
+    if (deferredCapture) {
+      pendingView = admitted;
+      return null;
+    }
     try {
       PathStateBlockTransition transition = collectAndValidate(admitted);
+      PathStateSnapshotDelta snapshotDelta = snapshotDeltaPreparer == null ? null
+          : snapshotDeltaPreparer.prepare(admitted.getMeta(), transition);
+      validateSnapshotDelta(admitted.getMeta(), transition, snapshotDelta);
       pending = transition;
+      pendingSnapshotDelta = snapshotDelta;
       return transition;
     } catch (IOException | RuntimeException currentFailure) {
       fail(FailureStage.CAPTURE, currentFailure);
@@ -80,7 +128,15 @@ public final class PathStateRuntimeAttachment {
   }
 
   /** Durable publication failures are retained as observable fail-stop state. */
-  public synchronized void publish(PathStateBlockTransition transition) {
+  public void publish(PathStateBlockTransition transition) {
+    if (deferredCapture) {
+      publishDeferred(transition);
+      return;
+    }
+    publishNow(transition);
+  }
+
+  private synchronized void publishNow(PathStateBlockTransition transition) {
     if (failure != null || transition == null) {
       return;
     }
@@ -92,8 +148,89 @@ public final class PathStateRuntimeAttachment {
       readyBlockNumber = transition.getBlockNumber();
       readyBlockHash = transition.getBlockHash();
       pending = null;
+      pendingSnapshotDelta = null;
     } catch (IOException | RuntimeException currentFailure) {
       fail(FailureStage.PUBLISH, currentFailure);
+    }
+  }
+
+  private void publishDeferred(PathStateBlockTransition transition) {
+    BlockChangeView admitted;
+    synchronized (this) {
+      if (failure != null) {
+        return;
+      }
+      if (transition != null || pendingView == null) {
+        fail(FailureStage.PUBLISH,
+            new IOException("deferred PathState publication has no captured view"));
+        return;
+      }
+      admitted = pendingView;
+      pendingView = null;
+    }
+    long startedNanos = System.nanoTime();
+    try {
+      deferredQueue.put(admitted);
+      logger.info("Path-state deferred view enqueued: head={}, queueDepth={}, enqueueMicros={}",
+          admitted.getMeta().getBlockNumber(), deferredQueue.size(),
+          TimeUnit.NANOSECONDS.toMicros(System.nanoTime() - startedNanos));
+    } catch (InterruptedException interrupted) {
+      Thread.currentThread().interrupt();
+      fail(FailureStage.PUBLISH, interrupted);
+    }
+  }
+
+  private void runDeferred() {
+    while (!closed || !deferredQueue.isEmpty()) {
+      try {
+        BlockChangeView view = deferredQueue.poll(100L, TimeUnit.MILLISECONDS);
+        if (view == null) {
+          continue;
+        }
+        long startedNanos = System.nanoTime();
+        PathStateBlockTransition transition = collectAndValidate(view);
+        PathStateSnapshotDelta delta = snapshotDeltaPreparer == null ? null
+            : snapshotDeltaPreparer.prepare(view.getMeta(), transition);
+        validateSnapshotDelta(view.getMeta(), transition, delta);
+        sink.accept(transition);
+        synchronized (this) {
+          readyBlockNumber = transition.getBlockNumber();
+          readyBlockHash = transition.getBlockHash();
+        }
+        logger.info("Path-state deferred view prepared: head={}, queueDepth={}, serviceMs={}",
+            transition.getBlockNumber(), deferredQueue.size(),
+            TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedNanos));
+      } catch (InterruptedException interrupted) {
+        if (!closed) {
+          Thread.currentThread().interrupt();
+          fail(FailureStage.CAPTURE, interrupted);
+        }
+        return;
+      } catch (IOException | RuntimeException currentFailure) {
+        fail(FailureStage.CAPTURE, currentFailure);
+        return;
+      }
+    }
+  }
+
+  /** Drains the deferred benchmark worker before its Manager-owned head is closed. */
+  public void close() throws IOException {
+    if (deferredWorker == null) {
+      return;
+    }
+    closed = true;
+    try {
+      deferredWorker.join(TimeUnit.SECONDS.toMillis(30));
+    } catch (InterruptedException interrupted) {
+      Thread.currentThread().interrupt();
+      throw new IOException("deferred PathState close interrupted", interrupted);
+    }
+    if (deferredWorker.isAlive()) {
+      deferredWorker.interrupt();
+      throw new IOException("deferred PathState worker did not drain before close");
+    }
+    if (failure != null) {
+      throw new IOException("deferred PathState worker failed", failure);
     }
   }
 
@@ -111,6 +248,15 @@ public final class PathStateRuntimeAttachment {
 
   public synchronized boolean isFailed() {
     return failure != null;
+  }
+
+  /** Returns the exact optional delta bound to the currently captured transition. */
+  public synchronized PathStateSnapshotDelta preparedSnapshotDelta(
+      PathStateBlockTransition transition) {
+    if (pending != Objects.requireNonNull(transition, "transition")) {
+      throw new IllegalStateException("path-state Snapshot delta transition is not pending");
+    }
+    return pendingSnapshotDelta;
   }
 
   public synchronized Throwable getFailure() {
@@ -203,7 +349,7 @@ public final class PathStateRuntimeAttachment {
     byte[] hash = view.getMeta().getBlockHash();
     byte[] parentHash = view.getMeta().getParentHash();
     if (failure == null) {
-      if (pending != null) {
+      if (pending != null || pendingView != null) {
         fail(FailureStage.CAPTURE_GAP,
             new IOException("path-state previous capture is not published"));
       }
@@ -232,6 +378,18 @@ public final class PathStateRuntimeAttachment {
       throw new IOException("path-state collector changed the captured block identity");
     }
     return transition;
+  }
+
+  private static void validateSnapshotDelta(BlockSnapshotMeta meta,
+      PathStateBlockTransition transition, PathStateSnapshotDelta delta) throws IOException {
+    if (delta == null) {
+      return;
+    }
+    if (!meta.equals(delta.getMeta())
+        || !Arrays.equals(transition.getPayloadDigest(), delta.getTransitionPayloadDigest())
+        || !Arrays.equals(transition.getMutationViewDigest(), delta.getMutationViewDigest())) {
+      throw new IOException("path-state Snapshot delta identity mismatch");
+    }
   }
 
   private static FailureKind classify(Throwable failure) {
@@ -406,5 +564,12 @@ public final class PathStateRuntimeAttachment {
   public interface TransitionPreviewer {
 
     byte[] prepare(PathStateBlockTransition transition) throws IOException;
+  }
+
+  @FunctionalInterface
+  public interface SnapshotDeltaPreparer {
+
+    PathStateSnapshotDelta prepare(BlockSnapshotMeta meta, PathStateBlockTransition transition)
+        throws IOException;
   }
 }

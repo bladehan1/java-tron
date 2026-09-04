@@ -134,7 +134,7 @@ public final class PathStateBaseCompaction {
     try (PathStateNodeStoreSet source = PathStateNodeStoreSet.openPublished(manifest, layer);
         PathStateNodeStoreSet destination = PathStateNodeStoreSet.beginBaseAt(manifest, nextPath)) {
       PathStateRoot sourceRoot = source.createRoot();
-      sourceRoot.verifyNodeStores();
+      sourceRoot.verifyAllNodeStores();
       List<PathStateRoot.LeafRecord> leaves = new ArrayList<>(source.leafRecords());
       PathStateRoot destinationRoot = destination.initializeBase(leaves, layer.getStateRoot());
       if (!Arrays.equals(destinationRoot.rootHash(), replacement.getStateRoot())) {
@@ -155,7 +155,7 @@ public final class PathStateBaseCompaction {
       if (!Arrays.equals(restored.rootHash(), replacement.getStateRoot())) {
         throw new IOException("path-state prepared BASE root mismatch");
       }
-      restored.verifyNodeStores();
+      restored.verifyAllNodeStores();
     }
   }
 
@@ -167,7 +167,7 @@ public final class PathStateBaseCompaction {
       if (!Arrays.equals(restored.rootHash(), replacement.getStateRoot())) {
         throw new IOException("path-state installed BASE root mismatch");
       }
-      restored.verifyNodeStores();
+      restored.verifyAllNodeStores();
     }
   }
 

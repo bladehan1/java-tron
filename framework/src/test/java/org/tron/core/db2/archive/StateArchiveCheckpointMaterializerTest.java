@@ -1,0 +1,261 @@
+package org.tron.core.db2.archive;
+
+import static org.junit.Assert.assertArrayEquals;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertThrows;
+import static org.junit.Assert.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+import java.io.IOException;
+import java.nio.file.DirectoryStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import org.junit.Rule;
+import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
+import org.rocksdb.Options;
+import org.rocksdb.RocksDB;
+import org.tron.core.db2.archive.BlockReverseDiff.DbGroup;
+import org.tron.core.db2.archive.BlockReverseDiff.Entry;
+import org.tron.core.db2.core.CommonCheckpointMaterializer.Status;
+import org.tron.core.db2.core.CommonCheckpointPayload;
+import org.tron.core.db2.core.CommonCheckpointTarget;
+import org.tron.core.db2.stateroot.PathStateFlushTarget;
+
+public class StateArchiveCheckpointMaterializerTest {
+
+  @Rule
+  public final TemporaryFolder temporaryFolder = new TemporaryFolder();
+
+  @Test
+  public void preservesEveryBlockBoundaryBeforePublishingReadableAcrossReopen()
+      throws Exception {
+    Path root = temporaryFolder.newFolder("normal").toPath();
+    byte[] format = hash(90);
+    CommonCheckpointPayload payload = payload(format, 1, 3, hash(0), hash(10), hash(13));
+    CommonCheckpointTarget target = CommonCheckpointTarget.from(payload);
+    StateArchiveCheckpointMaterializer materializer =
+        new StateArchiveCheckpointMaterializer(root, format);
+
+    assertEquals(Status.NEEDS_MATERIALIZATION, materializer.inspect(target));
+    materializer.materialize(payload, target);
+    assertEquals(Status.MATERIALIZED, materializer.inspect(target));
+    assertFalse(Files.exists(root.resolve(StateArchiveCheckpointMaterializer.READABLE_FILE)));
+    assertEquals(3, blockFileCount(root));
+    assertThrows(IOException.class,
+        () -> StateArchiveCheckpointReadAdapter.open(root, target));
+    for (int index = 0; index < payload.getBlocks().size(); index++) {
+      BlockReverseDiff actual = materializer.loadBlock(target, index);
+      assertEquals(payload.getBlocks().get(index).getMeta(), actual.getMeta());
+      assertArrayEquals(payload.getBlocks().get(index).getMutationViewDigest(),
+          actual.getMutationViewDigest());
+      assertEquals("code", actual.getGroups().get(0).getDbName());
+    }
+
+    materializer.materialize(payload, target);
+    assertEquals(3, blockFileCount(root));
+    materializer.publish(target);
+    assertEquals(Status.PUBLISHED, materializer.inspect(target));
+    try (StateArchiveCheckpointReadAdapter reader =
+        StateArchiveCheckpointReadAdapter.open(root, target)) {
+      assertEquals(0, reader.getIndexedFrom());
+      assertEquals(3, reader.getIndexedThrough());
+      assertArrayEquals(new byte[]{0}, reader.findOldValueAfter("code", new byte[]{1}, 0)
+          .get().getValue());
+      assertFalse(reader.findOldValueAfter("code", new byte[]{2}, 2).isPresent());
+    }
+
+    StateArchiveCheckpointMaterializer reopened =
+        new StateArchiveCheckpointMaterializer(root, format);
+    assertEquals(Status.PUBLISHED, reopened.inspect(target));
+    reopened.publish(target);
+
+    CommonCheckpointPayload child = payload(format, 4, 2, hash(3), hash(13), hash(15));
+    CommonCheckpointTarget childTarget = CommonCheckpointTarget.from(child);
+    reopened.materialize(child, childTarget);
+    reopened.publish(childTarget);
+    assertEquals(Status.PUBLISHED, reopened.inspect(childTarget));
+    try (StateArchiveCheckpointReadAdapter reader =
+        StateArchiveCheckpointReadAdapter.open(root, childTarget)) {
+      assertEquals(0, reader.getIndexedFrom());
+      assertEquals(5, reader.getIndexedThrough());
+      assertArrayEquals(hash(5), reader.getHeadHash());
+      assertArrayEquals(new byte[]{1}, reader.findOldValueAfter("code", new byte[]{2}, 0)
+          .get().getValue());
+      assertArrayEquals(new byte[]{3}, reader.findOldValueAfter("code", new byte[]{4}, 3)
+          .get().getValue());
+    }
+    CommonCheckpointTarget restored =
+        StateArchiveCheckpointMaterializer.loadPublishedTarget(root, format);
+    assertEquals(childTarget, restored);
+    try (StateArchiveCheckpointReadAdapter reader =
+        StateArchiveCheckpointReadAdapter.open(root, format)) {
+      assertEquals(5, reader.getIndexedThrough());
+      assertArrayEquals(new byte[]{1}, reader.findOldValueAfter("code", new byte[]{2}, 0)
+          .get().getValue());
+    }
+  }
+
+  @Test
+  public void resumesEveryDurabilityBoundaryUsingOnlyCheckpointRedo() throws Exception {
+    for (StateArchiveCheckpointMaterializer.Stage stage
+        : StateArchiveCheckpointMaterializer.Stage.values()) {
+      Path root = temporaryFolder.newFolder("fault-" + stage).toPath();
+      byte[] format = hash(91);
+      CommonCheckpointPayload payload = payload(format, 8, 3, hash(7), hash(20), hash(23));
+      CommonCheckpointTarget target = CommonCheckpointTarget.from(payload);
+      StateArchiveCheckpointMaterializer failed = new StateArchiveCheckpointMaterializer(root,
+          format, failAt(stage));
+      if (stage == StateArchiveCheckpointMaterializer.Stage.AFTER_READABLE) {
+        failed.materialize(payload, target);
+        assertThrows(IOException.class, () -> failed.publish(target));
+      } else {
+        assertThrows(IOException.class, () -> failed.materialize(payload, target));
+      }
+
+      StateArchiveCheckpointMaterializer recovered =
+          new StateArchiveCheckpointMaterializer(root, format);
+      if (recovered.inspect(target) == Status.NEEDS_MATERIALIZATION) {
+        recovered.materialize(payload, target);
+      }
+      recovered.publish(target);
+      assertEquals(Status.PUBLISHED, recovered.inspect(target));
+      assertEquals(3, blockFileCount(root));
+    }
+  }
+
+  @Test
+  public void rejectsForeignFormatCorruptImmutableBlockAndNonParentReadable()
+      throws Exception {
+    Path root = temporaryFolder.newFolder("reject").toPath();
+    byte[] format = hash(92);
+    CommonCheckpointPayload payload = payload(format, 1, 2, hash(0), hash(30), hash(32));
+    CommonCheckpointTarget target = CommonCheckpointTarget.from(payload);
+    StateArchiveCheckpointMaterializer materializer =
+        new StateArchiveCheckpointMaterializer(root, format);
+
+    CommonCheckpointPayload foreign = payload(hash(99), 1, 1, hash(0), hash(30), hash(31));
+    assertThrows(IOException.class, () -> materializer.materialize(foreign,
+        CommonCheckpointTarget.from(foreign)));
+
+    StateArchiveCheckpointMaterializer interrupted = new StateArchiveCheckpointMaterializer(root,
+        format, failAt(StateArchiveCheckpointMaterializer.Stage.AFTER_BLOCK_FILE));
+    assertThrows(IOException.class, () -> interrupted.materialize(payload, target));
+    Path block = firstBlockFile(root);
+    byte[] corrupt = Files.readAllBytes(block);
+    corrupt[corrupt.length - 1] ^= 1;
+    Files.write(block, corrupt);
+    assertThrows(IOException.class, () -> materializer.materialize(payload, target));
+
+    Path cleanRoot = temporaryFolder.newFolder("non-parent").toPath();
+    StateArchiveCheckpointMaterializer clean =
+        new StateArchiveCheckpointMaterializer(cleanRoot, format);
+    clean.materialize(payload, target);
+    clean.publish(target);
+    CommonCheckpointPayload nonChild = payload(format, 5, 1, hash(9), hash(40), hash(41));
+    assertThrows(IOException.class,
+        () -> clean.inspect(CommonCheckpointTarget.from(nonChild)));
+    assertTrue(Files.isRegularFile(cleanRoot.resolve(
+        StateArchiveCheckpointMaterializer.READABLE_FILE)));
+    try (Options options = new Options().setCreateIfMissing(false);
+        RocksDB database = RocksDB.open(options, cleanRoot.resolve(
+            StateArchiveCheckpointServingIndex.DIRECTORY).resolve("keys").toString())) {
+      database.put(new byte[]{0}, new byte[]{1});
+    }
+    assertThrows(IOException.class, () -> clean.inspect(target));
+  }
+
+  private static StateArchiveCheckpointMaterializer.FaultHook failAt(
+      StateArchiveCheckpointMaterializer.Stage failedStage) {
+    return (stage, blockIndex) -> {
+      if (stage == failedStage) {
+        throw new IOException("injected " + stage + " at " + blockIndex);
+      }
+    };
+  }
+
+  private static CommonCheckpointPayload payload(byte[] format, long firstBlock, int count,
+      byte[] parentHash, byte[] parentRoot, byte[] stateRoot) {
+    List<PathStateFlushTarget.BlockBinding> bindings = new ArrayList<>();
+    List<BlockReverseDiff> archives = new ArrayList<>();
+    byte[] priorHash = parentHash;
+    byte[] priorRoot = parentRoot;
+    for (int index = 0; index < count; index++) {
+      long number = firstBlock + index;
+      byte[] blockHash = hash((int) number);
+      byte[] nextRoot = index == count - 1 ? stateRoot : hash(30 + (int) number);
+      byte[] view = hash(60 + (int) number);
+      BlockSnapshotMeta meta = BlockSnapshotMeta.forBlock(number, blockHash, priorHash,
+          number * 3_000L);
+      PathStateFlushTarget.BlockBinding binding = mock(PathStateFlushTarget.BlockBinding.class);
+      when(binding.getMeta()).thenReturn(meta);
+      when(binding.getParentStateRoot()).thenReturn(priorRoot);
+      when(binding.getStateRoot()).thenReturn(nextRoot);
+      when(binding.getTransitionPayloadDigest()).thenReturn(hash(70 + (int) number));
+      when(binding.getMutationViewDigest()).thenReturn(view);
+      bindings.add(binding);
+      archives.add(new BlockReverseDiff(meta, Collections.singletonList(new DbGroup(
+          "code", Collections.singletonList(new Entry(new byte[]{(byte) number},
+          OldValue.present(new byte[]{(byte) (number - 1)}))))), view));
+      priorHash = blockHash;
+      priorRoot = nextRoot;
+    }
+    PathStateFlushTarget pathState = mock(PathStateFlushTarget.class);
+    when(pathState.getBlocks()).thenReturn(bindings);
+    when(pathState.getParentStateRoot()).thenReturn(parentRoot);
+    when(pathState.getStateRoot()).thenReturn(stateRoot);
+    when(pathState.getStores()).thenReturn(Collections.emptyList());
+    when(pathState.getSuperNodeMutations()).thenReturn(Collections.emptyList());
+    return CommonCheckpointPayload.create(format, pathState, archives,
+        Collections.emptyList());
+  }
+
+  private static int blockFileCount(Path root) throws IOException {
+    Path targets = root.resolve(StateArchiveCheckpointMaterializer.TARGET_DIRECTORY);
+    try (DirectoryStream<Path> targetPaths = Files.newDirectoryStream(targets)) {
+      for (Path target : targetPaths) {
+        Path blocks = target.resolve(StateArchiveCheckpointMaterializer.BLOCK_DIRECTORY);
+        if (Files.isDirectory(blocks)) {
+          int count = 0;
+          try (DirectoryStream<Path> paths = Files.newDirectoryStream(blocks, "*.diff")) {
+            for (Path ignored : paths) {
+              count++;
+            }
+          }
+          return count;
+        }
+      }
+    }
+    return 0;
+  }
+
+  private static Path firstBlockFile(Path root) throws IOException {
+    Path targets = root.resolve(StateArchiveCheckpointMaterializer.TARGET_DIRECTORY);
+    try (DirectoryStream<Path> targetPaths = Files.newDirectoryStream(targets)) {
+      for (Path target : targetPaths) {
+        Path blocks = target.resolve(StateArchiveCheckpointMaterializer.BLOCK_DIRECTORY);
+        if (Files.isDirectory(blocks)) {
+          try (DirectoryStream<Path> paths = Files.newDirectoryStream(blocks, "*.diff")) {
+            for (Path path : paths) {
+              return path;
+            }
+          }
+        }
+      }
+    }
+    throw new IOException("checkpoint block not found");
+  }
+
+  private static byte[] hash(int seed) {
+    byte[] hash = new byte[32];
+    for (int index = 0; index < hash.length; index++) {
+      hash[index] = (byte) (seed + index);
+    }
+    return hash;
+  }
+}

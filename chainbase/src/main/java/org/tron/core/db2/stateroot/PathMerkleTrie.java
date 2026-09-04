@@ -37,8 +37,13 @@ public final class PathMerkleTrie {
   };
 
   private final PathNodeStore nodeStore;
+  private static final AtomicLong NODE_CREATE_COUNT = new AtomicLong();
+  private static final AtomicLong NODE_KECCAK_COUNT = new AtomicLong();
+
+  private final boolean lazyHashReferences;
   private final Map<BytesKey, byte[]> leaves = new TreeMap<>(UNSIGNED_KEY_COMPARATOR);
   private final IdentityHashMap<Node, BytesKey> materializedNodes = new IdentityHashMap<>();
+  private final IdentityHashMap<Node, Node> resolvedMaterializedNodes = new IdentityHashMap<>();
   private Snapshot inheritedSnapshot;
   private Node rootNode;
   private Node materializedRoot;
@@ -48,11 +53,21 @@ public final class PathMerkleTrie {
   private boolean frozen;
   private int lastNodePuts;
   private int lastNodeDeletes;
+  private long lastCommitPlanNanos;
+  private long lastCommitStoreNanos;
+  private long lastCommitFinalizeNanos;
   private final AtomicLong nodeDecodeCount = new AtomicLong();
   private final AtomicLong nodeHashVerifyCount = new AtomicLong();
+  private final AtomicLong hashReferenceCreateCount = new AtomicLong();
+  private final AtomicLong hashReferenceResolveCount = new AtomicLong();
 
   public PathMerkleTrie(PathNodeStore nodeStore) {
+    this(nodeStore, true);
+  }
+
+  PathMerkleTrie(PathNodeStore nodeStore, boolean lazyHashReferences) {
     this.nodeStore = Objects.requireNonNull(nodeStore, "nodeStore");
+    this.lazyHashReferences = lazyHashReferences;
   }
 
   public synchronized void put(byte[] secureKey, byte[] encodedValue) {
@@ -88,7 +103,7 @@ public final class PathMerkleTrie {
     Node resolvedRoot = resolve(rootNode, EMPTY_PATH);
     rootNode = resolvedRoot;
     if (batch.size() < PARALLEL_UPDATE_THRESHOLD || !(resolvedRoot instanceof BranchNode)) {
-      applySequential(batch);
+      applySequentialBatch(batch);
       return;
     }
     BranchNode root = (BranchNode) resolvedRoot;
@@ -110,18 +125,24 @@ public final class PathMerkleTrie {
       }
     }
     if (guaranteedSurvivors < 2) {
-      applySequential(batch);
+      applySequentialBatch(batch);
       return;
     }
-    List<Future<SubtreeResult>> futures = new ArrayList<>();
-    List<Integer> positions = new ArrayList<>();
+    List<SubtreeWork> work = new ArrayList<>();
     for (int i = 0; i < groups.size(); i++) {
       if (!groups.get(i).isEmpty()) {
-        final int position = i;
-        positions.add(position);
-        futures.add(Objects.requireNonNull(executor, "executor").submit(
-            () -> applySubtree(root.children[position], position, groups.get(position))));
+        work.add(new SubtreeWork(i, groups.get(i)));
       }
+    }
+    work.sort((left, right) -> {
+      int compared = Integer.compare(right.mutations.size(), left.mutations.size());
+      return compared != 0 ? compared : Integer.compare(left.position, right.position);
+    });
+    List<Future<SubtreeResult>> futures = new ArrayList<>(work.size());
+    for (SubtreeWork subtree : work) {
+      futures.add(Objects.requireNonNull(executor, "executor").submit(
+          () -> applySubtree(root.children[subtree.position], subtree.position,
+              subtree.mutations)));
     }
     Node[] children = Arrays.copyOf(root.children, root.children.length);
     Map<BytesKey, byte[]> previous = new LinkedHashMap<>();
@@ -129,7 +150,7 @@ public final class PathMerkleTrie {
     try {
       for (int i = 0; i < futures.size(); i++) {
         SubtreeResult result = futures.get(i).get();
-        children[positions.get(i)] = result.node;
+        children[work.get(i).position] = result.node;
         previous.putAll(result.previous);
         changed.putAll(result.changed);
       }
@@ -165,13 +186,34 @@ public final class PathMerkleTrie {
     dirty = true;
   }
 
-  private void applySequential(List<BatchMutation> mutations) {
+  private static final class SubtreeWork {
+
+    private final int position;
+    private final List<BatchMutation> mutations;
+
+    private SubtreeWork(int position, List<BatchMutation> mutations) {
+      this.position = position;
+      this.mutations = mutations;
+    }
+  }
+
+  private void applySequentialBatch(List<BatchMutation> mutations) {
     for (BatchMutation mutation : mutations) {
-      if (mutation.encodedValue == null) {
-        delete(mutation.secureKey);
-      } else {
-        put(mutation.secureKey, mutation.encodedValue);
+      BytesKey key = new BytesKey(mutation.secureKey);
+      byte[] previous = mutation.previousValueKnown
+          ? mutation.previousEncodedValue : leafValue(key);
+      if (Arrays.equals(previous, mutation.encodedValue)) {
+        continue;
       }
+      leaves.put(key, mutation.encodedValue);
+      if (previous == null && mutation.encodedValue != null) {
+        leafCount++;
+      } else if (previous != null && mutation.encodedValue == null) {
+        leafCount--;
+      }
+      rootNode = update(rootNode, mutation.nibbles, 0, EMPTY_PATH,
+          mutation.encodedValue);
+      dirty = true;
     }
   }
 
@@ -181,16 +223,18 @@ public final class PathMerkleTrie {
     byte[] path = new byte[]{(byte) nibble};
     Map<BytesKey, byte[]> previous = new LinkedHashMap<>();
     Map<BytesKey, byte[]> changed = new LinkedHashMap<>();
+    List<BatchMutation> effective = new ArrayList<>();
     for (BatchMutation mutation : mutations) {
       BytesKey key = new BytesKey(mutation.secureKey);
       byte[] oldValue;
-      if (leaves.containsKey(key)) {
+      if (mutation.previousValueKnown) {
+        oldValue = mutation.previousEncodedValue;
+      } else if (leaves.containsKey(key)) {
         oldValue = leaves.get(key);
       } else if (inheritedSnapshot != null && inheritedSnapshot.containsLeaf(key)) {
         oldValue = inheritedSnapshot.leafValue(key);
       } else {
-        byte[] nibbles = toNibbles(key.bytes);
-        ValueResult result = resolvedValueAt(node, nibbles, 1, path);
+        ValueResult result = resolvedValueAt(node, mutation.nibbles, 1, path);
         node = result.node;
         oldValue = result.value;
       }
@@ -198,10 +242,136 @@ public final class PathMerkleTrie {
       if (Arrays.equals(oldValue, mutation.encodedValue)) {
         continue;
       }
-      node = update(node, toNibbles(key.bytes), 1, path, mutation.encodedValue);
       changed.put(key, mutation.encodedValue);
+      effective.add(mutation);
+    }
+    if (!effective.isEmpty()) {
+      node = updateBatch(node, effective, 1, path);
     }
     return new SubtreeResult(node, previous, changed);
+  }
+
+  /** Applies sorted, unique edits while rebuilding every shared ancestor at most once. */
+  private Node updateBatch(Node node, List<BatchMutation> mutations, int offset, byte[] path) {
+    if (mutations.isEmpty()) {
+      return node;
+    }
+    if (node == null) {
+      return buildMutations(mutations, offset);
+    }
+    Node present = resolve(node, path);
+    if (present instanceof LeafNode) {
+      return updateLeafBatch((LeafNode) present, mutations, offset, path);
+    }
+    if (present instanceof ExtensionNode) {
+      return updateExtensionBatch((ExtensionNode) present, mutations, offset, path);
+    }
+    BranchNode branch = (BranchNode) present;
+    Node[] children = Arrays.copyOf(branch.children, branch.children.length);
+    boolean changed = false;
+    List<List<BatchMutation>> groups = groupMutations(mutations, offset);
+    for (int nibble = 0; nibble < groups.size(); nibble++) {
+      if (groups.get(nibble).isEmpty()) {
+        continue;
+      }
+      Node previous = children[nibble];
+      children[nibble] = updateBatch(previous, groups.get(nibble), offset + 1,
+          append(path, new byte[]{(byte) nibble}));
+      changed |= previous != children[nibble];
+    }
+    return changed ? normalizeBranch(children, path) : present;
+  }
+
+  private Node updateLeafBatch(LeafNode leaf, List<BatchMutation> mutations, int offset,
+      byte[] path) {
+    List<Leaf> entries = new ArrayList<>(mutations.size() + 1);
+    byte[] leafKey = append(path, leaf.path);
+    boolean retainLeaf = true;
+    for (BatchMutation mutation : mutations) {
+      byte[] key = mutation.nibbles;
+      if (Arrays.equals(key, leafKey)) {
+        retainLeaf = false;
+      }
+      if (mutation.encodedValue != null) {
+        entries.add(new Leaf(key, mutation.encodedValue));
+      }
+    }
+    if (retainLeaf) {
+      entries.add(new Leaf(leafKey, leaf.value));
+    }
+    if (entries.isEmpty()) {
+      return null;
+    }
+    entries.sort((left, right) -> compareNibbles(left.nibbles, right.nibbles));
+    return build(entries, offset);
+  }
+
+  private Node updateExtensionBatch(ExtensionNode extension, List<BatchMutation> mutations,
+      int offset, byte[] path) {
+    int shared = extension.path.length;
+    for (BatchMutation mutation : mutations) {
+      shared = Math.min(shared,
+          commonPrefix(extension.path, 0, mutation.nibbles, offset));
+    }
+    if (shared == extension.path.length) {
+      Node child = updateBatch(extension.child, mutations, offset + shared,
+          append(path, extension.path));
+      return child == extension.child ? extension
+          : normalizeExtension(extension.path, child, path);
+    }
+
+    byte[] common = Arrays.copyOf(extension.path, shared);
+    byte[] branchPath = append(path, common);
+    Node[] children = new Node[16];
+    int oldNibble = extension.path[shared];
+    byte[] oldSuffix = Arrays.copyOfRange(extension.path, shared + 1,
+        extension.path.length);
+    children[oldNibble] = oldSuffix.length == 0 ? extension.child
+        : new ExtensionNode(oldSuffix, extension.child);
+    int groupOffset = offset + shared;
+    List<List<BatchMutation>> groups = groupMutations(mutations, groupOffset);
+    for (int nibble = 0; nibble < groups.size(); nibble++) {
+      if (groups.get(nibble).isEmpty()) {
+        continue;
+      }
+      children[nibble] = updateBatch(children[nibble], groups.get(nibble), groupOffset + 1,
+          append(branchPath, new byte[]{(byte) nibble}));
+    }
+    Node branch = normalizeBranch(children, branchPath);
+    return shared == 0 ? branch : normalizeExtension(common, branch, path);
+  }
+
+  private static Node buildMutations(List<BatchMutation> mutations, int offset) {
+    List<Leaf> entries = new ArrayList<>(mutations.size());
+    for (BatchMutation mutation : mutations) {
+      if (mutation.encodedValue != null) {
+        entries.add(new Leaf(mutation.nibbles, mutation.encodedValue));
+      }
+    }
+    entries.sort((left, right) -> compareNibbles(left.nibbles, right.nibbles));
+    return entries.isEmpty() ? null : build(entries, offset);
+  }
+
+  private static List<List<BatchMutation>> groupMutations(
+      List<BatchMutation> mutations, int offset) {
+    List<List<BatchMutation>> groups = new ArrayList<>(16);
+    for (int nibble = 0; nibble < 16; nibble++) {
+      groups.add(new ArrayList<>());
+    }
+    for (BatchMutation mutation : mutations) {
+      groups.get(mutation.nibbles[offset]).add(mutation);
+    }
+    return groups;
+  }
+
+  private static int compareNibbles(byte[] left, byte[] right) {
+    for (int index = 0; index < Math.min(left.length, right.length); index++) {
+      int compared = Byte.compare(left[index], right[index]);
+      if (compared != 0) {
+        return compared;
+      }
+    }
+    return Integer.compare(left.length, right.length);
   }
 
   private static void cancel(List<? extends Future<?>> futures) {
@@ -237,12 +407,42 @@ public final class PathMerkleTrie {
     return lastNodeDeletes;
   }
 
+  synchronized long getLastCommitPlanNanos() {
+    return lastCommitPlanNanos;
+  }
+
+  synchronized long getLastCommitStoreNanos() {
+    return lastCommitStoreNanos;
+  }
+
+  synchronized long getLastCommitFinalizeNanos() {
+    return lastCommitFinalizeNanos;
+  }
+
   synchronized long getNodeDecodeCount() {
     return nodeDecodeCount.get();
   }
 
   synchronized long getNodeHashVerifyCount() {
     return nodeHashVerifyCount.get();
+  }
+
+  synchronized long getHashReferenceCreateCount() {
+    return hashReferenceCreateCount.get();
+  }
+
+  synchronized long getHashReferenceResolveCount() {
+    return hashReferenceResolveCount.get();
+  }
+
+  /** Cumulative count of LeafNode/ExtensionNode/BranchNode creations (RLP encodes). */
+  static long nodeCreateCountTotal() {
+    return NODE_CREATE_COUNT.get();
+  }
+
+  /** Cumulative count of actual Keccak computations on node RLP (cache misses). */
+  static long nodeKeccakCountTotal() {
+    return NODE_KECCAK_COUNT.get();
   }
 
   synchronized List<LeafEntry> leafEntries() {
@@ -331,7 +531,7 @@ public final class PathMerkleTrie {
   }
 
   private void installStoredRoot(byte[] encoded, byte[] expected) {
-    rootNode = new StoredNode(encoded, EMPTY_PATH);
+    rootNode = new StoredNode(encoded, EMPTY_PATH, expected);
     materializedRoot = rootNode;
     rememberMaterialized(rootNode, EMPTY_PATH);
     rootHash = Arrays.copyOf(expected, expected.length);
@@ -352,12 +552,13 @@ public final class PathMerkleTrie {
     }
   }
 
-  /** Verifies every path owned by the current materialized node set without repairing it. */
-  public synchronized void verifyNodeStore() {
+  /** Explicitly scans every reachable path in the materialized node set without repairing it. */
+  public synchronized void verifyAllNodeStore() {
     if (dirty) {
       throw new IllegalStateException("cannot verify a dirty path trie");
     }
-    Map<BytesKey, byte[]> expectedNodes = collectNodes(rootNode);
+    Map<BytesKey, byte[]> expectedNodes = new LinkedHashMap<>();
+    collectResolvedNodes(rootNode, EMPTY_PATH, expectedNodes);
     for (Map.Entry<BytesKey, byte[]> entry : expectedNodes.entrySet()) {
       if (!Arrays.equals(nodeStore.get(entry.getKey().bytes), entry.getValue())) {
         throw new IllegalStateException("missing or corrupt materialized path node");
@@ -368,26 +569,56 @@ public final class PathMerkleTrie {
     }
   }
 
+  /** Compatibility alias for explicit rebuild, repair, and test callers. */
+  public synchronized void verifyNodeStore() {
+    verifyAllNodeStore();
+  }
+
+  private void collectResolvedNodes(Node node, byte[] path, Map<BytesKey, byte[]> nodes) {
+    if (node == null) {
+      return;
+    }
+    Node present = resolve(node, path);
+    if (nodes.put(new BytesKey(path), encodedNode(present)) != null) {
+      throw new IllegalStateException("duplicate path-state node path");
+    }
+    visitChildren(present, path,
+        (child, childPath) -> collectResolvedNodes(child, childPath, nodes));
+  }
+
   private void commit() {
+    long startedNanos = System.nanoTime();
     IdentityHashMap<Node, Boolean> retained = new IdentityHashMap<>();
     List<NodePath> additions = new ArrayList<>();
     collectAdditions(rootNode, EMPTY_PATH, retained, additions);
     List<NodePath> removals = new ArrayList<>();
     collectRemovals(materializedRoot, retained, removals);
+    long plannedNanos = System.nanoTime();
 
     for (NodePath removal : removals) {
       nodeStore.delete(removal.path);
       materializedNodes.remove(removal.node);
     }
     for (NodePath addition : additions) {
-      nodeStore.put(addition.path, addition.node.encoded);
-      materializedNodes.put(addition.node, new BytesKey(addition.path));
+      nodeStore.put(addition.path, encodedNode(addition.node));
+      rememberMaterialized(addition.node, addition.path);
+    }
+    long storedNanos = System.nanoTime();
+    synchronized (resolvedMaterializedNodes) {
+      for (Node resolvedReference : resolvedMaterializedNodes.keySet()) {
+        materializedNodes.remove(resolvedReference);
+      }
+      resolvedMaterializedNodes.clear();
     }
     lastNodeDeletes = removals.size();
     lastNodePuts = additions.size();
     materializedRoot = rootNode;
     rootHash = hash(rootNode);
     dirty = false;
+    long finishedNanos = System.nanoTime();
+    lastCommitPlanNanos = plannedNanos - startedNanos;
+    lastCommitStoreNanos = storedNanos - plannedNanos;
+    lastCommitFinalizeNanos = finishedNanos - storedNanos;
   }
 
   private void collectAdditions(Node node, byte[] path,
@@ -413,12 +644,16 @@ public final class PathMerkleTrie {
     if (node == null || retained.containsKey(node)) {
       return;
     }
-    BytesKey path = materializedPath(node);
+    Node present = resolvedMaterializedNode(node);
+    if (retained.containsKey(present)) {
+      return;
+    }
+    BytesKey path = materializedPath(present);
     if (path == null) {
       throw new IllegalStateException("path-local update lost a materialized node identity");
     }
-    removals.add(new NodePath(node, path.copy()));
-    visitChildren(node, path.bytes,
+    removals.add(new NodePath(present, path.copy()));
+    visitChildren(present, path.bytes,
         (child, ignored) -> collectRemovals(child, retained, removals));
   }
 
@@ -454,17 +689,27 @@ public final class PathMerkleTrie {
   }
 
   private BytesKey materializedPath(Node node) {
+    BytesKey bound = node.materializedPath();
+    if (bound != null) {
+      return bound;
+    }
+    if (node instanceof HashRefNode) {
+      return node.bindMaterializedPath(new BytesKey(((HashRefNode) node).path));
+    }
     BytesKey path;
     synchronized (materializedNodes) {
       path = materializedNodes.get(node);
     }
-    return path != null || inheritedSnapshot == null
-        ? path : inheritedSnapshot.materializedPath(node);
+    if (path == null && inheritedSnapshot != null) {
+      path = inheritedSnapshot.materializedPath(node);
+    }
+    return path == null ? null : node.bindMaterializedPath(path);
   }
 
   private void rememberMaterialized(Node node, byte[] path) {
+    BytesKey materialized = node.bindMaterializedPath(new BytesKey(path));
     synchronized (materializedNodes) {
-      materializedNodes.put(node, new BytesKey(path));
+      materializedNodes.put(node, materialized);
     }
   }
 
@@ -475,8 +720,23 @@ public final class PathMerkleTrie {
         throw new IllegalStateException("resolved path trie node moved from its durable path");
       }
       rememberMaterialized(replacement, path);
+      synchronized (resolvedMaterializedNodes) {
+        resolvedMaterializedNodes.put(original, replacement);
+      }
     }
     return replacement;
+  }
+
+  private Node resolvedMaterializedNode(Node node) {
+    Node present = node;
+    synchronized (resolvedMaterializedNodes) {
+      Node replacement = resolvedMaterializedNodes.get(present);
+      while (replacement != null && replacement != present) {
+        present = replacement;
+        replacement = resolvedMaterializedNodes.get(present);
+      }
+    }
+    return present;
   }
 
   private void requireMutable() {
@@ -657,7 +917,7 @@ public final class PathMerkleTrie {
     if (node == null) {
       return;
     }
-    if (nodes.put(new BytesKey(path), node.encoded) != null) {
+    if (nodes.put(new BytesKey(path), encodedNode(node)) != null) {
       throw new IllegalStateException("duplicate path-state node path");
     }
     visitChildren(node, path, (child, childPath) -> collectNodes(child, childPath, nodes));
@@ -668,7 +928,7 @@ public final class PathMerkleTrie {
     if (node == null) {
       return;
     }
-    indexed.put(node, new BytesKey(path));
+    indexed.put(node, node.bindMaterializedPath(new BytesKey(path)));
     visitChildren(node, path, (child, childPath) -> indexNodes(child, childPath, indexed));
   }
 
@@ -688,7 +948,7 @@ public final class PathMerkleTrie {
 
   private static byte[] hash(Node node) {
     return node == null ? Arrays.copyOf(Hash.EMPTY_TRIE_HASH, Hash.EMPTY_TRIE_HASH.length)
-        : Hash.sha3(node.encoded);
+        : nodeHash(node);
   }
 
   private static int sharedPrefix(List<Leaf> entries, int depth) {
@@ -768,12 +1028,27 @@ public final class PathMerkleTrie {
   }
 
   private Node resolve(Node node, byte[] expectedPath) {
+    if (node instanceof HashRefNode) {
+      HashRefNode reference = (HashRefNode) node;
+      if (!Arrays.equals(reference.path, expectedPath)) {
+        throw new IllegalStateException("hashed path trie node moved from its durable path");
+      }
+      byte[] encoded = nodeStore.get(reference.path);
+      nodeHashVerifyCount.incrementAndGet();
+      if (encoded == null || !Arrays.equals(Hash.sha3(encoded), reference.expectedHash)) {
+        throw new IllegalStateException("path-state durable child is missing or corrupt");
+      }
+      hashReferenceResolveCount.incrementAndGet();
+      StoredNode stored = new StoredNode(encoded, reference.path, reference.expectedHash);
+      rememberMaterialized(stored, reference.path);
+      return retainResolvedReplacement(reference, resolve(stored, expectedPath), expectedPath);
+    }
     if (!(node instanceof StoredNode)) {
       return node;
     }
     StoredNode stored = (StoredNode) node;
     nodeDecodeCount.incrementAndGet();
-    byte[] storedEncoding = node.encoded;
+    byte[] storedEncoding = encodedNode(node);
     if (!Arrays.equals(stored.path, expectedPath)) {
       throw new IllegalStateException("stored path trie node moved from its durable path");
     }
@@ -806,8 +1081,11 @@ public final class PathMerkleTrie {
     } else {
       throw new IllegalStateException("path-state durable node has invalid arity");
     }
-    if (!Arrays.equals(decoded.encoded, storedEncoding)) {
+    if (!Arrays.equals(encodedNode(decoded), storedEncoding)) {
       throw new IllegalStateException("path-state durable node is not canonically encoded");
+    }
+    if (stored.knownHash != null) {
+      decoded.bindCachedHash(stored.knownHash);
     }
     return retainResolvedReplacement(stored, decoded, expectedPath);
   }
@@ -832,14 +1110,18 @@ public final class PathMerkleTrie {
     if (reference.payload.length != SECURE_KEY_LENGTH) {
       throw new IllegalStateException("path-state child hash must contain exactly 32 bytes");
     }
-    byte[] encoded = nodeStore.get(path);
-    nodeHashVerifyCount.incrementAndGet();
-    if (encoded == null || !Arrays.equals(Hash.sha3(encoded), reference.payload)) {
-      throw new IllegalStateException("path-state durable child is missing or corrupt");
+    if (!lazyHashReferences) {
+      byte[] encoded = nodeStore.get(path);
+      nodeHashVerifyCount.incrementAndGet();
+      if (encoded == null || !Arrays.equals(Hash.sha3(encoded), reference.payload)) {
+        throw new IllegalStateException("path-state durable child is missing or corrupt");
+      }
+      Node stored = new StoredNode(encoded, path, reference.payload);
+      rememberMaterialized(stored, path);
+      return stored;
     }
-    Node stored = new StoredNode(encoded, path);
-    rememberMaterialized(stored, path);
-    return stored;
+    hashReferenceCreateCount.incrementAndGet();
+    return new HashRefNode(path, reference.payload);
   }
 
   private static List<RlpElement> decodeList(byte[] encoded) {
@@ -916,8 +1198,26 @@ public final class PathMerkleTrie {
     return new Compact((flags & 2) != 0, path);
   }
 
-  private static byte[] nodeReference(byte[] encodedNode) {
-    return encodedNode.length < SECURE_KEY_LENGTH ? encodedNode : rlpItem(Hash.sha3(encodedNode));
+  private static byte[] encodedNode(Node node) {
+    byte[] encoded = Objects.requireNonNull(node, "node").encoded;
+    if (encoded == null) {
+      throw new IllegalStateException("unresolved path-state hash reference has no node encoding");
+    }
+    return encoded;
+  }
+
+  private static byte[] nodeHash(Node node) {
+    return node instanceof HashRefNode
+        ? Arrays.copyOf(((HashRefNode) node).expectedHash, SECURE_KEY_LENGTH)
+        : node.cachedHash();
+  }
+
+  private static byte[] nodeReference(Node node) {
+    if (node instanceof HashRefNode) {
+      return rlpItem(((HashRefNode) node).expectedHash);
+    }
+    byte[] encoded = encodedNode(node);
+    return encoded.length < SECURE_KEY_LENGTH ? encoded : rlpItem(node.cachedHash());
   }
 
   private static byte[] compactPath(byte[] nibbles, boolean leaf) {
@@ -1015,19 +1315,98 @@ public final class PathMerkleTrie {
   private abstract static class Node {
 
     private final byte[] encoded;
+    private volatile byte[] hash;
+    private volatile BytesKey materializedPath;
 
     private Node(byte[] encoded) {
       this.encoded = encoded;
     }
+
+    private byte[] cachedHash() {
+      byte[] cached = hash;
+      if (cached == null) {
+        synchronized (this) {
+          cached = hash;
+          if (cached == null) {
+            NODE_KECCAK_COUNT.incrementAndGet();
+            cached = Hash.sha3(encodedNode(this));
+            hash = cached;
+          }
+        }
+      }
+      return cached;
+    }
+
+    private BytesKey materializedPath() {
+      return materializedPath;
+    }
+
+    private BytesKey bindMaterializedPath(BytesKey path) {
+      BytesKey present = materializedPath;
+      if (present == null) {
+        synchronized (this) {
+          present = materializedPath;
+          if (present == null) {
+            materializedPath = path;
+            return path;
+          }
+        }
+      }
+      if (!Arrays.equals(present.bytes, path.bytes)) {
+        throw new IllegalStateException("path-local node identity moved between durable paths");
+      }
+      return present;
+    }
+
+    private void bindCachedHash(byte[] knownHash) {
+      byte[] known = Arrays.copyOf(Objects.requireNonNull(knownHash, "knownHash"),
+          knownHash.length);
+      if (known.length != SECURE_KEY_LENGTH) {
+        throw new IllegalArgumentException("knownHash must contain exactly 32 bytes");
+      }
+      synchronized (this) {
+        if (hash == null) {
+          hash = known;
+        } else if (!Arrays.equals(hash, known)) {
+          throw new IllegalStateException("path-state node cached hash does not match storage");
+        }
+      }
+    }
+
   }
 
   private static final class StoredNode extends Node {
 
     private final byte[] path;
+    private final byte[] knownHash;
 
     private StoredNode(byte[] encoded, byte[] path) {
+      this(encoded, path, null);
+    }
+
+    private StoredNode(byte[] encoded, byte[] path, byte[] knownHash) {
       super(Arrays.copyOf(Objects.requireNonNull(encoded, "encoded"), encoded.length));
       this.path = Arrays.copyOf(Objects.requireNonNull(path, "path"), path.length);
+      this.knownHash = knownHash == null ? null : Arrays.copyOf(knownHash, knownHash.length);
+      if (this.knownHash != null && this.knownHash.length != SECURE_KEY_LENGTH) {
+        throw new IllegalArgumentException("knownHash must contain exactly 32 bytes");
+      }
+    }
+  }
+
+  private static final class HashRefNode extends Node {
+
+    private final byte[] path;
+    private final byte[] expectedHash;
+
+    private HashRefNode(byte[] path, byte[] expectedHash) {
+      super(null);
+      this.path = Arrays.copyOf(Objects.requireNonNull(path, "path"), path.length);
+      this.expectedHash = Arrays.copyOf(Objects.requireNonNull(expectedHash, "expectedHash"),
+          expectedHash.length);
+      if (this.expectedHash.length != SECURE_KEY_LENGTH) {
+        throw new IllegalArgumentException("expectedHash must contain exactly 32 bytes");
+      }
     }
   }
 
@@ -1038,9 +1417,11 @@ public final class PathMerkleTrie {
 
     private LeafNode(byte[] path, byte[] value) {
       super(rlpList(rlpItem(compactPath(path, true)), rlpItem(value)));
+      NODE_CREATE_COUNT.incrementAndGet();
       this.path = Arrays.copyOf(path, path.length);
       this.value = Arrays.copyOf(value, value.length);
     }
+
   }
 
   private static final class ExtensionNode extends Node {
@@ -1050,6 +1431,7 @@ public final class PathMerkleTrie {
 
     private ExtensionNode(byte[] path, Node child) {
       super(encode(path, child));
+      NODE_CREATE_COUNT.incrementAndGet();
       if (path.length == 0) {
         throw new IllegalArgumentException("extension path must not be empty");
       }
@@ -1059,7 +1441,7 @@ public final class PathMerkleTrie {
 
     private static byte[] encode(byte[] path, Node child) {
       Node present = Objects.requireNonNull(child, "child");
-      return rlpList(rlpItem(compactPath(path, false)), nodeReference(present.encoded));
+      return rlpList(rlpItem(compactPath(path, false)), nodeReference(present));
     }
   }
 
@@ -1069,6 +1451,7 @@ public final class PathMerkleTrie {
 
     private BranchNode(Node[] children) {
       super(encode(children));
+      NODE_CREATE_COUNT.incrementAndGet();
       this.children = Arrays.copyOf(children, children.length);
     }
 
@@ -1079,7 +1462,7 @@ public final class PathMerkleTrie {
       List<byte[]> encodedChildren = new ArrayList<>(Collections.nCopies(17, EMPTY_RLP_ITEM));
       for (int i = 0; i < children.length; i++) {
         if (children[i] != null) {
-          encodedChildren.set(i, nodeReference(children[i].encoded));
+          encodedChildren.set(i, nodeReference(children[i]));
         }
       }
       return rlpList(encodedChildren.toArray(new byte[encodedChildren.size()][]));
@@ -1122,12 +1505,24 @@ public final class PathMerkleTrie {
   static final class BatchMutation {
 
     private final byte[] secureKey;
+    private final byte[] nibbles;
     private final byte[] encodedValue;
+    private final boolean previousValueKnown;
+    private final byte[] previousEncodedValue;
 
     BatchMutation(byte[] secureKey, byte[] encodedValue) {
+      this(secureKey, encodedValue, false, null);
+    }
+
+    BatchMutation(byte[] secureKey, byte[] encodedValue, boolean previousValueKnown,
+        byte[] previousEncodedValue) {
       this.secureKey = PathMerkleTrie.secureKey(secureKey).copy();
+      nibbles = toNibbles(this.secureKey);
       this.encodedValue = encodedValue == null ? null
           : nonEmpty(encodedValue, "encodedValue");
+      this.previousValueKnown = previousValueKnown;
+      this.previousEncodedValue = previousEncodedValue == null ? null
+          : nonEmpty(previousEncodedValue, "previousEncodedValue");
     }
   }
 
@@ -1218,8 +1613,19 @@ public final class PathMerkleTrie {
     }
 
     private BytesKey materializedPath(Node node) {
+      BytesKey bound = node.materializedPath();
+      if (bound != null) {
+        return bound;
+      }
       BytesKey path = materializedNodes.get(node);
-      return path != null || parent == null ? path : parent.materializedPath(node);
+      if (path == null && parent != null) {
+        path = parent.materializedPath(node);
+      }
+      return path == null ? null : node.bindMaterializedPath(path);
+    }
+
+    byte[] rootHash() {
+      return Arrays.copyOf(rootHash, rootHash.length);
     }
   }
 

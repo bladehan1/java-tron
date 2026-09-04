@@ -31,10 +31,17 @@ public final class P66AccountAssetCodec {
   /** Validates and converts one raw execution Account into its target archive representation. */
   public byte[] canonicalizeAccount(Phase phase, byte[] physicalAccountKey,
       byte[] rawAccountValue) {
+    Objects.requireNonNull(rawAccountValue, "rawAccountValue");
+    return canonicalizeAccount(phase, physicalAccountKey, parseAccount(rawAccountValue),
+        rawAccountValue);
+  }
+
+  byte[] canonicalizeAccount(Phase phase, byte[] physicalAccountKey, Account account,
+      byte[] rawAccountValue) {
     Objects.requireNonNull(phase, "phase");
     byte[] accountKey = requireAddress(physicalAccountKey);
     Objects.requireNonNull(rawAccountValue, "rawAccountValue");
-    Account account = parseAccount(rawAccountValue);
+    Objects.requireNonNull(account, "account");
     requireAccountAddress(accountKey, account);
     if (!phase.directAssetsEnabled()) {
       if (account.getAssetOptimized()) {

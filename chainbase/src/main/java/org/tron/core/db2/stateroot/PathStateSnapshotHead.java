@@ -3,6 +3,7 @@ package org.tron.core.db2.stateroot;
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.Objects;
+import org.tron.core.db2.archive.BlockSnapshotMeta;
 
 /** In-process snapshot authority that advances only with the durable block-final CURRENT head. */
 public final class PathStateSnapshotHead implements PathStateHead {
@@ -103,6 +104,12 @@ public final class PathStateSnapshotHead implements PathStateHead {
   @Override
   public synchronized byte[] preview(PathStateBlockTransition transition) throws IOException {
     return prepare(transition).getStateRoot();
+  }
+
+  @Override
+  public synchronized PathStateSnapshotDelta prepareSnapshotDelta(BlockSnapshotMeta meta,
+      PathStateBlockTransition transition) throws IOException {
+    return prepare(transition).toSnapshotDelta(Objects.requireNonNull(meta, "meta"));
   }
 
   /** Publishes one exact prepared child and adopts it only after CURRENT confirms durability. */

@@ -15,6 +15,7 @@ import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Current-only per-Store trie and super-trie aggregator for TASK-016.
@@ -103,7 +104,7 @@ public final class PathStateRoot {
     rootMaterialized = false;
   }
 
-  synchronized void applyParallel(Collection<PathStateMutation> mutations,
+  synchronized ParallelApplyStats applyParallel(Collection<PathStateMutation> mutations,
       ExecutorService participantExecutor, ExecutorService branchExecutor) {
     List<PreparedMutation> prepared = prepare(mutations);
     Map<Integer, List<PreparedMutation>> grouped = new LinkedHashMap<>();
@@ -111,16 +112,29 @@ public final class PathStateRoot {
       grouped.computeIfAbsent(mutation.participant.getStoreId(), ignored -> new ArrayList<>())
           .add(mutation);
     }
-    List<Future<?>> futures = new ArrayList<>();
+    List<ParticipantWork> work = new ArrayList<>(grouped.size());
     for (List<PreparedMutation> participantMutations : grouped.values()) {
+      work.add(new ParticipantWork(participantMutations));
+    }
+    work.sort((left, right) -> {
+      int compared = Integer.compare(right.mutations.size(), left.mutations.size());
+      return compared != 0 ? compared
+          : Integer.compare(left.participant.getStoreId(), right.participant.getStoreId());
+    });
+    List<Future<?>> futures = new ArrayList<>(work.size());
+    long startedNanos = System.nanoTime();
+    for (ParticipantWork participantWork : work) {
       futures.add(Objects.requireNonNull(participantExecutor, "participantExecutor").submit(() -> {
-        PathStateParticipant participant = participantMutations.get(0).participant;
-        List<PathMerkleTrie.BatchMutation> batch = new ArrayList<>(participantMutations.size());
-        for (PreparedMutation mutation : participantMutations) {
-          batch.add(new PathMerkleTrie.BatchMutation(mutation.secureKey, mutation.encodedValue));
+        long participantStartedNanos = System.nanoTime();
+        List<PathMerkleTrie.BatchMutation> batch =
+            new ArrayList<>(participantWork.mutations.size());
+        for (PreparedMutation mutation : participantWork.mutations) {
+          batch.add(new PathMerkleTrie.BatchMutation(mutation.secureKey, mutation.encodedValue,
+              mutation.previousValueKnown, mutation.previousEncodedValue));
         }
-        participantTries.get(participant.getDbName()).applyBatch(batch,
+        participantTries.get(participantWork.participant.getDbName()).applyBatch(batch,
             Objects.requireNonNull(branchExecutor, "branchExecutor"));
+        participantWork.elapsedNanos = System.nanoTime() - participantStartedNanos;
       }));
     }
     try {
@@ -141,6 +155,29 @@ public final class PathStateRoot {
     }
     recordPendingLeafMutations(prepared);
     rootMaterialized = false;
+    long totalWorkNanos = 0;
+    int maxMutations = 0;
+    int authoritativePreviousValues = 0;
+    long maxElapsedNanos = 0;
+    int maxElapsedStoreId = 0;
+    for (ParticipantWork participantWork : work) {
+      totalWorkNanos += participantWork.elapsedNanos;
+      maxMutations = Math.max(maxMutations, participantWork.mutations.size());
+      if (participantWork.elapsedNanos > maxElapsedNanos) {
+        maxElapsedNanos = participantWork.elapsedNanos;
+        maxElapsedStoreId = participantWork.participant.getStoreId();
+      }
+    }
+    for (PreparedMutation mutation : prepared) {
+      if (mutation.previousValueKnown) {
+        authoritativePreviousValues++;
+      }
+    }
+    return new ParallelApplyStats(work.size(), prepared.size(), authoritativePreviousValues,
+        maxMutations,
+        TimeUnit.NANOSECONDS.toMillis(maxElapsedNanos), maxElapsedStoreId,
+        TimeUnit.NANOSECONDS.toMillis(totalWorkNanos),
+        TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedNanos));
   }
 
   private static void cancel(List<? extends Future<?>> futures) {
@@ -148,6 +185,76 @@ public final class PathStateRoot {
       if (!future.isDone()) {
         future.cancel(true);
       }
+    }
+  }
+
+  static final class ParallelApplyStats {
+
+    private final int participantCount;
+    private final int mutationCount;
+    private final int authoritativePreviousValues;
+    private final int maxParticipantMutations;
+    private final long maxParticipantMillis;
+    private final int maxParticipantStoreId;
+    private final long participantWorkMillis;
+    private final long wallMillis;
+
+    private ParallelApplyStats(int participantCount, int mutationCount,
+        int authoritativePreviousValues,
+        int maxParticipantMutations, long maxParticipantMillis, int maxParticipantStoreId,
+        long participantWorkMillis, long wallMillis) {
+      this.participantCount = participantCount;
+      this.mutationCount = mutationCount;
+      this.authoritativePreviousValues = authoritativePreviousValues;
+      this.maxParticipantMutations = maxParticipantMutations;
+      this.maxParticipantMillis = maxParticipantMillis;
+      this.maxParticipantStoreId = maxParticipantStoreId;
+      this.participantWorkMillis = participantWorkMillis;
+      this.wallMillis = wallMillis;
+    }
+
+    int participantCount() {
+      return participantCount;
+    }
+
+    int mutationCount() {
+      return mutationCount;
+    }
+
+    int authoritativePreviousValues() {
+      return authoritativePreviousValues;
+    }
+
+    int maxParticipantMutations() {
+      return maxParticipantMutations;
+    }
+
+    long maxParticipantMillis() {
+      return maxParticipantMillis;
+    }
+
+    int maxParticipantStoreId() {
+      return maxParticipantStoreId;
+    }
+
+    long participantWorkMillis() {
+      return participantWorkMillis;
+    }
+
+    long wallMillis() {
+      return wallMillis;
+    }
+  }
+
+  private static final class ParticipantWork {
+
+    private final PathStateParticipant participant;
+    private final List<PreparedMutation> mutations;
+    private long elapsedNanos;
+
+    private ParticipantWork(List<PreparedMutation> mutations) {
+      this.mutations = mutations;
+      participant = mutations.get(0).participant;
     }
   }
 
@@ -191,12 +298,25 @@ public final class PathStateRoot {
   }
 
   synchronized void restoreStoredRoots(byte[] expectedRoot) {
+    Map<String, byte[]> participantRoots = new LinkedHashMap<>();
     for (PathStateParticipant participant : scope.getParticipants()) {
-      participantTries.get(participant.getDbName()).restoreRoot();
+      participantRoots.put(participant.getDbName(),
+          participantTries.get(participant.getDbName()).restoreRoot());
     }
     superTrie.restoreRoot(expectedRoot);
     if (!Arrays.equals(superTrie.rootHash(), expectedRoot)) {
       throw new IllegalStateException("restored path-state root differs from durable progress");
+    }
+    for (PathStateParticipant participant : scope.getParticipants()) {
+      byte[] expectedLeaf = PathStateCommitmentCodec.superLeafValue(participant.getStoreId(),
+          participant.getDbName(), participant.getStoreFormatVersion(),
+          participantRoots.get(participant.getDbName()));
+      byte[] actualLeaf = superTrie.get(
+          PathStateCommitmentCodec.superLeafKey(participant.getStoreId()));
+      if (!Arrays.equals(expectedLeaf, actualLeaf)) {
+        throw new IllegalStateException(
+            "restored path-state participant root is not bound by the super trie");
+      }
     }
     rootMaterialized = true;
   }
@@ -243,6 +363,46 @@ public final class PathStateRoot {
     return count;
   }
 
+  synchronized long hashReferenceCreateCount() {
+    long count = superTrie.getHashReferenceCreateCount();
+    for (PathMerkleTrie trie : participantTries.values()) {
+      count += trie.getHashReferenceCreateCount();
+    }
+    return count;
+  }
+
+  synchronized long hashReferenceResolveCount() {
+    long count = superTrie.getHashReferenceResolveCount();
+    for (PathMerkleTrie trie : participantTries.values()) {
+      count += trie.getHashReferenceResolveCount();
+    }
+    return count;
+  }
+
+  synchronized long nodeCommitPlanNanos() {
+    long nanos = superTrie.getLastCommitPlanNanos();
+    for (PathMerkleTrie trie : participantTries.values()) {
+      nanos += trie.getLastCommitPlanNanos();
+    }
+    return nanos;
+  }
+
+  synchronized long nodeCommitStoreNanos() {
+    long nanos = superTrie.getLastCommitStoreNanos();
+    for (PathMerkleTrie trie : participantTries.values()) {
+      nanos += trie.getLastCommitStoreNanos();
+    }
+    return nanos;
+  }
+
+  synchronized long nodeCommitFinalizeNanos() {
+    long nanos = superTrie.getLastCommitFinalizeNanos();
+    for (PathMerkleTrie trie : participantTries.values()) {
+      nanos += trie.getLastCommitFinalizeNanos();
+    }
+    return nanos;
+  }
+
   /** Returns the super root after binding every participant identity, format, and current root. */
   public synchronized byte[] rootHash() {
     if (rootMaterialized) {
@@ -259,15 +419,20 @@ public final class PathStateRoot {
     return root;
   }
 
-  /** Verifies all current participant nodes and the already-published super-trie nodes. */
-  public synchronized void verifyNodeStores() {
+  /** Explicitly scans all current participant nodes and the published super-trie nodes. */
+  public synchronized void verifyAllNodeStores() {
     if (!rootMaterialized) {
       throw new IllegalStateException("path state root is not materialized");
     }
     for (PathMerkleTrie trie : participantTries.values()) {
-      trie.verifyNodeStore();
+      trie.verifyAllNodeStore();
     }
-    superTrie.verifyNodeStore();
+    superTrie.verifyAllNodeStore();
+  }
+
+  /** Compatibility alias for explicit rebuild, repair, and test callers. */
+  public synchronized void verifyNodeStores() {
+    verifyAllNodeStores();
   }
 
   synchronized List<LeafRecord> leafRecords() {
@@ -397,7 +562,7 @@ public final class PathStateRoot {
       throw new IllegalStateException("restored path-state root differs from durable progress");
     }
     rootMaterialized = true;
-    verifyNodeStores();
+    verifyAllNodeStores();
   }
 
   private Map<Integer, List<PathMerkleTrie.LeafEntry>> restoreParticipantLeaves(
@@ -446,7 +611,13 @@ public final class PathStateRoot {
       }
       byte[] encodedValue = present.isDelete() ? null
           : PathStateCommitmentCodec.presentLeafValue(present.getPhysicalValue());
-      prepared.add(new PreparedMutation(participant, secureKey, encodedValue));
+      boolean previousValueKnown = present.isPreviousValueKnown();
+      byte[] previousPhysicalValue = previousValueKnown
+          ? present.getPreviousPhysicalValue() : null;
+      byte[] previousEncodedValue = previousPhysicalValue == null ? null
+          : PathStateCommitmentCodec.presentLeafValue(previousPhysicalValue);
+      prepared.add(new PreparedMutation(participant, secureKey, encodedValue,
+          previousValueKnown, previousEncodedValue));
     }
     Collections.sort(prepared, MUTATION_COMPARATOR);
     return prepared;
@@ -492,6 +663,15 @@ public final class PathStateRoot {
 
     public byte[] getStateRoot() {
       return Arrays.copyOf(stateRoot, stateRoot.length);
+    }
+
+    byte[] participantRoot(String dbName) {
+      PathMerkleTrie.Snapshot participant = participants.get(
+          Objects.requireNonNull(dbName, "dbName"));
+      if (participant == null) {
+        throw new IllegalArgumentException("snapshot has no path-state participant: " + dbName);
+      }
+      return participant.rootHash();
     }
   }
 
@@ -554,12 +734,16 @@ public final class PathStateRoot {
     private final PathStateParticipant participant;
     private final byte[] secureKey;
     private final byte[] encodedValue;
+    private final boolean previousValueKnown;
+    private final byte[] previousEncodedValue;
 
     private PreparedMutation(PathStateParticipant participant, byte[] secureKey,
-        byte[] encodedValue) {
+        byte[] encodedValue, boolean previousValueKnown, byte[] previousEncodedValue) {
       this.participant = participant;
       this.secureKey = secureKey;
       this.encodedValue = encodedValue;
+      this.previousValueKnown = previousValueKnown;
+      this.previousEncodedValue = previousEncodedValue;
     }
   }
 

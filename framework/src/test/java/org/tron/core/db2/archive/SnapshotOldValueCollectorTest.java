@@ -35,6 +35,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.Test;
@@ -61,6 +63,7 @@ import org.tron.core.db2.stateroot.PathStateRoot;
 import org.tron.core.db2.stateroot.PathStateRootMetadata;
 import org.tron.core.db2.stateroot.PathStateRuntimeAdmission;
 import org.tron.core.db2.stateroot.PathStateRuntimeAttachment;
+import org.tron.core.db2.stateroot.PathStateSnapshotDelta;
 import org.tron.core.db2.stateroot.PathStateSnapshotHead;
 import org.tron.core.db2.stateroot.PathStateStoreManifest;
 import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
@@ -71,6 +74,52 @@ import org.tron.protos.Protocol.Account;
 import org.tron.protos.Protocol.Transaction;
 
 public class SnapshotOldValueCollectorTest extends BaseMethodTest {
+
+  @Test
+  public void deferredPathStateCaptureDoesNotWaitForCollectorAndDrainsOnClose()
+      throws Exception {
+    MemoryDb codeDb = new MemoryDb("code");
+    SnapshotManager manager = new SnapshotManager("");
+    Chainbase code = new Chainbase(new SnapshotRoot(codeDb));
+    manager.add(code);
+    manager.enable();
+    CountDownLatch collecting = new CountDownLatch(1);
+    CountDownLatch release = new CountDownLatch(1);
+    AtomicReference<PathStateBlockTransition> published = new AtomicReference<>();
+    PathStateRuntimeAttachment attachment = PathStateRuntimeAttachment.deferred(view -> {
+      collecting.countDown();
+      try {
+        if (!release.await(5, TimeUnit.SECONDS)) {
+          throw new IOException("timed out waiting to release deferred collector");
+        }
+      } catch (InterruptedException interrupted) {
+        Thread.currentThread().interrupt();
+        throw new IOException("deferred collector interrupted", interrupted);
+      }
+      BlockSnapshotMeta meta = view.getMeta();
+      return new PathStateBlockTransition(meta.getBlockNumber(), meta.getBlockHash(),
+          meta.getParentHash(), meta.getTimestamp(), P66Phase.P66_ON,
+          Collections.singletonList(
+              PathStateMutation.put("code", bytes("contract"), bytes("runtime"))),
+          view.getMutationViewDigest());
+    }, published::set, (blockNumber, blockHash) -> { }, null, (meta, transition) -> null);
+    attachment.synchronizeReadyHead(PathStateRootMetadata.base(0, hash(0), hash(9), 0,
+        P66Phase.P66_ON, hash(7), hash(8), hash(6)));
+    manager.attachPathStateRuntime(attachment);
+
+    try (ISession block = manager.buildSession()) {
+      code.put(bytes("contract"), bytes("runtime"));
+      block.commit(BlockSnapshotMeta.forBlock(1, hash(1), hash(0), 3_000L));
+    }
+    assertTrue(collecting.await(5, TimeUnit.SECONDS));
+    assertNull(published.get());
+    release.countDown();
+    attachment.close();
+    assertEquals(1, published.get().getBlockNumber());
+    assertEquals(PathStateRuntimeAttachment.State.READY, attachment.status().getState());
+    assertSame(attachment, manager.detachPathStateRuntime(attachment));
+    manager.shutdown();
+  }
 
   @Test
   public void pathStateRuntimeCoexistsWithArchiveAtBlockFinalBoundary() throws Exception {
@@ -86,8 +135,15 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
     manager.enable();
     manager.installArchiveCollector(new SnapshotOldValueCollector(), diff -> { });
     AtomicReference<PathStateBlockTransition> published = new AtomicReference<>();
+    AtomicReference<byte[]> capturedViewDigest = new AtomicReference<>();
+    SnapshotPathStateTransitionCollector collector = new SnapshotPathStateTransitionCollector(
+        key -> Collections.emptyMap());
     PathStateRuntimeAttachment attachment = new PathStateRuntimeAttachment(
-        new SnapshotPathStateTransitionCollector(key -> Collections.emptyMap()), published::set);
+        view -> {
+          capturedViewDigest.set(view.getMutationViewDigest());
+          return collector.collect(view);
+        }, published::set,
+        (blockNumber, blockHash) -> { }, null, (meta, transition) -> null);
     manager.attachPathStateRuntime(attachment);
 
     byte[] key = bytes("contract");
@@ -101,7 +157,52 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
     assertEquals(1, published.get().getMutations().size());
     assertEquals("code", published.get().getMutations().get(0).getDbName());
     assertArrayEquals(key, published.get().getMutations().get(0).getCanonicalKey());
+    assertArrayEquals(capturedViewDigest.get(), published.get().getMutationViewDigest());
+    assertFalse(Arrays.equals(published.get().getPayloadDigest(),
+        published.get().getMutationViewDigest()));
     assertSame(attachment, manager.detachPathStateRuntime(attachment));
+    manager.shutdown();
+  }
+
+  @Test
+  public void pathStateForwardDeltaIsOwnedByTheSameBlockSnapshotLayer() throws Exception {
+    MemoryDb codeDb = new MemoryDb("code");
+    SnapshotManager manager = new SnapshotManager("");
+    Chainbase code = new Chainbase(new SnapshotRoot(codeDb));
+    manager.add(code);
+    manager.enable();
+    manager.installArchiveCollector(new SnapshotOldValueCollector(), diff -> { });
+    AtomicReference<PathStateBlockTransition> published = new AtomicReference<>();
+    AtomicReference<PathStateSnapshotDelta> prepared = new AtomicReference<>();
+    PathStateRuntimeAttachment attachment = new PathStateRuntimeAttachment(view -> {
+      BlockSnapshotMeta meta = view.getMeta();
+      return new PathStateBlockTransition(meta.getBlockNumber(), meta.getBlockHash(),
+          meta.getParentHash(), meta.getTimestamp(), P66Phase.P66_ON,
+          Collections.singletonList(
+              PathStateMutation.put("code", bytes("contract"), bytes("runtime"))),
+          view.getMutationViewDigest());
+    }, published::set, (blockNumber, blockHash) -> { }, null, (meta, transition) -> {
+      PathStateSnapshotDelta delta = mock(PathStateSnapshotDelta.class);
+      when(delta.getMeta()).thenReturn(meta);
+      when(delta.getTransitionPayloadDigest()).thenReturn(transition.getPayloadDigest());
+      when(delta.getMutationViewDigest()).thenReturn(transition.getMutationViewDigest());
+      prepared.set(delta);
+      return delta;
+    });
+    manager.attachPathStateRuntime(attachment);
+
+    BlockSnapshotMeta meta = BlockSnapshotMeta.forBlock(1, hash(1), hash(0), 3_000L);
+    try (ISession block = manager.buildSession()) {
+      code.put(bytes("contract"), bytes("runtime"));
+      block.commit(meta);
+    }
+
+    SnapshotImpl layer = (SnapshotImpl) code.getHead();
+    assertEquals(meta, layer.getBlockSnapshotMeta());
+    assertSame(prepared.get(), layer.getPreparedPathStateDelta());
+    assertEquals(1, published.get().getBlockNumber());
+    assertFalse(attachment.isFailed());
+    manager.detachPathStateRuntime(attachment);
     manager.shutdown();
   }
 
@@ -284,6 +385,8 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
     PathStateMutation firstAsset = mutation(activation, "account-asset",
         Bytes.concat(firstAddress, bytes("1000021")));
     assertArrayEquals(Longs.toByteArray(210L), firstAsset.getCanonicalValue());
+    assertTrue(firstAccount.isPreviousValueKnown());
+    assertFalse(firstAsset.isPreviousValueKnown());
 
     byte[] codeKey = bytes("after-activation");
     try (ISession block = manager.buildSession()) {
@@ -296,6 +399,8 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
     assertEquals(P66Phase.P66_ON, published.get(1).getPhase());
     assertEquals(1, published.get(1).getMutations().size());
     assertEquals("code", published.get(1).getMutations().get(0).getDbName());
+    assertTrue(published.get(1).getMutations().get(0).isPreviousValueKnown());
+    assertNull(published.get(1).getMutations().get(0).getPreviousPhysicalValue());
     manager.detachPathStateRuntime(attachment);
     manager.shutdown();
   }

@@ -92,6 +92,38 @@ public class PathStateLayerTest {
   }
 
   @Test
+  public void preparedLayerValidationDoesNotReadNodeStores() throws Exception {
+    Fixture fixture = publishedBase("prepared-zero-read", Engine.ROCKSDB);
+    PathStateNodeStoreSet parentStores = PathStateNodeStoreSet.openPublished(
+        fixture.manifest, fixture.base);
+    PathStateNodeStoreSet childStores = null;
+    try {
+      PathStateRoot parentRoot = parentStores.createRoot();
+      PathStateBlockTransition transition = new PathStateBlockTransition(101, bytes(11),
+          fixture.base.getBlockHash(), 303, P66Phase.P66_ON, Collections.singletonList(
+              PathStateMutation.put("proposal", new byte[]{1}, new byte[]{5})));
+      PreparedPathStateTransition prepared = PreparedPathStateTransition.prepare(
+          fixture.base, parentRoot.snapshot(), transition);
+      PathStateRootMetadata identity = PathStateRootMetadata.layer(101, bytes(11),
+          fixture.base.getBlockHash(), 303, P66Phase.P66_ON,
+          fixture.manifest.getIdentityDigest(), fixture.base.getStateRoot(),
+          prepared.getStateRoot(), transition.getPayloadDigest());
+      childStores = PathStateNodeStoreSet.beginLayer(fixture.manifest, identity, parentStores);
+      long readsBefore = childStores.nodeStoreGetCalls();
+
+      assertArrayEquals(prepared.getStateRoot(),
+          childStores.createRootFrom(prepared).rootHash());
+      assertEquals(readsBefore, childStores.nodeStoreGetCalls());
+    } finally {
+      if (childStores != null) {
+        childStores.close();
+      } else {
+        parentStores.close();
+      }
+    }
+  }
+
+  @Test
   public void currentLayerRestoreFailsClosedWhenDurableLeafIsMissing() throws Exception {
     Fixture fixture = publishedBase("corrupt-layer", Engine.ROCKSDB);
     PathStateRootMetadata layer;

@@ -3,12 +3,9 @@ package org.tron.core.db2.archive;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
 import java.util.function.BooleanSupplier;
-import org.tron.core.db2.common.WrappedByteArray;
 
 /** Scheme 2 collector: read old values from the completed block layer's previous view. */
 public final class SnapshotOldValueCollector implements OldValueCollector {
@@ -54,15 +51,10 @@ public final class SnapshotOldValueCollector implements OldValueCollector {
         BlockChangeView.PostValue postValue = change.getPostValue();
         if (accountAssetProjector != null
             && AccountAssetArchiveProjector.ACCOUNT_DB.equals(database.getDbName())) {
-          Map<WrappedByteArray, byte[]> oldPhysicalAssets = Collections.emptyMap();
-          if (accountAssetProjector.requiresOldPhysicalAssets(
-              oldValue.isPresent() ? oldValue.getValue() : null, postValue)) {
-            oldPhysicalAssets = AccountAssetOldPhysicalAssetsSource.captureRequired(
-                oldPhysicalAssetsSource, key);
-          }
-          AccountAssetArchiveProjector.Projection projection = accountAssetProjector.project(
-              key, oldValue.isPresent() ? oldValue.getValue() : null, postValue,
-              targetAssetOptimizationEnabled, oldPhysicalAssets);
+          AccountAssetArchiveProjector.Projection projection =
+              accountAssetProjector.projectWithOldPhysicalAssetsSource(
+                  key, oldValue.isPresent() ? oldValue.getValue() : null, postValue,
+                  targetAssetOptimizationEnabled, oldPhysicalAssetsSource);
           oldValue = projection.oldAccount;
           postValue = projection.postAccount;
           accountAssetEntries.addAll(projection.reverseAssets);
@@ -79,7 +71,7 @@ public final class SnapshotOldValueCollector implements OldValueCollector {
       groups.add(new BlockReverseDiff.DbGroup(
           AccountAssetArchiveProjector.ACCOUNT_ASSET_DB, accountAssetEntries));
     }
-    return new BlockReverseDiff(view.getMeta(), groups);
+    return new BlockReverseDiff(view.getMeta(), groups, view.getMutationViewDigest());
   }
 
   /** Resolves proposal 66 from the same immutable target block view being projected. */

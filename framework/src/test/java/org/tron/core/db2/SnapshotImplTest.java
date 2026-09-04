@@ -2,14 +2,24 @@ package org.tron.core.db2;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
+import static org.junit.Assert.assertThrows;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import java.lang.reflect.Constructor;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.util.Collections;
 import org.junit.Test;
 import org.tron.common.BaseMethodTest;
+import org.tron.core.db2.archive.BlockReverseDiff;
+import org.tron.core.db2.archive.BlockSnapshotMeta;
 import org.tron.core.db2.core.Snapshot;
 import org.tron.core.db2.core.SnapshotImpl;
 import org.tron.core.db2.core.SnapshotManager;
 import org.tron.core.db2.core.SnapshotRoot;
+import org.tron.core.db2.stateroot.PathStateSnapshotDelta;
 
 public class SnapshotImplTest extends BaseMethodTest {
   private RevokingDbWithCacheNewValueTest.TestRevokingTronStore tronDatabase;
@@ -161,6 +171,53 @@ public class SnapshotImplTest extends BaseMethodTest {
     assertEquals(new String("value4".getBytes()), new String(s4));
   }
 
+  @Test
+  public void testAttachBlockArtifactsRequiresOneSnapshotIdentity() throws Exception {
+    SnapshotRoot root = new SnapshotRoot(tronDatabase.getDb());
+    SnapshotImpl layer = getSnapshotImplIns(root);
+    BlockSnapshotMeta meta = BlockSnapshotMeta.forBlock(1, hash(1), hash(0), 3_000L);
+    PathStateSnapshotDelta delta = mock(PathStateSnapshotDelta.class);
+    when(delta.getMeta()).thenReturn(meta);
+
+    attachBlockArtifacts(layer, meta, null, delta);
+
+    assertEquals(meta, layer.getBlockSnapshotMeta());
+    assertSame(delta, layer.getPreparedPathStateDelta());
+
+    PathStateSnapshotDelta wrong = mock(PathStateSnapshotDelta.class);
+    when(wrong.getMeta()).thenReturn(
+        BlockSnapshotMeta.forBlock(2, hash(2), hash(1), 6_000L));
+    InvocationTargetException failure = assertThrows(InvocationTargetException.class,
+        () -> attachBlockArtifacts(layer, meta, null, wrong));
+    assertEquals(IllegalArgumentException.class, failure.getCause().getClass());
+    assertSame(delta, layer.getPreparedPathStateDelta());
+  }
+
+  @Test
+  public void testAttachBlockArtifactsRequiresOneMutationViewIdentity() throws Exception {
+    SnapshotRoot root = new SnapshotRoot(tronDatabase.getDb());
+    SnapshotImpl layer = getSnapshotImplIns(root);
+    BlockSnapshotMeta meta = BlockSnapshotMeta.forBlock(1, hash(1), hash(0), 3_000L);
+    byte[] viewDigest = hash(7);
+    BlockReverseDiff reverseDiff = new BlockReverseDiff(meta, Collections.emptyList(),
+        viewDigest);
+    PathStateSnapshotDelta delta = mock(PathStateSnapshotDelta.class);
+    when(delta.getMeta()).thenReturn(meta);
+    when(delta.getMutationViewDigest()).thenReturn(viewDigest);
+
+    attachBlockArtifacts(layer, meta, reverseDiff, delta);
+    assertSame(reverseDiff, layer.getPreparedArchiveBlock());
+    assertSame(delta, layer.getPreparedPathStateDelta());
+
+    PathStateSnapshotDelta wrong = mock(PathStateSnapshotDelta.class);
+    when(wrong.getMeta()).thenReturn(meta);
+    when(wrong.getMutationViewDigest()).thenReturn(hash(8));
+    InvocationTargetException failure = assertThrows(InvocationTargetException.class,
+        () -> attachBlockArtifacts(layer, meta, reverseDiff, wrong));
+    assertEquals(IllegalArgumentException.class, failure.getCause().getClass());
+    assertSame(delta, layer.getPreparedPathStateDelta());
+  }
+
   /**
    * The constructor of SnapshotImpl is not public
    * so reflection is used to construct the object here.
@@ -170,6 +227,22 @@ public class SnapshotImplTest extends BaseMethodTest {
     Constructor constructor = clazz.getDeclaredConstructor(Snapshot.class);
     constructor.setAccessible(true);
     return (SnapshotImpl) constructor.newInstance(snapshot);
+  }
+
+  private void attachBlockArtifacts(SnapshotImpl snapshot, BlockSnapshotMeta meta,
+      BlockReverseDiff reverseDiff, PathStateSnapshotDelta delta) throws Exception {
+    Method method = SnapshotImpl.class.getDeclaredMethod("attachBlockArtifacts",
+        BlockSnapshotMeta.class, BlockReverseDiff.class, PathStateSnapshotDelta.class);
+    method.setAccessible(true);
+    method.invoke(snapshot, meta, reverseDiff, delta);
+  }
+
+  private static byte[] hash(int seed) {
+    byte[] hash = new byte[32];
+    for (int index = 0; index < hash.length; index++) {
+      hash[index] = (byte) (seed + index);
+    }
+    return hash;
   }
 
 }

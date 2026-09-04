@@ -8,9 +8,13 @@ import static org.junit.Assert.assertTrue;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import org.bouncycastle.util.encoders.Hex;
 import org.junit.Test;
 import org.tron.common.crypto.Hash;
@@ -174,6 +178,161 @@ public class PathMerkleTrieTest {
     assertTrue(restored.getLastNodePuts() <= PathMerkleTrie.SECURE_KEY_LENGTH * 2 + 1);
   }
 
+  @Test
+  public void leavesHashedSiblingsUnresolvedUntilTheirPathIsVisited() {
+    byte[][] keys = new byte[16][];
+    byte[][] values = new byte[16][];
+    InMemoryPathNodeStore sourceStore = new InMemoryPathNodeStore();
+    PathMerkleTrie source = new PathMerkleTrie(sourceStore);
+    for (int index = 0; index < keys.length; index++) {
+      keys[index] = filledKey(index << 4);
+      values[index] = value("hashed-child-value-that-is-long-enough-" + index);
+      source.put(keys[index], values[index]);
+    }
+    byte[] root = source.rootHash();
+
+    InMemoryPathNodeStore restoredStore = new InMemoryPathNodeStore();
+    restoredStore.nodes.putAll(sourceStore.nodes);
+    PathMerkleTrie restored = new PathMerkleTrie(restoredStore);
+    restored.restoreRoot(root);
+    int readsAfterRoot = restoredStore.gets;
+    String corruptSibling = Hex.toHexString(new byte[]{(byte) 0x0a});
+    assertTrue(restoredStore.nodes.containsKey(corruptSibling));
+    restoredStore.nodes.put(corruptSibling, new byte[]{1});
+
+    assertArrayEquals(values[3], restored.get(keys[3]));
+    assertEquals(readsAfterRoot + 1, restoredStore.gets);
+    assertEquals(16, restored.getHashReferenceCreateCount());
+    assertEquals(1, restored.getHashReferenceResolveCount());
+    assertThrows(IllegalStateException.class, restored::verifyAllNodeStore);
+  }
+
+  @Test
+  public void lazyDenseBranchHasAStableEagerReadBaseline() {
+    byte[][] keys = new byte[16][];
+    byte[][] values = new byte[16][];
+    InMemoryPathNodeStore sourceStore = new InMemoryPathNodeStore();
+    PathMerkleTrie source = new PathMerkleTrie(sourceStore);
+    for (int index = 0; index < keys.length; index++) {
+      keys[index] = filledKey(index << 4);
+      values[index] = value("hashed-child-value-that-is-long-enough-" + index);
+      source.put(keys[index], values[index]);
+    }
+    byte[] root = source.rootHash();
+
+    InMemoryPathNodeStore eagerStore = new InMemoryPathNodeStore();
+    eagerStore.nodes.putAll(copyNodeMap(sourceStore.nodes));
+    PathMerkleTrie eager = new PathMerkleTrie(eagerStore, false);
+    eager.restoreRoot(root);
+    assertArrayEquals(values[3], eager.get(keys[3]));
+
+    InMemoryPathNodeStore lazyStore = new InMemoryPathNodeStore();
+    lazyStore.nodes.putAll(copyNodeMap(sourceStore.nodes));
+    PathMerkleTrie lazy = new PathMerkleTrie(lazyStore);
+    lazy.restoreRoot(root);
+    assertArrayEquals(values[3], lazy.get(keys[3]));
+
+    assertEquals(17, eagerStore.gets);
+    assertEquals(2, lazyStore.gets);
+    assertEquals(17, eager.getNodeHashVerifyCount());
+    assertEquals(2, lazy.getNodeHashVerifyCount());
+    assertEquals(eager.getNodeDecodeCount(), lazy.getNodeDecodeCount());
+    assertEquals(16, lazy.getHashReferenceCreateCount());
+    assertEquals(1, lazy.getHashReferenceResolveCount());
+
+    assertArrayEquals(values[3], lazy.get(keys[3]));
+    assertEquals(2, lazyStore.gets);
+    assertEquals(2, lazy.getNodeHashVerifyCount());
+    assertEquals(1, lazy.getHashReferenceResolveCount());
+  }
+
+  @Test
+  public void lazyRestoreProducesTheSameUpdatedPathNodeSet() {
+    int leafCount = 128;
+    byte[][] keys = new byte[leafCount][];
+    byte[][] values = new byte[leafCount][];
+    InMemoryPathNodeStore sourceStore = new InMemoryPathNodeStore();
+    PathMerkleTrie source = new PathMerkleTrie(sourceStore);
+    for (int index = 0; index < leafCount; index++) {
+      keys[index] = Hash.sha3(value("key-" + index));
+      values[index] = value("initial-value-" + index);
+      source.put(keys[index], values[index]);
+    }
+    byte[] initialRoot = source.rootHash();
+    Map<String, byte[]> initialNodes = copyNodeMap(sourceStore.nodes);
+
+    values[17] = value("updated-value");
+    InMemoryPathNodeStore eagerStore = new InMemoryPathNodeStore();
+    eagerStore.nodes.putAll(copyNodeMap(initialNodes));
+    PathMerkleTrie eager = new PathMerkleTrie(eagerStore, false);
+    eager.restoreRoot(initialRoot);
+    eager.put(keys[17], values[17]);
+    eager.delete(keys[33]);
+    byte[] expectedRoot = eager.rootHash();
+
+    InMemoryPathNodeStore lazyStore = new InMemoryPathNodeStore();
+    lazyStore.nodes.putAll(initialNodes);
+    PathMerkleTrie lazy = new PathMerkleTrie(lazyStore);
+    lazy.restoreRoot(initialRoot);
+    lazy.put(keys[17], values[17]);
+    lazy.delete(keys[33]);
+
+    assertArrayEquals(expectedRoot, lazy.rootHash());
+    assertNodeMapsEqual(eagerStore.nodes, lazyStore.nodes);
+  }
+
+  @Test
+  public void prefixBatchMatchesSequentialMixedChangesFromLazyRoot() {
+    int leafCount = 512;
+    byte[][] keys = new byte[leafCount][];
+    byte[][] values = new byte[leafCount][];
+    InMemoryPathNodeStore sourceStore = new InMemoryPathNodeStore();
+    PathMerkleTrie source = new PathMerkleTrie(sourceStore);
+    for (int index = 0; index < leafCount; index++) {
+      keys[index] = Hash.sha3(value("batch-key-" + index));
+      values[index] = value("batch-value-" + index);
+      source.put(keys[index], values[index]);
+    }
+    byte[] initialRoot = source.rootHash();
+    Map<String, byte[]> initialNodes = copyNodeMap(sourceStore.nodes);
+
+    InMemoryPathNodeStore sequentialStore = new InMemoryPathNodeStore();
+    sequentialStore.nodes.putAll(copyNodeMap(initialNodes));
+    PathMerkleTrie sequential = new PathMerkleTrie(sequentialStore);
+    sequential.restoreRoot(initialRoot);
+    List<PathMerkleTrie.BatchMutation> changes = new ArrayList<>();
+    for (int index = 0; index < 40; index++) {
+      byte[] updated = value("batch-updated-" + index);
+      sequential.put(keys[index], updated);
+      changes.add(new PathMerkleTrie.BatchMutation(keys[index], updated));
+    }
+    for (int index = 40; index < 60; index++) {
+      sequential.delete(keys[index]);
+      changes.add(new PathMerkleTrie.BatchMutation(keys[index], null));
+    }
+    for (int index = 0; index < 40; index++) {
+      byte[] insertedKey = Hash.sha3(value("batch-inserted-key-" + index));
+      byte[] insertedValue = value("batch-inserted-value-" + index);
+      sequential.put(insertedKey, insertedValue);
+      changes.add(new PathMerkleTrie.BatchMutation(insertedKey, insertedValue));
+    }
+    byte[] expectedRoot = sequential.rootHash();
+
+    InMemoryPathNodeStore batchStore = new InMemoryPathNodeStore();
+    batchStore.nodes.putAll(copyNodeMap(initialNodes));
+    PathMerkleTrie batch = new PathMerkleTrie(batchStore);
+    batch.restoreRoot(initialRoot);
+    ExecutorService executor = Executors.newFixedThreadPool(4);
+    try {
+      batch.applyBatch(changes, executor);
+      assertArrayEquals(expectedRoot, batch.rootHash());
+      assertNodeMapsEqual(sequentialStore.nodes, batchStore.nodes);
+      assertTrue(batchStore.gets <= sequentialStore.gets);
+    } finally {
+      executor.shutdownNow();
+    }
+  }
+
   private static byte[] referenceRoot(byte[][] keys, byte[][] values) {
     TrieImpl reference = new TrieImpl();
     reference.setAsync(false);
@@ -211,6 +370,14 @@ public class PathMerkleTrieTest {
     for (String path : expected.keySet()) {
       assertArrayEquals(expected.get(path), actual.get(path));
     }
+  }
+
+  private static Map<String, byte[]> copyNodeMap(Map<String, byte[]> source) {
+    Map<String, byte[]> copy = new LinkedHashMap<>();
+    for (Map.Entry<String, byte[]> entry : source.entrySet()) {
+      copy.put(entry.getKey(), Arrays.copyOf(entry.getValue(), entry.getValue().length));
+    }
+    return copy;
   }
 
   private static final class InMemoryPathNodeStore implements PathNodeStore {

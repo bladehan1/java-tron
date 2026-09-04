@@ -30,6 +30,28 @@ public final class AccountAssetArchiveProjector {
       Map<WrappedByteArray, byte[]> oldPhysicalAssetsForAddress) {
     Account oldAccount = parse(rawOld);
     Account postAccount = rawPost.isPresent() ? parse(rawPost.getValue()) : null;
+    return projectParsed(accountKey, rawOld, rawPost, targetAssetOptimizationEnabled,
+        oldPhysicalAssetsForAddress, oldAccount, postAccount);
+  }
+
+  Projection projectWithOldPhysicalAssetsSource(byte[] accountKey, byte[] rawOld,
+      BlockChangeView.PostValue rawPost, boolean targetAssetOptimizationEnabled,
+      AccountAssetOldPhysicalAssetsSource oldPhysicalAssetsSource) {
+    Account oldAccount = parse(rawOld);
+    Account postAccount = rawPost.isPresent() ? parse(rawPost.getValue()) : null;
+    Map<WrappedByteArray, byte[]> oldPhysicalAssets = Collections.emptyMap();
+    if (requiresOldPhysicalAssets(oldAccount, postAccount)) {
+      oldPhysicalAssets = AccountAssetOldPhysicalAssetsSource.captureRequired(
+          oldPhysicalAssetsSource, accountKey);
+    }
+    return projectParsed(accountKey, rawOld, rawPost, targetAssetOptimizationEnabled,
+        oldPhysicalAssets, oldAccount, postAccount);
+  }
+
+  private Projection projectParsed(byte[] accountKey, byte[] rawOld,
+      BlockChangeView.PostValue rawPost, boolean targetAssetOptimizationEnabled,
+      Map<WrappedByteArray, byte[]> oldPhysicalAssetsForAddress, Account oldAccount,
+      Account postAccount) {
     boolean projectPost = postAccount != null
         && (postAccount.getAssetOptimized() || targetAssetOptimizationEnabled);
 
@@ -71,11 +93,12 @@ public final class AccountAssetArchiveProjector {
     }
 
     OldValue canonicalOld = oldAccount == null ? OldValue.absent()
-        : OldValue.present(canonicalAccount(accountKey, oldAccount,
+        : OldValue.present(canonicalAccount(accountKey, oldAccount, rawOld,
             oldAccount.getAssetOptimized()));
     BlockChangeView.PostValue canonicalPost = postAccount == null
         ? BlockChangeView.PostValue.absent()
-        : BlockChangeView.PostValue.present(canonicalAccount(accountKey, postAccount, projectPost));
+        : BlockChangeView.PostValue.present(canonicalAccount(accountKey, postAccount,
+            rawPost.getValue(), projectPost));
     if (canonicalPost.isPresent()) {
       codec.requireCanonicalLayout(phase(postAccount, projectPost),
           accountKey, canonicalPost.getValue(), changedAssetRows);
@@ -135,9 +158,9 @@ public final class AccountAssetArchiveProjector {
     return result;
   }
 
-  private byte[] canonicalAccount(byte[] accountKey, Account account, boolean projected) {
-    return codec.canonicalizeAccount(phase(account, projected), accountKey,
-        account.toByteArray());
+  private byte[] canonicalAccount(byte[] accountKey, Account account, byte[] rawAccount,
+      boolean projected) {
+    return codec.canonicalizeAccount(phase(account, projected), accountKey, account, rawAccount);
   }
 
   private Phase phase(Account account, boolean projected) {

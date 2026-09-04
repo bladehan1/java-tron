@@ -216,26 +216,34 @@ public class PathStateRootTest {
     List<PathStateMutation> changes = new ArrayList<>();
     for (int i = 0; i < 32; i++) {
       changes.add(PathStateMutation.put("account", bytes("initial-" + i),
-          bytes("updated-" + i)));
+          bytes("updated-" + i)).withPreviousPhysicalValue(bytes("value-" + i)));
     }
     for (int i = 32; i < 48; i++) {
-      changes.add(PathStateMutation.delete("account", bytes("initial-" + i)));
+      changes.add(PathStateMutation.delete("account", bytes("initial-" + i))
+          .withPreviousPhysicalValue(bytes("value-" + i)));
     }
     for (int i = 0; i < 24; i++) {
       changes.add(PathStateMutation.put("storage-row", bytes("slot-" + i),
-          bytes("storage-" + i)));
+          bytes("storage-" + i)).withPreviousPhysicalValue(null));
       changes.add(PathStateMutation.put("abi", bytes("contract-" + i),
-          bytes("abi-" + i)));
+          bytes("abi-" + i)).withPreviousPhysicalValue(null));
     }
     sequential.apply(changes);
     ExecutorService participants = Executors.newFixedThreadPool(4);
     ExecutorService branches = Executors.newFixedThreadPool(8);
+    PathStateRoot.ParallelApplyStats stats;
     try {
-      parallel.applyParallel(changes, participants, branches);
+      stats = parallel.applyParallel(changes, participants, branches);
     } finally {
       participants.shutdownNow();
       branches.shutdownNow();
     }
+    assertEquals(3, stats.participantCount());
+    assertEquals(96, stats.mutationCount());
+    assertEquals(96, stats.authoritativePreviousValues());
+    assertEquals(48, stats.maxParticipantMutations());
+    assertTrue(stats.participantWorkMillis() >= stats.maxParticipantMillis());
+    assertTrue(stats.wallMillis() >= 0);
     assertArrayEquals(sequential.rootHash(), parallel.rootHash());
     assertEquals(sequential.pendingLeafMutations().size(),
         parallel.pendingLeafMutations().size());
