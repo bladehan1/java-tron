@@ -4,9 +4,13 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
+import org.tron.common.crypto.Hash;
+import org.tron.core.db2.archive.BlockSnapshotMeta;
 
 /** Immutable, memory-only candidate trie result for one exact block transition. */
 public final class PreparedPathStateTransition {
@@ -60,6 +64,12 @@ public final class PreparedPathStateTransition {
     return nodeMutations.size();
   }
 
+  /** Freezes this candidate as one immutable Snapshot-owned forward delta. */
+  public PathStateSnapshotDelta toSnapshotDelta(BlockSnapshotMeta meta) {
+    return PathStateSnapshotDelta.from(meta, this,
+        new PathStateCanonicalizer().participantScope());
+  }
+
   PathStateRootMetadata getParent() {
     return parent;
   }
@@ -78,6 +88,54 @@ public final class PreparedPathStateTransition {
 
   boolean extendsParent(PathStateRootMetadata expected) {
     return Arrays.equals(parent.encode(), expected.encode());
+  }
+
+  /** Validates the immutable candidate without reading any path-state Store. */
+  void validatePreparedTransition(PathStateParticipantScope scope) {
+    PathStateParticipantScope admittedScope = Objects.requireNonNull(scope, "scope");
+    if (transition.getBlockNumber() != parent.getBlockNumber() + 1
+        || !Arrays.equals(transition.getParentHash(), parent.getBlockHash())) {
+      throw new IllegalStateException("path-state prepared transition no longer extends parent");
+    }
+    byte[] candidateRoot = snapshot.getStateRoot();
+    if (candidateRoot.length != PathStateCommitmentCodec.ROOT_LENGTH) {
+      throw new IllegalStateException("path-state prepared root must contain exactly 32 bytes");
+    }
+    Set<Integer> admittedStoreIds = new LinkedHashSet<>();
+    admittedStoreIds.add(0);
+    for (PathStateParticipant participant : admittedScope.getParticipants()) {
+      admittedStoreIds.add(participant.getStoreId());
+    }
+    Set<NodeMutationKey> unique = new LinkedHashSet<>();
+    NodeMutation superRoot = null;
+    for (NodeMutation mutation : nodeMutations) {
+      if (!admittedStoreIds.contains(mutation.storeId)) {
+        throw new IllegalStateException("prepared path-state node has unknown Store ID");
+      }
+      if (mutation.path.length > PathMerkleTrie.SECURE_KEY_LENGTH * 2) {
+        throw new IllegalStateException("prepared path-state node path is too long");
+      }
+      for (byte nibble : mutation.path) {
+        if (nibble < 0 || nibble > 15) {
+          throw new IllegalStateException("prepared path-state node path is not nibble encoded");
+        }
+      }
+      if (!unique.add(new NodeMutationKey(mutation.storeId, mutation.path))) {
+        throw new IllegalStateException("duplicate prepared path-state node mutation");
+      }
+      if (mutation.encodedNode != null && mutation.encodedNode.length == 0) {
+        throw new IllegalStateException("prepared path-state node encoding is empty");
+      }
+      if (mutation.storeId == 0 && mutation.path.length == 0) {
+        superRoot = mutation;
+      }
+    }
+    if (!Arrays.equals(candidateRoot, parent.getStateRoot())) {
+      if (superRoot == null || superRoot.encodedNode == null
+          || !Arrays.equals(Hash.sha3(superRoot.encodedNode), candidateRoot)) {
+        throw new IllegalStateException("prepared path-state super root mutation is inconsistent");
+      }
+    }
   }
 
   private static void requireChild(PathStateRootMetadata parent,
@@ -161,6 +219,29 @@ public final class PreparedPathStateTransition {
     @Override
     public int hashCode() {
       return Arrays.hashCode(bytes);
+    }
+  }
+
+  private static final class NodeMutationKey {
+
+    private final int storeId;
+    private final byte[] path;
+
+    private NodeMutationKey(int storeId, byte[] path) {
+      this.storeId = storeId;
+      this.path = Arrays.copyOf(path, path.length);
+    }
+
+    @Override
+    public boolean equals(Object other) {
+      return this == other || other instanceof NodeMutationKey
+          && storeId == ((NodeMutationKey) other).storeId
+          && Arrays.equals(path, ((NodeMutationKey) other).path);
+    }
+
+    @Override
+    public int hashCode() {
+      return 31 * storeId + Arrays.hashCode(path);
     }
   }
 }

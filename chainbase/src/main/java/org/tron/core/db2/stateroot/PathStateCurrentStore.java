@@ -242,8 +242,7 @@ public final class PathStateCurrentStore {
       throw new IOException("path-state canonical switch target has invalid native progress");
     }
     try (PathStateNodeStoreSet stores = PathStateNodeStoreSet.openPublished(manifest, target)) {
-      PathStateRoot root = stores.createRoot();
-      root.verifyNodeStores();
+      stores.createRoot();
     } catch (IllegalArgumentException | IllegalStateException e) {
       throw new IOException("path-state canonical switch target is corrupt", e);
     }

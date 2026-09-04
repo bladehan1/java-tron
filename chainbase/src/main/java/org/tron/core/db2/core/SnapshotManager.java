@@ -52,6 +52,7 @@ import org.tron.core.db2.archive.HistoryCommitMarker;
 import org.tron.core.db2.archive.OldValueCollector;
 import org.tron.core.db2.stateroot.PathStateBlockTransition;
 import org.tron.core.db2.stateroot.PathStateRuntimeAttachment;
+import org.tron.core.db2.stateroot.PathStateSnapshotDelta;
 import org.tron.core.db2.common.DB;
 import org.tron.core.db2.common.IRevokingDB;
 import org.tron.core.db2.common.Key;
@@ -252,6 +253,7 @@ public class SnapshotManager implements RevokingDatabase {
    */
   public synchronized void commit(BlockSnapshotMeta meta) {
     Objects.requireNonNull(meta, "meta");
+    long startedNanos = System.nanoTime();
     if (activeSession <= 0) {
       throw new RevokingStoreIllegalStateException(activeSession);
     }
@@ -269,14 +271,19 @@ public class SnapshotManager implements RevokingDatabase {
     if (oldValueCollector != null || pathStateRuntimeAttachment != null) {
       changeView = BlockChangeView.capture(meta, dbs);
     }
+    long frozenNanos = System.nanoTime();
     BlockReverseDiff reverseDiff = null;
     if (oldValueCollector != null) {
       reverseDiff = Objects.requireNonNull(
           oldValueCollector.collect(changeView),
           "archive collector returned null");
     }
+    long archiveNanos = System.nanoTime();
     PathStateBlockTransition pathStateTransition = pathStateRuntimeAttachment == null ? null
         : pathStateRuntimeAttachment.capture(changeView);
+    long pathNanos = System.nanoTime();
+    PathStateSnapshotDelta pathStateDelta = pathStateTransition == null ? null
+        : pathStateRuntimeAttachment.preparedSnapshotDelta(pathStateTransition);
 
     dbs.forEach(db -> {
       if (db.getHead().isOptimized()) {
@@ -285,13 +292,28 @@ public class SnapshotManager implements RevokingDatabase {
     });
 
     for (Chainbase db : dbs) {
-      ((SnapshotImpl) db.getHead()).attachArchiveBlock(meta,
-          ArchiveStoreScope.isStateDatabase(db.getDbName()) ? reverseDiff : null);
+      boolean stateDatabase = ArchiveStoreScope.isStateDatabase(db.getDbName());
+      ((SnapshotImpl) db.getHead()).attachBlockArtifacts(meta,
+          stateDatabase ? reverseDiff : null, stateDatabase ? pathStateDelta : null);
     }
+    long attachedNanos = System.nanoTime();
     --activeSession;
     if (pathStateRuntimeAttachment != null) {
       pathStateRuntimeAttachment.publish(pathStateTransition);
     }
+    long completedNanos = System.nanoTime();
+    if (changeView != null) {
+      logger.info("Block-final artifact stages: head={}, freezeMs={}, archiveMs={}, "
+              + "pathCaptureMs={}, attachMs={}, publishMs={}, totalMs={}",
+          meta.getBlockNumber(), elapsedMillis(startedNanos, frozenNanos),
+          elapsedMillis(frozenNanos, archiveNanos), elapsedMillis(archiveNanos, pathNanos),
+          elapsedMillis(pathNanos, attachedNanos), elapsedMillis(attachedNanos, completedNanos),
+          elapsedMillis(startedNanos, completedNanos));
+    }
+  }
+
+  private static long elapsedMillis(long startedNanos, long completedNanos) {
+    return TimeUnit.NANOSECONDS.toMillis(completedNanos - startedNanos);
   }
 
   /** Previews optional producer metadata from the active block session without publishing it. */

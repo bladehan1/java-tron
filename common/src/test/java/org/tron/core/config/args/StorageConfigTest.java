@@ -88,19 +88,36 @@ public class StorageConfigTest {
     assertEquals(128, defaults.getPathStateRoot().getReversibleLayerLimit());
     assertEquals(2147483648L, defaults.getPathStateRoot().getReversibleLayerBytes());
     assertEquals(268435456L, defaults.getPathStateRoot().getWriteBufferBytes());
+    assertEquals(268435456L, defaults.getPathStateRoot().getNodeCacheBytes());
+    assertEquals(4, defaults.getPathStateRoot().getParticipantThreads());
+    assertEquals(8, defaults.getPathStateRoot().getBranchThreads());
     assertFalse(defaults.getPathStateRoot().isRebuildFromGenesis());
     assertTrue(defaults.getPathStateRoot().isVerifyEveryBlock());
+    assertFalse(defaults.getPathStateRoot().isVolatileSnapshotBenchmark());
+    assertFalse(defaults.getPathStateRoot().isAsyncPrepareBenchmark());
 
     StorageConfig configured = StorageConfig.fromConfig(withRef(
         "storage.pathStateRoot { enabled = true, mode = shadow, directory = root-test, "
             + "formatVersion = 1, reversibleLayerLimit = 8, reversibleLayerBytes = 4096, "
-            + "writeBufferBytes = 1024, rebuildFromGenesis = false, "
-            + "verifyEveryBlock = true }"));
+            + "writeBufferBytes = 1024, nodeCacheBytes = 2048, participantThreads = 2, "
+            + "branchThreads = 3, rebuildFromGenesis = false, "
+            + "verifyEveryBlock = true, volatileSnapshotBenchmark = true, "
+            + "asyncPrepareBenchmark = true }"));
     assertTrue(configured.getPathStateRoot().isEnabled());
     assertEquals("root-test", configured.getPathStateRoot().getDirectory());
     assertEquals(8, configured.getPathStateRoot().getReversibleLayerLimit());
     assertEquals(4096L, configured.getPathStateRoot().getReversibleLayerBytes());
     assertEquals(1024L, configured.getPathStateRoot().getWriteBufferBytes());
+    assertEquals(2048L, configured.getPathStateRoot().getNodeCacheBytes());
+    assertEquals(2, configured.getPathStateRoot().getParticipantThreads());
+    assertEquals(3, configured.getPathStateRoot().getBranchThreads());
+    assertTrue(configured.getPathStateRoot().isVolatileSnapshotBenchmark());
+    assertTrue(configured.getPathStateRoot().isAsyncPrepareBenchmark());
+  }
+
+  @Test(expected = IllegalArgumentException.class)
+  public void testPathStateRootRejectsInvalidPrepareThreads() {
+    StorageConfig.fromConfig(withRef("storage.pathStateRoot.participantThreads = 0"));
   }
 
   @Test(expected = IllegalArgumentException.class)

@@ -16,6 +16,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicLong;
 import org.tron.core.db2.stateroot.PathStateRootMetadata.Kind;
 
 /** Exact-27 participant and super-trie namespace views over one BASE or LAYER native database. */
@@ -64,6 +65,7 @@ public final class PathStateNodeStoreSet implements Closeable {
   private final PathStateNodeStoreSet parentStores;
   private final PathNodeStore superStore;
   private final byte[] manifestDigest;
+  private final AtomicLong nodeStoreGetCalls = new AtomicLong();
   private final Kind kind;
   private final PathStateRootMetadata expectedMetadata;
   private final boolean sealed;
@@ -310,6 +312,7 @@ public final class PathStateNodeStoreSet implements Closeable {
       throw new IllegalStateException("path-state layer has no parent node overlay");
     }
     PreparedPathStateTransition candidate = Objects.requireNonNull(prepared, "prepared");
+    candidate.validatePreparedTransition(scope);
     PathStateRoot next = PathStateRoot.fromSnapshot(scope,
         participant -> participantStores.get(participant.getDbName()), superStore,
         candidate.getSnapshot());
@@ -325,10 +328,13 @@ public final class PathStateNodeStoreSet implements Closeable {
         store.put(mutation.getPath(), encoded);
       }
     }
-    next.verifyNodeStores();
     root = next;
     rootClaimed = true;
     return root;
+  }
+
+  long nodeStoreGetCalls() {
+    return nodeStoreGetCalls.get();
   }
 
   synchronized List<PathStateRoot.LeafRecord> leafRecords() {
@@ -1186,6 +1192,7 @@ public final class PathStateNodeStoreSet implements Closeable {
 
     @Override
     public byte[] get(byte[] path) {
+      owner.nodeStoreGetCalls.incrementAndGet();
       return owner.get(key(path));
     }
 

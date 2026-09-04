@@ -26,6 +26,8 @@ import java.util.stream.Stream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.tron.common.crypto.Hash;
+import org.tron.core.db2.archive.BlockSnapshotMeta;
+import org.tron.core.db2.core.CommonCheckpointPayload;
 import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
 
 /**
@@ -74,6 +76,8 @@ public final class PathStatePhysicalStoreSet implements Closeable {
       'g', 'e', 'n', 'e', 'r', 'a', 't', 'i', 'o', 'n'};
   private static final byte[] SUPER_GENERATION_METADATA = new byte[]{'s', 'u', 'p', 'e', 'r', '-',
       'g', 'e', 'n', 'e', 'r', 'a', 't', 'i', 'o', 'n'};
+  private static final byte[] CHECKPOINT_TARGET_METADATA = new byte[]{'c', 'h', 'e', 'c', 'k',
+      'p', 'o', 'i', 'n', 't', '-', 't', 'a', 'r', 'g', 'e', 't', '-', 'v', '1'};
 
   private final Path directory;
   private final PathStatePhysicalStoreManifest manifest;
@@ -85,11 +89,13 @@ public final class PathStatePhysicalStoreSet implements Closeable {
   private final ExecutorService trieBranchExecutor;
   private final ResidentNodeCache residentNodeCache;
   private Map<BytesKey, ReverseJournalIndexEntry> reverseJournalIndex;
+  private byte[] cachedTrieTarget;
+  private PathStateRoot.Snapshot cachedTrieSnapshot;
   private boolean rootClaimed;
   private boolean closed;
 
   private PathStatePhysicalStoreSet(PathStatePhysicalStoreManifest manifest,
-      PathStateParticipantScope scope)
+      PathStateParticipantScope scope, long residentNodeCacheBytes)
       throws IOException {
     this.manifest = manifest;
     this.directory = manifest.getDirectory();
@@ -98,7 +104,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     this.participantPrepareExecutor = newTrieExecutor("participant-prepare",
         MAX_PARALLEL_PARTICIPANT_PREPARES);
     this.trieBranchExecutor = newTrieExecutor("branch-prepare", MAX_PARALLEL_TRIE_BRANCHES);
-    this.residentNodeCache = new ResidentNodeCache(STEADY_NODE_CACHE_BYTES);
+    this.residentNodeCache = new ResidentNodeCache(residentNodeCacheBytes);
     try {
       for (PathStateParticipant participant : scope.getParticipants()) {
         Path participantDirectory = directory.resolve(STORES_DIRECTORY).resolve(String.format(
@@ -124,12 +130,20 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     rejectLegacySharedNodes(root);
     PathStatePhysicalStoreManifest manifest = PathStatePhysicalStoreManifest.createOrOpen(root,
         Objects.requireNonNull(engine, "engine"));
-    return new PathStatePhysicalStoreSet(manifest, Objects.requireNonNull(scope, "scope"));
+    return new PathStatePhysicalStoreSet(manifest, Objects.requireNonNull(scope, "scope"),
+        STEADY_NODE_CACHE_BYTES);
   }
 
   /** Opens only a fully materialized physical layout; missing child databases fail closed. */
   public static PathStatePhysicalStoreSet openExisting(Path directory,
       PathStateParticipantScope scope, Engine engine) throws IOException {
+    return openExisting(directory, scope, engine, STEADY_NODE_CACHE_BYTES);
+  }
+
+  /** Opens a complete physical layout with an explicit shared resident-node cache budget. */
+  public static PathStatePhysicalStoreSet openExisting(Path directory,
+      PathStateParticipantScope scope, Engine engine, long residentNodeCacheBytes)
+      throws IOException {
     Path root = Objects.requireNonNull(directory, "directory").toAbsolutePath().normalize();
     rejectLegacySharedNodes(root);
     PathStatePhysicalStoreManifest manifest = PathStatePhysicalStoreManifest.validateExisting(
@@ -141,7 +155,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
           .resolve(NODES_DIRECTORY));
     }
     requireStoreDirectory(root.resolve(SUPER_DIRECTORY).resolve(NODES_DIRECTORY));
-    return new PathStatePhysicalStoreSet(manifest, admittedScope);
+    return new PathStatePhysicalStoreSet(manifest, admittedScope, residentNodeCacheBytes);
   }
 
   public synchronized PhysicalStore participant(String dbName) {
@@ -179,6 +193,18 @@ public final class PathStatePhysicalStoreSet implements Closeable {
 
   PathStateParticipantScope participantScope() {
     return scope;
+  }
+
+  long residentNodeCacheBytes() {
+    return residentNodeCache.bytes();
+  }
+
+  int residentNodeCacheEntries() {
+    return residentNodeCache.size();
+  }
+
+  long residentNodeCacheEvictions() {
+    return residentNodeCache.evictions();
   }
 
   synchronized void saveIngestCheckpoint(String dbName, PathStatePhysicalIngestCheckpoint value) {
@@ -575,6 +601,26 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     return prepareTransition(transition).target.getMetadata();
   }
 
+  /** Prepares one physical transition and its Snapshot-owned forward delta without any write. */
+  synchronized PreparedPhysicalTransition prepareSnapshotDelta(BlockSnapshotMeta meta,
+      PathStateBlockTransition transition) throws IOException {
+    requireOpen();
+    if (Files.exists(directory.resolve(INTENT_FILE), LinkOption.NOFOLLOW_LINKS)) {
+      throw new IOException("physical path-state prepare requires a settled CURRENT");
+    }
+    TransitionPlan plan = prepareTransition(transition);
+    return new PreparedPhysicalTransition(transition, plan,
+        snapshotDelta(Objects.requireNonNull(meta, "meta"), transition, plan));
+  }
+
+  /** Materializes an unchanged, previously prepared physical transition exactly once. */
+  synchronized PathStateRootMetadata applyAndPublish(PreparedPhysicalTransition prepared,
+      PathStateLayerLimits limits) throws IOException {
+    PreparedPhysicalTransition admitted = Objects.requireNonNull(prepared, "prepared");
+    return applyAndPublishInternal(admitted.transition, limits, stage -> { }, true,
+        admitted.plan);
+  }
+
   /** Applies one block-final child to the physical 27+1 stores and publishes its CURRENT. */
   public synchronized PathStateRootMetadata applyAndPublish(PathStateBlockTransition transition)
       throws IOException {
@@ -600,10 +646,21 @@ public final class PathStatePhysicalStoreSet implements Closeable {
   private PathStateRootMetadata applyAndPublishInternal(PathStateBlockTransition transition,
       PathStateLayerLimits limits, TransitionFaultHook faultHook, boolean parallelParticipants)
       throws IOException {
+    return applyAndPublishInternal(transition, limits, faultHook, parallelParticipants, null);
+  }
+
+  private PathStateRootMetadata applyAndPublishInternal(PathStateBlockTransition transition,
+      PathStateLayerLimits limits, TransitionFaultHook faultHook, boolean parallelParticipants,
+      TransitionPlan preparedPlan) throws IOException {
     requireOpen();
     long startedNanos = System.nanoTime();
     recoverPublication();
-    TransitionPlan plan = prepareTransition(transition);
+    TransitionPlan plan = preparedPlan == null ? prepareTransition(transition) : preparedPlan;
+    if (preparedPlan != null
+        && (!Arrays.equals(currentTarget().encode(), plan.parentTarget)
+        || preparedPlan.transition != transition)) {
+      throw new IOException("prepared physical transition no longer extends CURRENT");
+    }
     long preparedNanos = System.nanoTime();
     TransitionFaultHook hook = Objects.requireNonNull(faultHook, "faultHook");
     byte[] encoded = plan.target.encode();
@@ -639,12 +696,15 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     hook.after(TransitionStage.AFTER_CURRENT);
     PathStateMetadataFile.deleteDurable(intent);
     hook.after(TransitionStage.AFTER_RETIRE);
+    cacheTrieSnapshot(encoded, plan.trieSnapshot);
     long completedNanos = System.nanoTime();
     logger.info("Path-state physical transition completed: head={}, changedStores={}, "
             + "journalBytes={}, journalCount={}, journalWindowBytes={}, nodeReadMisses={}, "
             + "nodeReadHits={}, residentNodeHits={}, residentCleanHits={}, "
             + "residentUpdatedHits={}, nativeNodeReads={}, residentCacheBytes={}, "
-            + "residentEvictions={}, nodeDecodes={}, nodeHashVerifies={}, prepareMs={}, "
+            + "residentEvictions={}, nodeDecodes={}, nodeHashVerifies={}, "
+            + "hashReferencesCreated={}, hashReferencesResolved={}, flatReverseReads={}, "
+            + "flatReverseReused={}, prepareMs={}, "
             + "journalMs={}, intentMs={}, participantWaitMs={}, finalizeMs={}, totalMs={}",
         plan.target.getMetadata().getBlockNumber(), plan.participants.size(),
         encodedJournal.length, reverseJournalCount(), reverseJournalBytes(),
@@ -653,6 +713,10 @@ public final class PathStatePhysicalStoreSet implements Closeable {
         residentNodeCache.bytes(), residentNodeCache.evictions() - plan.initialResidentEvictions,
         plan.nodeDecodes,
         plan.nodeHashVerifies,
+        plan.hashReferencesCreated,
+        plan.hashReferencesResolved,
+        plan.flatReverseReads,
+        plan.flatReverseReused,
         elapsedMillis(startedNanos, preparedNanos), elapsedMillis(preparedNanos, journalNanos),
         elapsedMillis(journalNanos, intentNanos), elapsedMillis(intentNanos, participantsNanos),
         elapsedMillis(participantsNanos, completedNanos),
@@ -700,18 +764,28 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     }
 
     Map<Integer, RecordingNodeStore> recordings = new LinkedHashMap<>();
-    PathStateRoot candidate = new PathStateRoot(scope,
-        participant -> recordings.computeIfAbsent(participant.getStoreId(), ignored ->
-            new RecordingNodeStore(participant(participant.getDbName()).nodeStore())),
-        recordings.computeIfAbsent(0, ignored ->
-            new RecordingNodeStore(superStore.nodeStore())));
-    candidate.restoreStoredRoots(current.getSuperRoot());
-    requireParticipantRoots(candidate, current);
+    PathStateRoot.PathNodeStoreFactory storeFactory = participant -> recordings.computeIfAbsent(
+        participant.getStoreId(), ignored ->
+            new RecordingNodeStore(participant(participant.getDbName()).nodeStore()));
+    RecordingNodeStore recordingSuper = recordings.computeIfAbsent(0, ignored ->
+        new RecordingNodeStore(superStore.nodeStore()));
+    PathStateRoot candidate;
+    boolean reusedTrieSnapshot = cachedTrieSnapshot != null
+        && Arrays.equals(cachedTrieTarget, current.encode());
+    if (reusedTrieSnapshot) {
+      candidate = PathStateRoot.fromSnapshot(scope, storeFactory, recordingSuper,
+          cachedTrieSnapshot);
+    } else {
+      candidate = new PathStateRoot(scope, storeFactory, recordingSuper);
+      candidate.restoreStoredRoots(current.getSuperRoot());
+      requireParticipantRoots(candidate, current);
+    }
     if (!transition.getMutations().isEmpty()) {
       candidate.applyParallel(transition.getMutations(), participantPrepareExecutor,
           trieBranchExecutor);
     }
     byte[] stateRoot = candidate.rootHash();
+    PathStateRoot.Snapshot trieSnapshot = candidate.snapshot();
 
     Map<Integer, List<FlatMutation>> flatByStore = new LinkedHashMap<>();
     for (PathStateMutation mutation : transition.getMutations()) {
@@ -720,13 +794,21 @@ public final class PathStatePhysicalStoreSet implements Closeable {
           mutation.getPhysicalKey());
       byte[] encodedValue = mutation.isDelete() ? null
           : PathStateCommitmentCodec.presentLeafValue(mutation.getPhysicalValue());
+      byte[] previousEncodedValue = null;
+      if (mutation.isPreviousValueKnown() && mutation.getPreviousPhysicalValue() != null) {
+        previousEncodedValue = PathStateCommitmentCodec.presentLeafValue(
+            mutation.getPreviousPhysicalValue());
+      }
       flatByStore.computeIfAbsent(participant.getStoreId(), ignored -> new ArrayList<>())
-          .add(new FlatMutation(secureKey, encodedValue));
+          .add(new FlatMutation(secureKey, encodedValue, mutation.isPreviousValueKnown(),
+              previousEncodedValue));
     }
 
     List<PathStatePhysicalGlobalIntent.ParticipantTarget> targets = new ArrayList<>();
     List<ParticipantTransition> participantTransitions = new ArrayList<>();
     List<PathStatePhysicalReverseJournal.StoreReverse> reverseStores = new ArrayList<>();
+    long flatReverseReads = 0;
+    long flatReverseReused = 0;
     for (PathStatePhysicalGlobalIntent.ParticipantTarget oldTarget
         : current.getParticipants()) {
       List<FlatMutation> flatMutations = flatByStore.get(oldTarget.getStoreId());
@@ -741,14 +823,22 @@ public final class PathStatePhysicalStoreSet implements Closeable {
       byte[] generation = participantGeneration(participant, flatDigest, storeRoot);
       targets.add(new PathStatePhysicalGlobalIntent.ParticipantTarget(participant.getStoreId(),
           generation, flatDigest, storeRoot));
-      participantTransitions.add(new ParticipantTransition(
+      participantTransitions.add(new ParticipantTransition(participant,
           participant(participant.getDbName()), flatMutations,
           recordings.get(participant.getStoreId()).mutations(), flatDigest, generation,
           storeRoot));
       List<PathStatePhysicalReverseJournal.Entry> reverseFlat = new ArrayList<>();
       for (FlatMutation mutation : flatMutations) {
+        byte[] oldValue;
+        if (mutation.previousValueKnown) {
+          oldValue = mutation.previousEncodedValue;
+          flatReverseReused++;
+        } else {
+          oldValue = participant(participant.getDbName()).getFlat(mutation.secureKey);
+          flatReverseReads++;
+        }
         reverseFlat.add(new PathStatePhysicalReverseJournal.Entry(mutation.secureKey,
-            participant(participant.getDbName()).getFlat(mutation.secureKey)));
+            oldValue));
       }
       reverseStores.add(new PathStatePhysicalReverseJournal.StoreReverse(
           participant.getStoreId(), reverseFlat,
@@ -775,11 +865,51 @@ public final class PathStatePhysicalStoreSet implements Closeable {
         .mapToLong(RecordingNodeStore::getResidentCleanHits).sum();
     long residentUpdatedHits = recordings.values().stream()
         .mapToLong(RecordingNodeStore::getResidentUpdatedHits).sum();
-    return new TransitionPlan(target, participantTransitions, superStore,
+    return new TransitionPlan(transition, current.encode(), target, participantTransitions,
+        superStore,
         recordings.get(0).mutations(), journal, nodeReadMisses, nodeReadHits,
         residentNodeHits, residentCleanHits, residentUpdatedHits, nativeNodeReads,
         initialResidentEvictions, candidate.nodeDecodeCount(),
-        candidate.nodeHashVerifyCount());
+        candidate.nodeHashVerifyCount(), candidate.hashReferenceCreateCount(),
+        candidate.hashReferenceResolveCount(), flatReverseReads, flatReverseReused,
+        trieSnapshot, reusedTrieSnapshot);
+  }
+
+  private PathStateSnapshotDelta snapshotDelta(BlockSnapshotMeta meta,
+      PathStateBlockTransition transition, TransitionPlan plan) {
+    List<PathStateSnapshotDelta.StoreDelta> stores = new ArrayList<>();
+    for (ParticipantTransition participant : plan.participants) {
+      stores.add(new PathStateSnapshotDelta.StoreDelta(participant.participant,
+          participant.storeRoot, snapshotMutations(participant.flatMutations),
+          snapshotNodeMutations(participant.nodeMutations)));
+    }
+    return PathStateSnapshotDelta.fromPhysical(meta,
+        PathStatePhysicalGlobalIntent.decode(plan.parentTarget).getMetadata(), transition,
+        plan.trieSnapshot, stores, snapshotNodeMutations(plan.superNodeMutations));
+  }
+
+  private static List<PathStateSnapshotDelta.Mutation> snapshotMutations(
+      List<FlatMutation> mutations) {
+    List<PathStateSnapshotDelta.Mutation> result = new ArrayList<>();
+    for (FlatMutation mutation : mutations) {
+      result.add(new PathStateSnapshotDelta.Mutation(mutation.secureKey,
+          mutation.encodedValue));
+    }
+    return result;
+  }
+
+  private static List<PathStateSnapshotDelta.Mutation> snapshotNodeMutations(
+      List<NodeMutation> mutations) {
+    List<PathStateSnapshotDelta.Mutation> result = new ArrayList<>();
+    for (NodeMutation mutation : mutations) {
+      result.add(new PathStateSnapshotDelta.Mutation(mutation.path, mutation.encodedNode));
+    }
+    return result;
+  }
+
+  private void cacheTrieSnapshot(byte[] target, PathStateRoot.Snapshot snapshot) {
+    cachedTrieTarget = Arrays.copyOf(target, target.length);
+    cachedTrieSnapshot = Objects.requireNonNull(snapshot, "snapshot");
   }
 
   private void applyParticipantTransitionsInParallel(List<ParticipantTransition> transitions)
@@ -862,6 +992,8 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     PathStateMetadataFile.replaceCurrentBytes(current, parent.encode());
     hook.after(RewindStage.AFTER_CURRENT);
     PathStateMetadataFile.deleteDurable(intent);
+    cachedTrieTarget = null;
+    cachedTrieSnapshot = null;
     hook.after(RewindStage.AFTER_RETIRE);
   }
 
@@ -1623,6 +1755,51 @@ public final class PathStatePhysicalStoreSet implements Closeable {
       nodeStore.apply(nodeMutations);
     }
 
+    void applyCheckpointParticipant(CommonCheckpointPayload.PathStoreTarget target,
+        byte[] marker) {
+      List<PathStateNativeNodeStore.BatchMutation> mutations = new ArrayList<>();
+      for (CommonCheckpointPayload.Mutation mutation : target.getFlatMutations()) {
+        byte[] key = prefixed(FLAT_PREFIX, mutation.getKey(), "secureKey");
+        mutations.add(mutation.isDelete()
+            ? PathStateNativeNodeStore.BatchMutation.delete(key)
+            : PathStateNativeNodeStore.BatchMutation.put(key, mutation.getValue()));
+      }
+      List<NodeMutation> cacheMutations = new ArrayList<>();
+      for (CommonCheckpointPayload.Mutation mutation : target.getNodeMutations()) {
+        byte[] path = mutation.getKey();
+        byte[] value = mutation.getValue();
+        mutations.add(mutation.isDelete()
+            ? PathStateNativeNodeStore.BatchMutation.delete(prefixed(NODE_PREFIX, path, "path"))
+            : PathStateNativeNodeStore.BatchMutation.put(prefixed(NODE_PREFIX, path, "path"),
+                value));
+        cacheMutations.add(new NodeMutation(path, value));
+      }
+      mutations.add(metadataMutation(CHECKPOINT_TARGET_METADATA, marker));
+      nativeStore.writeBatch(mutations);
+      nodeStore.apply(cacheMutations);
+    }
+
+    void applyCheckpointSuper(List<CommonCheckpointPayload.Mutation> supplied, byte[] marker) {
+      List<PathStateNativeNodeStore.BatchMutation> mutations = new ArrayList<>();
+      List<NodeMutation> cacheMutations = new ArrayList<>();
+      for (CommonCheckpointPayload.Mutation mutation : supplied) {
+        byte[] path = mutation.getKey();
+        byte[] value = mutation.getValue();
+        mutations.add(mutation.isDelete()
+            ? PathStateNativeNodeStore.BatchMutation.delete(prefixed(NODE_PREFIX, path, "path"))
+            : PathStateNativeNodeStore.BatchMutation.put(prefixed(NODE_PREFIX, path, "path"),
+                value));
+        cacheMutations.add(new NodeMutation(path, value));
+      }
+      mutations.add(metadataMutation(CHECKPOINT_TARGET_METADATA, marker));
+      nativeStore.writeBatch(mutations);
+      nodeStore.apply(cacheMutations);
+    }
+
+    byte[] checkpointTargetMarker() {
+      return getMetadata(CHECKPOINT_TARGET_METADATA);
+    }
+
     private static void appendNodeMutations(
         List<PathStateNativeNodeStore.BatchMutation> target,
         List<NodeMutation> nodeMutations) {
@@ -2084,17 +2261,28 @@ public final class PathStatePhysicalStoreSet implements Closeable {
 
     private final byte[] secureKey;
     private final byte[] encodedValue;
+    private final boolean previousValueKnown;
+    private final byte[] previousEncodedValue;
 
     private FlatMutation(byte[] secureKey, byte[] encodedValue) {
+      this(secureKey, encodedValue, false, null);
+    }
+
+    private FlatMutation(byte[] secureKey, byte[] encodedValue, boolean previousValueKnown,
+        byte[] previousEncodedValue) {
       this.secureKey = Arrays.copyOf(Objects.requireNonNull(secureKey, "secureKey"),
           secureKey.length);
       this.encodedValue = encodedValue == null ? null
           : Arrays.copyOf(encodedValue, encodedValue.length);
+      this.previousValueKnown = previousValueKnown;
+      this.previousEncodedValue = previousEncodedValue == null ? null
+          : Arrays.copyOf(previousEncodedValue, previousEncodedValue.length);
     }
   }
 
   private static final class ParticipantTransition {
 
+    private final PathStateParticipant participant;
     private final PhysicalStore store;
     private final List<FlatMutation> flatMutations;
     private final List<NodeMutation> nodeMutations;
@@ -2102,9 +2290,10 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     private final byte[] generation;
     private final byte[] storeRoot;
 
-    private ParticipantTransition(PhysicalStore store, List<FlatMutation> flatMutations,
-        List<NodeMutation> nodeMutations, byte[] flatDigest, byte[] generation,
-        byte[] storeRoot) {
+    private ParticipantTransition(PathStateParticipant participant, PhysicalStore store,
+        List<FlatMutation> flatMutations, List<NodeMutation> nodeMutations, byte[] flatDigest,
+        byte[] generation, byte[] storeRoot) {
+      this.participant = participant;
       this.store = store;
       this.flatMutations = flatMutations;
       this.nodeMutations = nodeMutations;
@@ -2116,6 +2305,8 @@ public final class PathStatePhysicalStoreSet implements Closeable {
 
   private static final class TransitionPlan {
 
+    private final PathStateBlockTransition transition;
+    private final byte[] parentTarget;
     private final PathStatePhysicalGlobalIntent target;
     private final List<ParticipantTransition> participants;
     private final PhysicalStore superStore;
@@ -2130,13 +2321,25 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     private final long initialResidentEvictions;
     private final long nodeDecodes;
     private final long nodeHashVerifies;
+    private final long hashReferencesCreated;
+    private final long hashReferencesResolved;
+    private final long flatReverseReads;
+    private final long flatReverseReused;
+    private final PathStateRoot.Snapshot trieSnapshot;
+    private final boolean reusedTrieSnapshot;
 
-    private TransitionPlan(PathStatePhysicalGlobalIntent target,
+    private TransitionPlan(PathStateBlockTransition transition, byte[] parentTarget,
+        PathStatePhysicalGlobalIntent target,
         List<ParticipantTransition> participants, PhysicalStore superStore,
         List<NodeMutation> superNodeMutations, PathStatePhysicalReverseJournal journal,
         long nodeReadMisses, long nodeReadHits, long residentNodeHits,
         long residentCleanHits, long residentUpdatedHits, long nativeNodeReads,
-        long initialResidentEvictions, long nodeDecodes, long nodeHashVerifies) {
+        long initialResidentEvictions, long nodeDecodes, long nodeHashVerifies,
+        long hashReferencesCreated, long hashReferencesResolved,
+        long flatReverseReads, long flatReverseReused,
+        PathStateRoot.Snapshot trieSnapshot, boolean reusedTrieSnapshot) {
+      this.transition = transition;
+      this.parentTarget = Arrays.copyOf(parentTarget, parentTarget.length);
       this.target = target;
       this.participants = participants;
       this.superStore = superStore;
@@ -2151,6 +2354,38 @@ public final class PathStatePhysicalStoreSet implements Closeable {
       this.initialResidentEvictions = initialResidentEvictions;
       this.nodeDecodes = nodeDecodes;
       this.nodeHashVerifies = nodeHashVerifies;
+      this.hashReferencesCreated = hashReferencesCreated;
+      this.hashReferencesResolved = hashReferencesResolved;
+      this.flatReverseReads = flatReverseReads;
+      this.flatReverseReused = flatReverseReused;
+      this.trieSnapshot = Objects.requireNonNull(trieSnapshot, "trieSnapshot");
+      this.reusedTrieSnapshot = reusedTrieSnapshot;
+    }
+  }
+
+  static final class PreparedPhysicalTransition {
+
+    private final PathStateBlockTransition transition;
+    private final TransitionPlan plan;
+    private final PathStateSnapshotDelta snapshotDelta;
+
+    private PreparedPhysicalTransition(PathStateBlockTransition transition,
+        TransitionPlan plan, PathStateSnapshotDelta snapshotDelta) {
+      this.transition = transition;
+      this.plan = plan;
+      this.snapshotDelta = snapshotDelta;
+    }
+
+    PathStateSnapshotDelta getSnapshotDelta() {
+      return snapshotDelta;
+    }
+
+    boolean reusedTrieSnapshot() {
+      return plan.reusedTrieSnapshot;
+    }
+
+    boolean matches(PathStateBlockTransition supplied) {
+      return transition == supplied;
     }
   }
 

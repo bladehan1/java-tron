@@ -319,6 +319,11 @@ public class ArgsTest {
     override.put("storage.pathStateRoot.directory", "root-mapped");
     override.put("storage.pathStateRoot.reversibleLayerLimit", "9");
     override.put("storage.pathStateRoot.reversibleLayerBytes", "8192");
+    override.put("storage.pathStateRoot.volatileSnapshotBenchmark", "true");
+    override.put("storage.pathStateRoot.nodeCacheBytes", "1073741824");
+    override.put("storage.pathStateRoot.participantThreads", "2");
+    override.put("storage.pathStateRoot.branchThreads", "3");
+    override.put("storage.pathStateRoot.asyncPrepareBenchmark", "true");
     Config config = ConfigFactory.parseMap(override)
         .withFallback(ConfigFactory.defaultReference());
 
@@ -332,8 +337,13 @@ public class ArgsTest {
     Assert.assertEquals(9, storage.getPathStateRootReversibleLayerLimit());
     Assert.assertEquals(8192L, storage.getPathStateRootReversibleLayerBytes());
     Assert.assertEquals(268435456L, storage.getPathStateRootWriteBufferBytes());
+    Assert.assertEquals(1073741824L, storage.getPathStateRootNodeCacheBytes());
+    Assert.assertEquals(2, storage.getPathStateRootParticipantThreads());
+    Assert.assertEquals(3, storage.getPathStateRootBranchThreads());
     Assert.assertFalse(storage.isPathStateRootRebuildFromGenesis());
     Assert.assertTrue(storage.isPathStateRootVerifyEveryBlock());
+    Assert.assertTrue(storage.isPathStateRootVolatileSnapshotBenchmark());
+    Assert.assertTrue(storage.isPathStateRootAsyncPrepareBenchmark());
     Args.clearParam();
   }
 

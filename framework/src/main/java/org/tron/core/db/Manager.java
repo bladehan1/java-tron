@@ -137,6 +137,7 @@ import org.tron.core.db2.stateroot.PathStateCanonicalizer.P66Phase;
 import org.tron.core.db2.stateroot.PathStateHead;
 import org.tron.core.db2.stateroot.PathStateLayerLimits;
 import org.tron.core.db2.stateroot.PathStateNativeSnapshotSource;
+import org.tron.core.db2.stateroot.PathStatePhysicalOverlayHead;
 import org.tron.core.db2.stateroot.PathStatePhysicalRuntimeAdmission;
 import org.tron.core.db2.stateroot.PathStatePhysicalSnapshotHead;
 import org.tron.core.db2.stateroot.PathStatePhysicalStoreSet;
@@ -766,9 +767,15 @@ public class Manager {
         throw new IllegalStateException(
             "Path-state startup requires a completed admitted rebuild");
       }
-      recovered = PathStatePhysicalSnapshotHead.open(directory, engine,
-          new PathStateLayerLimits(storage.getPathStateRootReversibleLayerLimit(),
-              storage.getPathStateRootReversibleLayerBytes()));
+      PathStateLayerLimits limits = new PathStateLayerLimits(
+          storage.getPathStateRootReversibleLayerLimit(),
+          storage.getPathStateRootReversibleLayerBytes());
+      recovered = storage.isPathStateRootVolatileSnapshotBenchmark()
+          ? PathStatePhysicalOverlayHead.open(directory, engine, limits,
+              storage.getPathStateRootNodeCacheBytes(),
+              storage.getPathStateRootParticipantThreads(),
+              storage.getPathStateRootBranchThreads())
+          : PathStatePhysicalSnapshotHead.open(directory, engine, limits);
       PathStateRootMetadata recoveredHead = recovered.getHead();
       if (recoveredHead.getBlockNumber()
           != getDynamicPropertiesStore().getLatestBlockHeaderNumber()
@@ -779,8 +786,15 @@ public class Manager {
       }
       pathStateSnapshotHead = recovered;
       attachPathStateBlockFinalRuntime();
-      logger.info("Path-state current root attached: directory={}, head={}, engine={}",
-          directory, recoveredHead.getBlockNumber(), storage.getDbEngine());
+      logger.info("Path-state current root attached: directory={}, head={}, engine={}, "
+              + "volatileSnapshotBenchmark={}, asyncPrepareBenchmark={}, nodeCacheBytes={}, "
+              + "participantThreads={}, branchThreads={}",
+          directory,
+          recoveredHead.getBlockNumber(), storage.getDbEngine(),
+          storage.isPathStateRootVolatileSnapshotBenchmark(),
+          storage.isPathStateRootAsyncPrepareBenchmark(),
+          storage.getPathStateRootNodeCacheBytes(), storage.getPathStateRootParticipantThreads(),
+          storage.getPathStateRootBranchThreads());
       recovered = null;
     } catch (java.io.IOException | RuntimeException failure) {
       pathStateSnapshotHead = null;
@@ -804,11 +818,18 @@ public class Manager {
       throw new IllegalStateException(
           "Path-state block-final capture requires account-asset Store");
     }
-    PathStateRuntimeAttachment attachment = new PathStateRuntimeAttachment(
-        new SnapshotPathStateTransitionCollector(accountAssetStore::prefixQuery,
-            this::scanPathStateActivationAccounts),
-        this::advancePathStateRoot, this::flushPathStateBaseThrough,
-        transition -> pathStateSnapshotHead.preview(transition));
+    SnapshotPathStateTransitionCollector collector = new SnapshotPathStateTransitionCollector(
+        accountAssetStore::prefixQuery, this::scanPathStateActivationAccounts);
+    PathStateRuntimeAttachment attachment = Args.getInstance().getStorage()
+        .isPathStateRootAsyncPrepareBenchmark()
+        ? PathStateRuntimeAttachment.deferred(collector, this::advancePathStateRoot,
+            this::flushPathStateBaseThrough,
+            transition -> pathStateSnapshotHead.preview(transition),
+            (meta, transition) -> pathStateSnapshotHead.prepareSnapshotDelta(meta, transition))
+        : new PathStateRuntimeAttachment(collector, this::advancePathStateRoot,
+            this::flushPathStateBaseThrough,
+            transition -> pathStateSnapshotHead.preview(transition),
+            (meta, transition) -> pathStateSnapshotHead.prepareSnapshotDelta(meta, transition));
     attachment.synchronizeReadyHead(pathStateSnapshotHead.getHead());
     ((SnapshotManager) revokingStore).attachPathStateRuntime(attachment);
     pathStateRuntime = attachment;
@@ -1531,15 +1552,24 @@ public class Manager {
       TooBigTransactionException, DupTransactionException, TaposException,
       ValidateScheduleException, ReceiptCheckErrException, VMIllegalException,
       TooBigTransactionResultException, ZksnarkException, BadBlockException, EventBloomException {
+    long startedNanos = System.nanoTime();
     processBlock(block, txs);
+    long processedNanos = System.nanoTime();
     chainBaseManager.getBlockStore().put(block.getBlockId().getBytes(), block);
     chainBaseManager.getBlockIndexStore().put(block.getBlockId());
     if (block.getTransactions().size() != 0) {
       chainBaseManager.getTransactionRetStore()
           .put(ByteArray.fromLong(block.getNum()), block.getResult());
     }
+    long storedNanos = System.nanoTime();
 
     updateFork(block);
+    long forkUpdatedNanos = System.nanoTime();
+    logger.info("ApplyBlock outer stages: head={}, processMs={}, storeMs={}, forkMs={}, totalMs={}",
+        block.getNum(), elapsedMillis(startedNanos, processedNanos),
+        elapsedMillis(processedNanos, storedNanos),
+        elapsedMillis(storedNanos, forkUpdatedNanos),
+        elapsedMillis(startedNanos, forkUpdatedNanos));
     if (System.currentTimeMillis() - block.getTimeStamp() >= 60_000) {
       revokingStore.setMaxFlushCount(maxFlushCount);
       if (Args.getInstance().getShutdownBlockTime() != null
@@ -1795,7 +1825,9 @@ public class Manager {
         final Histogram.Timer timer = Metrics.histogramStartTimer(
                 MetricKeys.Histogram.BLOCK_PUSH_LATENCY);
         long start = System.currentTimeMillis();
+        long startedNanos = System.nanoTime();
         List<TransactionCapsule> txs = getVerifyTxs(block);
+        long verifiedNanos = System.nanoTime();
         logger.info("Block num: {}, re-push-size: {}, pending-size: {}, "
                         + "block-tx-size: {}, verify-tx-size: {}",
                 block.getNum(), rePushTransactions.size(), pendingTransactions.size(),
@@ -1883,9 +1915,14 @@ public class Manager {
               return;
             }
             long oldSolidNum = getDynamicPropertiesStore().getLatestSolidifiedBlockNum();
+            long applyStartedNanos = System.nanoTime();
+            long appliedNanos;
+            long committedNanos;
             try (ISession tmpSession = revokingStore.buildSession()) {
               applyBlock(newBlock, txs);
+              appliedNanos = System.nanoTime();
               commitBlockSession(tmpSession, newBlock);
+              committedNanos = System.nanoTime();
             } catch (Throwable throwable) {
               logger.error(throwable.getMessage(), throwable);
               khaosDb.removeBlk(block.getBlockId());
@@ -1894,6 +1931,15 @@ public class Manager {
             }
             long newSolidNum = getDynamicPropertiesStore().getLatestSolidifiedBlockNum();
             blockTrigger(newBlock, oldSolidNum, newSolidNum);
+            long triggeredNanos = System.nanoTime();
+            logger.info("PushBlock core stages: head={}, verifyMs={}, preApplyMs={}, applyMs={}, "
+                    + "commitMs={}, triggerMs={}, throughTriggerMs={}", newBlock.getNum(),
+                elapsedMillis(startedNanos, verifiedNanos),
+                elapsedMillis(verifiedNanos, applyStartedNanos),
+                elapsedMillis(applyStartedNanos, appliedNanos),
+                elapsedMillis(appliedNanos, committedNanos),
+                elapsedMillis(committedNanos, triggeredNanos),
+                elapsedMillis(startedNanos, triggeredNanos));
           }
           logger.info(SAVE_BLOCK, newBlock);
         }
@@ -1921,6 +1967,10 @@ public class Manager {
     } finally {
       setBlockWaitLock(false);
     }
+  }
+
+  private static long elapsedMillis(long startedNanos, long completedNanos) {
+    return TimeUnit.NANOSECONDS.toMillis(completedNanos - startedNanos);
   }
 
   void blockTrigger(final BlockCapsule block, long oldSolid, long newSolid) {
@@ -2369,6 +2419,7 @@ public class Manager {
       DupTransactionException, TransactionExpirationException, ValidateScheduleException,
       ReceiptCheckErrException, VMIllegalException, TooBigTransactionResultException,
       ZksnarkException, BadBlockException, EventBloomException {
+    long startedNanos = System.nanoTime();
     // todo set revoking db max size.
 
     // checkWitness
@@ -2393,6 +2444,7 @@ public class Manager {
     TransactionRetCapsule transactionRetCapsule =
         new TransactionRetCapsule(block);
     HistoryBlockHashUtil.write(this, block);
+    long transactionStartedNanos = System.nanoTime();
     try {
       merkleContainer.resetCurrentMerkleTree();
       accountStateCallBack.preExecute(block);
@@ -2422,6 +2474,7 @@ public class Manager {
     } finally {
       accountStateCallBack.exceptionFinish();
     }
+    long transactionCompletedNanos = System.nanoTime();
     merkleContainer.saveCurrentMerkleTreeAsBestMerkleTree(block.getNum());
     block.setResult(transactionRetCapsule);
     if (getDynamicPropertiesStore().getAllowAdaptiveEnergy() == 1) {
@@ -2458,6 +2511,12 @@ public class Manager {
         .initBlockSection(transactionRetCapsule);
     chainBaseManager.getSectionBloomStore().write(block.getNum());
     block.setBloom(blockBloom);
+    long completedNanos = System.nanoTime();
+    logger.info("ProcessBlock stages: head={}, preTxMs={}, txLoopMs={}, postTxMs={}, totalMs={}",
+        block.getNum(), elapsedMillis(startedNanos, transactionStartedNanos),
+        elapsedMillis(transactionStartedNanos, transactionCompletedNanos),
+        elapsedMillis(transactionCompletedNanos, completedNanos),
+        elapsedMillis(startedNanos, completedNanos));
   }
 
   private void payReward(BlockCapsule block) {
@@ -3206,6 +3265,11 @@ public class Manager {
         throw new IllegalStateException("Path-state runtime lost SnapshotManager ownership");
       }
       ((SnapshotManager) revokingStore).detachPathStateRuntime(runtime);
+      try {
+        runtime.close();
+      } catch (java.io.IOException failure) {
+        throw new IllegalStateException("Failed to close PathState runtime", failure);
+      }
       pathStateRuntime = null;
     }
     PathStateHead owner = pathStateSnapshotHead;

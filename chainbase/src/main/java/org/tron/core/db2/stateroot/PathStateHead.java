@@ -2,6 +2,7 @@ package org.tron.core.db2.stateroot;
 
 import java.io.Closeable;
 import java.io.IOException;
+import org.tron.core.db2.archive.BlockSnapshotMeta;
 
 /** Runtime-owned current path-state authority used by Manager lifecycle integration. */
 public interface PathStateHead extends Closeable {
@@ -14,6 +15,12 @@ public interface PathStateHead extends Closeable {
 
   /** Computes the child state root without publishing or adopting it. */
   byte[] preview(PathStateBlockTransition transition) throws IOException;
+
+  /** Prepares an optional Snapshot-owned forward delta without publishing durable state. */
+  default PathStateSnapshotDelta prepareSnapshotDelta(BlockSnapshotMeta meta,
+      PathStateBlockTransition transition) throws IOException {
+    return null;
+  }
 
   PathStateRootMetadata getHead() throws IOException;
 

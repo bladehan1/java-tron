@@ -131,11 +131,33 @@ public class Storage {
 
   @Getter
   @Setter
+  private long pathStateRootNodeCacheBytes;
+
+  @Getter
+  @Setter
+  private int pathStateRootParticipantThreads;
+
+  @Getter
+  @Setter
+  private int pathStateRootBranchThreads;
+
+  @Getter
+  @Setter
   private boolean pathStateRootRebuildFromGenesis;
 
   @Getter
   @Setter
   private boolean pathStateRootVerifyEveryBlock;
+
+  /** Benchmark-only: advance the path-state head in memory and persist no per-block state. */
+  @Getter
+  @Setter
+  private boolean pathStateRootVolatileSnapshotBenchmark;
+
+  /** Benchmark-only: compute ordered PathState deltas on a bounded background worker. */
+  @Getter
+  @Setter
+  private boolean pathStateRootAsyncPrepareBenchmark;
 
   private Options defaultDbOptions;
 

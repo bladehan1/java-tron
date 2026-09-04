@@ -48,9 +48,16 @@ public final class PathStateBlockTransition {
   private final P66Phase phase;
   private final List<PathStateMutation> mutations;
   private final byte[] payloadDigest;
+  private final byte[] mutationViewDigest;
 
   public PathStateBlockTransition(long blockNumber, byte[] blockHash, byte[] parentHash,
       long timestamp, P66Phase phase, Collection<PathStateMutation> mutations) {
+    this(blockNumber, blockHash, parentHash, timestamp, phase, mutations, null);
+  }
+
+  public PathStateBlockTransition(long blockNumber, byte[] blockHash, byte[] parentHash,
+      long timestamp, P66Phase phase, Collection<PathStateMutation> mutations,
+      byte[] mutationViewDigest) {
     if (blockNumber < 0) {
       throw new IllegalArgumentException("blockNumber must not be negative");
     }
@@ -66,6 +73,9 @@ public final class PathStateBlockTransition {
     }
     this.mutations = Collections.unmodifiableList(canonical);
     this.payloadDigest = sha256(encode(prepared));
+    this.mutationViewDigest = mutationViewDigest == null
+        ? Arrays.copyOf(payloadDigest, payloadDigest.length)
+        : copyHash(mutationViewDigest, "mutationViewDigest");
   }
 
   public long getBlockNumber() {
@@ -98,6 +108,10 @@ public final class PathStateBlockTransition {
 
   public byte[] getPayloadDigest() {
     return Arrays.copyOf(payloadDigest, payloadDigest.length);
+  }
+
+  public byte[] getMutationViewDigest() {
+    return Arrays.copyOf(mutationViewDigest, mutationViewDigest.length);
   }
 
   private List<PreparedMutation> prepare(Collection<PathStateMutation> supplied) {
@@ -152,10 +166,12 @@ public final class PathStateBlockTransition {
   }
 
   private static PathStateMutation copyMutation(PathStateMutation mutation) {
-    return mutation.isDelete()
+    PathStateMutation copy = mutation.isDelete()
         ? PathStateMutation.delete(mutation.getDbName(), mutation.getCanonicalKey())
         : PathStateMutation.put(mutation.getDbName(), mutation.getCanonicalKey(),
             mutation.getCanonicalValue());
+    return mutation.isPreviousValueKnown()
+        ? copy.withPreviousPhysicalValue(mutation.getPreviousPhysicalValue()) : copy;
   }
 
   private static byte[] copyHash(byte[] value, String name) {

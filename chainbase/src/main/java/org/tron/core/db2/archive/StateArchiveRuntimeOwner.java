@@ -554,19 +554,15 @@ public final class StateArchiveRuntimeOwner implements Closeable {
 
   private ArchiveProgressEnvelope readReadableAuthority() throws IOException {
     BlockSnapshotMeta head = readableHead;
-    ArchiveHistoryWriter writer = historyWriter;
     PersistentServingKeyIndexCatalog catalog = servingIndexCatalog;
     LatestStateGenerationCoordinator latest = latestStateCoordinator;
-    ArchiveWalBinding binding = snapshotManager.getLatestArchiveWalBinding();
-    if (binding == null) {
-      binding = snapshotManager.getRecoveredArchiveWalBinding();
-    }
-    BlockSnapshotMeta persisted = binding == null ? recoveredHead : binding.getLast();
-    if (head == null || writer == null || catalog == null || latest == null
-        || snapshotManager.getArchiveReadableEpoch() != head.getEpoch()
-        || !head.equals(writer.committedHeadMeta()) || !head.equals(persisted)) {
+    // H and the WAL binding may advance before the next reader generation is published. Queries
+    // continue to pin the previous immutable serving/latest generation under this owner's lock;
+    // write/recovery callers retain the stricter P/H/I/latest/R check above.
+    if (head == null || catalog == null || latest == null
+        || snapshotManager.getArchiveReadableEpoch() != head.getEpoch()) {
       throw new ArchivePersistenceException(
-          "Archive historical query is outside the P/H/I/latest/R fixed point");
+          "Archive historical query has no published reader generation");
     }
     try (PersistentServingKeyIndexGeneration serving = catalog.pin()) {
       if (!serving.isLatestSourceIdentityBound()

@@ -5,6 +5,7 @@ import com.google.common.collect.Iterators;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Streams;
 import com.google.common.primitives.Bytes;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -19,6 +20,7 @@ import org.tron.core.db2.common.Key;
 import org.tron.core.db2.common.Value;
 import org.tron.core.db2.common.Value.Operator;
 import org.tron.core.db2.common.WrappedByteArray;
+import org.tron.core.db2.stateroot.PathStateSnapshotDelta;
 
 public class SnapshotImpl extends AbstractSnapshot<Key, Value> {
 
@@ -30,6 +32,9 @@ public class SnapshotImpl extends AbstractSnapshot<Key, Value> {
 
   @Getter
   private BlockReverseDiff preparedArchiveBlock;
+
+  @Getter
+  private PathStateSnapshotDelta preparedPathStateDelta;
 
   SnapshotImpl(Snapshot snapshot) {
     root = snapshot.getRoot();
@@ -47,12 +52,33 @@ public class SnapshotImpl extends AbstractSnapshot<Key, Value> {
   /**
    * Publishes the immutable block identity and optional archive payload on this layer.
    *
-   * <p>The caller performs all validation and materialization first, so this method is the
-   * non-throwing ownership-transfer point for a successfully committed block session.
+   * <p>The caller validates the prepared payload before this ownership-transfer point.
    */
   void attachArchiveBlock(BlockSnapshotMeta meta, BlockReverseDiff reverseDiff) {
+    attachBlockArtifacts(meta, reverseDiff, null);
+  }
+
+  /** Atomically binds all prepared block-final artifacts owned by this Snapshot layer. */
+  void attachBlockArtifacts(BlockSnapshotMeta meta, BlockReverseDiff reverseDiff,
+      PathStateSnapshotDelta pathStateDelta) {
+    BlockSnapshotMeta admitted = Objects.requireNonNull(meta, "meta");
+    if (reverseDiff != null && !admitted.equals(reverseDiff.getMeta())) {
+      throw new IllegalArgumentException("archive payload differs from Snapshot block identity");
+    }
+    if (pathStateDelta != null && !admitted.equals(pathStateDelta.getMeta())) {
+      throw new IllegalArgumentException("path-state delta differs from Snapshot block identity");
+    }
+    if (reverseDiff != null && pathStateDelta != null) {
+      byte[] archiveView = reverseDiff.getMutationViewDigest();
+      if (archiveView == null
+          || !Arrays.equals(archiveView, pathStateDelta.getMutationViewDigest())) {
+        throw new IllegalArgumentException(
+            "archive and path-state artifacts differ from mutation view identity");
+      }
+    }
     blockSnapshotMeta = meta;
     preparedArchiveBlock = reverseDiff;
+    preparedPathStateDelta = pathStateDelta;
   }
 
   @Override
