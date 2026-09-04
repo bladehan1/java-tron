@@ -27,6 +27,7 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.tron.common.arch.Arch;
+import org.tron.core.db2.archive.BlockSnapshotMeta;
 import org.tron.core.db2.stateroot.PathStateCanonicalizer.P66Phase;
 import org.tron.core.db2.stateroot.PathStateRebuildCoordinator.EntryConsumer;
 import org.tron.core.db2.stateroot.PathStateRebuildCoordinator.SnapshotIdentity;
@@ -645,7 +646,11 @@ public class PathStateNativeNodeStoreTest {
           6, P66Phase.P66_ON, Arrays.asList(
           PathStateMutation.put("code", key, new byte[]{6}),
           PathStateMutation.put("proposal", new byte[]{7}, new byte[]{8})));
-      assertArrayEquals(head.preview(update), head.advance(update).getStateRoot());
+      byte[] preview = head.preview(update);
+      PathStateSnapshotDelta delta = head.prepareSnapshotDelta(
+          BlockSnapshotMeta.forBlock(2, bytes(32), blockHash, 6), update);
+      assertArrayEquals(preview, delta.getStateRoot());
+      assertArrayEquals(delta.getStateRoot(), head.advance(update).getStateRoot());
       PathStateBlockTransition delete = new PathStateBlockTransition(3, bytes(33), bytes(32),
           9, P66Phase.P66_ON,
           Collections.singletonList(PathStateMutation.delete("code", key)));
@@ -660,6 +665,137 @@ public class PathStateNativeNodeStoreTest {
       assertEquals(3, reopened.currentMetadata().getBlockNumber());
       assertNull(reopened.participant("code").getFlat(
           PathStateCommitmentCodec.storeLeafKey(scope.require("code").getStoreId(), key)));
+    }
+  }
+
+  @Test
+  public void physicalSnapshotDeltaPreparesWithoutWritesAndReusesPlanForPublication()
+      throws Exception {
+    PathStateParticipantScope scope = new PathStateCanonicalizer().participantScope();
+    Path root = temporaryFolder.newFolder("physical-snapshot-delta").toPath();
+    preparePublishedPhysicalTarget(root, scope);
+    byte[] key = new byte[]{1, 2, 3};
+    byte[] blockHash = bytes(35);
+
+    try (PathStatePhysicalStoreSet stores = PathStatePhysicalStoreSet.open(root, scope,
+        Engine.ROCKSDB)) {
+      PathStateBlockTransition transition = new PathStateBlockTransition(1, blockHash,
+          new byte[32], 3, P66Phase.P66_ON,
+          Collections.singletonList(PathStateMutation.put("code", key, new byte[]{4, 5})));
+      PathStatePhysicalStoreSet.PreparedPhysicalTransition prepared =
+          stores.prepareSnapshotDelta(BlockSnapshotMeta.forBlock(1, blockHash, new byte[32], 3),
+              transition);
+      PathStateSnapshotDelta delta = prepared.getSnapshotDelta();
+
+      assertEquals(0, stores.currentMetadata().getBlockNumber());
+      assertEquals(0, stores.participant("code").getUnsyncedWriteBatchCalls());
+      assertEquals(0, stores.superStore().getUnsyncedWriteBatchCalls());
+      assertEquals(1, delta.getStores().size());
+      assertEquals("code", delta.getStores().get(0).getDbName());
+      assertArrayEquals(PathStateCommitmentCodec.storeLeafKey(
+              scope.require("code").getStoreId(), key),
+          delta.getStores().get(0).getFlatMutations().get(0).getKey());
+      assertArrayEquals(delta.getStateRoot(), delta.getTrieSnapshot().getStateRoot());
+
+      PathStateRootMetadata committed = stores.applyAndPublish(prepared,
+          PathStateLayerLimits.defaults());
+      assertArrayEquals(delta.getStateRoot(), committed.getStateRoot());
+      assertEquals(1, stores.participant("code").getUnsyncedWriteBatchCalls());
+      assertEquals(1, stores.superStore().getUnsyncedWriteBatchCalls());
+
+      PathStateBlockTransition next = new PathStateBlockTransition(2, bytes(36), blockHash,
+          6, P66Phase.P66_ON,
+          Collections.singletonList(PathStateMutation.put("code", key, new byte[]{6})));
+      PathStatePhysicalStoreSet.PreparedPhysicalTransition nextPrepared =
+          stores.prepareSnapshotDelta(BlockSnapshotMeta.forBlock(2, bytes(36), blockHash, 6),
+              next);
+      assertTrue(nextPrepared.reusedTrieSnapshot());
+      assertEquals(1, stores.participant("code").getUnsyncedWriteBatchCalls());
+      stores.applyAndPublish(nextPrepared, PathStateLayerLimits.defaults());
+      assertEquals(2, stores.participant("code").getUnsyncedWriteBatchCalls());
+    }
+  }
+
+  @Test
+  public void volatileOverlayAdvancesAndRewindsWithoutJournalOrDurableWrites()
+      throws Exception {
+    PathStateParticipantScope scope = new PathStateCanonicalizer().participantScope();
+    Path root = temporaryFolder.newFolder("physical-volatile-overlay").toPath();
+    Path legacyRoot = temporaryFolder.newFolder("physical-volatile-overlay-legacy").toPath();
+    preparePublishedPhysicalTarget(root, scope);
+    preparePublishedPhysicalTarget(legacyRoot, scope);
+    byte[] durableCurrent = Files.readAllBytes(
+        root.resolve(PathStatePhysicalStoreSet.CURRENT_FILE));
+    byte[] firstHash = bytes(37);
+    byte[] secondHash = bytes(38);
+
+    try (PathStatePhysicalOverlayHead head = PathStatePhysicalOverlayHead.open(root,
+        Engine.ROCKSDB, new PathStateLayerLimits(4, 1L << 20));
+        PathStatePhysicalSnapshotHead legacy = PathStatePhysicalSnapshotHead.open(legacyRoot,
+            Engine.ROCKSDB, new PathStateLayerLimits(4, 1L << 20))) {
+      PathStateBlockTransition first = new PathStateBlockTransition(1, firstHash,
+          new byte[32], 3, P66Phase.P66_ON, Collections.singletonList(
+          PathStateMutation.put("code", new byte[]{1}, new byte[]{2})));
+      PathStateSnapshotDelta firstDelta = head.prepareSnapshotDelta(
+          BlockSnapshotMeta.forBlock(1, firstHash, new byte[32], 3), first);
+      PathStateRootMetadata firstOverlay = head.advance(first);
+      assertArrayEquals(firstDelta.getStateRoot(), firstOverlay.getStateRoot());
+      assertArrayEquals(legacy.advance(first).getStateRoot(), firstOverlay.getStateRoot());
+
+      PathStateBlockTransition second = new PathStateBlockTransition(2, secondHash,
+          firstHash, 6, P66Phase.P66_ON, Arrays.asList(
+          PathStateMutation.put("code", new byte[]{1}, new byte[]{3}),
+          PathStateMutation.put("proposal", new byte[]{4}, new byte[]{5})));
+      head.prepareSnapshotDelta(BlockSnapshotMeta.forBlock(2, secondHash, firstHash, 6), second);
+      PathStateRootMetadata secondOverlay = head.advance(second);
+      assertEquals(2, secondOverlay.getBlockNumber());
+      assertArrayEquals(legacy.advance(second).getStateRoot(), secondOverlay.getStateRoot());
+      assertEquals(0, head.durableWriteBatchCalls());
+      assertArrayEquals(durableCurrent,
+          Files.readAllBytes(root.resolve(PathStatePhysicalStoreSet.CURRENT_FILE)));
+      Path reverse = root.resolve("reverse");
+      assertFalse(Files.exists(reverse));
+
+      PathStateRootMetadata rewound = head.rewindTo(1, firstHash);
+      assertEquals(1, rewound.getBlockNumber());
+      assertArrayEquals(firstDelta.getStateRoot(), rewound.getStateRoot());
+      assertEquals(0, head.durableWriteBatchCalls());
+    }
+
+    try (PathStatePhysicalStoreSet reopened = PathStatePhysicalStoreSet.openExisting(root, scope,
+        Engine.ROCKSDB)) {
+      assertEquals(0, reopened.currentMetadata().getBlockNumber());
+      assertNull(reopened.participant("code").getFlat(
+          PathStateCommitmentCodec.storeLeafKey(scope.require("code").getStoreId(),
+              new byte[]{1})));
+    }
+  }
+
+  @Test
+  public void asyncPrepareQueuesTransitionAndCompletesOffCallerThread() throws Exception {
+    PathStateParticipantScope scope = new PathStateCanonicalizer().participantScope();
+    Path root = temporaryFolder.newFolder("physical-async-overlay").toPath();
+    preparePublishedPhysicalTarget(root, scope);
+    byte[] durableCurrent = Files.readAllBytes(
+        root.resolve(PathStatePhysicalStoreSet.CURRENT_FILE));
+    byte[] blockHash = bytes(39);
+    PathStateBlockTransition transition = new PathStateBlockTransition(1, blockHash,
+        new byte[32], 3, P66Phase.P66_ON, Collections.singletonList(
+        PathStateMutation.put("code", new byte[]{1}, new byte[]{2})));
+
+    PathStatePhysicalOverlayHead overlay = PathStatePhysicalOverlayHead.open(root,
+        Engine.ROCKSDB, new PathStateLayerLimits(4, 1L << 20));
+    try (PathStateAsyncPrepareHead async = new PathStateAsyncPrepareHead(overlay, 2)) {
+      assertNull(async.prepareSnapshotDelta(
+          BlockSnapshotMeta.forBlock(1, blockHash, new byte[32], 3), transition));
+      assertEquals(0, async.advance(transition).getBlockNumber());
+      PathStateRootMetadata completed = async.flushBaseThrough(1, blockHash);
+      assertEquals(1, completed.getBlockNumber());
+      assertArrayEquals(blockHash, async.getHead().getBlockHash());
+      assertEquals(0, overlay.durableWriteBatchCalls());
+      assertArrayEquals(durableCurrent,
+          Files.readAllBytes(root.resolve(PathStatePhysicalStoreSet.CURRENT_FILE)));
+      assertFalse(Files.exists(root.resolve("reverse")));
     }
   }
 

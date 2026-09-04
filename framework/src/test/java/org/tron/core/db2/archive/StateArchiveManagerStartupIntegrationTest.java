@@ -177,9 +177,14 @@ public class StateArchiveManagerStartupIntegrationTest {
       assertThrows(org.tron.core.exception.TronError.class, snapshots::flushPending);
       assertEquals(target, manager.getArchiveHistoryWriter().committedHeadMeta());
       assertEquals(6, snapshots.getArchiveReadableEpoch());
-      assertThrows(ArchivePersistenceException.class,
-          () -> manager.getArchiveAccountBalance(6,
-              new byte[HistoricalAccountBalanceReader.ADDRESS_LENGTH]));
+      if (failureStage == ServingIndexStage.CURRENT_PUBLISHED) {
+        assertThrows(ArchivePersistenceException.class,
+            () -> manager.getArchiveAccountBalance(6,
+                new byte[HistoricalAccountBalanceReader.ADDRESS_LENGTH]));
+      } else {
+        assertFalse(manager.getArchiveAccountBalance(6,
+            new byte[HistoricalAccountBalanceReader.ADDRESS_LENGTH]).isPresent());
+      }
       assertThrows(ArchivePersistenceException.class, manager::inspectArchiveServingIndex);
       assertTrue(fixture.databases.values().stream().allMatch(database ->
           failureStage == ServingIndexStage.BEFORE_BUILD
@@ -569,10 +574,17 @@ public class StateArchiveManagerStartupIntegrationTest {
     assertArrayEquals(longValue(40), accountAssetStore.get(directKey));
     assertTrue(fixture.databases.values().stream()
         .allMatch(database -> database.getHead() instanceof SnapshotRoot));
-    assertThrows(ArchivePersistenceException.class,
-        () -> manager.getArchiveAccountAssetBalance(7, address, tokenId));
-    assertThrows(ArchivePersistenceException.class,
-        () -> manager.getArchiveAccountAssetBalance(8, address, tokenId));
+    if (failureStage == ReadableStateStage.CANONICAL_REFRESHED) {
+      assertAccountAsset(manager, 7, address, tokenId,
+          P66AccountAssetCodec.Phase.P66_ON, true, 30);
+      assertThrows(IllegalArgumentException.class,
+          () -> manager.getArchiveAccountAssetBalance(8, address, tokenId));
+    } else {
+      assertThrows(ArchivePersistenceException.class,
+          () -> manager.getArchiveAccountAssetBalance(7, address, tokenId));
+      assertThrows(ArchivePersistenceException.class,
+          () -> manager.getArchiveAccountAssetBalance(8, address, tokenId));
+    }
     Map<String, byte[]> historyAuthority = historyAuthoritySnapshot(archive);
 
     @SuppressWarnings("unchecked")

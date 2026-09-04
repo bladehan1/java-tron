@@ -3,7 +3,6 @@ package org.tron.core.db2.archive;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
@@ -69,26 +68,26 @@ public final class SnapshotPathStateTransitionCollector
     }
     BlockSnapshotMeta meta = admitted.getMeta();
     return new PathStateBlockTransition(meta.getBlockNumber(), meta.getBlockHash(),
-        meta.getParentHash(), meta.getTimestamp(), phase, mutations.values());
+        meta.getParentHash(), meta.getTimestamp(), phase, mutations.values(),
+        admitted.getMutationViewDigest());
   }
 
   private void collectActivationAccounts(
       Map<MutationKey, PathStateMutation> mutations) throws IOException {
     activationAccountSource.scan((key, rawPost) -> {
       BlockChangeView.PostValue postValue = BlockChangeView.PostValue.present(rawPost);
-      Map<WrappedByteArray, byte[]> oldAssets = Collections.emptyMap();
-      if (accountAssetProjector.requiresOldPhysicalAssets(null, postValue)) {
-        oldAssets = AccountAssetOldPhysicalAssetsSource.captureRequired(
-            oldPhysicalAssetsSource, key);
-      }
-      AccountAssetArchiveProjector.Projection projection = accountAssetProjector.project(
-          key, null, postValue, true, oldAssets);
+      AccountAssetArchiveProjector.Projection projection =
+          accountAssetProjector.projectWithOldPhysicalAssetsSource(
+              key, null, postValue, true, oldPhysicalAssetsSource);
       addCanonical(AccountAssetArchiveProjector.ACCOUNT_DB, key, projection.oldAccount,
           projection.postAccount, P66Phase.P66_ACTIVATION, mutations);
+      Map<WrappedByteArray, OldValue> reverseOldAssets = oldAssets(projection);
       for (AssetRow asset : projection.changedAssetRows) {
+        OldValue oldValue = requireOldAsset(reverseOldAssets, asset.getPhysicalRawKey());
         addPhysical(P66Phase.P66_ACTIVATION,
             AccountAssetArchiveProjector.ACCOUNT_ASSET_DB,
-            asset.getPhysicalRawKey(), null, asset.getPostValue(), mutations);
+            asset.getPhysicalRawKey(), nullable(oldValue), asset.getPostValue(), false,
+            mutations);
       }
     });
   }
@@ -97,23 +96,28 @@ public final class SnapshotPathStateTransitionCollector
       BlockChangeView.Change change, Map<MutationKey, PathStateMutation> mutations) {
     byte[] key = change.getKey();
     byte[] rawOld = database.getPrevious(key);
-    Map<WrappedByteArray, byte[]> oldAssets = Collections.emptyMap();
-    if (accountAssetProjector.requiresOldPhysicalAssets(rawOld, change.getPostValue())) {
-      oldAssets = AccountAssetOldPhysicalAssetsSource.captureRequired(
-          oldPhysicalAssetsSource, key);
-    }
-    AccountAssetArchiveProjector.Projection projection = accountAssetProjector.project(
-        key, rawOld, change.getPostValue(), phase != P66Phase.P66_OFF, oldAssets);
+    AccountAssetArchiveProjector.Projection projection =
+        accountAssetProjector.projectWithOldPhysicalAssetsSource(
+            key, rawOld, change.getPostValue(), phase != P66Phase.P66_OFF,
+            oldPhysicalAssetsSource);
     addCanonical(AccountAssetArchiveProjector.ACCOUNT_DB, key, projection.oldAccount,
         projection.postAccount, phase, mutations);
+    Map<WrappedByteArray, OldValue> reverseOldAssets = oldAssets(projection);
     for (AssetRow asset : projection.changedAssetRows) {
+      OldValue oldValue = requireOldAsset(reverseOldAssets, asset.getPhysicalRawKey());
       addPhysical(phase, AccountAssetArchiveProjector.ACCOUNT_ASSET_DB,
-          asset.getPhysicalRawKey(), null, asset.getPostValue(), mutations);
+          asset.getPhysicalRawKey(), nullable(oldValue), asset.getPostValue(), false, mutations);
     }
   }
 
   private void addPhysical(P66Phase phase, String dbName, byte[] key, byte[] rawOld,
       BlockChangeView.PostValue rawPost, Map<MutationKey, PathStateMutation> mutations) {
+    addPhysical(phase, dbName, key, rawOld, rawPost, true, mutations);
+  }
+
+  private void addPhysical(P66Phase phase, String dbName, byte[] key, byte[] rawOld,
+      BlockChangeView.PostValue rawPost, boolean physicalPreviousAuthoritative,
+      Map<MutationKey, PathStateMutation> mutations) {
     PathStateMutation oldMutation = rawOld == null ? null
         : canonicalizer.put(phase, dbName, key, rawOld);
     PathStateMutation postMutation = rawPost.isPresent()
@@ -122,7 +126,9 @@ public final class SnapshotPathStateTransitionCollector
     if (oldMutation != null && same(oldMutation, postMutation)) {
       return;
     }
-    add(postMutation, mutations);
+    add(physicalPreviousAuthoritative
+        ? postMutation.withPreviousPhysicalValue(
+        oldMutation == null ? null : oldMutation.getPhysicalValue()) : postMutation, mutations);
   }
 
   private void addCanonical(String dbName, byte[] key, OldValue oldValue,
@@ -136,14 +142,42 @@ public final class SnapshotPathStateTransitionCollector
     if (oldMutation != null && same(oldMutation, postMutation)) {
       return;
     }
-    add(postMutation, mutations);
+    add(postMutation.withPreviousPhysicalValue(
+        oldMutation == null ? null : oldMutation.getPhysicalValue()), mutations);
+  }
+
+  private static Map<WrappedByteArray, OldValue> oldAssets(
+      AccountAssetArchiveProjector.Projection projection) {
+    Map<WrappedByteArray, OldValue> result = new LinkedHashMap<>();
+    for (org.tron.core.db2.archive.BlockReverseDiff.Entry entry : projection.reverseAssets) {
+      result.put(WrappedByteArray.copyOf(entry.getKey()), entry.getOldValue());
+    }
+    return result;
+  }
+
+  private static OldValue requireOldAsset(Map<WrappedByteArray, OldValue> oldAssets,
+      byte[] physicalKey) {
+    OldValue oldValue = oldAssets.get(WrappedByteArray.copyOf(physicalKey));
+    if (oldValue == null) {
+      throw new ArchivePersistenceException(
+          "Changed AccountAsset row has no matching pre-state value");
+    }
+    return oldValue;
+  }
+
+  private static byte[] nullable(OldValue oldValue) {
+    return oldValue.isPresent() ? oldValue.getValue() : null;
   }
 
   private void add(PathStateMutation mutation,
       Map<MutationKey, PathStateMutation> mutations) {
     MutationKey key = new MutationKey(mutation.getDbName(), mutation.getCanonicalKey());
     PathStateMutation previous = mutations.putIfAbsent(key, mutation);
-    if (previous != null && !same(previous, mutation)) {
+    if (previous != null && (!same(previous, mutation)
+        || previous.isPreviousValueKnown() != mutation.isPreviousValueKnown()
+        || previous.isPreviousValueKnown()
+        && !Arrays.equals(previous.getPreviousPhysicalValue(),
+        mutation.getPreviousPhysicalValue()))) {
       throw new ArchivePersistenceException("Conflicting path-state block mutation");
     }
   }

@@ -231,10 +231,20 @@ public class Args extends CommonParameter {
         sc.getPathStateRoot().getReversibleLayerBytes());
     PARAMETER.storage.setPathStateRootWriteBufferBytes(
         sc.getPathStateRoot().getWriteBufferBytes());
+    PARAMETER.storage.setPathStateRootNodeCacheBytes(
+        sc.getPathStateRoot().getNodeCacheBytes());
+    PARAMETER.storage.setPathStateRootParticipantThreads(
+        sc.getPathStateRoot().getParticipantThreads());
+    PARAMETER.storage.setPathStateRootBranchThreads(
+        sc.getPathStateRoot().getBranchThreads());
     PARAMETER.storage.setPathStateRootRebuildFromGenesis(
         sc.getPathStateRoot().isRebuildFromGenesis());
     PARAMETER.storage.setPathStateRootVerifyEveryBlock(
         sc.getPathStateRoot().isVerifyEveryBlock());
+    PARAMETER.storage.setPathStateRootVolatileSnapshotBenchmark(
+        sc.getPathStateRoot().isVolatileSnapshotBenchmark());
+    PARAMETER.storage.setPathStateRootAsyncPrepareBenchmark(
+        sc.getPathStateRoot().isAsyncPrepareBenchmark());
 
     // estimatedTransactions / maxFlushCount clamping & validation run inside
     // TxCacheConfig.postProcess / SnapshotConfig.postProcess during bean load.

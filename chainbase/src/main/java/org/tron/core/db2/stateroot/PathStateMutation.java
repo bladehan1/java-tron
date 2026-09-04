@@ -9,12 +9,22 @@ public final class PathStateMutation {
   private final String dbName;
   private final byte[] physicalKey;
   private final byte[] physicalValue;
+  private final boolean previousValueKnown;
+  private final byte[] previousPhysicalValue;
 
   private PathStateMutation(String dbName, byte[] physicalKey, byte[] physicalValue) {
+    this(dbName, physicalKey, physicalValue, false, null);
+  }
+
+  private PathStateMutation(String dbName, byte[] physicalKey, byte[] physicalValue,
+      boolean previousValueKnown, byte[] previousPhysicalValue) {
     this.dbName = Objects.requireNonNull(dbName, "dbName");
     this.physicalKey = copy(physicalKey, "physicalKey");
     this.physicalValue = physicalValue == null ? null
         : Arrays.copyOf(physicalValue, physicalValue.length);
+    this.previousValueKnown = previousValueKnown;
+    this.previousPhysicalValue = previousPhysicalValue == null ? null
+        : Arrays.copyOf(previousPhysicalValue, previousPhysicalValue.length);
   }
 
   public static PathStateMutation put(String dbName, byte[] physicalKey, byte[] physicalValue) {
@@ -24,6 +34,11 @@ public final class PathStateMutation {
 
   public static PathStateMutation delete(String dbName, byte[] physicalKey) {
     return new PathStateMutation(dbName, physicalKey, null);
+  }
+
+  /** Returns an immutable copy carrying the block pre-state value, or known absence. */
+  public PathStateMutation withPreviousPhysicalValue(byte[] previousValue) {
+    return new PathStateMutation(dbName, physicalKey, physicalValue, true, previousValue);
   }
 
   public String getDbName() {
@@ -48,6 +63,20 @@ public final class PathStateMutation {
 
   public boolean isDelete() {
     return physicalValue == null;
+  }
+
+  /** Whether the block snapshot supplied an authoritative pre-state value for this key. */
+  public boolean isPreviousValueKnown() {
+    return previousValueKnown;
+  }
+
+  /** Exact pre-state bytes, or {@code null} when the authoritative pre-state is absent. */
+  public byte[] getPreviousPhysicalValue() {
+    if (!previousValueKnown) {
+      throw new IllegalStateException("previous physical value is unknown");
+    }
+    return previousPhysicalValue == null ? null
+        : Arrays.copyOf(previousPhysicalValue, previousPhysicalValue.length);
   }
 
   /** @deprecated Use {@link #getPhysicalValue()}; this alias is retained for old-format callers. */

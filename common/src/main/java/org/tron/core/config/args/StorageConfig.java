@@ -178,8 +178,13 @@ public class StorageConfig {
     private int reversibleLayerLimit = 128;
     private long reversibleLayerBytes = 2147483648L;
     private long writeBufferBytes = 268435456L;
+    private long nodeCacheBytes = 268435456L;
+    private int participantThreads = 4;
+    private int branchThreads = 8;
     private boolean rebuildFromGenesis = false;
     private boolean verifyEveryBlock = true;
+    private boolean volatileSnapshotBenchmark = false;
+    private boolean asyncPrepareBenchmark = false;
 
     void postProcess() {
       if (!"shadow".equals(mode)) {
@@ -191,14 +196,24 @@ public class StorageConfig {
       if (formatVersion != 1) {
         throw new IllegalArgumentException("pathStateRoot.formatVersion must be 1");
       }
-      if (reversibleLayerLimit <= 0 || reversibleLayerBytes <= 0 || writeBufferBytes <= 0) {
+      if (reversibleLayerLimit <= 0 || reversibleLayerBytes <= 0 || writeBufferBytes <= 0
+          || nodeCacheBytes <= 0) {
         throw new IllegalArgumentException("pathStateRoot limits must be positive");
+      }
+      if (participantThreads <= 0 || participantThreads > 64
+          || branchThreads <= 0 || branchThreads > 64) {
+        throw new IllegalArgumentException(
+            "pathStateRoot prepare threads must be in [1, 64]");
       }
       if (rebuildFromGenesis) {
         throw new IllegalArgumentException("pathStateRoot.rebuildFromGenesis is not supported");
       }
       if (!verifyEveryBlock) {
         throw new IllegalArgumentException("pathStateRoot.verifyEveryBlock must remain enabled");
+      }
+      if (asyncPrepareBenchmark && !volatileSnapshotBenchmark) {
+        throw new IllegalArgumentException(
+            "pathStateRoot.asyncPrepareBenchmark requires volatileSnapshotBenchmark");
       }
     }
   }

@@ -4,6 +4,7 @@ import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertThrows;
+import static org.junit.Assert.assertTrue;
 
 import com.google.common.hash.Hashing;
 import java.io.ByteArrayOutputStream;
@@ -122,6 +123,22 @@ public class PathStateBlockTransitionTest {
     assertArrayEquals(digest, transition.getPayloadDigest());
     assertThrows(UnsupportedOperationException.class,
         () -> transition.getMutations().add(PathStateMutation.delete("proposal", new byte[]{3})));
+  }
+
+  @Test
+  public void ownsAnOptionalAuthoritativePreviousValue() {
+    byte[] previous = new byte[]{3, 4};
+    PathStateMutation mutation = PathStateMutation.put(
+        "proposal", new byte[]{1}, new byte[]{2}).withPreviousPhysicalValue(previous);
+
+    previous[0] = 9;
+    assertTrue(mutation.isPreviousValueKnown());
+    assertArrayEquals(new byte[]{3, 4}, mutation.getPreviousPhysicalValue());
+    mutation.getPreviousPhysicalValue()[0] = 8;
+    assertArrayEquals(new byte[]{3, 4}, mutation.getPreviousPhysicalValue());
+
+    PathStateMutation unknown = PathStateMutation.delete("proposal", new byte[]{1});
+    assertThrows(IllegalStateException.class, unknown::getPreviousPhysicalValue);
   }
 
   private static PathStateBlockTransition transition(List<PathStateMutation> mutations) {

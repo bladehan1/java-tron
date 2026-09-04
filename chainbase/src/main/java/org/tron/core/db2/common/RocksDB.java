@@ -114,10 +114,22 @@ public class RocksDB implements DB<byte[], byte[]>, Flusher, SnapshotCapableStor
 
   @Override
   public void flush(Map<WrappedByteArray, WrappedByteArray> batch) {
+    flush(batch, writeOptions);
+  }
+
+  @Override
+  public void flushSynced(Map<WrappedByteArray, WrappedByteArray> batch) {
+    try (WriteOptionsWrapper synced = WriteOptionsWrapper.getInstance().sync(true)) {
+      flush(batch, synced);
+    }
+  }
+
+  private void flush(Map<WrappedByteArray, WrappedByteArray> batch,
+      WriteOptionsWrapper options) {
     Map<byte[], byte[]> rows = batch.entrySet().stream()
         .map(e -> Maps.immutableEntry(e.getKey().getBytes(), e.getValue().getBytes()))
         .collect(HashMap::new, (m, k) -> m.put(k.getKey(), k.getValue()), HashMap::putAll);
-    db.updateByBatch(rows, writeOptions);
+    db.updateByBatch(rows, options);
   }
 
   @Override

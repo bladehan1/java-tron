@@ -149,8 +149,7 @@ public final class PathStateLayerPublication {
     }
     requireSame(current, progress, "path-state CURRENT and native progress differ");
     try (PathStateNodeStoreSet stores = PathStateNodeStoreSet.openPublished(manifest, current)) {
-      PathStateRoot root = stores.createRoot();
-      root.verifyNodeStores();
+      stores.createRoot();
     }
   }
 
