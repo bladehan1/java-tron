@@ -132,8 +132,12 @@ public final class PathStateRoot {
           batch.add(new PathMerkleTrie.BatchMutation(mutation.secureKey, mutation.encodedValue,
               mutation.previousValueKnown, mutation.previousEncodedValue));
         }
-        participantTries.get(participantWork.participant.getDbName()).applyBatch(batch,
-            Objects.requireNonNull(branchExecutor, "branchExecutor"));
+        PathMerkleTrie participantTrie = participantTries.get(
+            participantWork.participant.getDbName());
+        participantTrie.applyBatch(batch,
+            Objects.requireNonNull(branchExecutor, "branchExecutor"),
+            usesDeferredNodeEncoding(participantWork.participant));
+        participantTrie.rootHash();
         participantWork.elapsedNanos = System.nanoTime() - participantStartedNanos;
       }));
     }
@@ -256,6 +260,11 @@ public final class PathStateRoot {
       this.mutations = mutations;
       participant = mutations.get(0).participant;
     }
+  }
+
+  static boolean usesDeferredNodeEncoding(PathStateParticipant participant) {
+    String dbName = participant.getDbName();
+    return "account".equals(dbName) || "account-asset".equals(dbName);
   }
 
   /** Applies one rebuild batch while locking only the participant tries touched by that batch. */

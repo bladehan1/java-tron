@@ -2,6 +2,7 @@ package org.tron.core.db2.stateroot;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
@@ -247,6 +248,14 @@ public class PathStateRootTest {
     assertArrayEquals(sequential.rootHash(), parallel.rootHash());
     assertEquals(sequential.pendingLeafMutations().size(),
         parallel.pendingLeafMutations().size());
+  }
+
+  @Test
+  public void deferredNodeEncodingIsInitiallyLimitedToAccountParticipants() {
+    assertTrue(PathStateRoot.usesDeferredNodeEncoding(participant(4, "account")));
+    assertTrue(PathStateRoot.usesDeferredNodeEncoding(participant(5, "account-asset")));
+    assertFalse(PathStateRoot.usesDeferredNodeEncoding(participant(1, "abi")));
+    assertFalse(PathStateRoot.usesDeferredNodeEncoding(participant(22, "storage-row")));
   }
 
   @Test

@@ -113,10 +113,12 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
     }
     assertTrue(collecting.await(5, TimeUnit.SECONDS));
     assertNull(published.get());
+    assertFalse(attachment.isReadyForHeaderDiagnostic(1L, hash(1)));
     release.countDown();
     attachment.close();
     assertEquals(1, published.get().getBlockNumber());
     assertEquals(PathStateRuntimeAttachment.State.READY, attachment.status().getState());
+    assertTrue(attachment.isReadyForHeaderDiagnostic(1L, hash(1)));
     assertSame(attachment, manager.detachPathStateRuntime(attachment));
     manager.shutdown();
   }
@@ -266,6 +268,10 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
         owner::advance, (blockNumber, blockHash) -> { },
         transition -> owner.prepare(transition).getStateRoot());
     runtime.synchronizeReadyHead(base);
+    assertTrue(runtime.isReadyForHeaderDiagnostic(base.getBlockNumber(), base.getBlockHash()));
+    assertFalse(runtime.isReadyForHeaderDiagnostic(base.getBlockNumber() + 1,
+        base.getBlockHash()));
+    assertFalse(runtime.isReadyForHeaderDiagnostic(base.getBlockNumber(), hash(100)));
     shadow.attachPathStateRuntime(runtime);
 
     BlockSnapshotMeta meta = BlockSnapshotMeta.forBlock(1L, canonicalBlockId, parentHash, 12L);
@@ -288,6 +294,7 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
     assertEquals(((SnapshotImpl) controlCode.getHead()).getBlockSnapshotMeta(),
         ((SnapshotImpl) shadowCode.getHead()).getBlockSnapshotMeta());
     assertEquals(PathStateRuntimeAttachment.State.READY, runtime.status().getState());
+    assertTrue(runtime.isReadyForHeaderDiagnostic(1L, canonicalBlockId));
     assertEquals(1L, owner.getHead().getBlockNumber());
     assertFalse(Arrays.equals(base.getStateRoot(), owner.getHead().getStateRoot()));
 
