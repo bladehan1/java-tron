@@ -38,7 +38,10 @@ public final class PathMerkleTrie {
 
   private final PathNodeStore nodeStore;
   private static final AtomicLong NODE_CREATE_COUNT = new AtomicLong();
+  private static final AtomicLong NODE_ENCODE_COUNT = new AtomicLong();
   private static final AtomicLong NODE_KECCAK_COUNT = new AtomicLong();
+  private static final ThreadLocal<Boolean> DEFER_NODE_ENCODING =
+      ThreadLocal.withInitial(() -> Boolean.FALSE);
 
   private final boolean lazyHashReferences;
   private final Map<BytesKey, byte[]> leaves = new TreeMap<>(UNSIGNED_KEY_COMPARATOR);
@@ -98,7 +101,22 @@ public final class PathMerkleTrie {
   }
 
   synchronized void applyBatch(List<BatchMutation> mutations, ExecutorService executor) {
+    applyBatch(mutations, executor, false);
+  }
+
+  synchronized void applyBatch(List<BatchMutation> mutations, ExecutorService executor,
+      boolean deferNodeEncoding) {
     requireMutable();
+    if (deferNodeEncoding) {
+      try (BlockNodeEncodingScope ignored = BlockNodeEncodingScope.open()) {
+        applyBatchInternal(mutations, executor);
+      }
+      return;
+    }
+    applyBatchInternal(mutations, executor);
+  }
+
+  private void applyBatchInternal(List<BatchMutation> mutations, ExecutorService executor) {
     List<BatchMutation> batch = new ArrayList<>(Objects.requireNonNull(mutations, "mutations"));
     Node resolvedRoot = resolve(rootNode, EMPTY_PATH);
     rootNode = resolvedRoot;
@@ -139,10 +157,11 @@ public final class PathMerkleTrie {
       return compared != 0 ? compared : Integer.compare(left.position, right.position);
     });
     List<Future<SubtreeResult>> futures = new ArrayList<>(work.size());
+    boolean deferNodeEncoding = DEFER_NODE_ENCODING.get();
     for (SubtreeWork subtree : work) {
       futures.add(Objects.requireNonNull(executor, "executor").submit(
           () -> applySubtree(root.children[subtree.position], subtree.position,
-              subtree.mutations)));
+              subtree.mutations, deferNodeEncoding)));
     }
     Node[] children = Arrays.copyOf(root.children, root.children.length);
     Map<BytesKey, byte[]> previous = new LinkedHashMap<>();
@@ -218,6 +237,20 @@ public final class PathMerkleTrie {
   }
 
   private SubtreeResult applySubtree(Node initial, int nibble,
+      List<BatchMutation> mutations, boolean deferNodeEncoding) {
+    if (deferNodeEncoding) {
+      try (BlockNodeEncodingScope ignored = BlockNodeEncodingScope.open()) {
+        SubtreeResult result = applySubtreeInternal(initial, nibble, mutations);
+        if (result.node != null) {
+          nodeReference(result.node);
+        }
+        return result;
+      }
+    }
+    return applySubtreeInternal(initial, nibble, mutations);
+  }
+
+  private SubtreeResult applySubtreeInternal(Node initial, int nibble,
       List<BatchMutation> mutations) {
     Node node = initial;
     byte[] path = new byte[]{(byte) nibble};
@@ -438,6 +471,11 @@ public final class PathMerkleTrie {
   /** Cumulative count of LeafNode/ExtensionNode/BranchNode creations (RLP encodes). */
   static long nodeCreateCountTotal() {
     return NODE_CREATE_COUNT.get();
+  }
+
+  /** Cumulative count of canonical RLP encodes, excluding already encoded durable nodes. */
+  static long nodeEncodeCountTotal() {
+    return NODE_ENCODE_COUNT.get();
   }
 
   /** Cumulative count of actual Keccak computations on node RLP (cache misses). */
@@ -1081,9 +1119,7 @@ public final class PathMerkleTrie {
     } else {
       throw new IllegalStateException("path-state durable node has invalid arity");
     }
-    if (!Arrays.equals(encodedNode(decoded), storedEncoding)) {
-      throw new IllegalStateException("path-state durable node is not canonically encoded");
-    }
+    decoded.bindEncoded(storedEncoding);
     if (stored.knownHash != null) {
       decoded.bindCachedHash(stored.knownHash);
     }
@@ -1103,6 +1139,9 @@ public final class PathMerkleTrie {
       return null;
     }
     if (reference.list) {
+      if (reference.encoded.length >= SECURE_KEY_LENGTH) {
+        throw new IllegalStateException("path-state inline child is not canonically encoded");
+      }
       Node stored = new StoredNode(reference.encoded, path);
       rememberMaterialized(stored, path);
       return stored;
@@ -1155,16 +1194,26 @@ public final class PathMerkleTrie {
     if (marker <= longBase) {
       payloadOffset = offset + 1;
       payloadLength = marker - shortBase;
+      if (!list && payloadLength == 1 && payloadOffset < encoded.length
+          && (encoded[payloadOffset] & 0xff) < 0x80) {
+        throw new IllegalStateException("path-state RLP item uses a non-canonical short form");
+      }
     } else {
       int lengthBytes = marker - longBase;
       if (lengthBytes > Integer.BYTES || offset + 1 + lengthBytes > encoded.length) {
         throw new IllegalStateException("path-state RLP length is invalid");
+      }
+      if (encoded[offset + 1] == 0) {
+        throw new IllegalStateException("path-state RLP length has leading zeroes");
       }
       payloadOffset = offset + 1 + lengthBytes;
       payloadLength = 0;
       for (int index = offset + 1; index < payloadOffset; index++) {
         payloadLength = Math.addExact(Math.multiplyExact(payloadLength, 256),
             encoded[index] & 0xff);
+      }
+      if (payloadLength < 56) {
+        throw new IllegalStateException("path-state RLP uses a non-canonical long form");
       }
     }
     int end = Math.addExact(payloadOffset, payloadLength);
@@ -1199,11 +1248,7 @@ public final class PathMerkleTrie {
   }
 
   private static byte[] encodedNode(Node node) {
-    byte[] encoded = Objects.requireNonNull(node, "node").encoded;
-    if (encoded == null) {
-      throw new IllegalStateException("unresolved path-state hash reference has no node encoding");
-    }
-    return encoded;
+    return Objects.requireNonNull(node, "node").encoded();
   }
 
   private static byte[] nodeHash(Node node) {
@@ -1314,13 +1359,52 @@ public final class PathMerkleTrie {
 
   private abstract static class Node {
 
-    private final byte[] encoded;
+    private volatile byte[] encoded;
     private volatile byte[] hash;
     private volatile BytesKey materializedPath;
 
     private Node(byte[] encoded) {
       this.encoded = encoded;
     }
+
+    private byte[] encoded() {
+      byte[] cached = encoded;
+      if (cached == null) {
+        synchronized (this) {
+          cached = encoded;
+          if (cached == null) {
+            cached = encodeNode();
+            if (cached == null) {
+              throw new IllegalStateException(
+                  "unresolved path-state hash reference has no node encoding");
+            }
+            encoded = cached;
+            NODE_ENCODE_COUNT.incrementAndGet();
+          }
+        }
+      }
+      return cached;
+    }
+
+    protected final void encodeEagerlyUnlessDeferred() {
+      if (!DEFER_NODE_ENCODING.get()) {
+        encoded();
+      }
+    }
+
+    private void bindEncoded(byte[] knownEncoding) {
+      byte[] known = Arrays.copyOf(Objects.requireNonNull(knownEncoding, "knownEncoding"),
+          knownEncoding.length);
+      synchronized (this) {
+        if (encoded == null) {
+          encoded = known;
+        } else if (!Arrays.equals(encoded, known)) {
+          throw new IllegalStateException("path-state durable node is not canonically encoded");
+        }
+      }
+    }
+
+    protected abstract byte[] encodeNode();
 
     private byte[] cachedHash() {
       byte[] cached = hash;
@@ -1392,6 +1476,11 @@ public final class PathMerkleTrie {
         throw new IllegalArgumentException("knownHash must contain exactly 32 bytes");
       }
     }
+
+    @Override
+    protected byte[] encodeNode() {
+      throw new IllegalStateException("stored path-state node lost its encoding");
+    }
   }
 
   private static final class HashRefNode extends Node {
@@ -1408,6 +1497,11 @@ public final class PathMerkleTrie {
         throw new IllegalArgumentException("expectedHash must contain exactly 32 bytes");
       }
     }
+
+    @Override
+    protected byte[] encodeNode() {
+      return null;
+    }
   }
 
   private static final class LeafNode extends Node {
@@ -1416,10 +1510,16 @@ public final class PathMerkleTrie {
     private final byte[] value;
 
     private LeafNode(byte[] path, byte[] value) {
-      super(rlpList(rlpItem(compactPath(path, true)), rlpItem(value)));
-      NODE_CREATE_COUNT.incrementAndGet();
+      super(null);
       this.path = Arrays.copyOf(path, path.length);
       this.value = Arrays.copyOf(value, value.length);
+      NODE_CREATE_COUNT.incrementAndGet();
+      encodeEagerlyUnlessDeferred();
+    }
+
+    @Override
+    protected byte[] encodeNode() {
+      return rlpList(rlpItem(compactPath(path, true)), rlpItem(value));
     }
 
   }
@@ -1430,18 +1530,19 @@ public final class PathMerkleTrie {
     private final Node child;
 
     private ExtensionNode(byte[] path, Node child) {
-      super(encode(path, child));
-      NODE_CREATE_COUNT.incrementAndGet();
+      super(null);
       if (path.length == 0) {
         throw new IllegalArgumentException("extension path must not be empty");
       }
       this.path = Arrays.copyOf(path, path.length);
       this.child = Objects.requireNonNull(child, "child");
+      NODE_CREATE_COUNT.incrementAndGet();
+      encodeEagerlyUnlessDeferred();
     }
 
-    private static byte[] encode(byte[] path, Node child) {
-      Node present = Objects.requireNonNull(child, "child");
-      return rlpList(rlpItem(compactPath(path, false)), nodeReference(present));
+    @Override
+    protected byte[] encodeNode() {
+      return rlpList(rlpItem(compactPath(path, false)), nodeReference(child));
     }
   }
 
@@ -1450,15 +1551,17 @@ public final class PathMerkleTrie {
     private final Node[] children;
 
     private BranchNode(Node[] children) {
-      super(encode(children));
-      NODE_CREATE_COUNT.incrementAndGet();
-      this.children = Arrays.copyOf(children, children.length);
-    }
-
-    private static byte[] encode(Node[] children) {
+      super(null);
       if (children.length != 16) {
         throw new IllegalArgumentException("branch must contain 16 child slots");
       }
+      this.children = Arrays.copyOf(children, children.length);
+      NODE_CREATE_COUNT.incrementAndGet();
+      encodeEagerlyUnlessDeferred();
+    }
+
+    @Override
+    protected byte[] encodeNode() {
       List<byte[]> encodedChildren = new ArrayList<>(Collections.nCopies(17, EMPTY_RLP_ITEM));
       for (int i = 0; i < children.length; i++) {
         if (children[i] != null) {
@@ -1466,6 +1569,31 @@ public final class PathMerkleTrie {
         }
       }
       return rlpList(encodedChildren.toArray(new byte[encodedChildren.size()][]));
+    }
+  }
+
+  /** Defers node encoding while one participant folds a block's sorted mutation batch. */
+  private static final class BlockNodeEncodingScope implements AutoCloseable {
+
+    private final boolean previous;
+
+    private BlockNodeEncodingScope(boolean previous) {
+      this.previous = previous;
+    }
+
+    private static BlockNodeEncodingScope open() {
+      boolean previous = DEFER_NODE_ENCODING.get();
+      DEFER_NODE_ENCODING.set(Boolean.TRUE);
+      return new BlockNodeEncodingScope(previous);
+    }
+
+    @Override
+    public void close() {
+      if (previous) {
+        DEFER_NODE_ENCODING.set(Boolean.TRUE);
+      } else {
+        DEFER_NODE_ENCODING.remove();
+      }
     }
   }
 

@@ -274,6 +274,16 @@ public final class PathStateRuntimeAttachment {
         headerDiagnosticBlockNumber, headerDiagnosticBlockHash);
   }
 
+  /** True only when an owner root read cannot wait for a deferred predecessor transition. */
+  public synchronized boolean isReadyForHeaderDiagnostic(long blockNumber, byte[] blockHash) {
+    byte[] admittedHash = Objects.requireNonNull(blockHash, "blockHash");
+    return failure == null && pending == null && pendingView == null
+        && readyBlockNumber == observedBlockNumber
+        && readyBlockNumber == blockNumber
+        && Arrays.equals(readyBlockHash, observedBlockHash)
+        && Arrays.equals(readyBlockHash, admittedHash);
+  }
+
   /** Records a non-blocking comparison of carried header metadata against the local READY root. */
   public synchronized void diagnoseHeader(long blockNumber, byte[] blockHash, byte[] carriedRoot,
       byte[] localRoot) {

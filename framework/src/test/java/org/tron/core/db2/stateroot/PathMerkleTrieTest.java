@@ -104,6 +104,22 @@ public class PathMerkleTrieTest {
   }
 
   @Test
+  public void rejectsNonCanonicalRlpWithoutDecodeReencoding() {
+    InMemoryPathNodeStore store = new InMemoryPathNodeStore();
+    byte[] nonCanonicalLeaf = new byte[37];
+    nonCanonicalLeaf[0] = (byte) 0xe4;
+    nonCanonicalLeaf[1] = (byte) 0xa1;
+    nonCanonicalLeaf[2] = 0x20;
+    nonCanonicalLeaf[35] = (byte) 0x81;
+    nonCanonicalLeaf[36] = 0x01;
+    store.nodes.put("", nonCanonicalLeaf);
+
+    PathMerkleTrie restored = new PathMerkleTrie(store);
+    restored.restoreRoot();
+    assertThrows(IllegalStateException.class, () -> restored.get(new byte[32]));
+  }
+
+  @Test
   public void detectsMissingCorruptAndDirtyCommittedNodes() {
     InMemoryPathNodeStore corruptStore = new InMemoryPathNodeStore();
     PathMerkleTrie corruptTrie = new PathMerkleTrie(corruptStore);
@@ -331,6 +347,104 @@ public class PathMerkleTrieTest {
     } finally {
       executor.shutdownNow();
     }
+  }
+
+  @Test
+  public void blockScopedEncodingEncodesOnlyTheFrozenNodeGraph() {
+    int leafCount = 512;
+    byte[][] keys = new byte[leafCount][];
+    InMemoryPathNodeStore sourceStore = new InMemoryPathNodeStore();
+    PathMerkleTrie source = new PathMerkleTrie(sourceStore);
+    for (int index = 0; index < leafCount; index++) {
+      keys[index] = Hash.sha3(value("arena-key-" + index));
+      source.put(keys[index], value("arena-value-" + index));
+    }
+    byte[] initialRoot = source.rootHash();
+    Map<String, byte[]> initialNodes = copyNodeMap(sourceStore.nodes);
+    List<PathMerkleTrie.BatchMutation> changes = new ArrayList<>();
+    for (int index = 0; index < 96; index++) {
+      changes.add(new PathMerkleTrie.BatchMutation(keys[index],
+          value("arena-updated-" + index)));
+    }
+    for (int index = 96; index < 128; index++) {
+      changes.add(new PathMerkleTrie.BatchMutation(keys[index], null));
+    }
+
+    InMemoryPathNodeStore eagerStore = new InMemoryPathNodeStore();
+    eagerStore.nodes.putAll(copyNodeMap(initialNodes));
+    PathMerkleTrie eager = new PathMerkleTrie(eagerStore);
+    eager.restoreRoot(initialRoot);
+    ExecutorService eagerExecutor = Executors.newFixedThreadPool(4);
+    long eagerEncodesBefore = PathMerkleTrie.nodeEncodeCountTotal();
+    long eagerEncodes;
+    try {
+      eager.applyBatch(changes, eagerExecutor, false);
+      eager.rootHash();
+      eagerEncodes = PathMerkleTrie.nodeEncodeCountTotal() - eagerEncodesBefore;
+    } finally {
+      eagerExecutor.shutdownNow();
+    }
+
+    InMemoryPathNodeStore arenaStore = new InMemoryPathNodeStore();
+    arenaStore.nodes.putAll(copyNodeMap(initialNodes));
+    PathMerkleTrie arena = new PathMerkleTrie(arenaStore);
+    arena.restoreRoot(initialRoot);
+    ExecutorService arenaExecutor = Executors.newFixedThreadPool(4);
+    long arenaCreatesBefore = PathMerkleTrie.nodeCreateCountTotal();
+    long arenaEncodesBefore = PathMerkleTrie.nodeEncodeCountTotal();
+    long arenaCreates;
+    long arenaEncodes;
+    try {
+      arena.applyBatch(changes, arenaExecutor, true);
+      assertArrayEquals(eager.rootHash(), arena.rootHash());
+      arenaCreates = PathMerkleTrie.nodeCreateCountTotal() - arenaCreatesBefore;
+      arenaEncodes = PathMerkleTrie.nodeEncodeCountTotal() - arenaEncodesBefore;
+      long encodesAfterFreeze = PathMerkleTrie.nodeEncodeCountTotal();
+      arena.rootHash();
+      arena.snapshot();
+      assertEquals(encodesAfterFreeze, PathMerkleTrie.nodeEncodeCountTotal());
+    } finally {
+      arenaExecutor.shutdownNow();
+    }
+
+    assertNodeMapsEqual(eagerStore.nodes, arenaStore.nodes);
+    assertTrue(arenaCreates > arenaEncodes);
+    assertTrue(arenaEncodes < eagerEncodes);
+    assertTrue(arenaEncodes >= arena.getLastNodePuts());
+  }
+
+  @Test
+  public void resolvedSubtreeSurvivesConsecutiveSnapshotSwitches() {
+    byte[][] keys = new byte[16][];
+    byte[][] values = new byte[16][];
+    InMemoryPathNodeStore store = new InMemoryPathNodeStore();
+    PathMerkleTrie source = new PathMerkleTrie(store);
+    for (int index = 0; index < keys.length; index++) {
+      keys[index] = filledKey(index << 4);
+      values[index] = value("snapshot-value-long-enough-" + index);
+      source.put(keys[index], values[index]);
+    }
+    byte[] initialRoot = source.rootHash();
+
+    PathMerkleTrie restored = new PathMerkleTrie(store);
+    restored.restoreRoot(initialRoot);
+    assertArrayEquals(values[3], restored.get(keys[3]));
+    PathMerkleTrie.Snapshot parent = restored.snapshot();
+
+    PathMerkleTrie firstBlock = PathMerkleTrie.fromSnapshot(store, parent);
+    values[4] = value("snapshot-block-one-updated");
+    firstBlock.put(keys[4], values[4]);
+    firstBlock.rootHash();
+    PathMerkleTrie.Snapshot firstChild = firstBlock.snapshot();
+
+    int readsBeforeInheritedLookup = store.gets;
+    PathMerkleTrie secondBlock = PathMerkleTrie.fromSnapshot(store, firstChild);
+    assertArrayEquals(values[3], secondBlock.get(keys[3]));
+    assertEquals(readsBeforeInheritedLookup, store.gets);
+
+    values[5] = value("snapshot-block-two-updated");
+    secondBlock.put(keys[5], values[5]);
+    assertArrayEquals(referenceRoot(keys, values), secondBlock.rootHash());
   }
 
   private static byte[] referenceRoot(byte[][] keys, byte[][] values) {
