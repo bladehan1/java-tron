@@ -43,7 +43,7 @@ public class PathStatePersistentFormatTest {
     assertTrue(Files.isDirectory(created.getLayersDirectory()));
     assertArrayEquals(original, Files.readAllBytes(manifest));
     assertEquals(
-        "d0fc17ad2ea70578b2400c8c3563b05407ff6d7f53f26ea7ad47b513565d404e",
+        "37fc0b69dae958872a3088ee060353e370c4ad7b9ff1804e5e151b47da1efa20",
         ByteArray.toHexString(Hashing.sha256().hashBytes(original).asBytes()));
     assertFalse(Files.exists(root.resolve("history")));
   }

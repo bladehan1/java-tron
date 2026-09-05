@@ -28,6 +28,7 @@ public class StorageConfig {
   private CheckpointConfig checkpoint = new CheckpointConfig();
   private SnapshotConfig snapshot = new SnapshotConfig();
   private StateArchiveConfig stateArchive = new StateArchiveConfig();
+  private CommonCheckpointConfig commonCheckpoint = new CommonCheckpointConfig();
   private PathStateRootConfig pathStateRoot = new PathStateRootConfig();
   private TxCacheConfig txCache = new TxCacheConfig();
   // ConfigBeanFactory requires all bean fields present per item, so we parse manually.
@@ -169,12 +170,26 @@ public class StorageConfig {
 
   @Getter
   @Setter
+  public static class CommonCheckpointConfig {
+
+    private boolean enabled = false;
+    private String directory = "common-checkpoint";
+
+    void postProcess() {
+      if (directory == null || directory.trim().isEmpty()) {
+        throw new IllegalArgumentException("commonCheckpoint.directory must not be empty");
+      }
+    }
+  }
+
+  @Getter
+  @Setter
   public static class PathStateRootConfig {
 
     private boolean enabled = false;
     private String mode = "shadow";
     private String directory = "path-state-root";
-    private int formatVersion = 1;
+    private int formatVersion = 2;
     private int reversibleLayerLimit = 128;
     private long reversibleLayerBytes = 2147483648L;
     private long writeBufferBytes = 268435456L;
@@ -193,8 +208,8 @@ public class StorageConfig {
       if (directory == null || directory.trim().isEmpty()) {
         throw new IllegalArgumentException("pathStateRoot.directory must not be empty");
       }
-      if (formatVersion != 1) {
-        throw new IllegalArgumentException("pathStateRoot.formatVersion must be 1");
+      if (formatVersion != 2) {
+        throw new IllegalArgumentException("pathStateRoot.formatVersion must be 2");
       }
       if (reversibleLayerLimit <= 0 || reversibleLayerBytes <= 0 || writeBufferBytes <= 0
           || nodeCacheBytes <= 0) {
@@ -266,7 +281,19 @@ public class StorageConfig {
     sc.dbSettings.postProcess();
     sc.snapshot.postProcess();
     sc.stateArchive.postProcess();
+    sc.commonCheckpoint.postProcess();
     sc.pathStateRoot.postProcess();
+    if (sc.commonCheckpoint.enabled
+        && (!sc.stateArchive.enabled || !sc.pathStateRoot.enabled)) {
+      throw new IllegalArgumentException(
+          "commonCheckpoint.enabled requires stateArchive.enabled and pathStateRoot.enabled");
+    }
+    if (sc.commonCheckpoint.enabled
+        && (sc.pathStateRoot.volatileSnapshotBenchmark
+        || sc.pathStateRoot.asyncPrepareBenchmark)) {
+      throw new IllegalArgumentException(
+          "commonCheckpoint.enabled is mutually exclusive with PathState benchmark modes");
+    }
     sc.txCache.postProcess();
     return sc;
   }

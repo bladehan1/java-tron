@@ -1,6 +1,7 @@
 package org.tron.core.db2.stateroot;
 
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -15,13 +16,16 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import lombok.extern.slf4j.Slf4j;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
+import org.tron.core.db2.core.CommonCheckpointBaseline;
+import org.tron.core.db2.stateroot.PathStateCanonicalizer.P66Phase;
 import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
 
 /**
- * Benchmark-only PathState head that reads one durable physical base and advances in memory.
+ * PathState head that reads one durable physical checkpoint and advances in memory.
  *
  * <p>No transition method writes F/N/M, INTENT, CURRENT, or a reverse journal. The durable base is
- * intentionally unchanged until the common-checkpoint flush path is installed.
+ * changed only by the common-checkpoint materializer. The same implementation remains available
+ * to the explicitly configured volatile benchmark mode.
  */
 @Slf4j(topic = "DB")
 public final class PathStatePhysicalOverlayHead implements PathStateHead {
@@ -62,6 +66,100 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
     return open(directory, engine, limits, PathStatePhysicalStoreSet.STEADY_NODE_CACHE_BYTES);
   }
 
+  /** Opens a next-format published target without invoking legacy journal/CURRENT recovery. */
+  public static PathStatePhysicalOverlayHead openCommonCheckpoint(Path directory, Engine engine,
+      PathStateLayerLimits limits, long residentNodeCacheBytes, int participantThreads,
+      int branchThreads, byte[] formatIdentity, BlockSnapshotMeta canonicalHead, P66Phase phase)
+      throws IOException {
+    requireThreadCount(participantThreads, "participantThreads");
+    requireThreadCount(branchThreads, "branchThreads");
+    PathStatePhysicalStoreSet opened = PathStatePhysicalStoreSet.openExisting(directory,
+        new PathStateCanonicalizer().participantScope(), engine, residentNodeCacheBytes);
+    try {
+      PathStateCheckpointMaterializer.PublishedHead current =
+          PathStateCheckpointMaterializer.loadPublishedHead(directory, formatIdentity);
+      PathStateRoot root = opened.createRoot();
+      root.restoreStoredRoots(current.getStateRoot());
+      PathStateRoot.Snapshot restored = root.snapshot();
+      PathStateRootMetadata metadata = PathStateRootMetadata.base(current.getBlockNumber(),
+          current.getBlockHash(), canonicalHead.getParentHash(), canonicalHead.getTimestamp(),
+          phase, opened.getFormatDigest(), current.getStateRoot(), current.getPayloadDigest());
+      return new PathStatePhysicalOverlayHead(opened, metadata, restored,
+          Objects.requireNonNull(limits, "limits").getMaxLayers(), participantThreads,
+          branchThreads);
+    } catch (IOException | RuntimeException failure) {
+      try {
+        opened.close();
+      } catch (IOException closeFailure) {
+        failure.addSuppressed(closeFailure);
+      }
+      throw failure;
+    }
+  }
+
+  /** Opens the immutable fresh baseline after its legacy pointer has been retired. */
+  public static PathStatePhysicalOverlayHead openCommonBaseline(Path directory, Engine engine,
+      PathStateLayerLimits limits, long residentNodeCacheBytes, int participantThreads,
+      int branchThreads) throws IOException {
+    requireThreadCount(participantThreads, "participantThreads");
+    requireThreadCount(branchThreads, "branchThreads");
+    PathStatePhysicalStoreSet opened = PathStatePhysicalStoreSet.openExisting(directory,
+        new PathStateCanonicalizer().participantScope(), engine, residentNodeCacheBytes);
+    try {
+      PathStateRootMetadata current = PathStateRootMetadata.decode(Files.readAllBytes(
+          directory.resolve(PathStateCheckpointMaterializer.COMMON_BASELINE_HEAD_FILE)));
+      PathStateRoot root = opened.createRoot();
+      root.restoreStoredRoots(current.getStateRoot());
+      return new PathStatePhysicalOverlayHead(opened, current, root.snapshot(),
+          Objects.requireNonNull(limits, "limits").getMaxLayers(), participantThreads,
+          branchThreads);
+    } catch (IOException | RuntimeException failure) {
+      try {
+        opened.close();
+      } catch (IOException closeFailure) {
+        failure.addSuppressed(closeFailure);
+      }
+      throw failure;
+    }
+  }
+
+  /** Refreshes the in-memory head after startup redo has published a newer common target. */
+  public synchronized void synchronizePublishedCheckpoint(byte[] formatIdentity,
+      BlockSnapshotMeta canonicalHead, P66Phase phase) throws IOException {
+    requireHealthy();
+    PathStateCheckpointMaterializer.PublishedHead current =
+        PathStateCheckpointMaterializer.loadPublishedHead(stores.getDirectory(), formatIdentity);
+    if (current.getEpoch() != canonicalHead.getEpoch()
+        || current.getBlockNumber() != canonicalHead.getBlockNumber()
+        || !Arrays.equals(current.getBlockHash(), canonicalHead.getBlockHash())) {
+      throw new IOException("PathState common CURRENT differs after startup redo");
+    }
+    PathStateRoot restored = new PathStateRoot(scope,
+        participant -> stores.participant(participant.getDbName()).nodeStore(),
+        stores.superStore().nodeStore());
+    restored.restoreStoredRoots(current.getStateRoot());
+    snapshot = restored.snapshot();
+    head = PathStateRootMetadata.base(current.getBlockNumber(), current.getBlockHash(),
+        canonicalHead.getParentHash(), canonicalHead.getTimestamp(), phase, formatDigest,
+        current.getStateRoot(), current.getPayloadDigest());
+    history.clear();
+    pending = null;
+  }
+
+  /** Creates the PathState authority over the same stores used by this in-memory head. */
+  public synchronized PathStateCheckpointMaterializer checkpointMaterializer(
+      byte[] formatIdentity, CommonCheckpointBaseline baseline) throws IOException {
+    requireHealthy();
+    return new PathStateCheckpointMaterializer(stores, scope, formatIdentity, baseline);
+  }
+
+  /** Retires this freshly rebuilt legacy pointer before the first common checkpoint is enabled. */
+  public synchronized void admitFreshCommonBaseline(CommonCheckpointBaseline baseline)
+      throws IOException {
+    requireHealthy();
+    PathStateCheckpointMaterializer.admitFreshBaseline(stores, head, baseline);
+  }
+
   /** Opens a benchmark overlay with an explicit shared resident-node cache budget. */
   public static PathStatePhysicalOverlayHead open(Path directory, Engine engine,
       PathStateLayerLimits limits, long residentNodeCacheBytes) throws IOException {
@@ -84,7 +182,7 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
       root.restoreStoredRoots(current.getStateRoot());
       PathStateRoot.Snapshot restored = root.snapshot();
       if (!Arrays.equals(restored.getStateRoot(), current.getStateRoot())) {
-        throw new IOException("path-state benchmark overlay root mismatch");
+        throw new IOException("path-state overlay root mismatch");
       }
       return new PathStatePhysicalOverlayHead(opened, current, restored,
           Objects.requireNonNull(limits, "limits").getMaxLayers(), participantThreads,
@@ -105,7 +203,7 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
     requireHealthy();
     PathStateBlockTransition admitted = Objects.requireNonNull(transition, "transition");
     if (pending == null || pending.transition != admitted) {
-      throw new IOException("path-state benchmark publication differs from prepared transition");
+      throw new IOException("path-state overlay publication differs from prepared transition");
     }
     history.add(new HeadState(head, snapshot));
     while (history.size() > maxHistory) {
@@ -169,7 +267,7 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
         return copy(head);
       }
     }
-    throw new IOException("path-state benchmark overlay ancestor is outside memory history");
+    throw new IOException("path-state overlay ancestor is outside memory history");
   }
 
   @Override
@@ -192,7 +290,7 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
       PathStateBlockTransition transition) throws IOException {
     requireHealthy();
     if (pending != null) {
-      throw new IOException("path-state benchmark transition is already prepared");
+      throw new IOException("path-state overlay transition is already prepared");
     }
     pending = prepare(Objects.requireNonNull(meta, "meta"),
         Objects.requireNonNull(transition, "transition"));
@@ -300,10 +398,10 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
 
   private void requireHealthy() throws IOException {
     if (closed) {
-      throw new IOException("path-state benchmark overlay is closed");
+      throw new IOException("path-state overlay is closed");
     }
     if (failed) {
-      throw new IOException("path-state benchmark overlay failed closed");
+      throw new IOException("path-state overlay failed closed");
     }
   }
 

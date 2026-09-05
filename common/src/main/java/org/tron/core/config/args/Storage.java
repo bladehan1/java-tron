@@ -103,6 +103,14 @@ public class Storage {
 
   @Getter
   @Setter
+  private boolean commonCheckpointEnabled;
+
+  @Getter
+  @Setter
+  private String commonCheckpointDirectory;
+
+  @Getter
+  @Setter
   private boolean pathStateRootEnabled;
 
   @Getter
