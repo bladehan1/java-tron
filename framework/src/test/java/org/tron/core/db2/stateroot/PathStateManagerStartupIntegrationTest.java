@@ -391,6 +391,62 @@ public class PathStateManagerStartupIntegrationTest {
     invoke(manager, "closePathStateRoot");
   }
 
+  @Test
+  public void commonCheckpointAdoptsCompatibleLegacyCurrentWithoutRebuild() throws Exception {
+    Path output = temporaryFolder.newFolder("common-checkpoint-legacy-current").toPath();
+    long baseNumber = 100L;
+    long timestamp = 300L;
+    Path root = output.resolve("path-state-root");
+    BlockId baseId = new BlockId(Sha256Hash.wrap(bytes(41)), baseNumber);
+    byte[] parentHash = bytes(40);
+    PathStateRootMetadata legacy = publishEmptyPhysicalCurrent(root, baseNumber,
+        baseId.getBytes(), parentHash);
+
+    DynamicPropertiesStore dynamic = mock(DynamicPropertiesStore.class);
+    when(dynamic.getLatestBlockHeaderNumber()).thenReturn(baseNumber);
+    when(dynamic.getLatestBlockHeaderHash()).thenReturn(baseId);
+    when(dynamic.getLatestBlockHeaderTimestamp()).thenReturn(timestamp);
+    when(dynamic.getAllowAccountAssetOptimizationFromRoot()).thenReturn(1L);
+    BlockCapsule baseBlock = mock(BlockCapsule.class);
+    when(baseBlock.getNum()).thenReturn(baseNumber);
+    when(baseBlock.getBlockId()).thenReturn(baseId);
+    when(baseBlock.getParentHash()).thenReturn(Sha256Hash.wrap(parentHash));
+    when(baseBlock.getTimeStamp()).thenReturn(timestamp);
+    ChainBaseManager chainBase = mock(ChainBaseManager.class);
+    when(chainBase.getDynamicPropertiesStore()).thenReturn(dynamic);
+    when(chainBase.getBlockByNum(baseNumber)).thenReturn(baseBlock);
+    when(chainBase.getAccountAssetStore()).thenReturn(mock(AccountAssetStore.class));
+
+    AtomicInteger pinnedSources = new AtomicInteger();
+    Manager manager = new Manager();
+    setChainBaseManager(manager, chainBase);
+    withCommonConfig(output, () -> {
+      SnapshotManager snapshots = new SnapshotManager("");
+      for (PathStateParticipantDescriptor.StoreIdentity participant
+          : PathStateParticipantDescriptor.current().getStores()) {
+        snapshots.getDbs().add(emptyNativeStore(participant.getDbName(), baseNumber,
+            baseId.getBytes(), pinnedSources));
+      }
+      snapshots.enable();
+      snapshots.setUnChecked(false);
+      setField(manager, "revokingStore", snapshots);
+      invoke(manager, "initCommonCheckpoint");
+    });
+
+    assertEquals(0, pinnedSources.get());
+    assertArrayEquals(legacy.getStateRoot(), manager.getPathStateSnapshotHead().getHead()
+        .getStateRoot());
+    assertTrue(Files.isRegularFile(output.resolve("common-checkpoint")
+        .resolve(CommonCheckpointBaselineFile.FILE_NAME)));
+    assertTrue(Files.isRegularFile(root.resolve(PathStateCheckpointMaterializer.COMMON_MODE_FILE)));
+    assertTrue(Files.isRegularFile(root.resolve("LEGACY_BASELINE")));
+    assertTrue(Files.isRegularFile(root.resolve(
+        PathStateCheckpointMaterializer.COMMON_BASELINE_HEAD_FILE)));
+    assertFalse(Files.exists(root.resolve("CURRENT")));
+    invoke(manager, "closeCommonCheckpoint");
+    invoke(manager, "closePathStateRoot");
+  }
+
   @SuppressWarnings("unchecked")
   private static Chainbase propertiesStoreWithP66Enabled() {
     DB<byte[], byte[]> database = mock(DB.class);
@@ -526,11 +582,16 @@ public class PathStateManagerStartupIntegrationTest {
 
   private static PathStateRootMetadata publishEmptyPhysicalCurrent(Path root,
       long blockNumber, int blockSeed, int parentSeed) throws Exception {
+    return publishEmptyPhysicalCurrent(root, blockNumber, bytes(blockSeed), bytes(parentSeed));
+  }
+
+  private static PathStateRootMetadata publishEmptyPhysicalCurrent(Path root,
+      long blockNumber, byte[] blockHash, byte[] parentHash) throws Exception {
     try (PathStatePhysicalStoreSet stores = PathStatePhysicalStoreSet.open(root,
         new PathStateCanonicalizer().participantScope(), Engine.ROCKSDB)) {
       PathStateRoot state = stores.buildRootFromFlat();
-      PathStateRootMetadata metadata = PathStateRootMetadata.base(blockNumber, bytes(blockSeed),
-          bytes(parentSeed), 300, P66Phase.P66_ON, stores.getFormatDigest(), state.rootHash(),
+      PathStateRootMetadata metadata = PathStateRootMetadata.base(blockNumber, blockHash,
+          parentHash, 300, P66Phase.P66_ON, stores.getFormatDigest(), state.rootHash(),
           bytes(3));
       stores.publishCurrent(metadata);
       return metadata;
