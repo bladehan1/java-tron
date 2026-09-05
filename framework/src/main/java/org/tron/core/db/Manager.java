@@ -3590,6 +3590,7 @@ public class Manager {
     if (!(revokingStore instanceof SnapshotManager)) {
       throw new IllegalStateException("Common checkpoint runtime lost SnapshotManager ownership");
     }
+    revokingStore.flushPending();
     ((SnapshotManager) revokingStore).detachCommonCheckpointRuntime(runtime);
     runtime.close();
     commonCheckpointRuntime = null;
