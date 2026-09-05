@@ -1,6 +1,7 @@
 package org.tron.core.db2.stateroot;
 
 import static org.junit.Assert.assertArrayEquals;
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertThrows;
 
@@ -31,21 +32,21 @@ public class PathStateCommitmentCodecTest {
       storageKey[i] = (byte) i;
     }
 
-    assertGolden("0b7f18d3381a9e44da93058f4214d7f0d818d1824be0f30839ed5200eb7f946a",
+    assertGolden("18d18850670fc1314f55e5346718606abf66777fdd67228eb193bbffffd9a2d7",
         4, accountKey);
-    assertGolden("90ad9575451bd26f005db5063deaeac71d8b221edd0a0bb0a345f21b40c16ff5",
+    assertGolden("ec0aa93f7d668a1604e02eef0876edc5ff8e3904b117c172f066085fb290a26f",
         22, storageKey);
-    assertGolden("ec6a48ade48f24cd456a89de3a5f86d282b0ae9892f265be58e5e8a704856350",
+    assertGolden("21bccc1258bd8d933e0c1de0cb40c3c33e3c5b12beb832d29313f2f99dd9ce0d",
         21, new byte[]{1});
   }
 
   @Test
   public void approvedAbiAndAssetIssueStoresHaveIndependentLeafDomains() throws Exception {
-    assertGolden("14af9866899065b509f6ea5d45902d443a4357efad5e6478c47ef108d603b8d7",
+    assertGolden("29f5801fed0819272800fc0bb431887f257e7e52d18086edbb61b21dd38a2aaa",
         1, new byte[]{1});
-    assertGolden("5c0a5639b07fa98f7e067c3e0c1d067ca1de752810b7576bc20fd2c75ba89eb5",
+    assertGolden("94ae32adcf9abf3bab5286ae66f5f1939083e78918f4621bbf7cd3ace8305101",
         6, new byte[]{1});
-    assertGolden("99951328ba6d7d4a7fa199cf727a7c4494bd885ce2ac8c04475dd1fd699af7de",
+    assertGolden("01c15364ad6927f41150cd5900739eb1a117c2f5e4d71c63c3a456eea63e401b",
         7, new byte[]{1});
   }
 
@@ -76,9 +77,8 @@ public class PathStateCommitmentCodecTest {
       storeRoot[i] = (byte) i;
     }
 
-    assertArrayEquals(
-        Hex.decode("cf8715b85b2ac18d2b63e57b9e8902887f1986df7dc6a46da01fbc1f8f99f8bf"),
-        PathStateCommitmentCodec.superLeafKey(4));
+    assertEquals("8c8018ac64709921cac7388f659d7396acef5e373bf3b329f9d93088536434a1",
+        Hex.toHexString(PathStateCommitmentCodec.superLeafKey(4)));
     assertArrayEquals(referenceSuperKey(4), PathStateCommitmentCodec.superLeafKey(4));
     assertArrayEquals(Hex.decode("f38400000004876163636f756e748400000001a0000102030405060708090a0b"
             + "0c0d0e0f101112131415161718191a1b1c1d1e1f"),
@@ -104,7 +104,7 @@ public class PathStateCommitmentCodecTest {
   private static void assertGolden(String expectedHex, int storeId, byte[] key)
       throws IOException {
     byte[] actual = PathStateCommitmentCodec.storeLeafKey(storeId, key);
-    assertArrayEquals(Hex.decode(expectedHex), actual);
+    assertEquals(expectedHex, Hex.toHexString(actual));
     assertArrayEquals(referenceStoreKey(storeId, key), actual);
   }
 
@@ -113,7 +113,6 @@ public class PathStateCommitmentCodecTest {
     try (DataOutputStream output = new DataOutputStream(bytes)) {
       output.writeShort(STORE_DOMAIN.length);
       output.write(STORE_DOMAIN);
-      output.writeShort(PathStateCommitmentCodec.FORMAT_VERSION);
       output.writeInt(storeId);
       output.writeInt(key.length);
       output.write(key);

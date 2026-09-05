@@ -39,23 +39,47 @@ public final class ChainbaseCheckpointMaterializer implements CommonCheckpointMa
   private final byte[] formatIdentity;
   private final Map<String, Chainbase> databases;
   private final FaultHook faultHook;
+  private final CommonCheckpointBaseline baseline;
 
   public ChainbaseCheckpointMaterializer(Path directory, byte[] formatIdentity,
       List<Chainbase> databases) {
-    this(directory, formatIdentity, databases, (stage, dbName) -> { });
+    this(directory, formatIdentity, databases, null, (stage, dbName) -> { });
+  }
+
+  public ChainbaseCheckpointMaterializer(Path directory, byte[] formatIdentity,
+      List<Chainbase> databases, CommonCheckpointBaseline baseline) {
+    this(directory, formatIdentity, databases, baseline, (stage, dbName) -> { });
   }
 
   ChainbaseCheckpointMaterializer(Path directory, byte[] formatIdentity,
       List<Chainbase> databases, FaultHook faultHook) {
+    this(directory, formatIdentity, databases, null, faultHook);
+  }
+
+  private ChainbaseCheckpointMaterializer(Path directory, byte[] formatIdentity,
+      List<Chainbase> databases, CommonCheckpointBaseline baseline, FaultHook faultHook) {
     this.directory = Objects.requireNonNull(directory, "directory");
     this.formatIdentity = digest(formatIdentity, "formatIdentity");
     this.databases = index(databases);
     this.faultHook = Objects.requireNonNull(faultHook, "faultHook");
+    this.baseline = baseline;
   }
 
   @Override
   public Authority authority() {
     return Authority.CHAINBASE;
+  }
+
+  /** Loads the compact next-format head published beside the Chainbase databases. */
+  public static PublishedHead loadPublishedHead(Path directory, byte[] expectedFormatIdentity)
+      throws IOException {
+    Marker marker = load(Objects.requireNonNull(directory, "directory").resolve(CURRENT_FILE));
+    if (!Arrays.equals(marker.formatIdentity,
+        digest(expectedFormatIdentity, "expectedFormatIdentity"))) {
+      throw new IOException("Chainbase published target format identity differs");
+    }
+    return new PublishedHead(marker.lastEpoch, marker.lastBlockNumber, marker.lastBlockHash,
+        marker.stateRoot, marker.payloadDigest);
   }
 
   @Override
@@ -70,6 +94,8 @@ public final class ChainbaseCheckpointMaterializer implements CommonCheckpointMa
         return Status.PUBLISHED;
       }
       requireParent(current, admitted);
+    } else if (baseline != null) {
+      baseline.requireParent(admitted, "Chainbase");
     }
     Path materialized = materializedPath(admitted);
     if (!Files.exists(materialized, LinkOption.NOFOLLOW_LINKS)) {
@@ -353,6 +379,45 @@ public final class ChainbaseCheckpointMaterializer implements CommonCheckpointMa
       this.lastBlockNumber = lastBlockNumber;
       this.lastBlockHash = lastBlockHash;
       this.stateRoot = stateRoot;
+    }
+  }
+
+  /** Minimal restart identity retained by CHAINBASE_CURRENT. */
+  public static final class PublishedHead {
+
+    private final long epoch;
+    private final long blockNumber;
+    private final byte[] blockHash;
+    private final byte[] stateRoot;
+    private final byte[] payloadDigest;
+
+    private PublishedHead(long epoch, long blockNumber, byte[] blockHash, byte[] stateRoot,
+        byte[] payloadDigest) {
+      this.epoch = epoch;
+      this.blockNumber = blockNumber;
+      this.blockHash = Arrays.copyOf(blockHash, blockHash.length);
+      this.stateRoot = Arrays.copyOf(stateRoot, stateRoot.length);
+      this.payloadDigest = Arrays.copyOf(payloadDigest, payloadDigest.length);
+    }
+
+    public long getEpoch() {
+      return epoch;
+    }
+
+    public long getBlockNumber() {
+      return blockNumber;
+    }
+
+    public byte[] getBlockHash() {
+      return Arrays.copyOf(blockHash, blockHash.length);
+    }
+
+    public byte[] getStateRoot() {
+      return Arrays.copyOf(stateRoot, stateRoot.length);
+    }
+
+    public byte[] getPayloadDigest() {
+      return Arrays.copyOf(payloadDigest, payloadDigest.length);
     }
   }
 }

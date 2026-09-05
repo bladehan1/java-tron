@@ -27,7 +27,11 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.tron.common.arch.Arch;
+import org.tron.core.db2.archive.BlockReverseDiff;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
+import org.tron.core.db2.core.CommonCheckpointBaseline;
+import org.tron.core.db2.core.CommonCheckpointPayload;
+import org.tron.core.db2.core.CommonCheckpointTarget;
 import org.tron.core.db2.stateroot.PathStateCanonicalizer.P66Phase;
 import org.tron.core.db2.stateroot.PathStateRebuildCoordinator.EntryConsumer;
 import org.tron.core.db2.stateroot.PathStateRebuildCoordinator.SnapshotIdentity;
@@ -768,6 +772,47 @@ public class PathStateNativeNodeStoreTest {
       assertNull(reopened.participant("code").getFlat(
           PathStateCommitmentCodec.storeLeafKey(scope.require("code").getStoreId(),
               new byte[]{1})));
+    }
+  }
+
+  @Test
+  public void commonOverlayReplacesInMemoryTrieAfterStartupRedo() throws Exception {
+    PathStateParticipantScope scope = new PathStateCanonicalizer().participantScope();
+    Path root = temporaryFolder.newFolder("physical-common-redo-overlay").toPath();
+    preparePublishedPhysicalTarget(root, scope);
+    byte[] formatIdentity = bytes(73);
+    byte[] blockHash = bytes(74);
+
+    try (PathStatePhysicalOverlayHead head = PathStatePhysicalOverlayHead.open(root,
+        Engine.ROCKSDB, new PathStateLayerLimits(4, 1L << 20))) {
+      PathStateRootMetadata baselineHead = head.getHead();
+      CommonCheckpointBaseline baseline = new CommonCheckpointBaseline(formatIdentity,
+          BlockSnapshotMeta.forBlock(baselineHead.getBlockNumber(), baselineHead.getBlockHash(),
+              baselineHead.getParentHash(), baselineHead.getTimestamp()),
+          baselineHead.getStateRoot());
+      head.admitFreshCommonBaseline(baseline);
+
+      PathStateBlockTransition transition = new PathStateBlockTransition(1, blockHash,
+          baselineHead.getBlockHash(), 3, P66Phase.P66_ON, Collections.singletonList(
+          PathStateMutation.put("code", new byte[]{1}, new byte[]{2})));
+      BlockSnapshotMeta block = BlockSnapshotMeta.forBlock(1, blockHash,
+          baselineHead.getBlockHash(), 3);
+      PathStateSnapshotDelta delta = head.prepareSnapshotDelta(block, transition);
+      PathStateFlushTarget target = PathStateFlushTarget.coalesce(
+          Collections.singletonList(delta));
+      CommonCheckpointPayload payload = CommonCheckpointPayload.create(formatIdentity, target,
+          Collections.singletonList(new BlockReverseDiff(block, Collections.emptyList(),
+              delta.getMutationViewDigest())), Collections.emptyList());
+      CommonCheckpointTarget checkpointTarget = CommonCheckpointTarget.from(payload);
+      PathStateCheckpointMaterializer materializer = head.checkpointMaterializer(formatIdentity,
+          baseline);
+      materializer.materialize(payload, checkpointTarget);
+      materializer.publish(checkpointTarget);
+
+      head.synchronizePublishedCheckpoint(formatIdentity, block, P66Phase.P66_ON);
+      assertEquals(1, head.getHead().getBlockNumber());
+      assertArrayEquals(blockHash, head.getHead().getBlockHash());
+      assertArrayEquals(delta.getStateRoot(), head.getHead().getStateRoot());
     }
   }
 

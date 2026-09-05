@@ -1,6 +1,5 @@
 package org.tron.core.db2.archive;
 
-import java.io.Closeable;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.Arrays;
@@ -10,7 +9,7 @@ import org.tron.core.db2.archive.ArchiveReadSnapshot.PinnedLatestState;
 import org.tron.core.db2.core.CommonCheckpointRuntimeOwner;
 
 /** Request-owned, point-only view over one published next-format checkpoint head. */
-public final class StateArchiveCheckpointReadSnapshot implements Closeable {
+public final class StateArchiveCheckpointReadSnapshot implements ArchivePointSnapshot {
 
   private final long targetBlock;
   private final long pinnedBlock;

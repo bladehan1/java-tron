@@ -21,6 +21,7 @@ public final class PathStateRuntimeAttachment {
   private final TransitionPreviewer previewer;
   private final SnapshotDeltaPreparer snapshotDeltaPreparer;
   private final boolean deferredCapture;
+  private final boolean commonCheckpointOnly;
   private final BlockingQueue<BlockChangeView> deferredQueue;
   private final Thread deferredWorker;
   private Throwable failure;
@@ -62,18 +63,34 @@ public final class PathStateRuntimeAttachment {
       TransitionSink sink, BaseFlushSink baseFlushSink, TransitionPreviewer previewer,
       SnapshotDeltaPreparer snapshotDeltaPreparer) {
     return new PathStateRuntimeAttachment(collector, sink, baseFlushSink, previewer,
-        snapshotDeltaPreparer, true);
+        snapshotDeltaPreparer, true, false);
+  }
+
+  /** Creates the production in-memory head used exclusively by the common checkpoint owner. */
+  public static PathStateRuntimeAttachment commonCheckpoint(PathStateTransitionCollector collector,
+      TransitionSink sink, TransitionPreviewer previewer,
+      SnapshotDeltaPreparer snapshotDeltaPreparer) {
+    return new PathStateRuntimeAttachment(collector, sink, (blockNumber, blockHash) -> { },
+        previewer, snapshotDeltaPreparer, false, true);
   }
 
   private PathStateRuntimeAttachment(PathStateTransitionCollector collector, TransitionSink sink,
       BaseFlushSink baseFlushSink, TransitionPreviewer previewer,
       SnapshotDeltaPreparer snapshotDeltaPreparer, boolean deferredCapture) {
+    this(collector, sink, baseFlushSink, previewer, snapshotDeltaPreparer, deferredCapture, false);
+  }
+
+  private PathStateRuntimeAttachment(PathStateTransitionCollector collector, TransitionSink sink,
+      BaseFlushSink baseFlushSink, TransitionPreviewer previewer,
+      SnapshotDeltaPreparer snapshotDeltaPreparer, boolean deferredCapture,
+      boolean commonCheckpointOnly) {
     this.collector = Objects.requireNonNull(collector, "collector");
     this.sink = Objects.requireNonNull(sink, "sink");
     this.baseFlushSink = Objects.requireNonNull(baseFlushSink, "baseFlushSink");
     this.previewer = previewer;
     this.snapshotDeltaPreparer = snapshotDeltaPreparer;
     this.deferredCapture = deferredCapture;
+    this.commonCheckpointOnly = commonCheckpointOnly;
     deferredQueue = deferredCapture ? new ArrayBlockingQueue<>(64) : null;
     deferredWorker = deferredCapture
         ? new Thread(this::runDeferred, "path-state-deferred-capture") : null;
@@ -81,6 +98,10 @@ public final class PathStateRuntimeAttachment {
       deferredWorker.setDaemon(true);
       deferredWorker.start();
     }
+  }
+
+  public boolean isCommonCheckpointOnly() {
+    return commonCheckpointOnly;
   }
 
   /** Computes producer metadata without observing, publishing, or failing this runtime. */

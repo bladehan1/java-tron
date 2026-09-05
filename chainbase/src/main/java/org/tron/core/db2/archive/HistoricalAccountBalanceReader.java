@@ -15,7 +15,7 @@ public final class HistoricalAccountBalanceReader {
   private HistoricalAccountBalanceReader() {
   }
 
-  public static Result read(ArchiveReadSnapshot snapshot, byte[] address) throws IOException {
+  public static Result read(ArchivePointSnapshot snapshot, byte[] address) throws IOException {
     Objects.requireNonNull(snapshot, "snapshot");
     if (address == null || address.length != ADDRESS_LENGTH) {
       throw new IllegalArgumentException("TRON account address must be exactly 21 bytes");

@@ -221,6 +221,8 @@ public class Args extends CommonParameter {
     PARAMETER.storage.setStateArchiveDirectory(sc.getStateArchive().getDirectory());
     PARAMETER.storage.setStateArchiveMaxSegmentSize(sc.getStateArchive().getMaxSegmentSize());
     PARAMETER.storage.setStateArchiveQueueCapacity(sc.getStateArchive().getQueueCapacity());
+    PARAMETER.storage.setCommonCheckpointEnabled(sc.getCommonCheckpoint().isEnabled());
+    PARAMETER.storage.setCommonCheckpointDirectory(sc.getCommonCheckpoint().getDirectory());
     PARAMETER.storage.setPathStateRootEnabled(sc.getPathStateRoot().isEnabled());
     PARAMETER.storage.setPathStateRootMode(sc.getPathStateRoot().getMode());
     PARAMETER.storage.setPathStateRootDirectory(sc.getPathStateRoot().getDirectory());
