@@ -365,12 +365,28 @@ public class PathStateManagerStartupIntegrationTest {
     when(dynamic.getLatestBlockHeaderHash()).thenReturn(childId);
     when(dynamic.getLatestBlockHeaderTimestamp()).thenReturn(303L);
     when(chainBase.getBlockByNum(101L)).thenReturn(childBlock);
+
+    BlockId pendingId = new BlockId(Sha256Hash.wrap(bytes(33)), 102L);
+    try (ISession session = snapshots.buildSession()) {
+      session.commit(BlockSnapshotMeta.forBlock(102, pendingId.getBytes(), childHash, 306L));
+    }
+    setSnapshotField(snapshots, "flushCount", 1);
+    BlockCapsule pendingBlock = mock(BlockCapsule.class);
+    when(pendingBlock.getNum()).thenReturn(102L);
+    when(pendingBlock.getBlockId()).thenReturn(pendingId);
+    when(pendingBlock.getParentHash()).thenReturn(childId);
+    when(pendingBlock.getTimeStamp()).thenReturn(306L);
+    when(dynamic.getLatestBlockHeaderNumber()).thenReturn(102L);
+    when(dynamic.getLatestBlockHeaderHash()).thenReturn(pendingId);
+    when(dynamic.getLatestBlockHeaderTimestamp()).thenReturn(306L);
+    when(chainBase.getBlockByNum(102L)).thenReturn(pendingBlock);
     invoke(manager, "closeCommonCheckpoint");
     invoke(manager, "closePathStateRoot");
 
     withCommonConfig(output, () -> invoke(manager, "initCommonCheckpoint"));
-    assertEquals(101L, manager.getPathStateSnapshotHead().getHead().getBlockNumber());
-    assertArrayEquals(childHash, manager.getPathStateSnapshotHead().getHead().getBlockHash());
+    assertEquals(102L, manager.getPathStateSnapshotHead().getHead().getBlockNumber());
+    assertArrayEquals(pendingId.getBytes(),
+        manager.getPathStateSnapshotHead().getHead().getBlockHash());
     invoke(manager, "closeCommonCheckpoint");
     invoke(manager, "closePathStateRoot");
   }
