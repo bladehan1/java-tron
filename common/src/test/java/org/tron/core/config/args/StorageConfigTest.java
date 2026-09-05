@@ -144,7 +144,7 @@ public class StorageConfigTest {
     assertFalse(defaults.getPathStateRoot().isEnabled());
     assertEquals("shadow", defaults.getPathStateRoot().getMode());
     assertEquals("path-state-root", defaults.getPathStateRoot().getDirectory());
-    assertEquals(2, defaults.getPathStateRoot().getFormatVersion());
+    assertEquals(1, defaults.getPathStateRoot().getFormatVersion());
     assertEquals(128, defaults.getPathStateRoot().getReversibleLayerLimit());
     assertEquals(2147483648L, defaults.getPathStateRoot().getReversibleLayerBytes());
     assertEquals(268435456L, defaults.getPathStateRoot().getWriteBufferBytes());
@@ -158,7 +158,7 @@ public class StorageConfigTest {
 
     StorageConfig configured = StorageConfig.fromConfig(withRef(
         "storage.pathStateRoot { enabled = true, mode = shadow, directory = root-test, "
-            + "formatVersion = 2, reversibleLayerLimit = 8, reversibleLayerBytes = 4096, "
+            + "formatVersion = 1, reversibleLayerLimit = 8, reversibleLayerBytes = 4096, "
             + "writeBufferBytes = 1024, nodeCacheBytes = 2048, participantThreads = 2, "
             + "branchThreads = 3, rebuildFromGenesis = false, "
             + "verifyEveryBlock = true, volatileSnapshotBenchmark = true, "

@@ -792,8 +792,13 @@ public class Manager {
           requireEmptyOrMissing(checkpointDirectory, "common checkpoint");
           baselineFile.beginBootstrap(formatIdentity);
         } else if (!baselineFile.hasBootstrapIntent(formatIdentity)) {
-          throw new IllegalStateException(
-              "Common checkpoint refuses an existing legacy PathState directory");
+          requireEmptyOrMissing(checkpointDirectory, "common checkpoint");
+          if (!Files.isRegularFile(
+              pathDirectory.resolve(PathStateCheckpointMaterializer.CURRENT_FILE),
+              LinkOption.NOFOLLOW_LINKS)) {
+            throw new IllegalStateException(
+                "Common checkpoint existing PathState requires one legacy CURRENT");
+          }
         }
       }
       if (!pathExisted) {
