@@ -11,7 +11,7 @@ import org.tron.core.db2.archive.HistoricalRangeOverlay.KeyRange;
 import org.tron.core.db2.archive.HistoricalRangeOverlay.Limits;
 
 /** One immutable physical-key archive read context pinned at {@code S(P)}. */
-public final class ArchiveReadSnapshot implements Closeable {
+public final class ArchiveReadSnapshot implements ArchivePointSnapshot {
 
   private final long targetBlock;
   private final long pinnedBlock;

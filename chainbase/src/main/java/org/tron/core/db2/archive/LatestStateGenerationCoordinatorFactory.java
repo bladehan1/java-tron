@@ -31,6 +31,7 @@ public final class LatestStateGenerationCoordinatorFactory {
   public static LatestStateGenerationCoordinator create(SnapshotManager manager,
       LatestStateGenerationCoordinator.AuthorityReader authorityReader)
       throws ArchivePersistenceException {
+    Objects.requireNonNull(authorityReader, "authorityReader");
     return create(manager, java.util.Collections.emptyMap(), authorityReader);
   }
 
@@ -38,9 +39,17 @@ public final class LatestStateGenerationCoordinatorFactory {
       Map<String, SnapshotCapableStore> supplementalStores,
       LatestStateGenerationCoordinator.AuthorityReader authorityReader)
       throws ArchivePersistenceException {
+    LatestStateGenerationAdapter adapter = createAdapter(manager, supplementalStores);
+    return new LatestStateGenerationCoordinator(adapter.participantsForCoordinator(),
+        adapter.storesForCoordinator(), manager::withArchiveStateBarrier, authorityReader);
+  }
+
+  /** Builds a direct request-pinning adapter for the common-checkpoint read gate. */
+  public static LatestStateGenerationAdapter createAdapter(SnapshotManager manager,
+      Map<String, SnapshotCapableStore> supplementalStores)
+      throws ArchivePersistenceException {
     Objects.requireNonNull(manager, "manager");
     Objects.requireNonNull(supplementalStores, "supplementalStores");
-    Objects.requireNonNull(authorityReader, "authorityReader");
     List<Chainbase> registered = new ArrayList<>(manager.getDbs());
     try {
       ArchiveStoreScope.validate(registered);
@@ -91,7 +100,6 @@ public final class LatestStateGenerationCoordinatorFactory {
     }
 
     List<String> participants = new ArrayList<>(stores.keySet());
-    return new LatestStateGenerationCoordinator(participants, stores,
-        manager::withArchiveStateBarrier, authorityReader);
+    return new LatestStateGenerationAdapter(participants, stores);
   }
 }

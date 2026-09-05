@@ -166,6 +166,13 @@ public final class LatestStateGenerationAdapter implements PinnedLatestStateFact
         serving.getParticipatingDatabases());
   }
 
+  /** Pins the current native engines for a common-checkpoint request identity. */
+  public PinnedLatestState pin(long blockNumber, byte[] blockHash) throws IOException {
+    String generationId = "common-checkpoint-" + blockNumber + '-'
+        + com.google.common.io.BaseEncoding.base16().lowerCase().encode(blockHash);
+    return pin(generationId, blockNumber, blockHash, participants);
+  }
+
   PinnedLatestState pin(String generationId, long blockNumber, byte[] blockHash,
       List<String> expectedParticipants) throws IOException {
     if (generationId == null || generationId.isEmpty() || blockNumber < 0
@@ -197,6 +204,14 @@ public final class LatestStateGenerationAdapter implements PinnedLatestStateFact
 
   public byte[] getSourceIdentityDigest() {
     return Arrays.copyOf(sourceIdentityDigest, sourceIdentityDigest.length);
+  }
+
+  List<String> participantsForCoordinator() {
+    return participants;
+  }
+
+  Map<String, SnapshotCapableStore> storesForCoordinator() {
+    return stores;
   }
 
   private static void validateSnapshot(String dbName, String sourceIdentity, long blockNumber,

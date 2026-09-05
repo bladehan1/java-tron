@@ -16,13 +16,17 @@ import java.util.Objects;
 import java.util.Set;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
 import org.tron.core.db2.core.CommonCheckpointMaterializer;
+import org.tron.core.db2.core.CommonCheckpointBaseline;
 import org.tron.core.db2.core.CommonCheckpointPayload;
 import org.tron.core.db2.core.CommonCheckpointTarget;
 
 /** Next-format PathState participant for the common-checkpoint two-barrier protocol. */
 public final class PathStateCheckpointMaterializer implements CommonCheckpointMaterializer {
 
-  static final String CURRENT_FILE = "CURRENT";
+  public static final String CURRENT_FILE = "CURRENT";
+  static final String LEGACY_BASELINE_FILE = "LEGACY_BASELINE";
+  public static final String COMMON_MODE_FILE = "COMMON_CHECKPOINT_MODE";
+  public static final String COMMON_BASELINE_HEAD_FILE = "COMMON_BASELINE_HEAD";
   static final String MATERIALIZED_DIRECTORY = "checkpoint-materialized";
   private static final int MAGIC = 0x50534354; // PSCT
   private static final short VERSION = 1;
@@ -35,24 +39,103 @@ public final class PathStateCheckpointMaterializer implements CommonCheckpointMa
   private final Path directory;
   private final byte[] formatIdentity;
   private final FaultHook faultHook;
+  private final CommonCheckpointBaseline baseline;
 
   public PathStateCheckpointMaterializer(PathStatePhysicalStoreSet stores,
       PathStateParticipantScope scope, byte[] formatIdentity) {
-    this(stores, scope, formatIdentity, (stage, storeId) -> { });
+    this(stores, scope, formatIdentity, null, (stage, storeId) -> { });
+  }
+
+  public PathStateCheckpointMaterializer(PathStatePhysicalStoreSet stores,
+      PathStateParticipantScope scope, byte[] formatIdentity, CommonCheckpointBaseline baseline) {
+    this(stores, scope, formatIdentity, baseline, (stage, storeId) -> { });
   }
 
   PathStateCheckpointMaterializer(PathStatePhysicalStoreSet stores,
       PathStateParticipantScope scope, byte[] formatIdentity, FaultHook faultHook) {
+    this(stores, scope, formatIdentity, null, faultHook);
+  }
+
+  private PathStateCheckpointMaterializer(PathStatePhysicalStoreSet stores,
+      PathStateParticipantScope scope, byte[] formatIdentity, CommonCheckpointBaseline baseline,
+      FaultHook faultHook) {
     this.stores = Objects.requireNonNull(stores, "stores");
     this.scope = Objects.requireNonNull(scope, "scope");
     this.directory = stores.getDirectory();
     this.formatIdentity = digest(formatIdentity, "formatIdentity");
     this.faultHook = Objects.requireNonNull(faultHook, "faultHook");
+    this.baseline = baseline;
   }
 
   @Override
   public Authority authority() {
     return Authority.PATH_STATE;
+  }
+
+  public static boolean isCommonModeAdmitted(Path directory, byte[] formatIdentity)
+      throws IOException {
+    Path mode = Objects.requireNonNull(directory, "directory").resolve(COMMON_MODE_FILE);
+    if (!Files.exists(mode, LinkOption.NOFOLLOW_LINKS)) {
+      return false;
+    }
+    if (!Files.isRegularFile(mode, LinkOption.NOFOLLOW_LINKS)
+        || !Arrays.equals(Files.readAllBytes(mode),
+        digest(formatIdentity, "formatIdentity"))) {
+      throw new IOException("PathState common-mode marker differs");
+    }
+    return true;
+  }
+
+  /** Converts a newly rebuilt legacy pointer into a read-only baseline admission record. */
+  public static void admitFreshBaseline(PathStatePhysicalStoreSet stores,
+      PathStateRootMetadata metadata, CommonCheckpointBaseline baseline) throws IOException {
+    Path directory = Objects.requireNonNull(stores, "stores").getDirectory();
+    Path current = directory.resolve(CURRENT_FILE);
+    Path legacy = directory.resolve(LEGACY_BASELINE_FILE);
+    Path mode = directory.resolve(COMMON_MODE_FILE);
+    if (Files.exists(mode, LinkOption.NOFOLLOW_LINKS)) {
+      if (!Files.isRegularFile(mode, LinkOption.NOFOLLOW_LINKS)) {
+        throw new IOException("PathState common-mode marker is not a regular file");
+      }
+      return;
+    }
+    if (!Files.isRegularFile(current, LinkOption.NOFOLLOW_LINKS)) {
+      if (Files.isRegularFile(legacy, LinkOption.NOFOLLOW_LINKS)
+          && Files.isRegularFile(directory.resolve(COMMON_BASELINE_HEAD_FILE),
+          LinkOption.NOFOLLOW_LINKS)) {
+        PathStateMetadataFile.publishImmutableBytes(mode, baseline.getFormatIdentity());
+        return;
+      }
+      throw new IOException("PathState fresh common baseline requires one legacy CURRENT");
+    }
+    if (Files.exists(legacy, LinkOption.NOFOLLOW_LINKS)) {
+      throw new IOException("PathState fresh common baseline has conflicting pointers");
+    }
+    if (metadata.getBlockNumber() != baseline.getHead().getBlockNumber()
+        || !Arrays.equals(metadata.getBlockHash(), baseline.getHead().getBlockHash())
+        || !Arrays.equals(metadata.getStateRoot(), baseline.getStateRoot())) {
+      throw new IOException("PathState fresh baseline identity differs");
+    }
+    PathStateMetadataFile.publishImmutableBytes(directory.resolve(COMMON_BASELINE_HEAD_FILE),
+        metadata.encode());
+    try {
+      Files.move(current, legacy, java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+    } catch (java.nio.file.AtomicMoveNotSupportedException unsupported) {
+      throw new IOException("PathState common baseline requires atomic rename", unsupported);
+    }
+    PathStateMetadataFile.publishImmutableBytes(mode, baseline.getFormatIdentity());
+  }
+
+  /** Loads the exact next-format head currently published by PathState CURRENT. */
+  public static PublishedHead loadPublishedHead(Path directory,
+      byte[] expectedFormatIdentity) throws IOException {
+    Marker marker = load(Objects.requireNonNull(directory, "directory").resolve(CURRENT_FILE));
+    if (!Arrays.equals(marker.formatIdentity,
+        digest(expectedFormatIdentity, "expectedFormatIdentity"))) {
+      throw new IOException("PathState published target format identity differs");
+    }
+    return new PublishedHead(marker.lastEpoch, marker.lastBlockNumber, marker.lastBlockHash,
+        marker.stateRoot, marker.payloadDigest);
   }
 
   @Override
@@ -67,6 +150,8 @@ public final class PathStateCheckpointMaterializer implements CommonCheckpointMa
         return Status.PUBLISHED;
       }
       requireParent(current, admitted);
+    } else if (baseline != null) {
+      baseline.requireParent(admitted, "PathState");
     }
     Path materialized = materializedPath(admitted);
     if (!Files.exists(materialized, LinkOption.NOFOLLOW_LINKS)) {
@@ -268,6 +353,45 @@ public final class PathStateCheckpointMaterializer implements CommonCheckpointMa
       this.lastBlockNumber = lastBlockNumber;
       this.lastBlockHash = lastBlockHash;
       this.stateRoot = stateRoot;
+    }
+  }
+
+  /** Minimal restart identity retained by the compact next-format CURRENT record. */
+  public static final class PublishedHead {
+
+    private final long epoch;
+    private final long blockNumber;
+    private final byte[] blockHash;
+    private final byte[] stateRoot;
+    private final byte[] payloadDigest;
+
+    private PublishedHead(long epoch, long blockNumber, byte[] blockHash, byte[] stateRoot,
+        byte[] payloadDigest) {
+      this.epoch = epoch;
+      this.blockNumber = blockNumber;
+      this.blockHash = Arrays.copyOf(blockHash, blockHash.length);
+      this.stateRoot = Arrays.copyOf(stateRoot, stateRoot.length);
+      this.payloadDigest = Arrays.copyOf(payloadDigest, payloadDigest.length);
+    }
+
+    public long getEpoch() {
+      return epoch;
+    }
+
+    public long getBlockNumber() {
+      return blockNumber;
+    }
+
+    public byte[] getBlockHash() {
+      return Arrays.copyOf(blockHash, blockHash.length);
+    }
+
+    public byte[] getStateRoot() {
+      return Arrays.copyOf(stateRoot, stateRoot.length);
+    }
+
+    public byte[] getPayloadDigest() {
+      return Arrays.copyOf(payloadDigest, payloadDigest.length);
     }
   }
 }

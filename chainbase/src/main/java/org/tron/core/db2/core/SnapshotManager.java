@@ -106,6 +106,7 @@ public class SnapshotManager implements RevokingDatabase {
   private OldValueCollector oldValueCollector;
   private ArchiveRuntimeAttachment archiveRuntimeAttachment;
   private PathStateRuntimeAttachment pathStateRuntimeAttachment;
+  private CommonCheckpointRuntimeAttachment commonCheckpointRuntimeAttachment;
   private Long submittedArchiveHistoryEpoch;
   private BlockReverseDiffSink blockReverseDiffSink;
   @Getter
@@ -366,8 +367,30 @@ public class SnapshotManager implements RevokingDatabase {
     if (archiveRuntimeAttachment != null) {
       throw new IllegalStateException("Borrowed archive runtime is already attached");
     }
+    if (commonCheckpointRuntimeAttachment != null) {
+      throw new IllegalStateException("Common checkpoint runtime is already attached");
+    }
     oldValueCollector = Objects.requireNonNull(collector, "collector");
     blockReverseDiffSink = Objects.requireNonNull(sink, "sink");
+  }
+
+  /** Installs Archive artifact capture without any legacy per-block or flush-time sink. */
+  public synchronized void installCommonCheckpointArchiveCollector(OldValueCollector collector) {
+    ArchiveStoreScope.validate(dbs);
+    if (oldValueCollector != null || blockReverseDiffSink != null
+        || archiveRuntimeAttachment != null || commonCheckpointRuntimeAttachment != null) {
+      throw new IllegalStateException("Archive collaborators are already installed");
+    }
+    oldValueCollector = Objects.requireNonNull(collector, "collector");
+  }
+
+  /** Clears a partially installed common-checkpoint collector during startup rollback. */
+  public synchronized void clearCommonCheckpointArchiveCollector() {
+    if (commonCheckpointRuntimeAttachment != null || archiveRuntimeAttachment != null
+        || blockReverseDiffSink != null) {
+      throw new IllegalStateException("Cannot clear an active Archive persistence runtime");
+    }
+    oldValueCollector = null;
   }
 
   /** Atomically installs one borrowed archive runtime bundle after store registration. */
@@ -376,6 +399,9 @@ public class SnapshotManager implements RevokingDatabase {
     ArchiveRuntimeAttachment candidate = Objects.requireNonNull(attachment, "attachment");
     if (archiveRuntimeAttachment != null) {
       throw new IllegalStateException("Archive runtime is already attached");
+    }
+    if (commonCheckpointRuntimeAttachment != null) {
+      throw new IllegalStateException("Common checkpoint runtime is already attached");
     }
     if (oldValueCollector != null || blockReverseDiffSink != null) {
       throw new IllegalStateException("Legacy archive collaborators are already installed");
@@ -411,6 +437,46 @@ public class SnapshotManager implements RevokingDatabase {
       throw new IllegalStateException("Path-state runtime is already attached");
     }
     pathStateRuntimeAttachment = candidate;
+  }
+
+  /**
+   * Installs the exclusive three-authority persistence owner. Archive collection and PathState
+   * in-memory advancement remain attached separately, but their legacy durable callbacks are
+   * never used while this attachment is present.
+   */
+  public synchronized void attachCommonCheckpointRuntime(
+      CommonCheckpointRuntimeAttachment attachment) {
+    ArchiveStoreScope.validate(dbs);
+    CommonCheckpointRuntimeAttachment candidate = Objects.requireNonNull(attachment,
+        "attachment");
+    if (!candidate.isEnabled()) {
+      throw new IllegalArgumentException("Common checkpoint runtime must be enabled");
+    }
+    if (commonCheckpointRuntimeAttachment != null) {
+      throw new IllegalStateException("Common checkpoint runtime is already attached");
+    }
+    if (archiveRuntimeAttachment != null || blockReverseDiffSink != null) {
+      throw new IllegalStateException(
+          "Common checkpoint runtime is mutually exclusive with legacy Archive persistence");
+    }
+    if (oldValueCollector == null || pathStateRuntimeAttachment == null
+        || !pathStateRuntimeAttachment.isCommonCheckpointOnly()) {
+      throw new IllegalStateException(
+          "Common checkpoint requires Archive capture and a checkpoint-only PathState runtime");
+    }
+    commonCheckpointRuntimeAttachment = candidate;
+  }
+
+  /** Detaches the exact Manager-owned common-checkpoint runtime without closing it. */
+  public synchronized CommonCheckpointRuntimeAttachment detachCommonCheckpointRuntime(
+      CommonCheckpointRuntimeAttachment expected) {
+    CommonCheckpointRuntimeAttachment candidate = Objects.requireNonNull(expected, "expected");
+    if (commonCheckpointRuntimeAttachment != candidate) {
+      throw new IllegalStateException("Cannot detach a missing or foreign common runtime");
+    }
+    commonCheckpointRuntimeAttachment = null;
+    oldValueCollector = null;
+    return candidate;
   }
 
   /** Detaches the exact borrowed path-state runtime without closing its Manager-owned state. */
@@ -518,6 +584,13 @@ public class SnapshotManager implements RevokingDatabase {
       archiveReadableEpoch = -1;
       return null;
     }
+    if (commonCheckpointRuntimeAttachment != null) {
+      commonCheckpointRuntimeAttachment = null;
+      oldValueCollector = null;
+      blockReverseDiffSink = null;
+      archiveReadableEpoch = -1;
+      return null;
+    }
     return blockReverseDiffSink instanceof Closeable ? (Closeable) blockReverseDiffSink : null;
   }
 
@@ -610,6 +683,20 @@ public class SnapshotManager implements RevokingDatabase {
     if (force || shouldBeRefreshed()) {
       try {
         long start = System.currentTimeMillis();
+        if (commonCheckpointRuntimeAttachment != null) {
+          if (flushCount <= 0) {
+            return;
+          }
+          try {
+            commonCheckpointRuntimeAttachment.checkpointAndRebase(flushCount);
+          } catch (IOException | RuntimeException failure) {
+            throw new TronDBException("Common checkpoint publication failed", failure);
+          }
+          flushCount = 0;
+          logger.info("Common checkpoint flush cost: {} ms.",
+              System.currentTimeMillis() - start);
+          return;
+        }
         BlockSnapshotMeta pathStateFlushTarget = pathStateFlushTarget();
         ArchiveWalBinding archiveBinding = publishArchiveHistoryForFlush();
         if (!isV2Open()) {

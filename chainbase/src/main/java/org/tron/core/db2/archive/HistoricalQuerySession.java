@@ -66,6 +66,28 @@ public final class HistoricalQuerySession implements AutoCloseable {
     return open(lease, targetBlockHash, Limits.defaults());
   }
 
+  /** Takes ownership of a common-checkpoint point snapshot. */
+  public static HistoricalQuerySession open(StateArchiveCheckpointReadSnapshot snapshot,
+      byte[] targetBlockHash) throws IOException {
+    return open(snapshot, targetBlockHash, Limits.defaults());
+  }
+
+  /** Takes ownership of a common-checkpoint point snapshot. */
+  public static HistoricalQuerySession open(StateArchiveCheckpointReadSnapshot snapshot,
+      byte[] targetBlockHash, Limits limits) throws IOException {
+    ArchiveReadContext context = ArchiveReadContext.open(snapshot, EXACT_ADAPTERS);
+    try {
+      return new HistoricalQuerySession(context, targetBlockHash, limits);
+    } catch (RuntimeException failure) {
+      try {
+        context.close();
+      } catch (IOException closeFailure) {
+        failure.addSuppressed(closeFailure);
+      }
+      throw failure;
+    }
+  }
+
   /** Takes ownership of {@code lease}, including if session construction fails. */
   public static HistoricalQuerySession open(ArchiveRuntimeQueryGate.Lease lease,
       byte[] targetBlockHash, Limits limits) throws IOException {

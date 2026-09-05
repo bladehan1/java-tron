@@ -24,9 +24,9 @@ public final class HistoricalAccountAssetBalanceResolver {
 
   private final P66AccountAssetCodec codec = new P66AccountAssetCodec();
 
-  public Result resolve(ArchiveReadSnapshot snapshot, byte[] address, String tokenId)
+  public Result resolve(ArchivePointSnapshot snapshot, byte[] address, String tokenId)
       throws IOException {
-    ArchiveReadSnapshot pinned = Objects.requireNonNull(snapshot, "snapshot");
+    ArchivePointSnapshot pinned = Objects.requireNonNull(snapshot, "snapshot");
     requireScopedDatabases();
     pinned.requirePinnedIdentity();
 

@@ -17,7 +17,7 @@ import org.tron.protos.contract.SmartContractOuterClass.SmartContract;
 /** Request-owned bindings from every versioned Store to one pinned archive snapshot. */
 public final class ArchiveReadContext implements Closeable {
 
-  private final ArchiveReadSnapshot snapshot;
+  private final ArchivePointSnapshot snapshot;
   private final Closeable owner;
   private final Map<String, StoreAdapter<?>> adapters;
   private final HistoricalAccountAssetBalanceResolver accountAssetResolver =
@@ -26,7 +26,7 @@ public final class ArchiveReadContext implements Closeable {
       new HistoricalAccountAssetPrefixResolver();
   private boolean closed;
 
-  private ArchiveReadContext(ArchiveReadSnapshot snapshot,
+  private ArchiveReadContext(ArchivePointSnapshot snapshot,
       Collection<StoreAdapter<?>> adapters, Closeable owner) {
     this.snapshot = Objects.requireNonNull(snapshot, "snapshot");
     this.owner = Objects.requireNonNull(owner, "owner");
@@ -35,6 +35,17 @@ public final class ArchiveReadContext implements Closeable {
 
   /** Takes ownership of {@code snapshot}, including when adapter validation fails. */
   public static ArchiveReadContext open(ArchiveReadSnapshot snapshot,
+      Collection<StoreAdapter<?>> adapters) throws IOException {
+    try {
+      return new ArchiveReadContext(snapshot, adapters, snapshot);
+    } catch (RuntimeException failure) {
+      closeAfterFailedOpen(snapshot, failure);
+      throw failure;
+    }
+  }
+
+  /** Takes ownership of one common-checkpoint point snapshot. */
+  public static ArchiveReadContext open(StateArchiveCheckpointReadSnapshot snapshot,
       Collection<StoreAdapter<?>> adapters) throws IOException {
     try {
       return new ArchiveReadContext(snapshot, adapters, snapshot);
@@ -206,10 +217,10 @@ public final class ArchiveReadContext implements Closeable {
 
   /** Read-only point view for one exact physical Store keyspace. */
   public static final class HistoricalStore<T> {
-    private final ArchiveReadSnapshot snapshot;
+    private final ArchivePointSnapshot snapshot;
     private final StoreAdapter<T> adapter;
 
-    private HistoricalStore(ArchiveReadSnapshot snapshot, StoreAdapter<T> adapter) {
+    private HistoricalStore(ArchivePointSnapshot snapshot, StoreAdapter<T> adapter) {
       this.snapshot = snapshot;
       this.adapter = adapter;
     }

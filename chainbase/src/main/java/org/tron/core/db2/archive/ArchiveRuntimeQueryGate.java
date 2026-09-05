@@ -81,7 +81,7 @@ public final class ArchiveRuntimeQueryGate implements Closeable {
   }
 
   /** One request-owned snapshot whose close releases both resources and gate accounting. */
-  public static final class Lease implements Closeable {
+  public static final class Lease implements ArchivePointSnapshot {
 
     private final ArchiveRuntimeQueryGate gate;
     private final ArchiveReadSnapshot snapshot;
@@ -97,6 +97,38 @@ public final class ArchiveRuntimeQueryGate implements Closeable {
         throw new IllegalStateException("Archive query lease is closed");
       }
       return snapshot;
+    }
+
+    @Override
+    public OldValue get(String dbName, byte[] physicalRawKey) throws IOException {
+      return getSnapshot().get(dbName, physicalRawKey);
+    }
+
+    @Override
+    public java.util.List<HistoricalRangeOverlay.Entry> range(String dbName,
+        HistoricalRangeOverlay.KeyRange range, HistoricalRangeOverlay.Limits limits)
+        throws IOException {
+      return getSnapshot().range(dbName, range, limits);
+    }
+
+    @Override
+    public long getTargetBlock() {
+      return getSnapshot().getTargetBlock();
+    }
+
+    @Override
+    public long getPinnedBlock() {
+      return getSnapshot().getPinnedBlock();
+    }
+
+    @Override
+    public byte[] getPinnedHash() {
+      return getSnapshot().getPinnedHash();
+    }
+
+    @Override
+    public void requirePinnedIdentity() {
+      getSnapshot().requirePinnedIdentity();
     }
 
     @Override

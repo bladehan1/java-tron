@@ -7,6 +7,7 @@ import java.util.Optional;
 import java.util.OptionalLong;
 import org.tron.core.db2.core.CommonCheckpointMaterializer.Status;
 import org.tron.core.db2.core.CommonCheckpointTarget;
+import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
 
 /** Request-owned exact-key reader for one published next-format checkpoint target. */
 public final class StateArchiveCheckpointReadAdapter implements AutoCloseable {
@@ -24,23 +25,35 @@ public final class StateArchiveCheckpointReadAdapter implements AutoCloseable {
   /** Opens only an exact target whose Archive READABLE and serving-index markers are published. */
   public static StateArchiveCheckpointReadAdapter open(Path archiveDirectory,
       CommonCheckpointTarget target) throws IOException {
+    return open(archiveDirectory, target, StateArchiveCheckpointServingIndex.configuredEngine());
+  }
+
+  public static StateArchiveCheckpointReadAdapter open(Path archiveDirectory,
+      CommonCheckpointTarget target, Engine engine) throws IOException {
     Path directory = Objects.requireNonNull(archiveDirectory, "archiveDirectory");
     CommonCheckpointTarget admitted = Objects.requireNonNull(target, "target");
     StateArchiveCheckpointMaterializer materializer =
-        new StateArchiveCheckpointMaterializer(directory, admitted.getFormatIdentity());
+        new StateArchiveCheckpointMaterializer(directory, admitted.getFormatIdentity(), null,
+            engine);
     if (materializer.inspect(admitted) != Status.PUBLISHED) {
       throw new IOException("State Archive checkpoint target is not published for reading");
     }
     return new StateArchiveCheckpointReadAdapter(admitted,
-        StateArchiveCheckpointServingIndex.openReader(directory, admitted));
+        StateArchiveCheckpointServingIndex.openReader(directory, admitted, engine));
   }
 
   /** Reconstructs the published target from disk before opening the exact-point reader. */
   public static StateArchiveCheckpointReadAdapter open(Path archiveDirectory,
       byte[] expectedFormatIdentity) throws IOException {
+    return open(archiveDirectory, expectedFormatIdentity,
+        StateArchiveCheckpointServingIndex.configuredEngine());
+  }
+
+  public static StateArchiveCheckpointReadAdapter open(Path archiveDirectory,
+      byte[] expectedFormatIdentity, Engine engine) throws IOException {
     Path directory = Objects.requireNonNull(archiveDirectory, "archiveDirectory");
     return open(directory, StateArchiveCheckpointMaterializer.loadPublishedTarget(directory,
-        expectedFormatIdentity));
+        expectedFormatIdentity, engine), engine);
   }
 
   /**
