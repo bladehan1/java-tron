@@ -10,17 +10,26 @@ import static org.mockito.Mockito.when;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.tron.core.db2.core.CommonCheckpointMaterializer.Authority;
+import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
 
 public class CommonCheckpointRuntimeAttachmentTest {
 
   @Rule
   public final TemporaryFolder temporaryFolder = new TemporaryFolder();
+
+  @Test
+  public void everyRuntimeConstructorRequiresMemoryRebaser() {
+    assertTrue(Arrays.stream(CommonCheckpointRuntime.class.getConstructors())
+        .allMatch(constructor -> Arrays.asList(constructor.getParameterTypes())
+            .contains(CommonCheckpointMemoryRebaser.class)));
+  }
 
   @Test
   public void disabledAttachmentDoesNotConstructRuntimeOrCreateDirectory() throws Exception {
@@ -90,10 +99,10 @@ public class CommonCheckpointRuntimeAttachmentTest {
         new CommonCheckpointFile(root.resolve("wal")), materializer(Authority.CHAINBASE),
         materializer(Authority.PATH_STATE), materializer(Authority.STATE_ARCHIVE));
     return new CommonCheckpointRuntime(new CommonCheckpointRuntimeOwner(coordinator),
-        Collections.singletonList(database), root.resolve("archive"), hash(1),
+        Collections.singletonList(database), root.resolve("archive"), hash(1), Engine.LEVELDB,
         (blockNumber, blockHash) -> {
           throw new IOException("latest state is intentionally unavailable");
-        });
+        }, target -> () -> { });
   }
 
   private static CommonCheckpointMaterializer materializer(Authority authority) {

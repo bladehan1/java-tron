@@ -16,23 +16,27 @@ public final class CommonCheckpointSnapshotRebaser {
    */
   public void rebase(List<Chainbase> databases, CommonCheckpointTarget target, int count)
       throws IOException {
+    prepare(databases, target, count).apply();
+  }
+
+  /** Fully validates every Store before returning a pointer-only rebase plan. */
+  Plan prepare(List<Chainbase> databases, CommonCheckpointTarget target, int count)
+      throws IOException {
     CommonCheckpointTarget admittedTarget = Objects.requireNonNull(target, "target");
     if (count <= 0) {
       throw new IllegalArgumentException("common checkpoint rebase count must be positive");
     }
-    List<Plan> plans = new ArrayList<>();
+    List<StorePlan> plans = new ArrayList<>();
     for (Chainbase database : Objects.requireNonNull(databases, "databases")) {
       plans.add(validate(Objects.requireNonNull(database, "database"), admittedTarget, count));
     }
     if (plans.isEmpty()) {
       throw new IOException("common checkpoint rebase requires registered Stores");
     }
-    for (Plan plan : plans) {
-      plan.apply();
-    }
+    return new Plan(plans);
   }
 
-  private static Plan validate(Chainbase database, CommonCheckpointTarget target, int count)
+  private static StorePlan validate(Chainbase database, CommonCheckpointTarget target, int count)
       throws IOException {
     Snapshot rootSnapshot = database.getHead().getRoot();
     if (!(rootSnapshot instanceof SnapshotRoot)) {
@@ -69,7 +73,7 @@ public final class CommonCheckpointSnapshotRebaser {
       throw new IOException("common checkpoint rebase Store chain is disconnected: "
           + database.getDbName());
     }
-    return new Plan(database, root, next, successor, head == next);
+    return new StorePlan(database, root, next, successor, head == next);
   }
 
   private static boolean isChild(BlockSnapshotMeta parent, BlockSnapshotMeta child) {
@@ -78,7 +82,22 @@ public final class CommonCheckpointSnapshotRebaser {
         && Arrays.equals(child.getParentHash(), parent.getBlockHash());
   }
 
-  private static final class Plan {
+  static final class Plan {
+
+    private final List<StorePlan> stores;
+
+    private Plan(List<StorePlan> stores) {
+      this.stores = new ArrayList<>(stores);
+    }
+
+    void apply() {
+      for (StorePlan store : stores) {
+        store.apply();
+      }
+    }
+  }
+
+  private static final class StorePlan {
 
     private final Chainbase database;
     private final SnapshotRoot root;
@@ -86,7 +105,7 @@ public final class CommonCheckpointSnapshotRebaser {
     private final Snapshot successor;
     private final boolean consumesHead;
 
-    private Plan(Chainbase database, SnapshotRoot root, Snapshot last, Snapshot successor,
+    private StorePlan(Chainbase database, SnapshotRoot root, Snapshot last, Snapshot successor,
         boolean consumesHead) {
       this.database = database;
       this.root = root;
