@@ -64,6 +64,7 @@ import org.tron.core.db2.common.WrappedByteArray;
 import org.tron.core.db2.core.Chainbase;
 import org.tron.core.db2.core.SnapshotManager;
 import org.tron.core.db2.core.SnapshotRoot;
+import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
 import org.tron.core.store.AccountAssetStore;
 import org.tron.core.store.CheckTmpStore;
 import org.tron.core.store.DynamicPropertiesStore;
@@ -241,6 +242,11 @@ public class StateArchiveManagerStartupIntegrationTest {
       assertEquals(head, manager.getStateArchiveRuntime().getRecoveredHead());
       assertEquals(0, manager.getStateArchiveRuntime().getStartupRecoveryActionCount());
       assertServingFixedPoint(archive, head, 6);
+      try (PersistentServingKeyIndexCatalog catalog =
+          PersistentServingKeyIndexCatalog.open(archive.resolve("serving-index"));
+          PersistentServingKeyIndexGeneration serving = catalog.pin()) {
+        assertEquals(Engine.valueOf(engine), serving.getEngine());
+      }
       assertEquals(head.getEpoch(), snapshots.getArchiveReadableEpoch());
       assertTrue(Files.isRegularFile(archive.resolve("MANIFEST")));
       assertFalse(Files.exists(archive.resolve("participants")));
@@ -959,11 +965,12 @@ public class StateArchiveManagerStartupIntegrationTest {
         assertEquals(27, inspection.getGeneration().getStores().size());
         assertEquals(epoch, inspection.getGeneration().getIndexedThrough());
         assertTrue(inspection.getGeneration().getApparentBytes() > 0);
-        assertTrue(inspection.getGeneration().getEngine().getEstimatedLiveDataBytes()
-            .isAvailable());
-        assertTrue(inspection.getGeneration().getEngine().getTotalSstBytes().isAvailable());
-        assertTrue(inspection.getGeneration().getEngine().getPendingCompactionBytes()
-            .isAvailable());
+        assertEquals("ROCKSDB".equals(engine), inspection.getGeneration().getEngine()
+            .getEstimatedLiveDataBytes().isAvailable());
+        assertEquals("ROCKSDB".equals(engine), inspection.getGeneration().getEngine()
+            .getTotalSstBytes().isAvailable());
+        assertEquals("ROCKSDB".equals(engine), inspection.getGeneration().getEngine()
+            .getPendingCompactionBytes().isAvailable());
         setField(snapshots, "size", 0);
       }
 
@@ -1175,16 +1182,18 @@ public class StateArchiveManagerStartupIntegrationTest {
 
     Path foreignArchive = temporaryFolder.newFolder("foreign-serving-history").toPath();
     Path foreignShadow = output.resolve("foreign-serving-shadow");
-    try (ArchiveHistoryWriter foreign = new ArchiveHistoryWriter(
-        foreignArchive, 4096, ArchiveStoreScope.getStateDatabases())) {
-      foreign.accept(new BlockReverseDiff(head.getMeta(), Collections.singletonList(
-          new BlockReverseDiff.DbGroup("proposal", Collections.singletonList(
-              new BlockReverseDiff.Entry(new byte[]{9, 9}, OldValue.absent()))))));
-      try (PersistentServingKeyIndexGeneration ignored =
-          foreign.buildServingGeneration(foreignShadow, "foreign")) {
-        // Catalog publication reopens the generation after this build handle is closed.
+    withArchiveConfig(output, "ROCKSDB", true, () -> {
+      try (ArchiveHistoryWriter foreign = new ArchiveHistoryWriter(
+          foreignArchive, 4096, ArchiveStoreScope.getStateDatabases())) {
+        foreign.accept(new BlockReverseDiff(head.getMeta(), Collections.singletonList(
+            new BlockReverseDiff.DbGroup("proposal", Collections.singletonList(
+                new BlockReverseDiff.Entry(new byte[]{9, 9}, OldValue.absent()))))));
+        try (PersistentServingKeyIndexGeneration ignored =
+            foreign.buildServingGeneration(foreignShadow, "foreign")) {
+          // Catalog publication reopens the generation after this build handle is closed.
+        }
       }
-    }
+    });
     try (PersistentServingKeyIndexCatalog catalog =
         PersistentServingKeyIndexCatalog.open(archive.resolve("serving-index"))) {
       assertTrue(catalog.publish(catalog.getCurrentGenerationId(), foreignShadow));

@@ -19,6 +19,7 @@ import java.nio.file.StandardOpenOption;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import org.tron.core.db2.core.CommonCheckpointMaterializer;
@@ -142,6 +143,20 @@ public final class StateArchiveCheckpointMaterializer implements CommonCheckpoin
       throw new IOException("State Archive READABLE target is not fully published");
     }
     return target;
+  }
+
+  /** Returns the published target when present, validating its complete serving boundary once. */
+  public static Optional<CommonCheckpointTarget> loadPublishedTargetIfPresent(Path directory,
+      byte[] expectedFormatIdentity, Engine engine) throws IOException {
+    if (!Files.exists(directory.resolve(READABLE_FILE), LinkOption.NOFOLLOW_LINKS)) {
+      return Optional.empty();
+    }
+    return Optional.of(loadPublishedTarget(directory, expectedFormatIdentity, engine));
+  }
+
+  /** Resolves the configured Archive index engine at runtime construction boundaries. */
+  public static Engine configuredEngine() {
+    return StateArchiveCheckpointServingIndex.configuredEngine();
   }
 
   @Override

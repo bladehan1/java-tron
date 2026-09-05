@@ -1,6 +1,5 @@
 package org.tron.core.db2.archive;
 
-import com.google.common.hash.Hashing;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
@@ -22,14 +21,26 @@ final class StateArchiveIndexEngineManifest {
   static final String FILE = "ENGINE";
   private static final String TEMP = "ENGINE.tmp";
   private static final int MAGIC = 0x53414945; // SAIE
-  private static final short VERSION = 1;
-  private static final int DIGEST_LENGTH = 32;
-  private static final int ENCODED_LENGTH = Integer.BYTES + 2 * Short.BYTES + DIGEST_LENGTH;
+  private static final short LEGACY_SHA_VERSION = 1;
+  private static final short VERSION = 2;
+  private static final int BODY_LENGTH = Integer.BYTES + 2 * Short.BYTES;
+  private static final int CHECKSUM_LENGTH = Integer.BYTES;
+  private static final int LEGACY_DIGEST_LENGTH = 32;
+  private static final int ENCODED_LENGTH = BODY_LENGTH + CHECKSUM_LENGTH;
 
   private StateArchiveIndexEngineManifest() {
   }
 
   static void openOrCreate(Path directory, Engine engine) throws IOException {
+    openOrCreate(directory, engine, false);
+  }
+
+  static void openOrCreateLegacy(Path directory, Engine engine) throws IOException {
+    openOrCreate(directory, engine, true);
+  }
+
+  private static void openOrCreate(Path directory, Engine engine, boolean admitLegacyRocks)
+      throws IOException {
     Path root = Objects.requireNonNull(directory, "directory");
     Engine selected = Objects.requireNonNull(engine, "engine");
     Files.createDirectories(root);
@@ -38,12 +49,14 @@ final class StateArchiveIndexEngineManifest {
     }
     Path manifest = root.resolve(FILE);
     if (Files.exists(manifest, LinkOption.NOFOLLOW_LINKS)) {
-      requireFile(manifest, selected);
+      require(root, selected);
       return;
     }
     Path database = root.resolve("keys");
     if (Files.exists(database, LinkOption.NOFOLLOW_LINKS)) {
-      throw new IOException("State Archive serving index has no engine identity");
+      if (!admitLegacyRocks || selected != Engine.ROCKSDB) {
+        throw new IOException("State Archive serving index has no engine identity");
+      }
     }
     byte[] encoded = encode(selected);
     Path temporary = root.resolve(TEMP);
@@ -63,32 +76,48 @@ final class StateArchiveIndexEngineManifest {
   }
 
   static void require(Path directory, Engine engine) throws IOException {
-    requireFile(Objects.requireNonNull(directory, "directory").resolve(FILE),
-        Objects.requireNonNull(engine, "engine"));
+    Engine expected = Objects.requireNonNull(engine, "engine");
+    if (load(directory) != expected) {
+      throw new IOException("State Archive serving index engine differs: expected " + expected);
+    }
   }
 
-  private static void requireFile(Path manifest, Engine engine) throws IOException {
+  static Engine load(Path directory) throws IOException {
+    Path manifest = Objects.requireNonNull(directory, "directory").resolve(FILE);
     if (!Files.isRegularFile(manifest, LinkOption.NOFOLLOW_LINKS)) {
       throw new IOException("State Archive serving engine identity is missing");
     }
     byte[] encoded = Files.readAllBytes(manifest);
-    if (encoded.length != ENCODED_LENGTH) {
+    if (encoded.length != ENCODED_LENGTH
+        && encoded.length != BODY_LENGTH + LEGACY_DIGEST_LENGTH) {
       throw new IOException("State Archive serving engine identity length is invalid");
     }
-    int bodyLength = encoded.length - DIGEST_LENGTH;
-    byte[] body = Arrays.copyOf(encoded, bodyLength);
-    if (!Arrays.equals(Arrays.copyOfRange(encoded, bodyLength, encoded.length),
-        Hashing.sha256().hashBytes(body).asBytes())) {
-      throw new IOException("State Archive serving engine identity checksum differs");
-    }
+    byte[] body = Arrays.copyOf(encoded, BODY_LENGTH);
     try (DataInputStream input = new DataInputStream(new ByteArrayInputStream(body))) {
-      if (input.readInt() != MAGIC || input.readShort() != VERSION) {
+      int magic = input.readInt();
+      short version = input.readShort();
+      if (magic != MAGIC || version != VERSION && version != LEGACY_SHA_VERSION) {
         throw new IOException("State Archive serving engine identity is unsupported");
       }
-      int tag = input.readUnsignedShort();
-      if (tag != tag(engine)) {
-        throw new IOException("State Archive serving index engine differs: expected " + engine);
+      if (version == VERSION) {
+        if (encoded.length != ENCODED_LENGTH
+            || java.nio.ByteBuffer.wrap(encoded, BODY_LENGTH, CHECKSUM_LENGTH).getInt()
+            != com.google.common.hash.Hashing.crc32c().hashBytes(body).asInt()) {
+          throw new IOException("State Archive serving engine identity checksum differs");
+        }
+      } else if (encoded.length != BODY_LENGTH + LEGACY_DIGEST_LENGTH
+          || !Arrays.equals(Arrays.copyOfRange(encoded, BODY_LENGTH, encoded.length),
+          com.google.common.hash.Hashing.sha256().hashBytes(body).asBytes())) {
+        throw new IOException("State Archive serving engine identity checksum differs");
       }
+      int tag = input.readUnsignedShort();
+      if (tag == tag(Engine.LEVELDB)) {
+        return Engine.LEVELDB;
+      }
+      if (tag == tag(Engine.ROCKSDB)) {
+        return Engine.ROCKSDB;
+      }
+      throw new IOException("State Archive serving engine identity tag is unsupported");
     }
   }
 
@@ -101,7 +130,7 @@ final class StateArchiveIndexEngineManifest {
       output.writeShort(tag(engine));
       output.flush();
       byte[] body = bytes.toByteArray();
-      output.write(Hashing.sha256().hashBytes(body).asBytes());
+      output.writeInt(com.google.common.hash.Hashing.crc32c().hashBytes(body).asInt());
       output.flush();
       return bytes.toByteArray();
     } catch (IOException impossible) {
