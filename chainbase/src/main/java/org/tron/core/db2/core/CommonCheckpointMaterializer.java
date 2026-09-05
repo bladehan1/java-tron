@@ -7,6 +7,14 @@ public interface CommonCheckpointMaterializer {
 
   Authority authority();
 
+  /** Opens resources that may be reused while one target crosses both coordinator barriers. */
+  default void beginCheckpoint(CommonCheckpointTarget target) throws IOException {
+  }
+
+  /** Releases resources opened for one target after publication, retirement, or failure. */
+  default void endCheckpoint(CommonCheckpointTarget target) throws IOException {
+  }
+
   /**
    * Returns only an exact state for {@code target}. Implementations must throw when durable state
    * is corrupt, ambiguous, or belongs to a different target.
