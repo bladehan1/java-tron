@@ -19,20 +19,15 @@ public final class CommonCheckpointRuntime implements AutoCloseable {
   private final byte[] formatIdentity;
   private final Engine engine;
   private final StateArchiveCheckpointReadSnapshot.PinnedLatestStateFactory latestFactory;
+  private final CommonCheckpointMemoryRebaser memoryRebaser;
   private final CommonCheckpointPayloadFactory payloadFactory = new CommonCheckpointPayloadFactory();
   private final CommonCheckpointSnapshotRebaser rebaser = new CommonCheckpointSnapshotRebaser();
   private CommonCheckpointTarget publishedTarget;
 
   public CommonCheckpointRuntime(CommonCheckpointRuntimeOwner owner, List<Chainbase> databases,
-      Path archiveDirectory, byte[] formatIdentity,
-      StateArchiveCheckpointReadSnapshot.PinnedLatestStateFactory latestFactory) {
-    this(owner, databases, archiveDirectory, formatIdentity,
-        StateArchiveCheckpointMaterializer.configuredEngine(), latestFactory);
-  }
-
-  public CommonCheckpointRuntime(CommonCheckpointRuntimeOwner owner, List<Chainbase> databases,
       Path archiveDirectory, byte[] formatIdentity, Engine engine,
-      StateArchiveCheckpointReadSnapshot.PinnedLatestStateFactory latestFactory) {
+      StateArchiveCheckpointReadSnapshot.PinnedLatestStateFactory latestFactory,
+      CommonCheckpointMemoryRebaser memoryRebaser) {
     this.owner = Objects.requireNonNull(owner, "owner");
     this.databases = new ArrayList<>(Objects.requireNonNull(databases, "databases"));
     if (this.databases.isEmpty() || this.databases.contains(null)) {
@@ -42,6 +37,7 @@ public final class CommonCheckpointRuntime implements AutoCloseable {
     this.formatIdentity = requireDigest(formatIdentity);
     this.engine = Objects.requireNonNull(engine, "engine");
     this.latestFactory = Objects.requireNonNull(latestFactory, "latestFactory");
+    this.memoryRebaser = Objects.requireNonNull(memoryRebaser, "memoryRebaser");
   }
 
   /** Completes durable redo before this runtime admits checkpoint reads or new flushes. */
@@ -62,7 +58,13 @@ public final class CommonCheckpointRuntime implements AutoCloseable {
     CommonCheckpointPayload payload = payloadFactory.capture(formatIdentity, databases,
         flushCount);
     CommonCheckpointTarget target = CommonCheckpointTarget.from(payload);
-    owner.apply(payload, () -> rebaser.rebase(databases, target, flushCount));
+    owner.apply(payload, () -> {
+      CommonCheckpointSnapshotRebaser.Plan chainbasePlan =
+          rebaser.prepare(databases, target, flushCount);
+      CommonCheckpointMemoryRebaser.RebasePlan pathStatePlan = memoryRebaser.prepare(target);
+      chainbasePlan.apply();
+      pathStatePlan.apply();
+    });
     publishedTarget = target;
     return target;
   }

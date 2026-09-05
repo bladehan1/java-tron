@@ -872,7 +872,8 @@ public class Manager {
       PathStatePhysicalOverlayHead admittedOwner = pathOwner;
       attachment = CommonCheckpointRuntimeAttachment.open(true,
           () -> new CommonCheckpointRuntime(new CommonCheckpointRuntimeOwner(coordinator),
-              snapshots.getDbs(), archiveDirectory, formatIdentity, engine, latest::pin));
+              snapshots.getDbs(), archiveDirectory, formatIdentity, engine, latest::pin,
+              admittedOwner::prepareCommonCheckpointRebase));
 
       canonical = currentCanonicalBlockMeta();
       if (Files.isRegularFile(pathDirectory.resolve(PathStateCheckpointMaterializer.CURRENT_FILE),
