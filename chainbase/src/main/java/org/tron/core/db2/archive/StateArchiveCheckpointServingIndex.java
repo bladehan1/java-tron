@@ -11,20 +11,18 @@ import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
+import java.util.Locale;
 import java.util.Objects;
 import java.util.OptionalLong;
-import org.rocksdb.Options;
-import org.rocksdb.ReadOptions;
-import org.rocksdb.RocksDB;
-import org.rocksdb.RocksDBException;
-import org.rocksdb.RocksIterator;
-import org.rocksdb.WriteBatch;
-import org.rocksdb.WriteOptions;
+import org.tron.common.parameter.CommonParameter;
 import org.tron.core.db2.archive.BlockReverseDiff.DbGroup;
 import org.tron.core.db2.archive.BlockReverseDiff.Entry;
 import org.tron.core.db2.core.CommonCheckpointPayload;
 import org.tron.core.db2.core.CommonCheckpointTarget;
+import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
 
 /** Persistent exact-key locator for next-format per-block checkpoint history files. */
 final class StateArchiveCheckpointServingIndex {
@@ -42,21 +40,23 @@ final class StateArchiveCheckpointServingIndex {
   private static final int LOCATION_LENGTH = DIGEST_LENGTH + Integer.BYTES + Long.BYTES
       + DIGEST_LENGTH;
 
-  static {
-    RocksDB.loadLibrary();
-  }
-
   private StateArchiveCheckpointServingIndex() {
   }
 
   static Status inspect(Path archiveDirectory, CommonCheckpointTarget target)
       throws IOException {
+    return inspect(archiveDirectory, target, configuredEngine());
+  }
+
+  static Status inspect(Path archiveDirectory, CommonCheckpointTarget target, Engine engine)
+      throws IOException {
     Path databasePath = databasePath(archiveDirectory);
     if (!Files.exists(databasePath, LinkOption.NOFOLLOW_LINKS)) {
       return Status.ABSENT;
     }
-    try (Options options = new Options().setCreateIfMissing(false);
-        RocksDB database = RocksDB.openReadOnly(options, databasePath.toString())) {
+    StateArchiveIndexEngineManifest.require(archiveDirectory.resolve(DIRECTORY), engine);
+    try (StateArchiveIndexDatabase.Reader database =
+        StateArchiveIndexDatabase.openReader(databasePath, engine)) {
       byte[] encoded = database.get(MARKER_KEY);
       if (encoded == null) {
         throw new IOException("State Archive checkpoint serving marker is missing");
@@ -68,14 +68,17 @@ final class StateArchiveCheckpointServingIndex {
       }
       requireParent(marker, target);
       return Status.PARENT;
-    } catch (RocksDBException failure) {
-      throw new IOException("Failed to inspect State Archive checkpoint serving index", failure);
     }
   }
 
   static void apply(Path archiveDirectory, CommonCheckpointPayload payload,
       CommonCheckpointTarget target) throws IOException {
-    Status status = inspect(archiveDirectory, target);
+    apply(archiveDirectory, payload, target, configuredEngine());
+  }
+
+  static void apply(Path archiveDirectory, CommonCheckpointPayload payload,
+      CommonCheckpointTarget target, Engine engine) throws IOException {
+    Status status = inspect(archiveDirectory, target, engine);
     if (status == Status.EXACT) {
       return;
     }
@@ -84,13 +87,12 @@ final class StateArchiveCheckpointServingIndex {
     if (!Files.isDirectory(indexDirectory, LinkOption.NOFOLLOW_LINKS)) {
       throw new IOException("State Archive checkpoint serving path is not a directory");
     }
+    StateArchiveIndexEngineManifest.openOrCreate(indexDirectory, engine);
     long baseBlockNumber = target.getFirstBlock().getBlockNumber() - 1;
     byte[] baseBlockHash = target.getFirstBlock().getParentHash();
     Path databasePath = databasePath(archiveDirectory);
-    try (Options options = new Options().setCreateIfMissing(true);
-        RocksDB database = RocksDB.open(options, databasePath.toString());
-        WriteBatch batch = new WriteBatch();
-        WriteOptions writes = new WriteOptions().setSync(true)) {
+    try (StateArchiveIndexDatabase.Writer database =
+        StateArchiveIndexDatabase.openWriter(databasePath, engine)) {
       byte[] existing = database.get(MARKER_KEY);
       if (existing != null) {
         Marker parent = decodeMarker(existing);
@@ -98,30 +100,43 @@ final class StateArchiveCheckpointServingIndex {
         baseBlockNumber = parent.baseBlockNumber;
         baseBlockHash = parent.baseBlockHash;
       }
+      List<StateArchiveIndexDatabase.Mutation> mutations = new ArrayList<>();
       for (int index = 0; index < payload.getBlocks().size(); index++) {
         CommonCheckpointPayload.BlockPayload block = payload.getBlocks().get(index);
         long blockNumber = block.getMeta().getBlockNumber();
         for (DbGroup group : block.getArchiveDiff().getGroups()) {
           requireStateDatabase(group.getDbName());
           for (Entry entry : group.getEntries()) {
-            batch.put(changeKey(group.getDbName(), entry.getKey(), blockNumber), new byte[]{1});
+            mutations.add(StateArchiveIndexDatabase.put(
+                changeKey(group.getDbName(), entry.getKey(), blockNumber), new byte[]{1}));
           }
         }
-        batch.put(blockKey(blockNumber), encodeLocation(target.getPayloadDigest(), index,
-            block.getMeta()));
+        mutations.add(StateArchiveIndexDatabase.put(blockKey(blockNumber),
+            encodeLocation(target.getPayloadDigest(), index, block.getMeta())));
       }
-      batch.put(MARKER_KEY, encodeMarker(target, baseBlockNumber, baseBlockHash));
-      database.write(writes, batch);
-    } catch (RocksDBException failure) {
-      throw new IOException("Failed to materialize State Archive checkpoint serving index",
-          failure);
+      mutations.add(StateArchiveIndexDatabase.put(MARKER_KEY,
+          encodeMarker(target, baseBlockNumber, baseBlockHash)));
+      database.write(mutations);
     }
     HistorySegmentStore.syncDirectory(indexDirectory);
   }
 
   static Reader openReader(Path archiveDirectory, CommonCheckpointTarget target)
       throws IOException {
-    return new Reader(archiveDirectory, target);
+    return openReader(archiveDirectory, target, configuredEngine());
+  }
+
+  static Reader openReader(Path archiveDirectory, CommonCheckpointTarget target, Engine engine)
+      throws IOException {
+    return new Reader(archiveDirectory, target, engine);
+  }
+
+  static Engine configuredEngine() {
+    org.tron.core.config.args.Storage storage = CommonParameter.getInstance().getStorage();
+    if (storage == null || storage.getDbEngine() == null) {
+      return Engine.LEVELDB;
+    }
+    return Engine.valueOf(storage.getDbEngine().toUpperCase(Locale.ROOT));
   }
 
   private static void requireParent(Marker marker, CommonCheckpointTarget target)
@@ -277,20 +292,19 @@ final class StateArchiveCheckpointServingIndex {
   static final class Reader implements AutoCloseable {
 
     private final Path archiveDirectory;
-    private final Options options;
-    private final RocksDB database;
+    private final StateArchiveIndexDatabase.Reader database;
     private final Marker marker;
     private boolean closed;
 
-    private Reader(Path archiveDirectory, CommonCheckpointTarget target) throws IOException {
+    private Reader(Path archiveDirectory, CommonCheckpointTarget target, Engine engine)
+        throws IOException {
       this.archiveDirectory = Objects.requireNonNull(archiveDirectory, "archiveDirectory");
       Objects.requireNonNull(target, "target");
-      this.options = new Options().setCreateIfMissing(false);
-      RocksDB opened;
+      StateArchiveIndexEngineManifest.require(archiveDirectory.resolve(DIRECTORY), engine);
+      StateArchiveIndexDatabase.Reader opened;
       try {
-        opened = RocksDB.openReadOnly(options, databasePath(archiveDirectory).toString());
-      } catch (RocksDBException | RuntimeException failure) {
-        options.close();
+        opened = StateArchiveIndexDatabase.openReader(databasePath(archiveDirectory), engine);
+      } catch (IOException | RuntimeException failure) {
         throw new IOException("Failed to open State Archive checkpoint serving reader", failure);
       }
       this.database = opened;
@@ -302,9 +316,8 @@ final class StateArchiveCheckpointServingIndex {
             loaded.baseBlockHash))) {
           throw new IOException("State Archive checkpoint reader target differs");
         }
-      } catch (IOException | RocksDBException | RuntimeException failure) {
+      } catch (IOException | RuntimeException failure) {
         opened.close();
-        options.close();
         if (failure instanceof IOException) {
           throw (IOException) failure;
         }
@@ -328,19 +341,16 @@ final class StateArchiveCheckpointServingIndex {
       byte[] prefix = changePrefix(dbName, rawKey);
       byte[] seek = ByteBuffer.allocate(prefix.length + Long.BYTES).put(prefix)
           .putLong(targetBlock + 1).array();
-      try (ReadOptions reads = new ReadOptions();
-          RocksIterator iterator = database.newIterator(reads)) {
-        iterator.seek(seek);
-        if (!iterator.isValid()) {
-          return OptionalLong.empty();
-        }
-        byte[] found = iterator.key();
-        if (found.length != prefix.length + Long.BYTES || !startsWith(found, prefix)) {
-          return OptionalLong.empty();
-        }
-        long blockNumber = ByteBuffer.wrap(found, prefix.length, Long.BYTES).getLong();
-        return blockNumber <= upperBound ? OptionalLong.of(blockNumber) : OptionalLong.empty();
+      StateArchiveIndexDatabase.KeyValue foundEntry = database.seek(seek);
+      if (foundEntry == null) {
+        return OptionalLong.empty();
       }
+      byte[] found = foundEntry.getKey();
+      if (found.length != prefix.length + Long.BYTES || !startsWith(found, prefix)) {
+        return OptionalLong.empty();
+      }
+      long blockNumber = ByteBuffer.wrap(found, prefix.length, Long.BYTES).getLong();
+      return blockNumber <= upperBound ? OptionalLong.of(blockNumber) : OptionalLong.empty();
     }
 
     OldValue readOldValue(String dbName, byte[] rawKey, long blockNumber) throws IOException {
@@ -349,12 +359,7 @@ final class StateArchiveCheckpointServingIndex {
       if (blockNumber <= marker.baseBlockNumber || blockNumber > marker.lastBlockNumber) {
         throw new IllegalArgumentException("checkpoint history block is outside coverage");
       }
-      Location location;
-      try {
-        location = decodeLocation(database.get(blockKey(blockNumber)));
-      } catch (RocksDBException failure) {
-        throw new IOException("Failed to read State Archive checkpoint block location", failure);
-      }
+      Location location = decodeLocation(database.get(blockKey(blockNumber)));
       String fileName = StateArchiveCheckpointMaterializer.blockFileName(location.index,
           new BlockSnapshotMeta(location.epoch, blockNumber, location.blockHash,
               new byte[DIGEST_LENGTH], 0));
@@ -395,8 +400,11 @@ final class StateArchiveCheckpointServingIndex {
     public void close() {
       if (!closed) {
         closed = true;
-        database.close();
-        options.close();
+        try {
+          database.close();
+        } catch (IOException failure) {
+          throw new IllegalStateException("Failed to close Archive serving reader", failure);
+        }
       }
     }
 
