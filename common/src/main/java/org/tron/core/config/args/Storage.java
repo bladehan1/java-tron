@@ -103,6 +103,10 @@ public class Storage {
 
   @Getter
   @Setter
+  private StorageConfig.NativeDbConfig stateArchiveServingIndexDbSettings;
+
+  @Getter
+  @Setter
   private boolean commonCheckpointEnabled;
 
   @Getter
@@ -166,6 +170,10 @@ public class Storage {
   @Getter
   @Setter
   private boolean pathStateRootAsyncPrepareBenchmark;
+
+  @Getter
+  @Setter
+  private StorageConfig.PathStateDbSettingsConfig pathStateRootDbSettings;
 
   private Options defaultDbOptions;
 

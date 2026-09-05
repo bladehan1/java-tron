@@ -4,13 +4,16 @@ import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertThrows;
+import static org.junit.Assert.assertTrue;
 
 import com.google.common.hash.Hashing;
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
+import java.util.stream.Stream;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
@@ -48,6 +51,25 @@ public class StateArchiveIndexDatabaseTest {
   }
 
   @Test
+  public void rocksReaderAndWriterShareConfiguredDatabaseHandle() throws Exception {
+    Path database = temporaryFolder.newFolder("rocks-shared-handle").toPath().resolve("keys");
+    try (StateArchiveIndexDatabase.Writer writer =
+        StateArchiveIndexDatabase.openWriter(database, Engine.ROCKSDB)) {
+      writer.write(Arrays.asList(StateArchiveIndexDatabase.put(new byte[]{1}, new byte[]{2})));
+      try (StateArchiveIndexDatabase.Reader reader =
+          StateArchiveIndexDatabase.openReader(database, Engine.ROCKSDB)) {
+        assertArrayEquals(new byte[]{2}, reader.get(new byte[]{1}));
+      }
+    }
+
+    String nativeOptions = new String(Files.readAllBytes(latestOptionsFile(database)),
+        StandardCharsets.US_ASCII);
+    assertTrue(nativeOptions.contains("write_buffer_size=67108864"));
+    assertTrue(nativeOptions.contains("block_size=4096"));
+    assertTrue(nativeOptions.contains("filter_policy=rocksdb.BuiltinBloomFilter"));
+  }
+
+  @Test
   public void rejectsExistingDatabaseWithoutEngineIdentity() throws Exception {
     Path root = temporaryFolder.newFolder("missing-manifest").toPath();
     Files.createDirectory(root.resolve("keys"));
@@ -70,5 +92,13 @@ public class StateArchiveIndexDatabaseTest {
     corrupt[7] = 2;
     Files.write(current.resolve(StateArchiveIndexEngineManifest.FILE), corrupt);
     assertThrows(IOException.class, () -> StateArchiveIndexEngineManifest.load(current));
+  }
+
+  private static Path latestOptionsFile(Path directory) throws IOException {
+    try (Stream<Path> files = Files.list(directory)) {
+      return files.filter(path -> path.getFileName().toString().startsWith("OPTIONS-"))
+          .max(java.util.Comparator.comparing(path -> path.getFileName().toString()))
+          .orElseThrow(() -> new IOException("RocksDB OPTIONS file is missing"));
+    }
   }
 }
