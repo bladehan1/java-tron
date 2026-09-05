@@ -191,7 +191,7 @@ public class StorageConfig {
     private boolean enabled = false;
     private String mode = "shadow";
     private String directory = "path-state-root";
-    private int formatVersion = 2;
+    private int formatVersion = 1;
     private int reversibleLayerLimit = 128;
     private long reversibleLayerBytes = 2147483648L;
     private long writeBufferBytes = 268435456L;
@@ -211,8 +211,8 @@ public class StorageConfig {
       if (directory == null || directory.trim().isEmpty()) {
         throw new IllegalArgumentException("pathStateRoot.directory must not be empty");
       }
-      if (formatVersion != 2) {
-        throw new IllegalArgumentException("pathStateRoot.formatVersion must be 2");
+      if (formatVersion != 1) {
+        throw new IllegalArgumentException("pathStateRoot.formatVersion must be 1");
       }
       if (reversibleLayerLimit <= 0 || reversibleLayerBytes <= 0 || writeBufferBytes <= 0
           || nodeCacheBytes <= 0) {

@@ -15,7 +15,7 @@ import org.tron.common.crypto.Hash;
  */
 public final class PathStateCommitmentCodec {
 
-  public static final int FORMAT_VERSION = 2;
+  public static final int FORMAT_VERSION = 1;
   public static final int ROOT_LENGTH = 32;
 
   private static final byte PRESENT_TAG = 1;
@@ -37,8 +37,9 @@ public final class PathStateCommitmentCodec {
     requireStoreId(stableStoreId);
     byte[] key = copy(physicalRawKey, "physicalRawKey");
     ByteBuffer material = ByteBuffer.allocate(Short.BYTES + STORE_LEAF_KEY_DOMAIN.length
-        + Integer.BYTES + Integer.BYTES + key.length);
+        + Short.BYTES + Integer.BYTES + Integer.BYTES + key.length);
     putDomain(material, STORE_LEAF_KEY_DOMAIN);
+    material.putShort((short) FORMAT_VERSION);
     material.putInt(stableStoreId);
     material.putInt(key.length);
     material.put(key);
