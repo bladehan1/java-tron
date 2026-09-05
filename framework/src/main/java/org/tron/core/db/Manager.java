@@ -629,7 +629,6 @@ public class Manager {
     // init liteFullNode
     initLiteNode();
 
-    requireSingleEngineArchiveMode(Args.getInstance().getStorage());
     if (Args.getInstance().getStorage().isCommonCheckpointEnabled()) {
       initCommonCheckpoint();
     } else {
@@ -676,15 +675,6 @@ public class Manager {
     }
 
     maxFlushCount = CommonParameter.getInstance().getStorage().getMaxFlushCount();
-  }
-
-  static void requireSingleEngineArchiveMode(org.tron.core.config.args.Storage storage) {
-    org.tron.core.config.args.Storage admitted = Objects.requireNonNull(storage, "storage");
-    if (admitted.isStateArchiveEnabled() && !admitted.isCommonCheckpointEnabled()
-        && !"ROCKSDB".equalsIgnoreCase(admitted.getDbEngine())) {
-      throw new IllegalStateException("LevelDB State Archive requires common checkpoint; "
-          + "legacy serving generations are RocksDB-only and mixed-engine startup is forbidden");
-    }
   }
 
   private void initStateArchive() {
@@ -877,7 +867,7 @@ public class Manager {
       PathStatePhysicalOverlayHead admittedOwner = pathOwner;
       attachment = CommonCheckpointRuntimeAttachment.open(true,
           () -> new CommonCheckpointRuntime(new CommonCheckpointRuntimeOwner(coordinator),
-              snapshots.getDbs(), archiveDirectory, formatIdentity, latest::pin));
+              snapshots.getDbs(), archiveDirectory, formatIdentity, engine, latest::pin));
 
       canonical = currentCanonicalBlockMeta();
       if (Files.isRegularFile(pathDirectory.resolve(PathStateCheckpointMaterializer.CURRENT_FILE),

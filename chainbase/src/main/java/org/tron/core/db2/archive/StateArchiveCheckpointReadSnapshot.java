@@ -6,7 +6,9 @@ import java.util.Arrays;
 import java.util.Objects;
 import java.util.Optional;
 import org.tron.core.db2.archive.ArchiveReadSnapshot.PinnedLatestState;
+import org.tron.core.db2.core.CommonCheckpointTarget;
 import org.tron.core.db2.core.CommonCheckpointRuntimeOwner;
+import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
 
 /** Request-owned, point-only view over one published next-format checkpoint head. */
 public final class StateArchiveCheckpointReadSnapshot implements ArchivePointSnapshot {
@@ -42,6 +44,31 @@ public final class StateArchiveCheckpointReadSnapshot implements ArchivePointSna
     try {
       archive = StateArchiveCheckpointReadAdapter.open(archiveDirectory,
           expectedFormatIdentity);
+      if (targetBlock < archive.getIndexedFrom() || targetBlock > archive.getIndexedThrough()) {
+        throw new IllegalArgumentException("checkpoint target block is outside indexed coverage");
+      }
+      latest = Objects.requireNonNull(latestFactory, "latestFactory").pin(
+          archive.getIndexedThrough(), archive.getHeadHash());
+      return new StateArchiveCheckpointReadSnapshot(targetBlock, lease, archive,
+          Objects.requireNonNull(latest, "pinned latest state"));
+    } catch (IOException | RuntimeException failure) {
+      closeAfterFailedPin(lease, archive, latest, failure);
+      throw failure;
+    }
+  }
+
+  /** Pins a target already validated and bound by its owning common-checkpoint runtime. */
+  public static StateArchiveCheckpointReadSnapshot pin(long targetBlock,
+      CommonCheckpointRuntimeOwner owner, Path archiveDirectory,
+      CommonCheckpointTarget publishedTarget, Engine engine,
+      PinnedLatestStateFactory latestFactory) throws IOException {
+    CommonCheckpointRuntimeOwner admittedOwner = Objects.requireNonNull(owner, "owner");
+    CommonCheckpointRuntimeOwner.ReadLease lease = admittedOwner.acquireReadLease();
+    StateArchiveCheckpointReadAdapter archive = null;
+    PinnedLatestState latest = null;
+    try {
+      archive = StateArchiveCheckpointReadAdapter.openTrusted(archiveDirectory,
+          publishedTarget, engine);
       if (targetBlock < archive.getIndexedFrom() || targetBlock > archive.getIndexedThrough()) {
         throw new IllegalArgumentException("checkpoint target block is outside indexed coverage");
       }

@@ -4,12 +4,16 @@ import static org.fusesource.leveldbjni.JniDBFactory.factory;
 
 import java.io.Closeable;
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.OptionalLong;
 import org.iq80.leveldb.DB;
 import org.iq80.leveldb.DBIterator;
 import org.iq80.leveldb.ReadOptions;
@@ -17,7 +21,7 @@ import org.iq80.leveldb.Snapshot;
 import org.tron.common.utils.DbOptionalsUtils;
 import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
 
-/** Engine-neutral native store for the common-checkpoint Archive serving index. */
+/** Engine-neutral native store for Archive serving indexes. */
 final class StateArchiveIndexDatabase {
 
   private static final Map<Path, SharedLevelDatabase> LEVEL_DATABASES = new HashMap<>();
@@ -35,6 +39,56 @@ final class StateArchiveIndexDatabase {
     Path path = normalize(directory);
     return engine == Engine.LEVELDB ? new LevelWriter(acquireLevel(path, true))
         : new RocksWriter(path);
+  }
+
+  static void checkpoint(Path source, Path target, Engine engine) throws IOException {
+    Path from = normalize(source);
+    Path to = normalize(target);
+    if (engine == Engine.ROCKSDB) {
+      RocksCheckpoint.create(from, to);
+      return;
+    }
+    checkpointLevel(from, to);
+  }
+
+  private static void checkpointLevel(Path source, Path target) throws IOException {
+    SharedLevelDatabase shared = acquireLevel(source, false);
+    boolean suspended = false;
+    try {
+      shared.database.suspendCompactions();
+      suspended = true;
+      Files.createDirectory(target);
+      try (java.util.stream.Stream<Path> entries = Files.list(source)) {
+        for (Path entry : (Iterable<Path>) entries::iterator) {
+          if (!Files.isRegularFile(entry, LinkOption.NOFOLLOW_LINKS)) {
+            continue;
+          }
+          String name = entry.getFileName().toString();
+          if ("LOCK".equals(name) || "LOG".equals(name) || "LOG.old".equals(name)) {
+            continue;
+          }
+          Path destination = target.resolve(name);
+          if (name.endsWith(".sst") || name.endsWith(".ldb")) {
+            Files.createLink(destination, entry);
+          } else {
+            Files.copy(entry, destination, StandardCopyOption.COPY_ATTRIBUTES);
+            try (java.nio.channels.FileChannel channel = java.nio.channels.FileChannel.open(
+                destination, java.nio.file.StandardOpenOption.WRITE)) {
+              channel.force(true);
+            }
+          }
+        }
+      }
+      HistorySegmentStore.syncDirectory(target);
+    } catch (InterruptedException failure) {
+      Thread.currentThread().interrupt();
+      throw new IOException("Interrupted while checkpointing LevelDB Archive index", failure);
+    } finally {
+      if (suspended) {
+        shared.database.resumeCompactions();
+      }
+      releaseLevel(shared);
+    }
   }
 
   static Mutation put(byte[] key, byte[] value) {
@@ -78,6 +132,10 @@ final class StateArchiveIndexDatabase {
     byte[] get(byte[] key) throws IOException;
 
     KeyValue seek(byte[] key) throws IOException;
+
+    Cursor cursor() throws IOException;
+
+    OptionalLong readLongProperty(String name) throws IOException;
   }
 
   interface Writer extends Closeable {
@@ -85,6 +143,15 @@ final class StateArchiveIndexDatabase {
     byte[] get(byte[] key) throws IOException;
 
     void write(List<Mutation> mutations) throws IOException;
+
+    void write(List<Mutation> mutations, boolean sync) throws IOException;
+  }
+
+  interface Cursor extends Closeable {
+
+    void seek(byte[] key) throws IOException;
+
+    KeyValue next() throws IOException;
   }
 
   static final class Mutation {
@@ -168,6 +235,16 @@ final class StateArchiveIndexDatabase {
     }
 
     @Override
+    public Cursor cursor() {
+      return new LevelCursor(shared.database.iterator(reads));
+    }
+
+    @Override
+    public OptionalLong readLongProperty(String name) {
+      return OptionalLong.empty();
+    }
+
+    @Override
     public void close() throws IOException {
       if (!closed) {
         closed = true;
@@ -179,8 +256,6 @@ final class StateArchiveIndexDatabase {
 
   private static final class LevelWriter implements Writer {
     private final SharedLevelDatabase shared;
-    private final org.iq80.leveldb.WriteOptions writes =
-        new org.iq80.leveldb.WriteOptions().sync(true);
     private boolean closed;
 
     private LevelWriter(SharedLevelDatabase shared) {
@@ -194,11 +269,16 @@ final class StateArchiveIndexDatabase {
 
     @Override
     public void write(List<Mutation> mutations) throws IOException {
+      write(mutations, true);
+    }
+
+    @Override
+    public void write(List<Mutation> mutations, boolean sync) throws IOException {
       try (org.iq80.leveldb.WriteBatch batch = shared.database.createWriteBatch()) {
         for (Mutation mutation : mutations) {
           batch.put(mutation.key, mutation.value);
         }
-        shared.database.write(batch, writes);
+        shared.database.write(batch, new org.iq80.leveldb.WriteOptions().sync(sync));
       }
     }
 
@@ -208,6 +288,33 @@ final class StateArchiveIndexDatabase {
         closed = true;
         releaseLevel(shared);
       }
+    }
+  }
+
+  private static final class LevelCursor implements Cursor {
+    private final DBIterator iterator;
+
+    private LevelCursor(DBIterator iterator) {
+      this.iterator = iterator;
+    }
+
+    @Override
+    public void seek(byte[] key) {
+      iterator.seek(key);
+    }
+
+    @Override
+    public KeyValue next() {
+      if (!iterator.hasNext()) {
+        return null;
+      }
+      Map.Entry<byte[], byte[]> entry = iterator.next();
+      return new KeyValue(entry.getKey(), entry.getValue());
+    }
+
+    @Override
+    public void close() throws IOException {
+      iterator.close();
     }
   }
 
@@ -255,6 +362,20 @@ final class StateArchiveIndexDatabase {
     }
 
     @Override
+    public Cursor cursor() {
+      return new RocksCursor(database, new org.rocksdb.ReadOptions());
+    }
+
+    @Override
+    public OptionalLong readLongProperty(String name) {
+      try {
+        return OptionalLong.of(database.getLongProperty(name));
+      } catch (org.rocksdb.RocksDBException | IllegalArgumentException failure) {
+        return OptionalLong.empty();
+      }
+    }
+
+    @Override
     public void close() {
       if (!closed) {
         closed = true;
@@ -272,7 +393,6 @@ final class StateArchiveIndexDatabase {
     private final org.rocksdb.Options options =
         new org.rocksdb.Options().setCreateIfMissing(true)
             .setCompressionType(org.rocksdb.CompressionType.NO_COMPRESSION);
-    private final org.rocksdb.WriteOptions writes = new org.rocksdb.WriteOptions().setSync(true);
     private final org.rocksdb.RocksDB database;
     private boolean closed;
 
@@ -280,7 +400,6 @@ final class StateArchiveIndexDatabase {
       try {
         database = org.rocksdb.RocksDB.open(options, directory.toString());
       } catch (org.rocksdb.RocksDBException | RuntimeException failure) {
-        writes.close();
         options.close();
         throw new IOException("Failed to open RocksDB Archive serving index", failure);
       }
@@ -297,11 +416,18 @@ final class StateArchiveIndexDatabase {
 
     @Override
     public void write(List<Mutation> mutations) throws IOException {
+      write(mutations, true);
+    }
+
+    @Override
+    public void write(List<Mutation> mutations, boolean sync) throws IOException {
       try (org.rocksdb.WriteBatch batch = new org.rocksdb.WriteBatch()) {
         for (Mutation mutation : mutations) {
           batch.put(mutation.key, mutation.value);
         }
-        database.write(writes, batch);
+        try (org.rocksdb.WriteOptions selected = new org.rocksdb.WriteOptions().setSync(sync)) {
+          database.write(selected, batch);
+        }
       } catch (org.rocksdb.RocksDBException failure) {
         throw new IOException("Failed to write RocksDB Archive serving index", failure);
       }
@@ -312,8 +438,59 @@ final class StateArchiveIndexDatabase {
       if (!closed) {
         closed = true;
         database.close();
-        writes.close();
         options.close();
+      }
+    }
+  }
+
+  private static final class RocksCursor implements Cursor {
+    private final org.rocksdb.ReadOptions reads;
+    private final org.rocksdb.RocksIterator iterator;
+
+    private RocksCursor(org.rocksdb.RocksDB database, org.rocksdb.ReadOptions reads) {
+      this.reads = reads;
+      this.iterator = database.newIterator(reads);
+    }
+
+    @Override
+    public void seek(byte[] key) {
+      iterator.seek(key);
+    }
+
+    @Override
+    public KeyValue next() throws IOException {
+      if (!iterator.isValid()) {
+        try {
+          iterator.status();
+        } catch (org.rocksdb.RocksDBException failure) {
+          throw new IOException("Failed to scan RocksDB Archive serving index", failure);
+        }
+        return null;
+      }
+      KeyValue value = new KeyValue(iterator.key(), iterator.value());
+      iterator.next();
+      return value;
+    }
+
+    @Override
+    public void close() {
+      iterator.close();
+      reads.close();
+    }
+  }
+
+  private static final class RocksCheckpoint {
+    static {
+      org.rocksdb.RocksDB.loadLibrary();
+    }
+
+    private static void create(Path source, Path target) throws IOException {
+      try (org.rocksdb.Options options = new org.rocksdb.Options().setCreateIfMissing(false);
+          org.rocksdb.RocksDB database = org.rocksdb.RocksDB.open(options, source.toString());
+          org.rocksdb.Checkpoint checkpoint = org.rocksdb.Checkpoint.create(database)) {
+        checkpoint.createCheckpoint(target.toString());
+      } catch (org.rocksdb.RocksDBException failure) {
+        throw new IOException("Failed to checkpoint RocksDB Archive serving index", failure);
       }
     }
   }

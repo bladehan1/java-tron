@@ -27,16 +27,9 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.OptionalLong;
 import java.util.stream.Stream;
-import org.rocksdb.Checkpoint;
-import org.rocksdb.CompressionType;
-import org.rocksdb.Options;
-import org.rocksdb.RocksDB;
-import org.rocksdb.RocksDBException;
-import org.rocksdb.RocksIterator;
-import org.rocksdb.WriteBatch;
-import org.rocksdb.WriteOptions;
+import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
 
-/** Persistent immutable exact-key serving generation backed by RocksDB. */
+/** Persistent immutable exact-key serving generation backed by the configured database engine. */
 public final class PersistentServingKeyIndexGeneration implements ServingKeyIndex {
 
   private static final int MAGIC = 0x534b4947; // SKIG
@@ -62,35 +55,33 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
   private static final String PENDING_COMPACTION_BYTES =
       "rocksdb.estimate-pending-compaction-bytes";
 
-  static {
-    RocksDB.loadLibrary();
-  }
-
   private final Path directory;
   private final Descriptor descriptor;
-  private final Options options;
-  private final RocksDB database;
+  private final Engine engine;
+  private final StateArchiveIndexDatabase.Reader database;
   private final Runnable release;
   private boolean closed;
 
   private PersistentServingKeyIndexGeneration(Path directory, Descriptor descriptor,
-      Runnable release) throws IOException {
+      Engine engine, boolean validateEngine, Runnable release) throws IOException {
     this.directory = directory;
     this.descriptor = descriptor;
+    this.engine = Objects.requireNonNull(engine, "engine");
     this.release = Objects.requireNonNull(release, "release");
-    this.options = new Options().setCreateIfMissing(false);
-    RocksDB opened = null;
+    if (validateEngine) {
+      StateArchiveIndexEngineManifest.openOrCreateLegacy(directory, engine);
+    }
+    StateArchiveIndexDatabase.Reader opened = null;
     try {
-      opened = RocksDB.openReadOnly(options, directory.resolve(DATABASE).toString());
+      opened = StateArchiveIndexDatabase.openReader(directory.resolve(DATABASE), engine);
       if (descriptor.formatVersion == EXACT_VERSION) {
         validateExactStoreCoverage(opened, descriptor);
       }
       this.database = opened;
-    } catch (RocksDBException | RuntimeException failure) {
+    } catch (IOException | RuntimeException failure) {
       if (opened != null) {
         opened.close();
       }
-      options.close();
       throw new IOException("Failed to open serving index generation", failure);
     }
   }
@@ -121,6 +112,8 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
       throw new IllegalArgumentException("Serving generation directory already exists");
     }
     Files.createDirectories(directory);
+    Engine engine = configuredEngine();
+    StateArchiveIndexEngineManifest.openOrCreate(directory, engine);
 
     MessageDigest sourceDigest = sha256();
     updateLong(sourceDigest, baseEpoch);
@@ -131,37 +124,31 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
     long previousBlock = baseEpoch;
     byte[] previousHash = Arrays.copyOf(baseHash, baseHash.length);
     long keyChanges = 0;
-    Options buildOptions = new Options().setCreateIfMissing(true);
-    WriteOptions writes = new WriteOptions().setSync(false);
-    try (RocksDB target = RocksDB.open(buildOptions, directory.resolve(DATABASE).toString())) {
+    try (StateArchiveIndexDatabase.Writer target =
+        StateArchiveIndexDatabase.openWriter(directory.resolve(DATABASE), engine)) {
       for (HistoryCommitMarker marker : committed) {
         BlockSnapshotMeta meta = marker.getMeta();
         validateNext(marker, previousEpoch, previousBlock, previousHash, participants);
         HistoryIndexRecord record = reader.read(marker.getIndexLocation());
         validateMarker(marker, record, participants);
-        try (WriteBatch batch = new WriteBatch()) {
-          for (HistoryIndexRecord.KeyGroup group : record.getGroups()) {
-            for (byte[] key : group.getKeys()) {
-              batch.put(dataKey(group.getDbName(), key, meta.getEpoch()), PRESENT);
-              batch.put(rangeDataKey(group.getDbName(), key, meta.getEpoch()), PRESENT);
-              keyChanges++;
-            }
+        List<StateArchiveIndexDatabase.Mutation> mutations = new ArrayList<>();
+        for (HistoryIndexRecord.KeyGroup group : record.getGroups()) {
+          for (byte[] key : group.getKeys()) {
+            mutations.add(StateArchiveIndexDatabase.put(
+                dataKey(group.getDbName(), key, meta.getEpoch()), PRESENT));
+            mutations.add(StateArchiveIndexDatabase.put(
+                rangeDataKey(group.getDbName(), key, meta.getEpoch()), PRESENT));
+            keyChanges++;
           }
-          target.write(writes, batch);
         }
+        target.write(mutations, false);
         updateSourceDigest(sourceDigest, marker);
         previousEpoch = meta.getEpoch();
         previousBlock = meta.getBlockNumber();
         previousHash = meta.getBlockHash();
       }
-      try (WriteOptions sync = new WriteOptions().setSync(true)) {
-        target.put(sync, new byte[]{0}, new byte[]{1});
-      }
-    } catch (RocksDBException failure) {
-      throw new IOException("Failed to build serving index generation", failure);
-    } finally {
-      writes.close();
-      buildOptions.close();
+      target.write(Collections.singletonList(
+          StateArchiveIndexDatabase.put(new byte[]{0}, new byte[]{1})), true);
     }
 
     Descriptor descriptor = new Descriptor(VERSION, scopeIdentity, generationId, baseEpoch,
@@ -169,7 +156,7 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
         previousHash, sourceDigest.digest(), latestSourceIdentityDigest, participants, keyChanges);
     persistDescriptor(directory, descriptor);
     HistorySegmentStore.syncDirectory(directory);
-    return open(directory);
+    return open(directory, engine);
   }
 
   public static PersistentServingKeyIndexGeneration open(Path directory) throws IOException {
@@ -178,7 +165,24 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
 
   static PersistentServingKeyIndexGeneration open(Path directory, Runnable release)
       throws IOException {
-    return new PersistentServingKeyIndexGeneration(directory, loadDescriptor(directory), release);
+    return open(directory, configuredEngine(), release);
+  }
+
+  static PersistentServingKeyIndexGeneration open(Path directory, Engine engine)
+      throws IOException {
+    return open(directory, engine, () -> { });
+  }
+
+  static PersistentServingKeyIndexGeneration open(Path directory, Engine engine,
+      Runnable release) throws IOException {
+    return new PersistentServingKeyIndexGeneration(directory, loadDescriptor(directory), engine,
+        true, release);
+  }
+
+  static PersistentServingKeyIndexGeneration openTrusted(Path directory, Engine engine,
+      Runnable release) throws IOException {
+    return new PersistentServingKeyIndexGeneration(directory, loadDescriptor(directory), engine,
+        false, release);
   }
 
   /** Creates one approved v5 exact-only generation from a validated logical increment plan. */
@@ -199,15 +203,15 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
       throw new IllegalArgumentException("Serving generation directory already exists");
     }
     Files.createDirectories(directory);
+    Engine engine = configuredEngine();
+    StateArchiveIndexEngineManifest.openOrCreate(directory, engine);
     byte[] sourceDigest = rollSourceDigest(plan.getSourceSeedDigest(),
         plan.getSourceStepDigests());
     long keyChanges;
-    try (Options buildOptions = exactOptions(true);
-        RocksDB target = RocksDB.open(buildOptions, directory.resolve(DATABASE).toString())) {
+    try (StateArchiveIndexDatabase.Writer target =
+        StateArchiveIndexDatabase.openWriter(directory.resolve(DATABASE), engine)) {
       keyChanges = applyExactPlan(target, generationId, plan, plan.getIndexedFrom(),
           sourceDigest, faultHook);
-    } catch (RocksDBException failure) {
-      throw new IOException("Failed to build exact serving generation", failure);
     }
     Descriptor descriptor = new Descriptor(EXACT_VERSION,
         ArchiveParticipantDescriptor.FORMAT_ID, generationId, plan.getIndexedFrom(),
@@ -215,7 +219,7 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
         plan.getParticipatingDatabases(), keyChanges);
     persistDescriptor(directory, descriptor);
     HistorySegmentStore.syncDirectory(directory);
-    return open(directory);
+    return open(directory, engine);
   }
 
   /** Checkpoints this immutable v5 generation and applies only the validated {@code (I,H]} plan. */
@@ -243,23 +247,16 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
       throw new IllegalArgumentException("Serving generation directory already exists");
     }
     Files.createDirectories(directory);
-    try (Options checkpointOptions = exactOptions(false);
-        RocksDB checkpointSource = RocksDB.open(checkpointOptions,
-            this.directory.resolve(DATABASE).toString());
-        Checkpoint checkpoint = Checkpoint.create(checkpointSource)) {
-      checkpoint.createCheckpoint(directory.resolve(DATABASE).toString());
-    } catch (RocksDBException failure) {
-      throw new IOException("Failed to checkpoint exact serving generation", failure);
-    }
+    StateArchiveIndexEngineManifest.openOrCreate(directory, engine);
+    StateArchiveIndexDatabase.checkpoint(this.directory.resolve(DATABASE),
+        directory.resolve(DATABASE), engine);
     byte[] sourceDigest = rollSourceDigest(descriptor.sourceDigest,
         plan.getSourceStepDigests());
     long added;
-    try (Options writeOptions = exactOptions(false);
-        RocksDB target = RocksDB.open(writeOptions, directory.resolve(DATABASE).toString())) {
+    try (StateArchiveIndexDatabase.Writer target =
+        StateArchiveIndexDatabase.openWriter(directory.resolve(DATABASE), engine)) {
       added = applyExactPlan(target, generationId, plan, descriptor.indexedFrom,
           sourceDigest, faultHook);
-    } catch (RocksDBException failure) {
-      throw new IOException("Failed to extend exact serving generation", failure);
     }
     Descriptor replacement = new Descriptor(EXACT_VERSION, descriptor.scopeIdentity,
         generationId, descriptor.indexedFrom, plan.getIndexedThrough(), plan.getHeadHash(),
@@ -267,7 +264,7 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
         descriptor.keyChanges + added);
     persistDescriptor(directory, replacement);
     HistorySegmentStore.syncDirectory(directory);
-    return open(directory);
+    return open(directory, engine);
   }
 
   @Override
@@ -286,12 +283,13 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
     byte[] prefix = dataPrefix(dbName, rawKey);
     byte[] seek = ByteBuffer.allocate(prefix.length + Long.BYTES).put(prefix)
         .putLong(targetBlock + 1).array();
-    try (RocksIterator iterator = database.newIterator()) {
+    try (StateArchiveIndexDatabase.Cursor iterator = database.cursor()) {
       iterator.seek(seek);
-      if (!iterator.isValid()) {
+      StateArchiveIndexDatabase.KeyValue entry = iterator.next();
+      if (entry == null) {
         return OptionalLong.empty();
       }
-      byte[] found = iterator.key();
+      byte[] found = entry.getKey();
       if (found.length != prefix.length + Long.BYTES || !startsWith(found, prefix)) {
         return OptionalLong.empty();
       }
@@ -325,10 +323,11 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
 
     byte[] databasePrefix = rangeDatabasePrefix(dbName);
     List<ServingKeyIndexGeneration.ChangedKey> result = new ArrayList<>();
-    try (RocksIterator iterator = database.newIterator()) {
+    try (StateArchiveIndexDatabase.Cursor iterator = database.cursor()) {
       iterator.seek(concat(databasePrefix, encodeRangeRawKey(lowerInclusive)));
-      while (iterator.isValid()) {
-        RangeDataKey found = decodeRangeDataKey(iterator.key(), databasePrefix);
+      StateArchiveIndexDatabase.KeyValue entry;
+      while ((entry = iterator.next()) != null) {
+        RangeDataKey found = decodeRangeDataKey(entry.getKey(), databasePrefix);
         if (found == null) {
           break;
         }
@@ -338,10 +337,11 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
         }
         if (found.epoch <= targetBlock) {
           iterator.seek(rangeDataKey(dbName, found.rawKey, targetBlock + 1));
-          if (!iterator.isValid()) {
+          entry = iterator.next();
+          if (entry == null) {
             break;
           }
-          RangeDataKey candidate = decodeRangeDataKey(iterator.key(), databasePrefix);
+          RangeDataKey candidate = decodeRangeDataKey(entry.getKey(), databasePrefix);
           if (candidate == null || !Arrays.equals(candidate.rawKey, found.rawKey)) {
             continue;
           }
@@ -355,9 +355,6 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
         }
         iterator.seek(rangeAfterRawKey(databasePrefix, found.rawKey));
       }
-      iterator.status();
-    } catch (RocksDBException failure) {
-      throw new IOException("Failed to scan serving index generation", failure);
     }
     return Collections.unmodifiableList(result);
   }
@@ -426,12 +423,7 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
     if (!isExactOnlyFormat()) {
       throw new ArchivePersistenceException("Serving generation has no durable Store coverage");
     }
-    byte[] encoded;
-    try {
-      encoded = database.get(storeCoverageKey(dbName));
-    } catch (RocksDBException failure) {
-      throw new IOException("Failed to read serving Store coverage", failure);
-    }
+    byte[] encoded = database.get(storeCoverageKey(dbName));
     PersistentStoreCoverage coverage = decodeCoverage(encoded);
     if (!coverage.dbName.equals(dbName)
         || coverage.indexedFrom != descriptor.indexedFrom
@@ -480,12 +472,15 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
     return directory;
   }
 
+  Engine getEngine() {
+    return engine;
+  }
+
   @Override
-  public synchronized void close() {
+  public synchronized void close() throws IOException {
     if (!closed) {
       closed = true;
       database.close();
-      options.close();
       release.run();
     }
   }
@@ -517,11 +512,12 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
     long pages = 0;
     long pagedEntries = 0;
     long logicalBytes = 0;
-    try (RocksIterator iterator = database.newIterator()) {
+    try (StateArchiveIndexDatabase.Cursor iterator = database.cursor()) {
       iterator.seek(metaPrefix);
-      while (iterator.isValid() && startsWith(iterator.key(), metaPrefix)) {
-        byte[] key = iterator.key();
-        byte[] value = iterator.value();
+      StateArchiveIndexDatabase.KeyValue entry;
+      while ((entry = iterator.next()) != null && startsWith(entry.getKey(), metaPrefix)) {
+        byte[] key = entry.getKey();
+        byte[] value = entry.getValue();
         KeyMeta meta = decodeKeyMeta(value);
         keyMetadata++;
         changeEntries += meta.count;
@@ -532,38 +528,27 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
           pagedKeys++;
           expectedPagedEntries += meta.count;
         }
-        iterator.next();
       }
-      iterator.status();
-    } catch (RocksDBException failure) {
-      throw new IOException("Failed to inspect exact serving key metadata", failure);
     }
-    try (RocksIterator iterator = database.newIterator()) {
+    try (StateArchiveIndexDatabase.Cursor iterator = database.cursor()) {
       iterator.seek(pagePrefix);
-      while (iterator.isValid() && startsWith(iterator.key(), pagePrefix)) {
-        byte[] key = iterator.key();
-        byte[] value = iterator.value();
+      StateArchiveIndexDatabase.KeyValue entry;
+      while ((entry = iterator.next()) != null && startsWith(entry.getKey(), pagePrefix)) {
+        byte[] key = entry.getKey();
+        byte[] value = entry.getValue();
         pages++;
         pagedEntries += decodeEpochPage(value).length;
         logicalBytes += key.length + value.length;
-        iterator.next();
       }
-      iterator.status();
-    } catch (RocksDBException failure) {
-      throw new IOException("Failed to inspect exact serving epoch pages", failure);
     }
     if (pagedEntries != expectedPagedEntries) {
       throw new ArchivePersistenceException(
           "Serving statistics found inconsistent paged entry totals: " + dbName);
     }
     byte[] coverageKey = storeCoverageKey(dbName);
-    try {
-      byte[] coverageValue = database.get(coverageKey);
-      decodeCoverage(coverageValue);
-      logicalBytes += coverageKey.length + coverageValue.length;
-    } catch (RocksDBException failure) {
-      throw new IOException("Failed to inspect serving Store coverage", failure);
-    }
+    byte[] coverageValue = database.get(coverageKey);
+    decodeCoverage(coverageValue);
+    logicalBytes += coverageKey.length + coverageValue.length;
     return new StoreStatistics(dbName, keyMetadata, inlineKeys, pagedKeys, pages,
         changeEntries, logicalBytes);
   }
@@ -598,8 +583,8 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
 
   private OptionalLong readLongProperty(String name) {
     try {
-      return OptionalLong.of(database.getLongProperty(name));
-    } catch (RocksDBException | IllegalArgumentException failure) {
+      return database.readLongProperty(name);
+    } catch (IOException | IllegalArgumentException failure) {
       return OptionalLong.empty();
     }
   }
@@ -618,15 +603,11 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
   private OptionalLong firstExactChangeAfter(String dbName, byte[] rawKey, long targetBlock,
       long upperBound) throws IOException {
     KeyMeta meta;
-    try {
-      byte[] encoded = database.get(keyMetaKey(dbName, rawKey));
-      if (encoded == null) {
-        return OptionalLong.empty();
-      }
-      meta = decodeKeyMeta(encoded);
-    } catch (RocksDBException failure) {
-      throw new IOException("Failed to read exact serving key metadata", failure);
+    byte[] encoded = database.get(keyMetaKey(dbName, rawKey));
+    if (encoded == null) {
+      return OptionalLong.empty();
     }
+    meta = decodeKeyMeta(encoded);
     if (meta.lastEpoch <= targetBlock || meta.firstEpoch > upperBound) {
       return OptionalLong.empty();
     }
@@ -652,20 +633,17 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
   }
 
   private long[] readPage(String dbName, byte[] rawKey, int pageIndex) throws IOException {
-    try {
-      byte[] encoded = database.get(keyPageKey(dbName, rawKey, pageIndex));
-      if (encoded == null) {
-        throw new ArchivePersistenceException("Exact serving epoch page is missing");
-      }
-      return decodeEpochPage(encoded);
-    } catch (RocksDBException failure) {
-      throw new IOException("Failed to read exact serving epoch page", failure);
+    byte[] encoded = database.get(keyPageKey(dbName, rawKey, pageIndex));
+    if (encoded == null) {
+      throw new ArchivePersistenceException("Exact serving epoch page is missing");
     }
+    return decodeEpochPage(encoded);
   }
 
-  private static long applyExactPlan(RocksDB target, String generationId,
+  private static long applyExactPlan(StateArchiveIndexDatabase.Writer target,
+      String generationId,
       ServingIndexIncrementalPlan plan, long coverageFrom, byte[] sourceDigest,
-      ExactWriteFaultHook faultHook) throws IOException, RocksDBException {
+      ExactWriteFaultHook faultHook) throws IOException {
     Map<ExactKey, List<Long>> changes = new LinkedHashMap<>();
     for (Map.Entry<String, List<ServingIndexIncrementalPlan.KeyChange>> database
         : plan.getChangesByDatabase().entrySet()) {
@@ -674,44 +652,47 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
         changes.computeIfAbsent(key, ignored -> new ArrayList<>()).add(change.getEpoch());
       }
     }
-    try (WriteBatch batch = new WriteBatch(); WriteOptions writes = new WriteOptions()
-        .setSync(true)) {
-      for (Map.Entry<ExactKey, List<Long>> entry : changes.entrySet()) {
-        appendExactChanges(target, batch, entry.getKey(), entry.getValue());
-      }
-      for (String database : plan.getParticipatingDatabases()) {
-        PersistentStoreCoverage coverage = new PersistentStoreCoverage(database,
-            coverageFrom, plan.getIndexedThrough(), plan.getHeadHash(), sourceDigest,
-            generationId, comparatorId(database));
-        batch.put(storeCoverageKey(database), encodeCoverage(coverage));
-      }
-      faultHook.beforeWrite();
-      target.write(writes, batch);
+    List<StateArchiveIndexDatabase.Mutation> mutations = new ArrayList<>();
+    for (Map.Entry<ExactKey, List<Long>> entry : changes.entrySet()) {
+      appendExactChanges(target, mutations, entry.getKey(), entry.getValue());
     }
+    for (String database : plan.getParticipatingDatabases()) {
+      PersistentStoreCoverage coverage = new PersistentStoreCoverage(database,
+          coverageFrom, plan.getIndexedThrough(), plan.getHeadHash(), sourceDigest,
+          generationId, comparatorId(database));
+      mutations.add(StateArchiveIndexDatabase.put(storeCoverageKey(database),
+          encodeCoverage(coverage)));
+    }
+    faultHook.beforeWrite();
+    target.write(mutations, true);
     return changes.values().stream().mapToLong(List::size).sum();
   }
 
-  private static void appendExactChanges(RocksDB target, WriteBatch batch, ExactKey key,
-      List<Long> appended) throws RocksDBException {
+  private static void appendExactChanges(StateArchiveIndexDatabase.Writer target,
+      List<StateArchiveIndexDatabase.Mutation> batch, ExactKey key,
+      List<Long> appended) throws IOException {
     byte[] metaKey = keyMetaKey(key.dbName, key.rawKey);
     byte[] existing = target.get(metaKey);
     KeyMeta meta = existing == null ? null : decodeKeyMeta(existing);
     if (meta == null) {
       requireStrictEpochs(appended, Long.MIN_VALUE);
       if (appended.size() <= INLINE_EPOCH_LIMIT) {
-        batch.put(metaKey, encodeKeyMeta(KeyMeta.inline(toArray(appended))));
+        batch.add(StateArchiveIndexDatabase.put(metaKey,
+            encodeKeyMeta(KeyMeta.inline(toArray(appended)))));
         return;
       }
       writeAllPages(batch, key, appended, 0);
-      batch.put(metaKey, encodeKeyMeta(KeyMeta.paged(appended.size(), appended.get(0),
-          appended.get(appended.size() - 1))));
+      batch.add(StateArchiveIndexDatabase.put(metaKey,
+          encodeKeyMeta(KeyMeta.paged(appended.size(), appended.get(0),
+              appended.get(appended.size() - 1)))));
       return;
     }
     requireStrictEpochs(appended, meta.lastEpoch);
     if (meta.mode == INLINE && meta.count + appended.size() <= INLINE_EPOCH_LIMIT) {
       List<Long> combined = asList(meta.inlineEpochs);
       combined.addAll(appended);
-      batch.put(metaKey, encodeKeyMeta(KeyMeta.inline(toArray(combined))));
+      batch.add(StateArchiveIndexDatabase.put(metaKey,
+          encodeKeyMeta(KeyMeta.inline(toArray(combined)))));
       return;
     }
     if (meta.mode == INLINE) {
@@ -726,17 +707,18 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
       combined.addAll(appended);
       writeAllPages(batch, key, combined, lastPageIndex);
     }
-    batch.put(metaKey, encodeKeyMeta(KeyMeta.paged(meta.count + appended.size(),
-        meta.firstEpoch, appended.get(appended.size() - 1))));
+    batch.add(StateArchiveIndexDatabase.put(metaKey,
+        encodeKeyMeta(KeyMeta.paged(meta.count + appended.size(),
+            meta.firstEpoch, appended.get(appended.size() - 1)))));
   }
 
-  private static void writeAllPages(WriteBatch batch, ExactKey key, List<Long> epochs,
-      int firstPageIndex) throws RocksDBException {
+  private static void writeAllPages(List<StateArchiveIndexDatabase.Mutation> batch,
+      ExactKey key, List<Long> epochs, int firstPageIndex) {
     for (int start = 0, page = firstPageIndex; start < epochs.size();
         start += EPOCHS_PER_PAGE, page++) {
       int end = Math.min(start + EPOCHS_PER_PAGE, epochs.size());
-      batch.put(keyPageKey(key.dbName, key.rawKey, page),
-          encodeEpochPage(toArray(epochs.subList(start, end))));
+      batch.add(StateArchiveIndexDatabase.put(keyPageKey(key.dbName, key.rawKey, page),
+          encodeEpochPage(toArray(epochs.subList(start, end)))));
     }
   }
 
@@ -893,8 +875,8 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
     }
   }
 
-  private static void validateExactStoreCoverage(RocksDB database, Descriptor descriptor)
-      throws RocksDBException {
+  private static void validateExactStoreCoverage(StateArchiveIndexDatabase.Reader database,
+      Descriptor descriptor) throws IOException {
     for (String participant : descriptor.participants) {
       PersistentStoreCoverage coverage = decodeCoverage(database.get(
           storeCoverageKey(participant)));
@@ -996,9 +978,8 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
         ? "MARKET_PRICE_V1" : "UNSIGNED_RAW_V1";
   }
 
-  private static Options exactOptions(boolean create) {
-    return new Options().setCreateIfMissing(create)
-        .setCompressionType(CompressionType.NO_COMPRESSION);
+  private static Engine configuredEngine() {
+    return StateArchiveCheckpointServingIndex.configuredEngine();
   }
 
   private static void validateExactIdentity(String generationId,

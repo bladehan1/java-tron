@@ -128,7 +128,12 @@ final class StateArchiveCheckpointServingIndex {
 
   static Reader openReader(Path archiveDirectory, CommonCheckpointTarget target, Engine engine)
       throws IOException {
-    return new Reader(archiveDirectory, target, engine);
+    return new Reader(archiveDirectory, target, engine, true);
+  }
+
+  static Reader openTrustedReader(Path archiveDirectory, CommonCheckpointTarget target,
+      Engine engine) throws IOException {
+    return new Reader(archiveDirectory, target, engine, false);
   }
 
   static Engine configuredEngine() {
@@ -296,11 +301,13 @@ final class StateArchiveCheckpointServingIndex {
     private final Marker marker;
     private boolean closed;
 
-    private Reader(Path archiveDirectory, CommonCheckpointTarget target, Engine engine)
-        throws IOException {
+    private Reader(Path archiveDirectory, CommonCheckpointTarget target, Engine engine,
+        boolean validateEngine) throws IOException {
       this.archiveDirectory = Objects.requireNonNull(archiveDirectory, "archiveDirectory");
       Objects.requireNonNull(target, "target");
-      StateArchiveIndexEngineManifest.require(archiveDirectory.resolve(DIRECTORY), engine);
+      if (validateEngine) {
+        StateArchiveIndexEngineManifest.require(archiveDirectory.resolve(DIRECTORY), engine);
+      }
       StateArchiveIndexDatabase.Reader opened;
       try {
         opened = StateArchiveIndexDatabase.openReader(databasePath(archiveDirectory), engine);

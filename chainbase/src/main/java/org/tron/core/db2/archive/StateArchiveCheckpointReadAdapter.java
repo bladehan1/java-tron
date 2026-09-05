@@ -42,6 +42,15 @@ public final class StateArchiveCheckpointReadAdapter implements AutoCloseable {
         StateArchiveCheckpointServingIndex.openReader(directory, admitted, engine));
   }
 
+  /** Opens a target already validated and pinned by the common-checkpoint runtime. */
+  public static StateArchiveCheckpointReadAdapter openTrusted(Path archiveDirectory,
+      CommonCheckpointTarget target, Engine engine) throws IOException {
+    Path directory = Objects.requireNonNull(archiveDirectory, "archiveDirectory");
+    CommonCheckpointTarget admitted = Objects.requireNonNull(target, "target");
+    return new StateArchiveCheckpointReadAdapter(admitted,
+        StateArchiveCheckpointServingIndex.openTrustedReader(directory, admitted, engine));
+  }
+
   /** Reconstructs the published target from disk before opening the exact-point reader. */
   public static StateArchiveCheckpointReadAdapter open(Path archiveDirectory,
       byte[] expectedFormatIdentity) throws IOException {

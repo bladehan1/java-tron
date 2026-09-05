@@ -26,6 +26,7 @@ import org.junit.rules.TemporaryFolder;
 import org.tron.core.db2.archive.ArchiveReadSnapshot.PinnedHistory;
 import org.tron.core.db2.archive.ArchiveReadSnapshot.PinnedLatestState;
 import org.tron.core.db2.archive.HistoryIndexRecord.KeyGroup;
+import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
 
 public class PersistentServingKeyIndexGenerationTest {
 
@@ -135,10 +136,16 @@ public class PersistentServingKeyIndexGenerationTest {
         assertEquals(6, statistics.getStores().get("account").getChangeEntryCount());
         assertEquals(0, statistics.getStores().get("abi").getChangeEntryCount());
         assertTrue(statistics.getStores().get("abi").getLogicalBytes() > 0);
-        assertTrue(statistics.getEngine().getEstimatedLiveDataBytes().isAvailable());
-        assertTrue(statistics.getEngine().getTotalSstBytes().isAvailable());
-        assertTrue(statistics.getEngine().getPendingCompactionBytes().isAvailable());
-        assertTrue(statistics.getEngine().getEstimatedLiveDataBytes().getValue() >= 0);
+        if (first.getEngine() == Engine.ROCKSDB) {
+          assertTrue(statistics.getEngine().getEstimatedLiveDataBytes().isAvailable());
+          assertTrue(statistics.getEngine().getTotalSstBytes().isAvailable());
+          assertTrue(statistics.getEngine().getPendingCompactionBytes().isAvailable());
+          assertTrue(statistics.getEngine().getEstimatedLiveDataBytes().getValue() >= 0);
+        } else {
+          assertFalse(statistics.getEngine().getEstimatedLiveDataBytes().isAvailable());
+          assertFalse(statistics.getEngine().getTotalSstBytes().isAvailable());
+          assertFalse(statistics.getEngine().getPendingCompactionBytes().isAvailable());
+        }
         PersistentServingKeyIndexGeneration.GenerationStatistics unavailable =
             first.inspectStatistics(ignored -> OptionalLong.empty());
         assertFalse(unavailable.getEngine().getEstimatedLiveDataBytes().isAvailable());

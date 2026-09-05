@@ -582,7 +582,8 @@ public final class StateArchiveRuntimeOwner implements Closeable {
     Path root = archiveDirectory.resolve("serving-index");
     if (Files.exists(root, LinkOption.NOFOLLOW_LINKS)) {
       PersistentServingKeyIndexCatalog catalog =
-          PersistentServingKeyIndexCatalog.open(root, this::afterCatalogStage);
+          PersistentServingKeyIndexCatalog.open(root,
+              StateArchiveCheckpointServingIndex.configuredEngine(), this::afterCatalogStage);
       try {
         upgradeServingExactIndex(writer, catalog);
         return catalog;

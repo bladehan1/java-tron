@@ -1,10 +1,13 @@
 package org.tron.core.db2.archive;
 
 import static org.junit.Assert.assertArrayEquals;
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertThrows;
 
+import com.google.common.hash.Hashing;
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
@@ -24,6 +27,7 @@ public class StateArchiveIndexDatabaseTest {
       Path root = temporaryFolder.newFolder(engine.name().toLowerCase()).toPath();
       Path database = root.resolve("keys");
       StateArchiveIndexEngineManifest.openOrCreate(root, engine);
+      assertEquals(12, Files.size(root.resolve(StateArchiveIndexEngineManifest.FILE)));
       try (StateArchiveIndexDatabase.Writer writer =
           StateArchiveIndexDatabase.openWriter(database, engine)) {
         writer.write(Arrays.asList(
@@ -49,5 +53,22 @@ public class StateArchiveIndexDatabaseTest {
     Files.createDirectory(root.resolve("keys"));
     assertThrows(IOException.class,
         () -> StateArchiveIndexEngineManifest.openOrCreate(root, Engine.LEVELDB));
+  }
+
+  @Test
+  public void acceptsPriorShaIdentityAndRejectsCrcCorruption() throws Exception {
+    Path legacy = temporaryFolder.newFolder("legacy-sha").toPath();
+    byte[] body = ByteBuffer.allocate(8).putInt(0x53414945).putShort((short) 1)
+        .putShort((short) 2).array();
+    Files.write(legacy.resolve(StateArchiveIndexEngineManifest.FILE),
+        ByteBuffer.allocate(40).put(body).put(Hashing.sha256().hashBytes(body).asBytes()).array());
+    assertEquals(Engine.ROCKSDB, StateArchiveIndexEngineManifest.load(legacy));
+
+    Path current = temporaryFolder.newFolder("current-crc").toPath();
+    StateArchiveIndexEngineManifest.openOrCreate(current, Engine.LEVELDB);
+    byte[] corrupt = Files.readAllBytes(current.resolve(StateArchiveIndexEngineManifest.FILE));
+    corrupt[7] = 2;
+    Files.write(current.resolve(StateArchiveIndexEngineManifest.FILE), corrupt);
+    assertThrows(IOException.class, () -> StateArchiveIndexEngineManifest.load(current));
   }
 }
