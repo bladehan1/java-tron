@@ -1755,6 +1755,16 @@ public final class PathMerkleTrie {
     byte[] rootHash() {
       return Arrays.copyOf(rootHash, rootHash.length);
     }
+
+    int depth() {
+      int depth = 0;
+      Snapshot cursor = this;
+      while (cursor != null) {
+        depth++;
+        cursor = cursor.parent;
+      }
+      return depth;
+    }
   }
 
   static final class LeafEntry {

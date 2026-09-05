@@ -731,7 +731,8 @@ public class PathStateNativeNodeStoreTest {
       assertArrayEquals(PathStateCommitmentCodec.storeLeafKey(
               scope.require("code").getStoreId(), key),
           delta.getStores().get(0).getFlatMutations().get(0).getKey());
-      assertArrayEquals(delta.getStateRoot(), delta.getTrieSnapshot().getStateRoot());
+      assertTrue(Arrays.stream(PathStateSnapshotDelta.class.getDeclaredFields())
+          .noneMatch(field -> field.getType() == PathStateRoot.Snapshot.class));
 
       PathStateRootMetadata committed = stores.applyAndPublish(prepared,
           PathStateLayerLimits.defaults());
@@ -845,6 +846,100 @@ public class PathStateNativeNodeStoreTest {
       assertEquals(1, head.getHead().getBlockNumber());
       assertArrayEquals(blockHash, head.getHead().getBlockHash());
       assertArrayEquals(delta.getStateRoot(), head.getHead().getStateRoot());
+    }
+  }
+
+  @Test
+  public void commonCheckpointRebasePreservesSuffixAndCutsSnapshotParents() throws Exception {
+    PathStateParticipantScope scope = new PathStateCanonicalizer().participantScope();
+    Path root = temporaryFolder.newFolder("physical-common-memory-rebase").toPath();
+    preparePublishedPhysicalTarget(root, scope);
+    byte[] formatIdentity = bytes(110);
+
+    try (PathStatePhysicalOverlayHead head = PathStatePhysicalOverlayHead.open(root,
+        Engine.ROCKSDB, new PathStateLayerLimits(8, 1L << 20))) {
+      PathStateRootMetadata initial = head.getHead();
+      CommonCheckpointBaseline baseline = commonBaseline(formatIdentity, initial);
+      head.admitFreshCommonBaseline(baseline);
+      PathStateCheckpointMaterializer materializer = head.checkpointMaterializer(formatIdentity,
+          baseline);
+      List<PathStateSnapshotDelta> deltas = new ArrayList<>();
+      for (int number = 1; number <= 3; number++) {
+        byte[] blockHash = bytes(110 + number);
+        byte[] parentHash = number == 1 ? initial.getBlockHash() : bytes(109 + number);
+        PathStateBlockTransition transition = new PathStateBlockTransition(number, blockHash,
+            parentHash, number * 3L, P66Phase.P66_ON, Collections.singletonList(
+            PathStateMutation.put("code", new byte[]{1}, new byte[]{(byte) number})));
+        BlockSnapshotMeta meta = BlockSnapshotMeta.forBlock(number, blockHash, parentHash,
+            number * 3L);
+        deltas.add(head.prepareSnapshotDelta(meta, transition));
+        head.advance(transition);
+      }
+      PathStateRootMetadata liveHead = head.getHead();
+      assertEquals(4, head.retentionCensus().getMaxSnapshotDepth());
+
+      CommonCheckpointPayload payload = commonPayload(formatIdentity,
+          deltas.subList(0, 2));
+      CommonCheckpointTarget target = CommonCheckpointTarget.from(payload);
+      materializer.materialize(payload, target);
+      materializer.publish(target);
+      head.prepareCommonCheckpointRebase(target).apply();
+
+      PathStatePhysicalOverlayHead.RetentionCensus census = head.retentionCensus();
+      assertEquals(3, census.getHeadBlockNumber());
+      assertEquals(1, census.getSuffixBlocks());
+      assertEquals(28, census.getTrieCount());
+      assertEquals(2, census.getMaxSnapshotDepth());
+      assertArrayEquals(liveHead.encode(), head.getHead().encode());
+
+      PathStateRootMetadata rewound = head.rewindTo(2, bytes(112));
+      assertArrayEquals(target.getStateRoot(), rewound.getStateRoot());
+      PathStateBlockTransition sibling = new PathStateBlockTransition(3, bytes(119), bytes(112),
+          10, P66Phase.P66_ON, Collections.singletonList(
+          PathStateMutation.put("proposal", new byte[]{2}, new byte[]{9})));
+      head.prepareSnapshotDelta(BlockSnapshotMeta.forBlock(3, bytes(119), bytes(112), 10),
+          sibling);
+      assertEquals(3, head.advance(sibling).getBlockNumber());
+    }
+  }
+
+  @Test
+  public void repeatedCommonCheckpointRebaseKeepsParentDepthConstant() throws Exception {
+    PathStateParticipantScope scope = new PathStateCanonicalizer().participantScope();
+    Path root = temporaryFolder.newFolder("physical-common-memory-rebase-long").toPath();
+    preparePublishedPhysicalTarget(root, scope);
+    byte[] formatIdentity = bytes(120);
+
+    try (PathStatePhysicalOverlayHead head = PathStatePhysicalOverlayHead.open(root,
+        Engine.ROCKSDB, new PathStateLayerLimits(8, 1L << 20))) {
+      PathStateRootMetadata initial = head.getHead();
+      CommonCheckpointBaseline baseline = commonBaseline(formatIdentity, initial);
+      head.admitFreshCommonBaseline(baseline);
+      PathStateCheckpointMaterializer materializer = head.checkpointMaterializer(formatIdentity,
+          baseline);
+      byte[] parentHash = initial.getBlockHash();
+      for (int number = 1; number <= 100; number++) {
+        byte[] blockHash = bytes(120 + number);
+        PathStateBlockTransition transition = new PathStateBlockTransition(number, blockHash,
+            parentHash, number * 3L, P66Phase.P66_ON, Collections.singletonList(
+            PathStateMutation.put("code", new byte[]{1}, new byte[]{(byte) number})));
+        BlockSnapshotMeta meta = BlockSnapshotMeta.forBlock(number, blockHash, parentHash,
+            number * 3L);
+        PathStateSnapshotDelta delta = head.prepareSnapshotDelta(meta, transition);
+        head.advance(transition);
+        CommonCheckpointPayload payload = commonPayload(formatIdentity,
+            Collections.singletonList(delta));
+        CommonCheckpointTarget target = CommonCheckpointTarget.from(payload);
+        materializer.materialize(payload, target);
+        materializer.publish(target);
+        head.prepareCommonCheckpointRebase(target).apply();
+        PathStatePhysicalOverlayHead.RetentionCensus census = head.retentionCensus();
+        assertEquals(0, census.getSuffixBlocks());
+        assertEquals(1, census.getMaxSnapshotDepth());
+        parentHash = blockHash;
+      }
+      assertEquals(100, head.getHead().getBlockNumber());
+      assertEquals(100, head.retentionCensus().getHeadBlockNumber());
     }
   }
 
@@ -1660,6 +1755,25 @@ public class PathStateNativeNodeStoreTest {
       assertArrayEquals(expectedRoot, stores.publishCurrent());
     }
     return expectedRoot;
+  }
+
+  private static CommonCheckpointBaseline commonBaseline(byte[] formatIdentity,
+      PathStateRootMetadata head) {
+    return new CommonCheckpointBaseline(formatIdentity,
+        BlockSnapshotMeta.forBlock(head.getBlockNumber(), head.getBlockHash(),
+            head.getParentHash(), head.getTimestamp()), head.getStateRoot());
+  }
+
+  private static CommonCheckpointPayload commonPayload(byte[] formatIdentity,
+      List<PathStateSnapshotDelta> deltas) {
+    PathStateFlushTarget target = PathStateFlushTarget.coalesce(deltas);
+    List<BlockReverseDiff> archive = new ArrayList<>();
+    for (PathStateSnapshotDelta delta : deltas) {
+      archive.add(new BlockReverseDiff(delta.getMeta(), Collections.emptyList(),
+          delta.getMutationViewDigest()));
+    }
+    return CommonCheckpointPayload.create(formatIdentity, target, archive,
+        Collections.emptyList());
   }
 
   private void assertPublicationRejected(Path directory, PathStateParticipantScope scope)

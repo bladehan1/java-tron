@@ -17,6 +17,8 @@ import java.util.concurrent.atomic.AtomicLong;
 import lombok.extern.slf4j.Slf4j;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
 import org.tron.core.db2.core.CommonCheckpointBaseline;
+import org.tron.core.db2.core.CommonCheckpointMemoryRebaser;
+import org.tron.core.db2.core.CommonCheckpointTarget;
 import org.tron.core.db2.stateroot.PathStateCanonicalizer.P66Phase;
 import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
 
@@ -153,6 +155,62 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
     return new PathStateCheckpointMaterializer(stores, scope, formatIdentity, baseline);
   }
 
+  /** Builds a fully validated parentless-target plus reversible-suffix memory rebase. */
+  public synchronized CommonCheckpointMemoryRebaser.RebasePlan prepareCommonCheckpointRebase(
+      CommonCheckpointTarget target) throws IOException {
+    requireHealthy();
+    CommonCheckpointTarget admitted = Objects.requireNonNull(target, "target");
+    if (pending != null) {
+      throw new IOException("path-state checkpoint cannot rebase a pending transition");
+    }
+    PathStateCheckpointMaterializer.PublishedHead published =
+        PathStateCheckpointMaterializer.loadPublishedHead(stores.getDirectory(),
+            admitted.getFormatIdentity());
+    BlockSnapshotMeta targetBlock = admitted.getLastBlock();
+    if (published.getEpoch() != targetBlock.getEpoch()
+        || published.getBlockNumber() != targetBlock.getBlockNumber()
+        || !Arrays.equals(published.getBlockHash(), targetBlock.getBlockHash())
+        || !Arrays.equals(published.getStateRoot(), admitted.getStateRoot())
+        || !Arrays.equals(published.getPayloadDigest(), admitted.getPayloadDigest())) {
+      throw new IOException("PathState published CURRENT differs from common checkpoint target");
+    }
+
+    TargetPosition position = targetPosition(admitted);
+    PathStateRoot baseline = new PathStateRoot(scope,
+        participant -> stores.participant(participant.getDbName()).nodeStore(),
+        stores.superStore().nodeStore());
+    baseline.restoreStoredRoots(admitted.getStateRoot());
+    PathStateRoot.Snapshot candidateSnapshot = baseline.snapshot();
+    PathStateRootMetadata candidateHead = PathStateRootMetadata.base(
+        targetBlock.getBlockNumber(), targetBlock.getBlockHash(), targetBlock.getParentHash(),
+        targetBlock.getTimestamp(), position.metadata.getPhase(), formatDigest,
+        admitted.getStateRoot(), admitted.getPayloadDigest());
+    List<HeadState> candidateHistory = new ArrayList<>();
+    BlockSnapshotMeta replayParent = targetBlock;
+
+    for (int index = position.historyIndex; index < history.size(); index++) {
+      HeadState retained = history.get(index);
+      PathStateRootMetadata child = index + 1 < history.size()
+          ? history.get(index + 1).metadata : head;
+      validateReplayStep(candidateHead, replayParent, retained.deltaToChild, child);
+      candidateHistory.add(new HeadState(candidateHead, candidateSnapshot,
+          retained.deltaToChild));
+      candidateSnapshot = replay(candidateSnapshot, retained.deltaToChild);
+      candidateHead = copy(child);
+      replayParent = retained.deltaToChild.getMeta();
+    }
+    if (!Arrays.equals(candidateSnapshot.getStateRoot(), head.getStateRoot())
+        || candidateHead.getBlockNumber() != head.getBlockNumber()
+        || !Arrays.equals(candidateHead.getBlockHash(), head.getBlockHash())) {
+      throw new IOException("path-state checkpoint rebase candidate differs from live head");
+    }
+
+    PathStateRootMetadata installedHead = candidateHead;
+    PathStateRoot.Snapshot installedSnapshot = candidateSnapshot;
+    List<HeadState> installedHistory = new ArrayList<>(candidateHistory);
+    return () -> installRebase(installedHead, installedSnapshot, installedHistory);
+  }
+
   /** Retires this freshly rebuilt legacy pointer before the first common checkpoint is enabled. */
   public synchronized void admitFreshCommonBaseline(CommonCheckpointBaseline baseline)
       throws IOException {
@@ -205,7 +263,7 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
     if (pending == null || pending.transition != admitted) {
       throw new IOException("path-state overlay publication differs from prepared transition");
     }
-    history.add(new HeadState(head, snapshot));
+    history.add(new HeadState(head, snapshot, pending.delta));
     while (history.size() > maxHistory) {
       history.remove(0);
     }
@@ -311,6 +369,12 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
     return calls;
   }
 
+  synchronized RetentionCensus retentionCensus() throws IOException {
+    requireHealthy();
+    return new RetentionCensus(head.getBlockNumber(), history.size(), snapshot.trieCount(),
+        snapshot.maxTrieDepth());
+  }
+
   @Override
   public synchronized void close() throws IOException {
     if (closed) {
@@ -389,6 +453,66 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
         candidate.hashReferenceCreateCount(), candidate.hashReferenceResolveCount(), stats);
   }
 
+  private TargetPosition targetPosition(CommonCheckpointTarget target) throws IOException {
+    if (matches(head, target.getLastBlock().getBlockNumber(),
+        target.getLastBlock().getBlockHash())
+        && Arrays.equals(head.getStateRoot(), target.getStateRoot())) {
+      return new TargetPosition(head, history.size());
+    }
+    for (int index = history.size() - 1; index >= 0; index--) {
+      HeadState candidate = history.get(index);
+      if (matches(candidate.metadata, target.getLastBlock().getBlockNumber(),
+          target.getLastBlock().getBlockHash())
+          && Arrays.equals(candidate.metadata.getStateRoot(), target.getStateRoot())) {
+        return new TargetPosition(candidate.metadata, index);
+      }
+    }
+    throw new IOException("PathState checkpoint target is outside reversible history");
+  }
+
+  private PathStateRoot.Snapshot replay(PathStateRoot.Snapshot parent,
+      PathStateSnapshotDelta delta) throws IOException {
+    Map<Integer, RecordingStore> recordings = new LinkedHashMap<>();
+    PathStateRoot candidate = PathStateRoot.fromSnapshot(scope,
+        participant -> recordings.computeIfAbsent(participant.getStoreId(), ignored ->
+            new RecordingStore(stores.participant(participant.getDbName()).nodeStore())),
+        recordings.computeIfAbsent(0, ignored ->
+            new RecordingStore(stores.superStore().nodeStore())), parent);
+    try {
+      candidate.replaySnapshotDelta(delta);
+      return candidate.snapshot();
+    } catch (IllegalArgumentException | IllegalStateException failure) {
+      throw new IOException("path-state checkpoint suffix replay failed", failure);
+    }
+  }
+
+  private void validateReplayStep(PathStateRootMetadata parent, BlockSnapshotMeta parentBlock,
+      PathStateSnapshotDelta delta, PathStateRootMetadata child) throws IOException {
+    if (delta == null || child.getKind() != PathStateRootMetadata.Kind.LAYER
+        || delta.getMeta().getEpoch() != parentBlock.getEpoch() + 1
+        || delta.getMeta().getBlockNumber() != child.getBlockNumber()
+        || !Arrays.equals(delta.getMeta().getBlockHash(), child.getBlockHash())
+        || !Arrays.equals(delta.getMeta().getParentHash(), child.getParentHash())
+        || delta.getMeta().getTimestamp() != child.getTimestamp()
+        || child.getBlockNumber() != parent.getBlockNumber() + 1
+        || !Arrays.equals(child.getParentHash(), parent.getBlockHash())
+        || !Arrays.equals(delta.getParentStateRoot(), parent.getStateRoot())
+        || !Arrays.equals(child.getParentStateRoot(), parent.getStateRoot())
+        || !Arrays.equals(delta.getStateRoot(), child.getStateRoot())
+        || !Arrays.equals(delta.getTransitionPayloadDigest(), child.getPayloadDigest())
+        || !Arrays.equals(child.getFormatDigest(), formatDigest)) {
+      throw new IOException("path-state checkpoint suffix identity mismatch");
+    }
+  }
+
+  private synchronized void installRebase(PathStateRootMetadata installedHead,
+      PathStateRoot.Snapshot installedSnapshot, List<HeadState> installedHistory) {
+    head = installedHead;
+    snapshot = installedSnapshot;
+    history.clear();
+    history.addAll(installedHistory);
+  }
+
   private void requireChild(PathStateBlockTransition transition) throws IOException {
     if (transition.getBlockNumber() != head.getBlockNumber() + 1
         || !Arrays.equals(transition.getParentHash(), head.getBlockHash())) {
@@ -433,10 +557,56 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
 
     private final PathStateRootMetadata metadata;
     private final PathStateRoot.Snapshot snapshot;
+    private final PathStateSnapshotDelta deltaToChild;
 
-    private HeadState(PathStateRootMetadata metadata, PathStateRoot.Snapshot snapshot) {
+    private HeadState(PathStateRootMetadata metadata, PathStateRoot.Snapshot snapshot,
+        PathStateSnapshotDelta deltaToChild) {
       this.metadata = metadata;
       this.snapshot = snapshot;
+      this.deltaToChild = deltaToChild;
+    }
+  }
+
+  private static final class TargetPosition {
+
+    private final PathStateRootMetadata metadata;
+    private final int historyIndex;
+
+    private TargetPosition(PathStateRootMetadata metadata, int historyIndex) {
+      this.metadata = metadata;
+      this.historyIndex = historyIndex;
+    }
+  }
+
+  static final class RetentionCensus {
+
+    private final long headBlockNumber;
+    private final int suffixBlocks;
+    private final int trieCount;
+    private final int maxSnapshotDepth;
+
+    private RetentionCensus(long headBlockNumber, int suffixBlocks, int trieCount,
+        int maxSnapshotDepth) {
+      this.headBlockNumber = headBlockNumber;
+      this.suffixBlocks = suffixBlocks;
+      this.trieCount = trieCount;
+      this.maxSnapshotDepth = maxSnapshotDepth;
+    }
+
+    long getHeadBlockNumber() {
+      return headBlockNumber;
+    }
+
+    int getSuffixBlocks() {
+      return suffixBlocks;
+    }
+
+    int getTrieCount() {
+      return trieCount;
+    }
+
+    int getMaxSnapshotDepth() {
+      return maxSnapshotDepth;
     }
   }
 

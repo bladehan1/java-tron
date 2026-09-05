@@ -330,6 +330,37 @@ public final class PathStateRoot {
     rootMaterialized = true;
   }
 
+  /** Replays one immutable secure-key delta without requiring the original raw Store keys. */
+  synchronized void replaySnapshotDelta(PathStateSnapshotDelta delta) {
+    PathStateSnapshotDelta admitted = Objects.requireNonNull(delta, "delta");
+    if (!Arrays.equals(rootHash(), admitted.getParentStateRoot())) {
+      throw new IllegalArgumentException("path-state replay parent root mismatch");
+    }
+    Set<Integer> changed = new LinkedHashSet<>();
+    for (PathStateSnapshotDelta.StoreDelta store : admitted.getStores()) {
+      PathStateParticipant participant = scope.require(store.getDbName());
+      if (participant.getStoreId() != store.getStoreId() || !changed.add(store.getStoreId())) {
+        throw new IllegalArgumentException("path-state replay participant identity mismatch");
+      }
+      PathMerkleTrie trie = participantTries.get(participant.getDbName());
+      for (PathStateSnapshotDelta.Mutation mutation : store.getFlatMutations()) {
+        if (mutation.isDelete()) {
+          trie.delete(mutation.getKey());
+        } else {
+          trie.put(mutation.getKey(), mutation.getValue());
+        }
+      }
+      if (!Arrays.equals(trie.rootHash(), store.getStoreRoot())) {
+        throw new IllegalArgumentException("path-state replay Store root mismatch: "
+            + store.getDbName());
+      }
+    }
+    rootMaterialized = false;
+    if (!Arrays.equals(rootHash(), admitted.getStateRoot())) {
+      throw new IllegalArgumentException("path-state replay state root mismatch");
+    }
+  }
+
   synchronized void recordPendingLeafMutations(Collection<PathStateMutation> mutations) {
     recordPendingLeafMutations(prepare(mutations));
   }
@@ -681,6 +712,18 @@ public final class PathStateRoot {
         throw new IllegalArgumentException("snapshot has no path-state participant: " + dbName);
       }
       return participant.rootHash();
+    }
+
+    int maxTrieDepth() {
+      int depth = superTrie.depth();
+      for (PathMerkleTrie.Snapshot participant : participants.values()) {
+        depth = Math.max(depth, participant.depth());
+      }
+      return depth;
+    }
+
+    int trieCount() {
+      return participants.size() + 1;
     }
   }
 

@@ -301,6 +301,45 @@ public class ChainbaseCheckpointMaterializerTest {
   }
 
   @Test
+  public void memoryRebaseFailureLeavesEverySnapshotPointerUnchanged() throws Exception {
+    java.nio.file.Path root = temporaryFolder.newFolder("memory-rebase-failure").toPath();
+    byte[] format = hash(94);
+    MemoryDb code = new MemoryDb("code");
+    Chainbase database = new Chainbase(new SnapshotRoot(code));
+    List<Chainbase> databases = Collections.singletonList(database);
+    BlockSnapshotMeta meta = BlockSnapshotMeta.forBlock(1, hash(1), hash(0), 3_000L);
+    byte[] view = hash(41);
+    PathStateSnapshotDelta path = pathDelta(meta, hash(10), hash(11), view);
+    BlockReverseDiff archiveBlock = new BlockReverseDiff(meta, Collections.emptyList(), view);
+    SnapshotImpl layer = append(database, meta, archiveBlock, path);
+    layer.put(new byte[]{1}, new byte[]{2});
+
+    ChainbaseCheckpointMaterializer chainbase = new ChainbaseCheckpointMaterializer(
+        root.resolve("chainbase"), format, databases);
+    PublishingMaterializer pathState = new PublishingMaterializer(Authority.PATH_STATE);
+    StateArchiveCheckpointMaterializer archive = new StateArchiveCheckpointMaterializer(
+        root.resolve("archive"), format);
+    CommonCheckpointRedoCoordinator coordinator = new CommonCheckpointRedoCoordinator(
+        new CommonCheckpointFile(root.resolve("wal")), chainbase, pathState, archive);
+    CommonCheckpointRuntime runtime = new CommonCheckpointRuntime(
+        new CommonCheckpointRuntimeOwner(coordinator), databases, root.resolve("archive"),
+        format, Engine.LEVELDB,
+        (blockNumber, blockHash) -> new TestLatest(code, blockNumber, blockHash),
+        target -> {
+          throw new IOException("injected memory rebase prepare failure");
+        });
+
+    runtime.recoverBeforeServing();
+    IOException failure = assertThrows(IOException.class, () -> runtime.checkpointAndRebase(1));
+    assertEquals("injected memory rebase prepare failure", failure.getMessage());
+    assertSame(layer, database.getHead());
+    assertSame(layer.getRoot(), layer.getPrevious());
+    assertEquals(CommonCheckpointRuntimeOwner.State.FAILED, runtime.getState());
+    assertFalse(java.nio.file.Files.exists(root.resolve("wal").resolve(
+        CommonCheckpointFile.FILE_NAME)));
+  }
+
+  @Test
   public void runtimeComposesStartupCheckpointRebaseAndPointQuery() throws Exception {
     java.nio.file.Path root = temporaryFolder.newFolder("composed-runtime").toPath();
     byte[] format = hash(93);
@@ -325,7 +364,8 @@ public class ChainbaseCheckpointMaterializerTest {
     CommonCheckpointRuntime runtime = new CommonCheckpointRuntime(
         new CommonCheckpointRuntimeOwner(coordinator), databases, root.resolve("archive"),
         format, Engine.LEVELDB,
-        (blockNumber, blockHash) -> new TestLatest(code, blockNumber, blockHash));
+        (blockNumber, blockHash) -> new TestLatest(code, blockNumber, blockHash),
+        target -> () -> { });
 
     assertEquals(CommonCheckpointRedoCoordinator.RecoveryAction.NO_CHECKPOINT,
         runtime.recoverBeforeServing());
