@@ -73,6 +73,38 @@ public class StorageConfigTest {
     assertEquals(8, configured.getStateArchive().getQueueCapacity());
   }
 
+  @Test
+  public void testArchiveNativeDatabaseProfileDefaultsAndOverrides() {
+    StorageConfig defaults = StorageConfig.fromConfig(withRef());
+    assertEquals(67108864,
+        defaults.getStateArchive().getServingIndex().getWriteBufferSize());
+    assertEquals(33554432L,
+        defaults.getStateArchive().getServingIndex().getCacheSize());
+    assertEquals(16777216,
+        defaults.getPathStateRoot().getDbSettings().getSmall().getWriteBufferSize());
+    assertEquals(67108864,
+        defaults.getPathStateRoot().getDbSettings().getGiant().getWriteBufferSize());
+    assertEquals(67108864L,
+        defaults.getPathStateRoot().getDbSettings().getGiant().getCacheSize());
+
+    StorageConfig configured = StorageConfig.fromConfig(withRef(
+        "storage.pathStateRoot.dbSettings.small.cacheSize = 1048576\n"
+            + "storage.pathStateRoot.dbSettings.giant.maxOpenFiles = 321\n"
+            + "storage.stateArchive.servingIndex.writeBufferSize = 8388608"));
+    assertEquals(1048576L,
+        configured.getPathStateRoot().getDbSettings().getSmall().getCacheSize());
+    assertEquals(321,
+        configured.getPathStateRoot().getDbSettings().getGiant().getMaxOpenFiles());
+    assertEquals(8388608,
+        configured.getStateArchive().getServingIndex().getWriteBufferSize());
+  }
+
+  @Test(expected = IllegalArgumentException.class)
+  public void testArchiveNativeDatabaseProfileRejectsInvalidValues() {
+    StorageConfig.fromConfig(withRef(
+        "storage.pathStateRoot.dbSettings.large.maxOpenFiles = 0"));
+  }
+
   @Test(expected = IllegalArgumentException.class)
   public void testStateArchiveRejectsSmallSegments() {
     StorageConfig.fromConfig(withRef("storage.stateArchive.maxSegmentSize = 1024"));

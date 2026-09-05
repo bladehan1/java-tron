@@ -9,6 +9,7 @@ import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
 import java.io.File;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -27,6 +28,7 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.tron.common.arch.Arch;
+import org.tron.core.config.args.StorageConfig.NativeDbConfig;
 import org.tron.core.db2.archive.BlockReverseDiff;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
 import org.tron.core.db2.core.CommonCheckpointBaseline;
@@ -76,6 +78,36 @@ public class PathStateNativeNodeStoreTest {
     store.close();
     store.close();
     assertThrows(IllegalStateException.class, () -> store.get(new byte[0]));
+  }
+
+  @Test
+  public void physicalStoresUseFixedSmallLargeAndGiantProfiles() {
+    assertEquals("giant", PathStatePhysicalStoreSet.storageProfileNameFor("account"));
+    assertEquals("giant", PathStatePhysicalStoreSet.storageProfileNameFor("account-asset"));
+    assertEquals("giant", PathStatePhysicalStoreSet.storageProfileNameFor("storage-row"));
+    assertEquals("large", PathStatePhysicalStoreSet.storageProfileNameFor("code"));
+    assertEquals("large", PathStatePhysicalStoreSet.storageProfileNameFor("contract"));
+    assertEquals("large", PathStatePhysicalStoreSet.storageProfileNameFor("delegation"));
+    assertEquals("small", PathStatePhysicalStoreSet.storageProfileNameFor("proposal"));
+  }
+
+  @Test
+  public void rocksProfileIsPersistedInNativeOptions() throws Exception {
+    Path directory = temporaryFolder.newFolder("rocks-profile-options").toPath();
+    try (PathStateNativeNodeStore store = PathStateNativeNodeStore.open(directory,
+        Engine.ROCKSDB, "giant", NativeDbConfig.giant())) {
+      assertEquals("giant", store.getStorageProfile());
+      store.put(new byte[]{1}, new byte[]{2});
+    }
+
+    String nativeOptions = new String(Files.readAllBytes(latestOptionsFile(directory)),
+        StandardCharsets.US_ASCII);
+    assertTrue(nativeOptions.contains("write_buffer_size=67108864"));
+    assertTrue(nativeOptions.contains("max_write_buffer_number=2"));
+    assertTrue(nativeOptions.contains("compression=kSnappyCompression"));
+    assertTrue(nativeOptions.contains("block_size=4096"));
+    assertTrue(nativeOptions.contains("filter_policy=rocksdb.BuiltinBloomFilter"));
+    assertTrue(nativeOptions.contains("checksum=kCRC32c"));
   }
 
   @Test
@@ -1843,6 +1875,14 @@ public class PathStateNativeNodeStoreTest {
       }
     }
     return Integer.compare(left.length, right.length);
+  }
+
+  private static Path latestOptionsFile(Path directory) throws java.io.IOException {
+    try (Stream<Path> files = Files.list(directory)) {
+      return files.filter(path -> path.getFileName().toString().startsWith("OPTIONS-"))
+          .max(java.util.Comparator.comparing(path -> path.getFileName().toString()))
+          .orElseThrow(() -> new java.io.IOException("RocksDB OPTIONS file is missing"));
+    }
   }
 
   private static void awaitTestLatch(CountDownLatch started, CountDownLatch release) {
