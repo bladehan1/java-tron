@@ -23,6 +23,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Stream;
+import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
 
 /** Durable generation catalog with request refcounts and safe retired-generation reaping. */
 public final class PersistentServingKeyIndexCatalog implements Closeable {
@@ -35,15 +36,18 @@ public final class PersistentServingKeyIndexCatalog implements Closeable {
 
   private final Path root;
   private final Path generations;
+  private final Engine engine;
   private final Map<String, Integer> references = new HashMap<>();
   private final Set<String> retired = new HashSet<>();
   private final FaultHook faultHook;
   private String currentId;
   private boolean closed;
 
-  private PersistentServingKeyIndexCatalog(Path root, String currentId, FaultHook faultHook) {
+  private PersistentServingKeyIndexCatalog(Path root, String currentId, Engine engine,
+      FaultHook faultHook) {
     this.root = root;
     this.generations = root.resolve(GENERATIONS);
+    this.engine = Objects.requireNonNull(engine, "engine");
     this.currentId = currentId;
     this.faultHook = Objects.requireNonNull(faultHook, "faultHook");
   }
@@ -57,12 +61,21 @@ public final class PersistentServingKeyIndexCatalog implements Closeable {
     Objects.requireNonNull(root, "root");
     String currentId = readCurrent(root);
     Path current = root.resolve(GENERATIONS).resolve(currentId);
+    Engine engine = StateArchiveIndexEngineManifest.load(current);
+    return open(root, engine, faultHook);
+  }
+
+  static PersistentServingKeyIndexCatalog open(Path root, Engine engine, FaultHook faultHook)
+      throws IOException {
+    Objects.requireNonNull(root, "root");
+    String currentId = readCurrent(root);
+    Path current = root.resolve(GENERATIONS).resolve(currentId);
     try (PersistentServingKeyIndexGeneration ignored =
-        PersistentServingKeyIndexGeneration.open(current)) {
-      // Opening validates both the immutable descriptor and RocksDB generation.
+        PersistentServingKeyIndexGeneration.open(current, engine)) {
+      // Opening validates both the immutable descriptor and configured native generation.
     }
     PersistentServingKeyIndexCatalog catalog =
-        new PersistentServingKeyIndexCatalog(root, currentId, faultHook);
+        new PersistentServingKeyIndexCatalog(root, currentId, engine, faultHook);
     catalog.discoverRetired();
     return catalog;
   }
@@ -85,8 +98,9 @@ public final class PersistentServingKeyIndexCatalog implements Closeable {
       throw new IllegalArgumentException("Serving index catalog already exists");
     }
     Files.createDirectories(root.resolve(GENERATIONS));
+    Engine engine = StateArchiveIndexEngineManifest.load(initialShadow);
     PersistentServingKeyIndexCatalog catalog =
-        new PersistentServingKeyIndexCatalog(root, null, faultHook);
+        new PersistentServingKeyIndexCatalog(root, null, engine, faultHook);
     if (!catalog.publishInternal(null, initialShadow, null)) {
       throw new IllegalStateException("Failed to publish initial serving generation");
     }
@@ -100,15 +114,16 @@ public final class PersistentServingKeyIndexCatalog implements Closeable {
       throw new IllegalArgumentException("Serving index catalog already exists");
     }
     Files.createDirectories(root.resolve(GENERATIONS));
+    Engine engine = StateArchiveIndexEngineManifest.load(initialShadow);
     PersistentServingKeyIndexCatalog catalog =
-        new PersistentServingKeyIndexCatalog(root, null, stage -> { });
+        new PersistentServingKeyIndexCatalog(root, null, engine, stage -> { });
     if (!catalog.publishInternal(null, initialShadow, readerVisible)) {
       throw new IllegalStateException("Failed to publish initial serving generation");
     }
     return catalog;
   }
 
-  /** Pins one immutable RocksDB handle and holds its generation refcount until close. */
+  /** Pins one immutable native generation handle and holds its refcount until close. */
   public synchronized PersistentServingKeyIndexGeneration pin(
       ArchiveProgressEnvelope readerVisible) throws IOException {
     return pinInternal(readerVisible);
@@ -128,7 +143,8 @@ public final class PersistentServingKeyIndexCatalog implements Closeable {
     references.put(pinnedId, references.getOrDefault(pinnedId, 0) + 1);
     PersistentServingKeyIndexGeneration pinned;
     try {
-      pinned = PersistentServingKeyIndexGeneration.open(generations.resolve(pinnedId),
+      pinned = PersistentServingKeyIndexGeneration.openTrusted(generations.resolve(pinnedId),
+          engine,
           () -> release(pinnedId));
     } catch (IOException | RuntimeException failure) {
       release(pinnedId);
@@ -166,7 +182,7 @@ public final class PersistentServingKeyIndexCatalog implements Closeable {
     long replacementFrom;
     long replacementThrough;
     try (PersistentServingKeyIndexGeneration replacement =
-        PersistentServingKeyIndexGeneration.open(shadow)) {
+        PersistentServingKeyIndexGeneration.open(shadow, engine)) {
       if (readerVisible != null) {
         validateReaderVisibility(replacement, readerVisible);
       }
@@ -177,7 +193,7 @@ public final class PersistentServingKeyIndexCatalog implements Closeable {
     validateGenerationId(replacementId);
     if (currentId != null) {
       try (PersistentServingKeyIndexGeneration current =
-          PersistentServingKeyIndexGeneration.open(generations.resolve(currentId))) {
+          PersistentServingKeyIndexGeneration.open(generations.resolve(currentId), engine)) {
         if (replacementFrom != current.getIndexedFrom()
             || replacementThrough < current.getIndexedThrough()) {
           throw new IllegalArgumentException("Serving generation publication regresses coverage");

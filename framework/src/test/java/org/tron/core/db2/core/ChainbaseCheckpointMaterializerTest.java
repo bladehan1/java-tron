@@ -324,7 +324,8 @@ public class ChainbaseCheckpointMaterializerTest {
         new CommonCheckpointFile(root.resolve("wal")), chainbase, pathState, archive);
     CommonCheckpointRuntime runtime = new CommonCheckpointRuntime(
         new CommonCheckpointRuntimeOwner(coordinator), databases, root.resolve("archive"),
-        format, (blockNumber, blockHash) -> new TestLatest(code, blockNumber, blockHash));
+        format, Engine.LEVELDB,
+        (blockNumber, blockHash) -> new TestLatest(code, blockNumber, blockHash));
 
     assertEquals(CommonCheckpointRedoCoordinator.RecoveryAction.NO_CHECKPOINT,
         runtime.recoverBeforeServing());
@@ -338,6 +339,12 @@ public class ChainbaseCheckpointMaterializerTest {
     try (StateArchiveCheckpointReadSnapshot snapshot = runtime.pinPoint(1)) {
       assertArrayEquals(new byte[]{2}, snapshot.get("code", new byte[]{1}).getValue());
     }
+    java.nio.file.Files.delete(root.resolve("archive/checkpoint-serving-index/ENGINE"));
+    try (StateArchiveCheckpointReadSnapshot snapshot = runtime.pinPoint(1)) {
+      assertArrayEquals(new byte[]{2}, snapshot.get("code", new byte[]{1}).getValue());
+    }
+    assertThrows(IOException.class, () -> StateArchiveCheckpointMaterializer.loadPublishedTarget(
+        root.resolve("archive"), format, Engine.LEVELDB));
     runtime.close();
     assertEquals(CommonCheckpointRuntimeOwner.State.CLOSED, runtime.getState());
   }
