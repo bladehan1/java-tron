@@ -1,5 +1,6 @@
 package org.tron.core.db2.archive;
 
+import static org.fusesource.leveldbjni.JniDBFactory.factory;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -15,17 +16,18 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import org.iq80.leveldb.DB;
+import org.iq80.leveldb.Options;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
-import org.rocksdb.Options;
-import org.rocksdb.RocksDB;
 import org.tron.core.db2.archive.BlockReverseDiff.DbGroup;
 import org.tron.core.db2.archive.BlockReverseDiff.Entry;
 import org.tron.core.db2.core.CommonCheckpointMaterializer.Status;
 import org.tron.core.db2.core.CommonCheckpointPayload;
 import org.tron.core.db2.core.CommonCheckpointTarget;
 import org.tron.core.db2.stateroot.PathStateFlushTarget;
+import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
 
 public class StateArchiveCheckpointMaterializerTest {
 
@@ -62,13 +64,22 @@ public class StateArchiveCheckpointMaterializerTest {
     materializer.publish(target);
     assertEquals(Status.PUBLISHED, materializer.inspect(target));
     try (StateArchiveCheckpointReadAdapter reader =
-        StateArchiveCheckpointReadAdapter.open(root, target)) {
+        StateArchiveCheckpointReadAdapter.open(root, target);
+        StateArchiveCheckpointReadAdapter concurrent =
+            StateArchiveCheckpointReadAdapter.open(root, target)) {
       assertEquals(0, reader.getIndexedFrom());
       assertEquals(3, reader.getIndexedThrough());
       assertArrayEquals(new byte[]{0}, reader.findOldValueAfter("code", new byte[]{1}, 0)
           .get().getValue());
       assertFalse(reader.findOldValueAfter("code", new byte[]{2}, 2).isPresent());
+      assertArrayEquals(new byte[]{0}, concurrent.findOldValueAfter("code", new byte[]{1}, 0)
+          .get().getValue());
     }
+    assertTrue(Files.isRegularFile(root.resolve(StateArchiveCheckpointServingIndex.DIRECTORY)
+        .resolve(StateArchiveIndexEngineManifest.FILE)));
+    StateArchiveCheckpointMaterializer wrongEngine = new StateArchiveCheckpointMaterializer(
+        root, format, null, Engine.ROCKSDB);
+    assertThrows(IOException.class, () -> wrongEngine.inspect(target));
 
     StateArchiveCheckpointMaterializer reopened =
         new StateArchiveCheckpointMaterializer(root, format);
@@ -162,9 +173,9 @@ public class StateArchiveCheckpointMaterializerTest {
         () -> clean.inspect(CommonCheckpointTarget.from(nonChild)));
     assertTrue(Files.isRegularFile(cleanRoot.resolve(
         StateArchiveCheckpointMaterializer.READABLE_FILE)));
-    try (Options options = new Options().setCreateIfMissing(false);
-        RocksDB database = RocksDB.open(options, cleanRoot.resolve(
-            StateArchiveCheckpointServingIndex.DIRECTORY).resolve("keys").toString())) {
+    Options options = new Options().createIfMissing(false);
+    try (DB database = factory.open(cleanRoot.resolve(
+        StateArchiveCheckpointServingIndex.DIRECTORY).resolve("keys").toFile(), options)) {
       database.put(new byte[]{0}, new byte[]{1});
     }
     assertThrows(IOException.class, () -> clean.inspect(target));
