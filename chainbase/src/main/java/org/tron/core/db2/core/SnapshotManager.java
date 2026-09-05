@@ -10,6 +10,9 @@ import com.google.common.util.concurrent.MoreExecutors;
 import java.io.Closeable;
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.LinkOption;
+import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -950,6 +953,11 @@ public class SnapshotManager implements RevokingDatabase {
   @Override
   public void check() {
     recoveredArchiveWalBinding = null;
+    if (hasDurableCommonCheckpointAuthority()) {
+      logger.info("Common checkpoint authority established, skip legacy checkpoint recovery");
+      unChecked = false;
+      return;
+    }
     if (!isV2Open()) {
       List<String> cpList = getCheckpointList();
       if (cpList != null && cpList.size() != 0) {
@@ -962,6 +970,25 @@ public class SnapshotManager implements RevokingDatabase {
     } else {
       checkV2();
     }
+  }
+
+  private boolean hasDurableCommonCheckpointAuthority() {
+    org.tron.core.config.args.Storage storage =
+        CommonParameter.getInstance().getStorage();
+    Path directory = Paths.get(CommonParameter.getInstance().getOutputDirectory(),
+        storage.getCommonCheckpointDirectory()).normalize();
+    return hasDurableCommonCheckpointAuthority(storage.isCommonCheckpointEnabled(), directory);
+  }
+
+  static boolean hasDurableCommonCheckpointAuthority(boolean enabled, Path directory) {
+    if (!enabled) {
+      return false;
+    }
+    Path admitted = Objects.requireNonNull(directory, "directory");
+    return Files.isRegularFile(admitted.resolve(ChainbaseCheckpointMaterializer.CURRENT_FILE),
+        LinkOption.NOFOLLOW_LINKS)
+        || Files.isRegularFile(admitted.resolve(CommonCheckpointFile.FILE_NAME),
+        LinkOption.NOFOLLOW_LINKS);
   }
 
   private void checkV1() {
