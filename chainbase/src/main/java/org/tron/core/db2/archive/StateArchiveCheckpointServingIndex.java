@@ -57,17 +57,7 @@ final class StateArchiveCheckpointServingIndex {
     StateArchiveIndexEngineManifest.require(archiveDirectory.resolve(DIRECTORY), engine);
     try (StateArchiveIndexDatabase.Reader database =
         StateArchiveIndexDatabase.openReader(databasePath, engine)) {
-      byte[] encoded = database.get(MARKER_KEY);
-      if (encoded == null) {
-        throw new IOException("State Archive checkpoint serving marker is missing");
-      }
-      Marker marker = decodeMarker(encoded);
-      if (Arrays.equals(encoded, encodeMarker(target, marker.baseBlockNumber,
-          marker.baseBlockHash))) {
-        return Status.EXACT;
-      }
-      requireParent(marker, target);
-      return Status.PARENT;
+      return inspect(database.get(MARKER_KEY), target);
     }
   }
 
@@ -78,47 +68,27 @@ final class StateArchiveCheckpointServingIndex {
 
   static void apply(Path archiveDirectory, CommonCheckpointPayload payload,
       CommonCheckpointTarget target, Engine engine) throws IOException {
-    Status status = inspect(archiveDirectory, target, engine);
-    if (status == Status.EXACT) {
-      return;
+    try (Session session = session(archiveDirectory, engine)) {
+      session.apply(payload, target);
     }
-    Path indexDirectory = archiveDirectory.resolve(DIRECTORY);
-    Files.createDirectories(indexDirectory);
-    if (!Files.isDirectory(indexDirectory, LinkOption.NOFOLLOW_LINKS)) {
-      throw new IOException("State Archive checkpoint serving path is not a directory");
+  }
+
+  static Session session(Path archiveDirectory, Engine engine) {
+    return new Session(archiveDirectory, engine);
+  }
+
+  private static Status inspect(byte[] encoded, CommonCheckpointTarget target)
+      throws IOException {
+    if (encoded == null) {
+      throw new IOException("State Archive checkpoint serving marker is missing");
     }
-    StateArchiveIndexEngineManifest.openOrCreate(indexDirectory, engine);
-    long baseBlockNumber = target.getFirstBlock().getBlockNumber() - 1;
-    byte[] baseBlockHash = target.getFirstBlock().getParentHash();
-    Path databasePath = databasePath(archiveDirectory);
-    try (StateArchiveIndexDatabase.Writer database =
-        StateArchiveIndexDatabase.openWriter(databasePath, engine)) {
-      byte[] existing = database.get(MARKER_KEY);
-      if (existing != null) {
-        Marker parent = decodeMarker(existing);
-        requireParent(parent, target);
-        baseBlockNumber = parent.baseBlockNumber;
-        baseBlockHash = parent.baseBlockHash;
-      }
-      List<StateArchiveIndexDatabase.Mutation> mutations = new ArrayList<>();
-      for (int index = 0; index < payload.getBlocks().size(); index++) {
-        CommonCheckpointPayload.BlockPayload block = payload.getBlocks().get(index);
-        long blockNumber = block.getMeta().getBlockNumber();
-        for (DbGroup group : block.getArchiveDiff().getGroups()) {
-          requireStateDatabase(group.getDbName());
-          for (Entry entry : group.getEntries()) {
-            mutations.add(StateArchiveIndexDatabase.put(
-                changeKey(group.getDbName(), entry.getKey(), blockNumber), new byte[]{1}));
-          }
-        }
-        mutations.add(StateArchiveIndexDatabase.put(blockKey(blockNumber),
-            encodeLocation(target.getPayloadDigest(), index, block.getMeta())));
-      }
-      mutations.add(StateArchiveIndexDatabase.put(MARKER_KEY,
-          encodeMarker(target, baseBlockNumber, baseBlockHash)));
-      database.write(mutations);
+    Marker marker = decodeMarker(encoded);
+    if (Arrays.equals(encoded, encodeMarker(target, marker.baseBlockNumber,
+        marker.baseBlockHash))) {
+      return Status.EXACT;
     }
-    HistorySegmentStore.syncDirectory(indexDirectory);
+    requireParent(marker, target);
+    return Status.PARENT;
   }
 
   static Reader openReader(Path archiveDirectory, CommonCheckpointTarget target)
@@ -292,6 +262,96 @@ final class StateArchiveCheckpointServingIndex {
     ABSENT,
     PARENT,
     EXACT
+  }
+
+  static final class Session implements AutoCloseable {
+
+    private final Path archiveDirectory;
+    private final Engine engine;
+    private StateArchiveIndexDatabase.Writer database;
+
+    private Session(Path archiveDirectory, Engine engine) {
+      this.archiveDirectory = Objects.requireNonNull(archiveDirectory, "archiveDirectory");
+      this.engine = Objects.requireNonNull(engine, "engine");
+    }
+
+    Status inspect(CommonCheckpointTarget target) throws IOException {
+      Path databasePath = databasePath(archiveDirectory);
+      if (database == null && !Files.exists(databasePath, LinkOption.NOFOLLOW_LINKS)) {
+        return Status.ABSENT;
+      }
+      return StateArchiveCheckpointServingIndex.inspect(
+          openExisting().get(MARKER_KEY), target);
+    }
+
+    void apply(CommonCheckpointPayload payload, CommonCheckpointTarget target)
+        throws IOException {
+      Path indexDirectory = archiveDirectory.resolve(DIRECTORY);
+      Path databasePath = databasePath(archiveDirectory);
+      boolean databaseExisted = Files.exists(databasePath, LinkOption.NOFOLLOW_LINKS);
+      Files.createDirectories(indexDirectory);
+      if (!Files.isDirectory(indexDirectory, LinkOption.NOFOLLOW_LINKS)) {
+        throw new IOException("State Archive checkpoint serving path is not a directory");
+      }
+      StateArchiveIndexEngineManifest.openOrCreate(indexDirectory, engine);
+      StateArchiveIndexDatabase.Writer writer = open();
+      byte[] existing = writer.get(MARKER_KEY);
+      long baseBlockNumber = target.getFirstBlock().getBlockNumber() - 1;
+      byte[] baseBlockHash = target.getFirstBlock().getParentHash();
+      if (existing != null) {
+        Marker parent = decodeMarker(existing);
+        if (Arrays.equals(existing,
+            encodeMarker(target, parent.baseBlockNumber, parent.baseBlockHash))) {
+          return;
+        }
+        requireParent(parent, target);
+        baseBlockNumber = parent.baseBlockNumber;
+        baseBlockHash = parent.baseBlockHash;
+      } else if (databaseExisted) {
+        throw new IOException("State Archive checkpoint serving marker is missing");
+      }
+      List<StateArchiveIndexDatabase.Mutation> mutations = new ArrayList<>();
+      for (int index = 0; index < payload.getBlocks().size(); index++) {
+        CommonCheckpointPayload.BlockPayload block = payload.getBlocks().get(index);
+        long blockNumber = block.getMeta().getBlockNumber();
+        for (DbGroup group : block.getArchiveDiff().getGroups()) {
+          requireStateDatabase(group.getDbName());
+          for (Entry entry : group.getEntries()) {
+            mutations.add(StateArchiveIndexDatabase.put(
+                changeKey(group.getDbName(), entry.getKey(), blockNumber), new byte[]{1}));
+          }
+        }
+        mutations.add(StateArchiveIndexDatabase.put(blockKey(blockNumber),
+            encodeLocation(target.getPayloadDigest(), index, block.getMeta())));
+      }
+      mutations.add(StateArchiveIndexDatabase.put(MARKER_KEY,
+          encodeMarker(target, baseBlockNumber, baseBlockHash)));
+      writer.write(mutations);
+      HistorySegmentStore.syncDirectory(indexDirectory);
+    }
+
+    private StateArchiveIndexDatabase.Writer openExisting() throws IOException {
+      StateArchiveIndexEngineManifest.require(archiveDirectory.resolve(DIRECTORY), engine);
+      return open();
+    }
+
+    private StateArchiveIndexDatabase.Writer open() throws IOException {
+      if (database == null) {
+        database = StateArchiveIndexDatabase.openWriter(databasePath(archiveDirectory), engine);
+      }
+      return database;
+    }
+
+    @Override
+    public void close() throws IOException {
+      if (database != null) {
+        try {
+          database.close();
+        } finally {
+          database = null;
+        }
+      }
+    }
   }
 
   static final class Reader implements AutoCloseable {

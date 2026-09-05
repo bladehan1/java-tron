@@ -93,6 +93,26 @@ public class CommonCheckpointRedoCoordinatorTest {
   }
 
   @Test
+  public void closesEveryCheckpointScopeAfterSuccessAndFailure() throws Exception {
+    Fixture completed = fixture("scope-success", null);
+    assertEquals(RecoveryAction.COMPLETED_REDO, completed.coordinator.apply(completed.payload));
+    for (FakeMaterializer materializer : completed.materializers) {
+      assertEquals(1, materializer.scopesStarted);
+      assertEquals(1, materializer.scopesEnded);
+      assertFalse(materializer.scopeOpen);
+    }
+
+    Fixture failed = fixture("scope-failure",
+        CommonCheckpointRedoCoordinator.Stage.AFTER_CHAINBASE_MATERIALIZE);
+    assertThrows(IOException.class, () -> failed.coordinator.apply(failed.payload));
+    for (FakeMaterializer materializer : failed.materializers) {
+      assertEquals(1, materializer.scopesStarted);
+      assertEquals(1, materializer.scopesEnded);
+      assertFalse(materializer.scopeOpen);
+    }
+  }
+
+  @Test
   public void runtimeOwnerRequiresStartupRecoveryAndGatesReadsAroundApply() throws Exception {
     Fixture fixture = fixture("runtime-owner", null);
     CommonCheckpointRuntimeOwner owner = new CommonCheckpointRuntimeOwner(fixture.coordinator);
@@ -239,6 +259,9 @@ public class CommonCheckpointRedoCoordinatorTest {
     private Status status = Status.NEEDS_MATERIALIZATION;
     private CommonCheckpointTarget target;
     private boolean advanceAfterMaterialize = true;
+    private int scopesStarted;
+    private int scopesEnded;
+    private boolean scopeOpen;
 
     private FakeMaterializer(Authority authority, List<String> actions) {
       this.authority = authority;
@@ -248,6 +271,18 @@ public class CommonCheckpointRedoCoordinatorTest {
     @Override
     public Authority authority() {
       return authority;
+    }
+
+    @Override
+    public void beginCheckpoint(CommonCheckpointTarget expected) {
+      scopesStarted++;
+      scopeOpen = true;
+    }
+
+    @Override
+    public void endCheckpoint(CommonCheckpointTarget expected) {
+      scopesEnded++;
+      scopeOpen = false;
     }
 
     @Override
