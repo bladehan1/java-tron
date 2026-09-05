@@ -48,6 +48,13 @@ public final class CommonCheckpointRedoCoordinator {
 
   private RecoveryAction redo(CommonCheckpointPayload payload) throws IOException {
     CommonCheckpointTarget target = CommonCheckpointTarget.from(payload);
+    try (CheckpointScope ignored = new CheckpointScope(target)) {
+      return redo(payload, target);
+    }
+  }
+
+  private RecoveryAction redo(CommonCheckpointPayload payload, CommonCheckpointTarget target)
+      throws IOException {
     Map<Authority, Status> initial = inspectAll(target);
     if (initial.containsValue(Status.PUBLISHED)
         && initial.containsValue(Status.NEEDS_MATERIALIZATION)) {
@@ -86,6 +93,49 @@ public final class CommonCheckpointRedoCoordinator {
     checkpointFile.retire();
     faultHook.after(Stage.AFTER_CHECKPOINT_RETIRE);
     return RecoveryAction.COMPLETED_REDO;
+  }
+
+  private final class CheckpointScope implements AutoCloseable {
+
+    private final CommonCheckpointTarget target;
+    private int opened;
+
+    private CheckpointScope(CommonCheckpointTarget target) throws IOException {
+      this.target = target;
+      try {
+        for (Authority authority : ORDER) {
+          materializers.get(authority).beginCheckpoint(target);
+          opened++;
+        }
+      } catch (IOException | RuntimeException failure) {
+        try {
+          close();
+        } catch (IOException closing) {
+          failure.addSuppressed(closing);
+        }
+        throw failure;
+      }
+    }
+
+    @Override
+    public void close() throws IOException {
+      IOException failure = null;
+      while (opened > 0) {
+        CommonCheckpointMaterializer materializer = materializers.get(ORDER[--opened]);
+        try {
+          materializer.endCheckpoint(target);
+        } catch (IOException closing) {
+          if (failure == null) {
+            failure = closing;
+          } else {
+            failure.addSuppressed(closing);
+          }
+        }
+      }
+      if (failure != null) {
+        throw failure;
+      }
+    }
   }
 
   private Map<Authority, Status> inspectAll(CommonCheckpointTarget target) throws IOException {

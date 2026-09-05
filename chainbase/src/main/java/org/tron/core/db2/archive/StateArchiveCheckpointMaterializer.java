@@ -55,6 +55,7 @@ public final class StateArchiveCheckpointMaterializer implements CommonCheckpoin
   private final FaultHook faultHook;
   private final CommonCheckpointBaseline baseline;
   private final Engine engine;
+  private StateArchiveCheckpointServingIndex.Session checkpointServingIndex;
 
   public StateArchiveCheckpointMaterializer(Path directory, byte[] formatIdentity) {
     this(directory, formatIdentity, null, StateArchiveCheckpointServingIndex.configuredEngine(),
@@ -95,6 +96,27 @@ public final class StateArchiveCheckpointMaterializer implements CommonCheckpoin
   @Override
   public Authority authority() {
     return Authority.STATE_ARCHIVE;
+  }
+
+  @Override
+  public synchronized void beginCheckpoint(CommonCheckpointTarget target) throws IOException {
+    requireTarget(target);
+    if (checkpointServingIndex != null) {
+      throw new IOException("State Archive checkpoint serving session is already open");
+    }
+    checkpointServingIndex = StateArchiveCheckpointServingIndex.session(directory, engine);
+  }
+
+  @Override
+  public synchronized void endCheckpoint(CommonCheckpointTarget target) throws IOException {
+    requireTarget(target);
+    if (checkpointServingIndex != null) {
+      try {
+        checkpointServingIndex.close();
+      } finally {
+        checkpointServingIndex = null;
+      }
+    }
   }
 
   @Override
@@ -184,7 +206,11 @@ public final class StateArchiveCheckpointMaterializer implements CommonCheckpoin
       faultHook.after(Stage.AFTER_BLOCK_FILE, index);
     }
     requireExactBlockSet(blocks, expectedNames);
-    StateArchiveCheckpointServingIndex.apply(directory, admittedPayload, admittedTarget, engine);
+    if (checkpointServingIndex == null) {
+      StateArchiveCheckpointServingIndex.apply(directory, admittedPayload, admittedTarget, engine);
+    } else {
+      checkpointServingIndex.apply(admittedPayload, admittedTarget);
+    }
     faultHook.after(Stage.AFTER_SERVING_INDEX_BATCH, -1);
     publishImmutable(materializedPath(admittedTarget), encodeTarget(admittedTarget));
     faultHook.after(Stage.AFTER_MATERIALIZED_TARGET, -1);
@@ -245,8 +271,10 @@ public final class StateArchiveCheckpointMaterializer implements CommonCheckpoin
   }
 
   private void requireServingIndex(CommonCheckpointTarget target) throws IOException {
-    if (StateArchiveCheckpointServingIndex.inspect(directory, target, engine)
-        != StateArchiveCheckpointServingIndex.Status.EXACT) {
+    StateArchiveCheckpointServingIndex.Status status = checkpointServingIndex == null
+        ? StateArchiveCheckpointServingIndex.inspect(directory, target, engine)
+        : checkpointServingIndex.inspect(target);
+    if (status != StateArchiveCheckpointServingIndex.Status.EXACT) {
       throw new IOException("State Archive checkpoint serving index target differs");
     }
   }
