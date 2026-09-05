@@ -152,6 +152,7 @@ public class StorageConfig {
     private String directory = "state-archive";
     private long maxSegmentSize = 1073741824L;
     private int queueCapacity = 256;
+    private NativeDbConfig servingIndex = NativeDbConfig.large();
 
     void postProcess() {
       if (directory == null || directory.trim().isEmpty()) {
@@ -165,6 +166,7 @@ public class StorageConfig {
         throw new IllegalArgumentException(
             "stateArchive.queueCapacity must be in [1, 65536]");
       }
+      servingIndex.validate("storage.stateArchive.servingIndex");
     }
   }
 
@@ -200,6 +202,7 @@ public class StorageConfig {
     private boolean verifyEveryBlock = true;
     private boolean volatileSnapshotBenchmark = false;
     private boolean asyncPrepareBenchmark = false;
+    private PathStateDbSettingsConfig dbSettings = new PathStateDbSettingsConfig();
 
     void postProcess() {
       if (!"shadow".equals(mode)) {
@@ -230,6 +233,77 @@ public class StorageConfig {
         throw new IllegalArgumentException(
             "pathStateRoot.asyncPrepareBenchmark requires volatileSnapshotBenchmark");
       }
+      dbSettings.validate();
+    }
+  }
+
+  /** Engine-neutral native options for one Archive/PathState resource tier. */
+  @Getter
+  @Setter
+  public static class NativeDbConfig {
+
+    private int blockSize = 4 * 1024;
+    private int writeBufferSize = 16 * 1024 * 1024;
+    private long cacheSize = 32L * 1024 * 1024;
+    private int maxOpenFiles = 100;
+    private long targetFileSizeBase = 16L * 1024 * 1024;
+    private long maxBytesForLevelBase = 64L * 1024 * 1024;
+    private int bloomBitsPerKey = 10;
+    private int maxWriteBufferNumber = 2;
+    private int levelNumber = 7;
+    private double maxBytesForLevelMultiplier = 10.0d;
+    private int level0FileNumCompactionTrigger = 4;
+    private int level0SlowdownWritesTrigger = 20;
+    private int level0StopWritesTrigger = 36;
+    private int backgroundFlushes = 1;
+    private int backgroundCompactions = 1;
+
+    public static NativeDbConfig small() {
+      return new NativeDbConfig();
+    }
+
+    public static NativeDbConfig large() {
+      NativeDbConfig config = new NativeDbConfig();
+      config.writeBufferSize = 64 * 1024 * 1024;
+      config.targetFileSizeBase = 64L * 1024 * 1024;
+      config.maxBytesForLevelBase = 256L * 1024 * 1024;
+      return config;
+    }
+
+    public static NativeDbConfig giant() {
+      NativeDbConfig config = large();
+      config.cacheSize = 64L * 1024 * 1024;
+      config.targetFileSizeBase = 128L * 1024 * 1024;
+      config.maxBytesForLevelBase = 512L * 1024 * 1024;
+      return config;
+    }
+
+    void validate(String path) {
+      if (blockSize <= 0 || writeBufferSize <= 0 || cacheSize <= 0 || maxOpenFiles <= 0
+          || targetFileSizeBase <= 0 || maxBytesForLevelBase <= 0
+          || bloomBitsPerKey <= 0 || maxWriteBufferNumber <= 0 || levelNumber <= 0
+          || maxBytesForLevelMultiplier <= 0 || level0FileNumCompactionTrigger <= 0
+          || level0SlowdownWritesTrigger < level0FileNumCompactionTrigger
+          || level0StopWritesTrigger < level0SlowdownWritesTrigger
+          || backgroundFlushes <= 0 || backgroundCompactions <= 0) {
+        throw new IllegalArgumentException(path + " native database options are invalid");
+      }
+    }
+  }
+
+  /** Fixed small/large/giant PathState profile catalog. */
+  @Getter
+  @Setter
+  public static class PathStateDbSettingsConfig {
+
+    private NativeDbConfig small = NativeDbConfig.small();
+    private NativeDbConfig large = NativeDbConfig.large();
+    private NativeDbConfig giant = NativeDbConfig.giant();
+
+    void validate() {
+      small.validate("storage.pathStateRoot.dbSettings.small");
+      large.validate("storage.pathStateRoot.dbSettings.large");
+      giant.validate("storage.pathStateRoot.dbSettings.giant");
     }
   }
 

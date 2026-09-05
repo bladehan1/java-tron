@@ -15,12 +15,21 @@ import java.util.Map;
 import java.util.Objects;
 import org.iq80.leveldb.DB;
 import org.iq80.leveldb.WriteOptions;
+import org.rocksdb.BlockBasedTableConfig;
+import org.rocksdb.BloomFilter;
+import org.rocksdb.ChecksumType;
+import org.rocksdb.CompressionType;
+import org.rocksdb.LRUCache;
 import org.rocksdb.RocksDBException;
-import org.tron.common.utils.DbOptionalsUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.tron.core.config.args.StorageConfig.NativeDbConfig;
 import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
 
 /** Package-owned LevelDB/RocksDB key/value engine shared by namespaced path-node views. */
 final class PathStateNativeNodeStore implements Closeable {
+
+  private static final Logger logger = LoggerFactory.getLogger("DB");
 
   static {
     org.rocksdb.RocksDB.loadLibrary();
@@ -28,6 +37,7 @@ final class PathStateNativeNodeStore implements Closeable {
 
   private final Path directory;
   private final Engine engine;
+  private final String storageProfile;
   private final Delegate delegate;
   private long writeBatchCalls;
   private long writeBatchMutations;
@@ -35,16 +45,26 @@ final class PathStateNativeNodeStore implements Closeable {
   private long unsyncedWriteBatchCalls;
   private volatile boolean closed;
 
-  private PathStateNativeNodeStore(Path directory, Engine engine, Delegate delegate) {
+  private PathStateNativeNodeStore(Path directory, Engine engine, String storageProfile,
+      Delegate delegate) {
     this.directory = directory;
     this.engine = engine;
+    this.storageProfile = storageProfile;
     this.delegate = delegate;
   }
 
   /** Opens one independent node database; callers choose the WAL sync boundary per batch. */
   static PathStateNativeNodeStore open(Path directory, Engine engine) throws IOException {
+    return open(directory, engine, "small", NativeDbConfig.small());
+  }
+
+  /** Opens one independent database with an explicit validated resource profile. */
+  static PathStateNativeNodeStore open(Path directory, Engine engine, String storageProfile,
+      NativeDbConfig config) throws IOException {
     Path path = Objects.requireNonNull(directory, "directory").toAbsolutePath().normalize();
     Engine selected = Objects.requireNonNull(engine, "engine");
+    String profile = Objects.requireNonNull(storageProfile, "storageProfile");
+    NativeDbConfig settings = Objects.requireNonNull(config, "config");
     if (Files.isSymbolicLink(path)) {
       throw new IOException("path-state node database must not be a symbolic link: " + path);
     }
@@ -52,9 +72,13 @@ final class PathStateNativeNodeStore implements Closeable {
     if (!Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS)) {
       throw new IOException("path-state node database is not a directory: " + path);
     }
-    Delegate opened = selected == Engine.LEVELDB ? new LevelDelegate(path)
-        : new RocksDelegate(path);
-    return new PathStateNativeNodeStore(path, selected, opened);
+    Delegate opened = selected == Engine.LEVELDB ? new LevelDelegate(path, settings)
+        : new RocksDelegate(path, settings);
+    logger.info("Path-state database opened: directory={}, engine={}, profile={}, blockBytes={}, "
+            + "writeBufferBytes={}, cacheBytes={}, maxOpenFiles={}", path, selected, profile,
+        settings.getBlockSize(), settings.getWriteBufferSize(), settings.getCacheSize(),
+        settings.getMaxOpenFiles());
+    return new PathStateNativeNodeStore(path, selected, profile, opened);
   }
 
   byte[] get(byte[] key) {
@@ -146,6 +170,10 @@ final class PathStateNativeNodeStore implements Closeable {
     return engine;
   }
 
+  String getStorageProfile() {
+    return storageProfile;
+  }
+
   @Override
   public synchronized void close() throws IOException {
     if (!closed) {
@@ -181,12 +209,21 @@ final class PathStateNativeNodeStore implements Closeable {
 
   private static final class LevelDelegate implements Delegate {
 
-    private final org.iq80.leveldb.Options options = DbOptionalsUtils.createDefaultDbOptions();
+    private final org.iq80.leveldb.Options options;
     private final WriteOptions syncWrites = new WriteOptions().sync(true);
     private final WriteOptions unsyncedWrites = new WriteOptions().sync(false);
     private final DB database;
 
-    private LevelDelegate(Path directory) throws IOException {
+    private LevelDelegate(Path directory, NativeDbConfig config) throws IOException {
+      options = new org.iq80.leveldb.Options()
+          .createIfMissing(true)
+          .paranoidChecks(true)
+          .verifyChecksums(true)
+          .compressionType(org.iq80.leveldb.CompressionType.SNAPPY)
+          .blockSize(config.getBlockSize())
+          .writeBufferSize(config.getWriteBufferSize())
+          .cacheSize(config.getCacheSize())
+          .maxOpenFiles(config.getMaxOpenFiles());
       database = factory.open(directory.toFile(), options);
     }
 
@@ -244,21 +281,53 @@ final class PathStateNativeNodeStore implements Closeable {
 
   private static final class RocksDelegate implements Delegate {
 
-    private final org.rocksdb.Options options =
-        new org.rocksdb.Options().setCreateIfMissing(true).setParanoidChecks(true);
+    private final LRUCache blockCache;
+    private final BloomFilter bloomFilter;
+    private final org.rocksdb.Options options;
     private final org.rocksdb.WriteOptions syncWrites =
         new org.rocksdb.WriteOptions().setSync(true);
     private final org.rocksdb.WriteOptions unsyncedWrites =
         new org.rocksdb.WriteOptions().setSync(false);
     private final org.rocksdb.RocksDB database;
 
-    private RocksDelegate(Path directory) throws IOException {
+    private RocksDelegate(Path directory, NativeDbConfig config) throws IOException {
+      blockCache = new LRUCache(config.getCacheSize());
+      bloomFilter = new BloomFilter(config.getBloomBitsPerKey(), false);
+      BlockBasedTableConfig table = new BlockBasedTableConfig()
+          .setBlockSize(config.getBlockSize())
+          .setChecksumType(ChecksumType.kCRC32c)
+          .setBlockCache(blockCache)
+          .setCacheIndexAndFilterBlocks(true)
+          .setPinL0FilterAndIndexBlocksInCache(false)
+          .setWholeKeyFiltering(true)
+          .setFilter(bloomFilter);
+      options = new org.rocksdb.Options()
+          .setCreateIfMissing(true)
+          .setParanoidChecks(true)
+          .setCompressionType(CompressionType.SNAPPY_COMPRESSION)
+          .setWriteBufferSize(config.getWriteBufferSize())
+          .setMaxWriteBufferNumber(config.getMaxWriteBufferNumber())
+          .setMinWriteBufferNumberToMerge(1)
+          .setMaxOpenFiles(config.getMaxOpenFiles())
+          .setNumLevels(config.getLevelNumber())
+          .setLevelCompactionDynamicLevelBytes(true)
+          .setLevel0FileNumCompactionTrigger(config.getLevel0FileNumCompactionTrigger())
+          .setLevel0SlowdownWritesTrigger(config.getLevel0SlowdownWritesTrigger())
+          .setLevel0StopWritesTrigger(config.getLevel0StopWritesTrigger())
+          .setMaxBackgroundCompactions(config.getBackgroundCompactions())
+          .setMaxBackgroundFlushes(config.getBackgroundFlushes())
+          .setTargetFileSizeBase(config.getTargetFileSizeBase())
+          .setMaxBytesForLevelBase(config.getMaxBytesForLevelBase())
+          .setMaxBytesForLevelMultiplier(config.getMaxBytesForLevelMultiplier())
+          .setTableFormatConfig(table);
       try {
         database = org.rocksdb.RocksDB.open(options, directory.toString());
       } catch (RocksDBException failure) {
         unsyncedWrites.close();
         syncWrites.close();
         options.close();
+        bloomFilter.close();
+        blockCache.close();
         throw new IOException("failed to open path-state RocksDB node database", failure);
       }
     }
@@ -318,10 +387,12 @@ final class PathStateNativeNodeStore implements Closeable {
 
     @Override
     public void close() {
+      database.close();
       unsyncedWrites.close();
       syncWrites.close();
-      database.close();
       options.close();
+      bloomFilter.close();
+      blockCache.close();
     }
   }
 

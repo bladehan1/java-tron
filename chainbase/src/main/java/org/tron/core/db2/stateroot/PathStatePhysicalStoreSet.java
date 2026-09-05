@@ -26,6 +26,9 @@ import java.util.stream.Stream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.tron.common.crypto.Hash;
+import org.tron.common.parameter.CommonParameter;
+import org.tron.core.config.args.StorageConfig.NativeDbConfig;
+import org.tron.core.config.args.StorageConfig.PathStateDbSettingsConfig;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
 import org.tron.core.db2.core.CommonCheckpointPayload;
 import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
@@ -52,6 +55,10 @@ public final class PathStatePhysicalStoreSet implements Closeable {
   private static final Set<String> LARGE_BOOTSTRAP_STORES = java.util.Collections.unmodifiableSet(
       new HashSet<>(Arrays.asList(
           "account", "account-asset", "delegation", "storage-row")));
+  private static final Set<String> GIANT_NATIVE_STORES = java.util.Collections.unmodifiableSet(
+      new HashSet<>(Arrays.asList("account", "account-asset", "storage-row")));
+  private static final Set<String> LARGE_NATIVE_STORES = java.util.Collections.unmodifiableSet(
+      new HashSet<>(Arrays.asList("code", "contract", "delegation")));
 
   private static final String STORES_DIRECTORY = "stores";
   private static final String SUPER_DIRECTORY = "super";
@@ -95,7 +102,8 @@ public final class PathStatePhysicalStoreSet implements Closeable {
   private boolean closed;
 
   private PathStatePhysicalStoreSet(PathStatePhysicalStoreManifest manifest,
-      PathStateParticipantScope scope, long residentNodeCacheBytes)
+      PathStateParticipantScope scope, long residentNodeCacheBytes,
+      PathStateDbSettingsConfig dbSettings)
       throws IOException {
     this.manifest = manifest;
     this.directory = manifest.getDirectory();
@@ -110,10 +118,12 @@ public final class PathStatePhysicalStoreSet implements Closeable {
         Path participantDirectory = directory.resolve(STORES_DIRECTORY).resolve(String.format(
             "%02d-%s", participant.getStoreId(), participant.getDbName())).resolve(NODES_DIRECTORY);
         participants.put(participant.getDbName(), new PhysicalStore(participantDirectory,
-            manifest.getEngine(), participant.getStoreId(), residentNodeCache));
+            manifest.getEngine(), participant.getStoreId(), residentNodeCache,
+            storageProfileNameFor(participant.getDbName()),
+            storageProfileFor(participant.getDbName(), dbSettings)));
       }
       superStore = new PhysicalStore(directory.resolve(SUPER_DIRECTORY).resolve(NODES_DIRECTORY),
-          manifest.getEngine(), 0, residentNodeCache);
+          manifest.getEngine(), 0, residentNodeCache, "small", dbSettings.getSmall());
     } catch (IOException | RuntimeException failure) {
       closeAfterFailure(failure);
       throw failure;
@@ -131,7 +141,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     PathStatePhysicalStoreManifest manifest = PathStatePhysicalStoreManifest.createOrOpen(root,
         Objects.requireNonNull(engine, "engine"));
     return new PathStatePhysicalStoreSet(manifest, Objects.requireNonNull(scope, "scope"),
-        STEADY_NODE_CACHE_BYTES);
+        STEADY_NODE_CACHE_BYTES, configuredDbSettings());
   }
 
   /** Opens only a fully materialized physical layout; missing child databases fail closed. */
@@ -155,7 +165,38 @@ public final class PathStatePhysicalStoreSet implements Closeable {
           .resolve(NODES_DIRECTORY));
     }
     requireStoreDirectory(root.resolve(SUPER_DIRECTORY).resolve(NODES_DIRECTORY));
-    return new PathStatePhysicalStoreSet(manifest, admittedScope, residentNodeCacheBytes);
+    return new PathStatePhysicalStoreSet(manifest, admittedScope, residentNodeCacheBytes,
+        configuredDbSettings());
+  }
+
+  static String storageProfileNameFor(String dbName) {
+    String supplied = Objects.requireNonNull(dbName, "dbName");
+    if (GIANT_NATIVE_STORES.contains(supplied)) {
+      return "giant";
+    }
+    if (LARGE_NATIVE_STORES.contains(supplied)) {
+      return "large";
+    }
+    return "small";
+  }
+
+  private static NativeDbConfig storageProfileFor(String dbName,
+      PathStateDbSettingsConfig settings) {
+    String profile = storageProfileNameFor(dbName);
+    if ("giant".equals(profile)) {
+      return settings.getGiant();
+    }
+    if ("large".equals(profile)) {
+      return settings.getLarge();
+    }
+    return settings.getSmall();
+  }
+
+  private static PathStateDbSettingsConfig configuredDbSettings() {
+    org.tron.core.config.args.Storage storage = CommonParameter.getInstance().getStorage();
+    PathStateDbSettingsConfig settings = storage == null ? null
+        : storage.getPathStateRootDbSettings();
+    return settings == null ? new PathStateDbSettingsConfig() : settings;
   }
 
   public synchronized PhysicalStore participant(String dbName) {
@@ -1641,8 +1682,9 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     private final ResidentNodeStore nodeStore;
 
     private PhysicalStore(Path directory, Engine engine, int storeId,
-        ResidentNodeCache residentNodeCache) throws IOException {
-      nativeStore = PathStateNativeNodeStore.open(directory, engine);
+        ResidentNodeCache residentNodeCache, String storageProfile, NativeDbConfig dbSettings)
+        throws IOException {
+      nativeStore = PathStateNativeNodeStore.open(directory, engine, storageProfile, dbSettings);
       nodeStore = new ResidentNodeStore(new PhysicalNodeStore(nativeStore), residentNodeCache,
           storeId);
     }
