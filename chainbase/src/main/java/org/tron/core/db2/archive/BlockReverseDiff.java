@@ -89,6 +89,10 @@ public final class BlockReverseDiff {
     public OldValue getOldValue() {
       return oldValue;
     }
+
+    long estimatedIndexInputBytes() {
+      return 128L + key.length + oldValue.valueLength();
+    }
   }
 
   static int compareUnsigned(byte[] left, byte[] right) {

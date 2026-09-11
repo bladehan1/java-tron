@@ -233,38 +233,6 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
     append(bundle, -1, null, SyncFaultHook.NONE);
   }
 
-  /**
-   * Appends finalized bytes before the next Common target exists. Do not seal an unmarked tail:
-   * startup recovery must still be able to trim it to the last authorized Common boundary.
-   */
-  public synchronized void appendFinalized(EncodedBundle bundle) throws IOException {
-    if (activeCheckpointSequence >= 0) {
-      throw new IllegalStateException("State Archive checkpoint append is active");
-    }
-    append(bundle, -1, null, SyncFaultHook.NONE, true);
-  }
-
-  /** Appends one bundle under the Common identity needed to prove any intervening rotation. */
-  public synchronized void appendForCheckpoint(EncodedBundle bundle, long checkpointSequence,
-      byte[] commonTargetDigest) throws IOException {
-    appendForCheckpoint(bundle, checkpointSequence, commonTargetDigest, SyncFaultHook.NONE);
-  }
-
-  synchronized void appendForCheckpoint(EncodedBundle bundle, long checkpointSequence,
-      byte[] commonTargetDigest, SyncFaultHook faultHook) throws IOException {
-    if (checkpointSequence < 0) {
-      throw new IllegalArgumentException("Invalid State Archive checkpoint sequence");
-    }
-    byte[] admittedDigest = requireHash(commonTargetDigest, "Common target digest");
-    if (activeCheckpointSequence >= 0
-        && (activeCheckpointSequence != checkpointSequence
-        || !Arrays.equals(activeCommonTargetDigest, admittedDigest))) {
-      throw new IllegalArgumentException("State Archive checkpoint append identity mismatch");
-    }
-    append(bundle, checkpointSequence, admittedDigest,
-        Objects.requireNonNull(faultHook, "faultHook"));
-  }
-
   private void append(EncodedBundle bundle, long checkpointSequence,
       byte[] commonTargetDigest, SyncFaultHook faultHook) throws IOException {
     append(bundle, checkpointSequence, commonTargetDigest, faultHook, false);
@@ -322,6 +290,38 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
     }
   }
 
+  /**
+   * Appends finalized bytes before the next Common target exists. Do not seal an unmarked tail:
+   * startup recovery must still be able to trim it to the last authorized Common boundary.
+   */
+  public synchronized void appendFinalized(EncodedBundle bundle) throws IOException {
+    if (activeCheckpointSequence >= 0) {
+      throw new IllegalStateException("State Archive checkpoint append is active");
+    }
+    append(bundle, -1, null, SyncFaultHook.NONE, true);
+  }
+
+  /** Appends one bundle under the Common identity needed to prove any intervening rotation. */
+  public synchronized void appendForCheckpoint(EncodedBundle bundle, long checkpointSequence,
+      byte[] commonTargetDigest) throws IOException {
+    appendForCheckpoint(bundle, checkpointSequence, commonTargetDigest, SyncFaultHook.NONE);
+  }
+
+  synchronized void appendForCheckpoint(EncodedBundle bundle, long checkpointSequence,
+      byte[] commonTargetDigest, SyncFaultHook faultHook) throws IOException {
+    if (checkpointSequence < 0) {
+      throw new IllegalArgumentException("Invalid State Archive checkpoint sequence");
+    }
+    byte[] admittedDigest = requireHash(commonTargetDigest, "Common target digest");
+    if (activeCheckpointSequence >= 0
+        && (activeCheckpointSequence != checkpointSequence
+        || !Arrays.equals(activeCommonTargetDigest, admittedDigest))) {
+      throw new IllegalArgumentException("State Archive checkpoint append identity mismatch");
+    }
+    append(bundle, checkpointSequence, admittedDigest,
+        Objects.requireNonNull(faultHook, "faultHook"));
+  }
+
   public synchronized BlockSnapshotMeta getAppendHead() {
     return appendHead;
   }
@@ -360,67 +360,82 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
 
   synchronized List<BlockReverseDiff> readCommittedDiffs(long fromExclusive, long through,
       long maxEncodedBytes) throws IOException {
-    requireUsable();
-    if (fromExclusive < 0 || through < fromExclusive || appendHead == null
-        || through > appendHead.getBlockNumber()) {
-      throw new IllegalArgumentException("Invalid State Archive committed read range");
-    }
+    long started = System.nanoTime();
+    long decodeNanos = 0;
+    boolean success = false;
     servingReadFrames = 0;
     servingReadBytes = 0;
-    if (fromExclusive == through) {
-      return Collections.emptyList();
-    }
-    int blockCount = Math.toIntExact(through - fromExclusive);
-    int[] laneIds = StateArchiveFileFormatV3.fiveLaneIds();
-    byte[][][] bundles = new byte[laneIds.length][blockCount][];
-    if (servingSegments == null) {
-      servingSegments = new HashMap<>();
-      for (int laneId : StateArchiveFileFormatV3.fiveLaneIds()) {
-        servingSegments.put(laneId, new TreeMap<>());
+    try {
+      requireUsable();
+      if (fromExclusive < 0 || through < fromExclusive || appendHead == null
+          || through > appendHead.getBlockNumber()) {
+        throw new IllegalArgumentException("Invalid State Archive committed read range");
       }
-      for (SealedSegment segment : sealedSegments) {
-        servingSegments.get(segment.getLaneId()).put(segment.getFirstBlock(), segment);
+      if (fromExclusive == through) {
+        success = true;
+        return Collections.emptyList();
       }
-    }
-    long first = fromExclusive + 1;
-    for (int laneOrdinal = 0; laneOrdinal < laneIds.length; laneOrdinal++) {
-      int laneId = laneIds[laneOrdinal];
-      NavigableMap<Long, SealedSegment> segments = servingSegments.get(laneId);
-      Map.Entry<Long, SealedSegment> selected = segments.floorEntry(first);
-      if (selected == null) {
-        selected = segments.ceilingEntry(first);
-      }
-      while (selected != null && selected.getKey() <= through) {
-        SealedSegment segment = selected.getValue();
-        if (segment.getLastBlock() >= first) {
-          readIndexedRange(laneId, segment.getSegmentSeq(), segment.getFirstBlock(),
-              Math.max(first, segment.getFirstBlock()),
-              Math.min(through, segment.getLastBlock()), segment.getSegmentHeaderDigest(),
-              first, bundles[laneOrdinal], maxEncodedBytes);
+      int blockCount = Math.toIntExact(through - fromExclusive);
+      int[] laneIds = StateArchiveFileFormatV3.fiveLaneIds();
+      byte[][][] bundles = new byte[laneIds.length][blockCount][];
+      if (servingSegments == null) {
+        servingSegments = new HashMap<>();
+        for (int laneId : StateArchiveFileFormatV3.fiveLaneIds()) {
+          servingSegments.put(laneId, new TreeMap<>());
         }
-        selected = segments.higherEntry(selected.getKey());
-      }
-      LaneState current = lanes.get(laneId);
-      if (current != null && current.firstBlock <= through && current.lastBlock >= first) {
-        readIndexedRange(laneId, current.segmentSeq, current.firstBlock,
-            Math.max(first, current.firstBlock), Math.min(through, current.lastBlock),
-            current.headerDigest, first, bundles[laneOrdinal], maxEncodedBytes);
-      }
-    }
-    List<BlockReverseDiff> result = new ArrayList<>(blockCount);
-    for (int block = 0; block < blockCount; block++) {
-      List<byte[]> ordered = new ArrayList<>(laneIds.length);
-      for (int lane = 0; lane < laneIds.length; lane++) {
-        byte[] frame = bundles[lane][block];
-        if (frame == null) {
-          throw new IOException("Incomplete State Archive serving source bundle");
+        for (SealedSegment segment : sealedSegments) {
+          servingSegments.get(segment.getLaneId()).put(segment.getFirstBlock(), segment);
         }
-        ordered.add(frame);
-        bundles[lane][block] = null;
       }
-      result.add(codec.decode(ordered).getDiff());
+      long first = fromExclusive + 1;
+      for (int laneOrdinal = 0; laneOrdinal < laneIds.length; laneOrdinal++) {
+        int laneId = laneIds[laneOrdinal];
+        NavigableMap<Long, SealedSegment> segments = servingSegments.get(laneId);
+        Map.Entry<Long, SealedSegment> selected = segments.floorEntry(first);
+        if (selected == null) {
+          selected = segments.ceilingEntry(first);
+        }
+        while (selected != null && selected.getKey() <= through) {
+          SealedSegment segment = selected.getValue();
+          if (segment.getLastBlock() >= first) {
+            readIndexedRange(laneId, segment.getSegmentSeq(), segment.getFirstBlock(),
+                Math.max(first, segment.getFirstBlock()),
+                Math.min(through, segment.getLastBlock()), segment.getSegmentHeaderDigest(),
+                first, bundles[laneOrdinal], maxEncodedBytes);
+          }
+          selected = segments.higherEntry(selected.getKey());
+        }
+        LaneState current = lanes.get(laneId);
+        if (current != null && current.firstBlock <= through && current.lastBlock >= first) {
+          readIndexedRange(laneId, current.segmentSeq, current.firstBlock,
+              Math.max(first, current.firstBlock), Math.min(through, current.lastBlock),
+              current.headerDigest, first, bundles[laneOrdinal], maxEncodedBytes);
+        }
+      }
+      List<BlockReverseDiff> result = new ArrayList<>(blockCount);
+      for (int block = 0; block < blockCount; block++) {
+        List<byte[]> ordered = new ArrayList<>(laneIds.length);
+        for (int lane = 0; lane < laneIds.length; lane++) {
+          byte[] frame = bundles[lane][block];
+          if (frame == null) {
+            throw new IOException("Incomplete State Archive serving source bundle");
+          }
+          ordered.add(frame);
+          bundles[lane][block] = null;
+        }
+        long decodeStarted = System.nanoTime();
+        try {
+          result.add(codec.decode(ordered).getDiff());
+        } finally {
+          decodeNanos += System.nanoTime() - decodeStarted;
+        }
+      }
+      success = true;
+      return Collections.unmodifiableList(result);
+    } finally {
+      ServingIndexTiming.source(fromExclusive, through, System.nanoTime() - started, decodeNanos,
+          servingReadBytes, servingReadFrames, success);
     }
-    return Collections.unmodifiableList(result);
   }
 
   synchronized long getServingReadFrames() {

@@ -17,6 +17,7 @@ import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.tron.core.db2.archive.BlockReverseDiff.DbGroup;
 import org.tron.core.db2.archive.BlockReverseDiff.Entry;
+import org.tron.core.db2.archive.PersistentServingKeyIndexGeneration.MutableIndex;
 import org.tron.core.db2.archive.StateArchiveServingIndexBuildCoordinatorV3.LiveServingIndexer;
 import org.tron.core.db2.core.CommonCheckpointTarget;
 import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
@@ -42,12 +43,14 @@ public class StateArchiveCatalogAndServingCornerCaseTest {
       assertEquals(6, one.status().getIndexedThrough());
       assertEquals(6, split.status().getIndexedThrough());
     }
-    try (PersistentServingKeyIndexCatalog one = PersistentServingKeyIndexCatalog.open(
-        oneBatch.resolve(StateArchiveServingIndexBuildCoordinatorV3.DIRECTORY),
-        Engine.LEVELDB, stage -> { });
-        PersistentServingKeyIndexCatalog split = PersistentServingKeyIndexCatalog.open(
-            splitBatch.resolve(StateArchiveServingIndexBuildCoordinatorV3.DIRECTORY),
-            Engine.LEVELDB, stage -> { });
+    try (MutableIndex one = new MutableIndex(
+        oneBatch.resolve(StateArchiveServingIndexBuildCoordinatorV3.DIRECTORY)
+                .resolve("single-v1"),
+        Engine.LEVELDB);
+        MutableIndex split = new MutableIndex(
+            splitBatch.resolve(StateArchiveServingIndexBuildCoordinatorV3.DIRECTORY)
+                .resolve("single-v1"),
+            Engine.LEVELDB);
         PersistentServingKeyIndexGeneration oneGeneration = one.pin();
         PersistentServingKeyIndexGeneration splitGeneration = split.pin()) {
       assertArrayEquals(oneGeneration.getAuthoritativePrefixDigest(),
@@ -78,12 +81,14 @@ public class StateArchiveCatalogAndServingCornerCaseTest {
       assertEquals(17, liveOwner.status().getBuildSequence());
       assertEquals(0, liveOwner.status().getPendingBlocks());
     }
-    try (PersistentServingKeyIndexCatalog bulk = PersistentServingKeyIndexCatalog.open(
-        bulkRoot.resolve(StateArchiveServingIndexBuildCoordinatorV3.DIRECTORY),
-        Engine.LEVELDB, stage -> { });
-        PersistentServingKeyIndexCatalog live = PersistentServingKeyIndexCatalog.open(
-            liveRoot.resolve(StateArchiveServingIndexBuildCoordinatorV3.DIRECTORY),
-            Engine.LEVELDB, stage -> { });
+    try (MutableIndex bulk = new MutableIndex(
+        bulkRoot.resolve(StateArchiveServingIndexBuildCoordinatorV3.DIRECTORY)
+                .resolve("single-v1"),
+        Engine.LEVELDB);
+        MutableIndex live = new MutableIndex(
+            liveRoot.resolve(StateArchiveServingIndexBuildCoordinatorV3.DIRECTORY)
+                .resolve("single-v1"),
+            Engine.LEVELDB);
         PersistentServingKeyIndexGeneration expected = bulk.pin();
         PersistentServingKeyIndexGeneration actual = live.pin()) {
       assertArrayEquals(expected.getAuthoritativePrefixDigest(),

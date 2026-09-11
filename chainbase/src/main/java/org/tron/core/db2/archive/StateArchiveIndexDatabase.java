@@ -439,6 +439,10 @@ final class StateArchiveIndexDatabase {
     private final byte[] key;
     private final byte[] value;
 
+    long estimatedBytes() {
+      return 32L + key.length + (value == null ? 0 : value.length);
+    }
+
     private Mutation(String columnFamily, byte[] key, byte[] value) {
       this.columnFamily = requireColumnFamily(columnFamily);
       this.key = Arrays.copyOf(Objects.requireNonNull(key, "key"), key.length);

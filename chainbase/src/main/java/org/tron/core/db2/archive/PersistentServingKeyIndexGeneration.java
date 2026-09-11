@@ -662,6 +662,16 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
       String generationId,
       ServingIndexIncrementalPlan plan, long coverageFrom, byte[] sourceDigest,
       ExactWriteFaultHook faultHook) throws IOException {
+    return applyExactPlan(target, generationId, plan, coverageFrom, sourceDigest, faultHook,
+        null);
+  }
+
+  private static long applyExactPlan(StateArchiveIndexDatabase.Writer target,
+      String generationId, ServingIndexIncrementalPlan plan, long coverageFrom, byte[] sourceDigest,
+      ExactWriteFaultHook faultHook,
+      java.util.function.LongFunction<StateArchiveIndexDatabase.Mutation> publication)
+      throws IOException {
+    long groupStarted = System.nanoTime();
     Map<ExactKey, List<Long>> changes = new LinkedHashMap<>();
     for (Map.Entry<String, List<ServingIndexIncrementalPlan.KeyChange>> database
         : plan.getChangesByDatabase().entrySet()) {
@@ -670,7 +680,10 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
         changes.computeIfAbsent(key, ignored -> new ArrayList<>()).add(change.getEpoch());
       }
     }
-    List<StateArchiveIndexDatabase.Mutation> mutations = new ArrayList<>();
+    ServingIndexTiming.record(ServingIndexTiming.Stage.GROUP, groupStarted);
+    long buildStarted = System.nanoTime();
+    List<StateArchiveIndexDatabase.Mutation> mutations = publication == null
+        ? new ArrayList<>() : new BoundedMutations();
     for (Map.Entry<ExactKey, List<Long>> entry : changes.entrySet()) {
       appendExactChanges(target, mutations, entry.getKey(), entry.getValue());
     }
@@ -681,9 +694,173 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
       mutations.add(StateArchiveIndexDatabase.put(storeCoverageKey(database),
           encodeCoverage(coverage)));
     }
+    long added = changes.values().stream().mapToLong(List::size).sum();
+    if (publication != null) {
+      mutations.add(publication.apply(added));
+    }
+    ServingIndexTiming.record(ServingIndexTiming.Stage.BUILD, buildStarted);
+    ServingIndexTiming.work(added, changes.size(), mutations.stream()
+        .mapToLong(StateArchiveIndexDatabase.Mutation::estimatedBytes).sum());
     faultHook.beforeWrite();
-    target.write(mutations, true);
-    return changes.values().stream().mapToLong(List::size).sum();
+    long writeStarted = System.nanoTime();
+    try {
+      target.write(mutations, true);
+    } finally {
+      ServingIndexTiming.record(ServingIndexTiming.Stage.WRITE_SYNC, writeStarted);
+    }
+    return added;
+  }
+
+  /** A single physical sync batch, including its durable progress record. */
+  private static final class BoundedMutations
+      extends ArrayList<StateArchiveIndexDatabase.Mutation> {
+    private long bytes;
+
+    @Override
+    public boolean add(StateArchiveIndexDatabase.Mutation mutation) {
+      if (size() >= 500_000 || mutation.estimatedBytes() > 64L * 1024 * 1024 - bytes) {
+        throw new IllegalArgumentException("Serving write batch budget exceeded");
+      }
+      bytes += mutation.estimatedBytes();
+      return super.add(mutation);
+    }
+  }
+
+  /**
+   * Versioned single-DB layout. Pages and the descriptor commit in the same sync batch;
+   * no filesystem generation or second database is involved in normal advancement.
+   */
+  static final class MutableIndex implements java.io.Closeable {
+    private static final byte[] PROGRESS_KEY = new byte[]{0x7f, 'S', 'I', 1};
+    private final Path directory;
+    private final Engine engine;
+    private final StateArchiveIndexDatabase.Writer writer;
+    private Descriptor descriptor;
+    private boolean failed;
+    private boolean closed;
+
+    MutableIndex(Path directory, Engine engine) throws IOException {
+      this.directory = directory;
+      this.engine = engine;
+      Files.createDirectories(directory);
+      StateArchiveIndexEngineManifest.openOrCreate(directory, engine);
+      writer = StateArchiveIndexDatabase.openWriter(directory.resolve(DATABASE), engine);
+      try {
+        byte[] encoded = writer.get(PROGRESS_KEY);
+        if (encoded != null) {
+          descriptor = decodeDescriptor(encoded);
+          if (descriptor.formatVersion != EXACT_VERSION) {
+            throw new IOException("Unsupported mutable serving descriptor");
+          }
+          try (PersistentServingKeyIndexGeneration ignored = pin()) {
+            // Validate coverage against the progress in the same database snapshot.
+          }
+        } else {
+          try (StateArchiveIndexDatabase.Reader reader =
+              StateArchiveIndexDatabase.openReader(directory.resolve(DATABASE), engine);
+              StateArchiveIndexDatabase.Cursor cursor = reader.cursor()) {
+            cursor.seek(new byte[0]);
+            if (cursor.next() != null) {
+              throw new IOException("Serving data exists without atomic progress");
+            }
+          }
+        }
+        HistorySegmentStore.syncDirectory(directory);
+        HistorySegmentStore.syncDirectory(directory.getParent());
+      } catch (IOException | RuntimeException failure) {
+        writer.close();
+        throw failure;
+      }
+    }
+
+    long indexedFrom() {
+      return descriptor == null ? -1 : descriptor.indexedFrom;
+    }
+
+    long indexedThrough() {
+      return descriptor == null ? -1 : descriptor.indexedThrough;
+    }
+
+    byte[] headHash() {
+      return descriptor == null ? null : descriptor.headHash.clone();
+    }
+
+    String identity() {
+      return descriptor == null ? "empty" : descriptor.generationId;
+    }
+
+
+    synchronized void append(String identity, ServingIndexIncrementalPlan plan,
+        byte[] latestSourceIdentity, ExactWriteFaultHook beforeWrite,
+        ExactWriteFaultHook afterWrite) throws IOException {
+      requireHealthy();
+      validateExactIdentity(identity, plan, latestSourceIdentity);
+      if (descriptor != null && (plan.getIndexedFrom() != descriptor.indexedThrough
+          || !Arrays.equals(plan.getIndexedFromHash(), descriptor.headHash)
+          || !plan.getParticipatingDatabases().equals(descriptor.participants))) {
+        throw new IOException("Serving increment does not extend durable I");
+      }
+      long from = descriptor == null ? plan.getIndexedFrom() : descriptor.indexedFrom;
+      long oldChanges = descriptor == null ? 0 : descriptor.keyChanges;
+      byte[] digest = rollSourceDigest(descriptor == null ? plan.getSourceSeedDigest()
+          : descriptor.sourceDigest, plan.getSourceStepDigests());
+      Descriptor[] replacement = new Descriptor[1];
+      try {
+        applyExactPlan(writer, identity, plan, from, digest, beforeWrite, added -> {
+          replacement[0] = new Descriptor(EXACT_VERSION, ArchiveParticipantDescriptor.FORMAT_ID,
+              identity, from, plan.getIndexedThrough(), plan.getHeadHash(), digest,
+              latestSourceIdentity, plan.getParticipatingDatabases(), oldChanges + added);
+          return StateArchiveIndexDatabase.put(PROGRESS_KEY, encodeDescriptor(replacement[0]));
+        });
+        afterWrite.beforeWrite();
+        descriptor = replacement[0];
+      } catch (IOException | RuntimeException failure) {
+        // A lost acknowledgement may have committed. Only reopening may resolve durable I.
+        failed = true;
+        throw failure;
+      }
+    }
+
+    synchronized PersistentServingKeyIndexGeneration pin() throws IOException {
+      requireHealthy();
+      StateArchiveIndexDatabase.Reader reader =
+          StateArchiveIndexDatabase.openReader(directory.resolve(DATABASE), engine);
+      try {
+        byte[] encoded = reader.get(PROGRESS_KEY);
+        if (encoded == null) {
+          throw new IOException("Serving index has no committed coverage");
+        }
+        Descriptor snapshot = decodeDescriptor(encoded);
+        validateExactStoreCoverage(reader, snapshot);
+        return new PersistentServingKeyIndexGeneration(directory, snapshot, engine, reader);
+      } catch (IOException | RuntimeException failure) {
+        reader.close();
+        throw failure;
+      }
+    }
+
+    private void requireHealthy() throws IOException {
+      if (closed || failed) {
+        throw new IOException("Serving index requires close and recovery");
+      }
+    }
+
+    @Override
+    public synchronized void close() throws IOException {
+      if (!closed) {
+        closed = true;
+        writer.close();
+      }
+    }
+  }
+
+  private PersistentServingKeyIndexGeneration(Path directory, Descriptor descriptor,
+      Engine engine, StateArchiveIndexDatabase.Reader reader) {
+    this.directory = directory;
+    this.descriptor = descriptor;
+    this.engine = engine;
+    this.database = reader;
+    this.release = () -> { };
   }
 
   static final class RuntimeBuilder implements java.io.Closeable {
@@ -806,7 +983,13 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
       List<StateArchiveIndexDatabase.Mutation> batch, ExactKey key,
       List<Long> appended) throws IOException {
     byte[] metaKey = keyMetaKey(key.dbName, key.rawKey);
-    byte[] existing = target.get(metaKey);
+    long metaStarted = System.nanoTime();
+    byte[] existing;
+    try {
+      existing = target.get(metaKey);
+    } finally {
+      ServingIndexTiming.record(ServingIndexTiming.Stage.META_GET, metaStarted);
+    }
     KeyMeta meta = existing == null ? null : decodeKeyMeta(existing);
     if (meta == null) {
       requireStrictEpochs(appended, Long.MIN_VALUE);
@@ -834,12 +1017,23 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
       combined.addAll(appended);
       writeAllPages(batch, key, combined, 0);
     } else {
-      int lastPageIndex = pageCount(meta.count) - 1;
-      long[] lastPage = decodeEpochPage(target.get(
-          keyPageKey(key.dbName, key.rawKey, lastPageIndex)));
-      List<Long> combined = asList(lastPage);
-      combined.addAll(appended);
-      writeAllPages(batch, key, combined, lastPageIndex);
+      if (meta.count % EPOCHS_PER_PAGE == 0) {
+        // A full previous page is immutable; do not read or rewrite it merely to append.
+        writeAllPages(batch, key, appended, pageCount(meta.count));
+      } else {
+        int lastPageIndex = pageCount(meta.count) - 1;
+        long tailStarted = System.nanoTime();
+        byte[] encodedPage;
+        try {
+          encodedPage = target.get(keyPageKey(key.dbName, key.rawKey, lastPageIndex));
+        } finally {
+          ServingIndexTiming.record(ServingIndexTiming.Stage.TAIL_GET, tailStarted);
+        }
+        long[] lastPage = decodeEpochPage(encodedPage);
+        List<Long> combined = asList(lastPage);
+        combined.addAll(appended);
+        writeAllPages(batch, key, combined, lastPageIndex);
+      }
     }
     batch.add(StateArchiveIndexDatabase.put(metaKey,
         encodeKeyMeta(KeyMeta.paged(meta.count + appended.size(),

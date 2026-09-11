@@ -48,7 +48,16 @@ public final class StateArchiveAppendCheckpointMaterializerV3
 
   StateArchiveAppendCheckpointMaterializerV3(Path directory,
       byte[] commonFormatIdentity, Engine bindingEngine, byte[] baselineHistoryDigest,
-      short compressionId, long rotationTargetBytes, Runnable beforeServingBuild) throws IOException {
+      short compressionId, long rotationTargetBytes, Runnable beforeServingBuild)
+      throws IOException {
+    this(directory, commonFormatIdentity, bindingEngine, baselineHistoryDigest, compressionId,
+        rotationTargetBytes, beforeServingBuild, 15_000);
+  }
+
+  StateArchiveAppendCheckpointMaterializerV3(Path directory,
+      byte[] commonFormatIdentity, Engine bindingEngine, byte[] baselineHistoryDigest,
+      short compressionId, long rotationTargetBytes, Runnable beforeServingBuild,
+      long servingTailDelayMillis) throws IOException {
     this.directory = Objects.requireNonNull(directory, "directory");
     this.commonFormatIdentity = requireDigest(commonFormatIdentity, "Common format identity");
     this.bindingEngine = Objects.requireNonNull(bindingEngine, "bindingEngine");
@@ -56,7 +65,7 @@ public final class StateArchiveAppendCheckpointMaterializerV3
     this.writer = openWriter(baselineHistoryDigest, rotationTargetBytes);
     this.servingWorker = new StateArchiveServingWorkerV3(
         () -> new StateArchiveServingIndexBuildCoordinatorV3(directory, bindingEngine, 1_000),
-        writer, beforeServingBuild);
+        writer, beforeServingBuild, servingTailDelayMillis);
   }
 
   private StateArchiveFiveLaneSegmentWriterV3 openWriter(byte[] baselineHistoryDigest,
@@ -104,7 +113,7 @@ public final class StateArchiveAppendCheckpointMaterializerV3
         new byte[StateArchiveFileFormatV3.HASH_LENGTH], admitted);
   }
 
-  /** Spreads encoding/append over solidification; leaves force and readable publication to Common. */
+  /** Spreads encoding/append over solidification; Common still owns force and publication. */
   public synchronized void appendFinalized(List<BlockReverseDiff> diffs) throws IOException {
     requireOpen();
     // The first checkpoint establishes the exact startup recovery identity. Before that, retain

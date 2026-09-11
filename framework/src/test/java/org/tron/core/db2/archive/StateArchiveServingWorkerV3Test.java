@@ -26,9 +26,12 @@ public class StateArchiveServingWorkerV3Test {
     Path root = temporaryFolder.newFolder().toPath();
     CountDownLatch entered = new CountDownLatch(1);
     CountDownLatch release = new CountDownLatch(1);
+    java.util.concurrent.atomic.AtomicReference<Thread> buildThread =
+        new java.util.concurrent.atomic.AtomicReference<>();
     try (StateArchiveFiveLaneSegmentWriterV3 source = source(root)) {
       append(source, 1);
       StateArchiveServingWorkerV3 worker = worker(root, source, () -> {
+        buildThread.set(Thread.currentThread());
         entered.countDown();
         try {
           if (!release.await(5, TimeUnit.SECONDS)) {
@@ -52,6 +55,7 @@ public class StateArchiveServingWorkerV3Test {
         assertEquals(Mode.LIVE_IMMEDIATE, worker.status().getMode());
         append(source, 3);
         worker.offer(target(3, 3));
+        assertEquals(Thread.currentThread(), buildThread.get());
         assertEquals(3, worker.status().getIndexedThrough());
         long sequence = worker.status().getBuildSequence();
         worker.offer(target(3, 3));
@@ -119,11 +123,32 @@ public class StateArchiveServingWorkerV3Test {
     }
   }
 
+  @Test(timeout = 15000)
+  public void workerStartsFromAvailableHistoryInsteadOfGenesis() throws Exception {
+    Path root = temporaryFolder.newFolder().toPath();
+    try (StateArchiveFiveLaneSegmentWriterV3 source = source(root)) {
+      append(source, 101);
+      append(source, 102);
+      try (StateArchiveServingWorkerV3 worker = worker(root, source, () -> { })) {
+        worker.offer(target(101, 102));
+        worker.completeInitialSync(target(101, 102));
+        assertEquals(100, worker.status().getIndexedFrom());
+        assertEquals(102, worker.status().getIndexedThrough());
+      }
+      try (StateArchiveServingWorkerV3 worker = worker(root, source, () -> { })) {
+        worker.offer(target(101, 102));
+        worker.completeInitialSync(target(101, 102));
+        assertEquals(100, worker.status().getIndexedFrom());
+        assertEquals(0, worker.status().getBuildSequence());
+      }
+    }
+  }
+
   private StateArchiveServingWorkerV3 worker(Path root,
       StateArchiveFiveLaneSegmentWriterV3 source, Runnable hook) {
     return new StateArchiveServingWorkerV3(
         () -> new StateArchiveServingIndexBuildCoordinatorV3(root, Engine.LEVELDB, 1000),
-        source, hook);
+        source, hook, 10);
   }
 
   private StateArchiveFiveLaneSegmentWriterV3 source(Path root) throws IOException {
