@@ -9,7 +9,6 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
-import java.util.UUID;
 import org.bouncycastle.util.encoders.Hex;
 import org.tron.core.db2.core.CommonCheckpointTarget;
 import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
@@ -18,12 +17,9 @@ import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
 public final class StateArchiveServingIndexBuildCoordinatorV3 implements AutoCloseable {
 
   static final String DIRECTORY = "serving-index-v3";
-  private final Path archiveRoot;
-  private final Path catalogRoot;
-  private final Engine engine;
   private final int bulkStartBlocks;
   private final List<BlockReverseDiff> pending = new ArrayList<>();
-  private PersistentServingKeyIndexCatalog catalog;
+  private final PersistentServingKeyIndexGeneration.MutableIndex index;
   private CommonCheckpointTarget committedHead;
   private byte[] latestSourceIdentity;
   private long indexedThrough = -1;
@@ -35,20 +31,20 @@ public final class StateArchiveServingIndexBuildCoordinatorV3 implements AutoClo
 
   public StateArchiveServingIndexBuildCoordinatorV3(Path archiveRoot, Engine engine,
       int bulkStartBlocks) throws IOException {
-    this.archiveRoot = Objects.requireNonNull(archiveRoot, "archiveRoot");
-    this.catalogRoot = archiveRoot.resolve(DIRECTORY);
-    this.engine = Objects.requireNonNull(engine, "engine");
+    Objects.requireNonNull(archiveRoot, "archiveRoot");
+    Objects.requireNonNull(engine, "engine");
+    Path catalogRoot = archiveRoot.resolve(DIRECTORY);
     if (bulkStartBlocks <= 0) {
       throw new IllegalArgumentException("bulkStartBlocks must be positive");
     }
     this.bulkStartBlocks = bulkStartBlocks;
-    if (Files.isRegularFile(catalogRoot.resolve("current"), LinkOption.NOFOLLOW_LINKS)) {
-      catalog = PersistentServingKeyIndexCatalog.open(catalogRoot, engine, stage -> { });
-      try (PersistentServingKeyIndexGeneration current = catalog.pin()) {
-        indexedThrough = current.getIndexedThrough();
-        indexedHash = current.getHeadHash();
-      }
+    if (Files.exists(catalogRoot.resolve("current"), LinkOption.NOFOLLOW_LINKS)) {
+      throw new IOException("Legacy serving generations require explicit migration; preserved");
     }
+    index = new PersistentServingKeyIndexGeneration.MutableIndex(
+        catalogRoot.resolve("single-v1"), engine);
+    indexedThrough = index.indexedThrough();
+    indexedHash = index.headHash();
     mode = Mode.BULK_CATCH_UP;
   }
 
@@ -84,7 +80,8 @@ public final class StateArchiveServingIndexBuildCoordinatorV3 implements AutoClo
       }
       return;
     }
-    BlockSnapshotMeta previous = pending.isEmpty() ? null : pending.get(pending.size() - 1).getMeta();
+    BlockSnapshotMeta previous = pending.isEmpty() ? null
+        : pending.get(pending.size() - 1).getMeta();
     if (previous == null && indexedThrough >= 0) {
       BlockSnapshotMeta first = diffs.get(0).getMeta();
       if (first.getBlockNumber() != indexedThrough + 1
@@ -101,8 +98,8 @@ public final class StateArchiveServingIndexBuildCoordinatorV3 implements AutoClo
       previous = diff.getMeta();
     }
     pending.addAll(diffs);
-    latestSourceIdentity = StateArchiveFileFormatV3.sha256(
-        new BlockHistoryCodec().encode(diffs.get(diffs.size() - 1)));
+    // Intermediate batches use the exact same final-block digest computed by the plan.
+    latestSourceIdentity = null;
     if (finalRange) {
       CommonCheckpointTarget target = Objects.requireNonNull(publishedHead, "publishedHead");
       if (!previous.equals(target.getLastBlock())) {
@@ -116,7 +113,7 @@ public final class StateArchiveServingIndexBuildCoordinatorV3 implements AutoClo
     }
   }
 
-  /** Drains the FIFO through the exact Common boundary and returns a generation-bound live handle. */
+  /** Drains through the exact Common boundary and returns a session-bound live handle. */
   public synchronized LiveServingIndexer completeInitialSync(CommonCheckpointTarget boundary)
       throws IOException {
     requireOpen();
@@ -134,7 +131,7 @@ public final class StateArchiveServingIndexBuildCoordinatorV3 implements AutoClo
       mode = Mode.LIVE_IMMEDIATE;
       syncSession++;
       return new LiveServingIndexer(syncSession, buildSequence,
-          catalog.getCurrentGenerationId());
+          index.identity());
     } catch (IOException | RuntimeException failure) {
       mode = Mode.CATCH_UP_REQUIRED;
       throw failure;
@@ -156,9 +153,7 @@ public final class StateArchiveServingIndexBuildCoordinatorV3 implements AutoClo
     if (!closed) {
       closed = true;
       mode = Mode.CLOSED;
-      if (catalog != null) {
-        catalog.close();
-      }
+      index.close();
     }
   }
 
@@ -202,39 +197,43 @@ public final class StateArchiveServingIndexBuildCoordinatorV3 implements AutoClo
     long base = indexedThrough >= 0 ? indexedThrough
         : pending.get(0).getMeta().getBlockNumber() - 1;
     byte[] baseHash = indexedHash == null ? pending.get(0).getMeta().getParentHash() : indexedHash;
-    ServingIndexIncrementalPlan plan = ServingIndexIncrementalPlan.planCommittedDiffs(
-        base, baseHash, pending);
-    byte[] sourceIdentity = Objects.requireNonNull(latestSourceIdentity,
-        "latestSourceIdentity");
-    String generationId = generationId(plan.getIndexedThrough(), plan.getHeadHash());
-    Path shadow = archiveRoot.resolve(".serving-index-v3-" + UUID.randomUUID());
-    try {
-      if (catalog == null) {
-        try (PersistentServingKeyIndexGeneration ignored =
-            PersistentServingKeyIndexGeneration.buildExact(shadow, generationId, plan,
-                sourceIdentity, engine, () -> { })) {
-          // Full descriptor and exact-27 coverage are verified again by catalog creation.
-        }
-        catalog = PersistentServingKeyIndexCatalog.create(catalogRoot, shadow);
-      } else {
-        String expected = catalog.getCurrentGenerationId();
-        try (PersistentServingKeyIndexGeneration current = catalog.pin();
-            PersistentServingKeyIndexGeneration ignored = current.extendExact(shadow,
-                generationId, plan, sourceIdentity)) {
-          // Verify immutable generation before CAS publication.
-        }
-        if (!catalog.publish(expected, shadow)) {
-          throw new IOException("Serving generation changed during FIFO publication");
-        }
+    long through = pending.get(pending.size() - 1).getMeta().getBlockNumber();
+    try (ServingIndexTiming timing = new ServingIndexTiming(mode.name(), base, through)) {
+      long planStarted = System.nanoTime();
+      ServingIndexIncrementalPlan plan;
+      try {
+        plan = ServingIndexIncrementalPlan.planCommittedDiffs(base, baseHash, pending);
+      } finally {
+        ServingIndexTiming.record(ServingIndexTiming.Stage.PLAN, planStarted);
       }
+      List<byte[]> steps = plan.getSourceStepDigests();
+      byte[] sourceIdentity = latestSourceIdentity == null
+          ? steps.get(steps.size() - 1) : latestSourceIdentity;
+      String generationId = generationId(plan.getIndexedThrough(), plan.getHeadHash());
+      index.append(generationId, plan, sourceIdentity, () -> { }, () -> { });
       indexedThrough = plan.getIndexedThrough();
       indexedHash = plan.getHeadHash();
       buildSequence++;
       pending.clear();
+      timing.succeeded();
     } catch (IOException | RuntimeException failure) {
       mode = Mode.CATCH_UP_REQUIRED;
       throw failure;
     }
+  }
+
+  /** Coverage starts at the base preceding the first available reverse diff, not at zero. */
+  public synchronized long getIndexedFrom() {
+    return index.indexedFrom();
+  }
+
+  synchronized PersistentServingKeyIndexGeneration pinIndexed(long baseline) throws IOException {
+    requireOpen();
+    if (mode != Mode.LIVE_IMMEDIATE || baseline < index.indexedFrom()
+        || baseline > indexedThrough) {
+      throw new IOException("Serving query baseline is outside ready coverage");
+    }
+    return index.pin();
   }
 
   private String generationId(long blockNumber, byte[] hash) {
@@ -245,7 +244,8 @@ public final class StateArchiveServingIndexBuildCoordinatorV3 implements AutoClo
   private BuildProgress progress() {
     long committed = committedHead == null ? indexedThrough
         : committedHead.getLastBlock().getBlockNumber();
-    return new BuildProgress(mode, indexedThrough, committed, pending.size(), buildSequence);
+    return new BuildProgress(mode, indexedThrough, committed, pending.size(), buildSequence,
+        index.indexedFrom());
   }
 
   private void requireOpen() {
@@ -266,6 +266,7 @@ public final class StateArchiveServingIndexBuildCoordinatorV3 implements AutoClo
 
   public static final class BuildProgress {
     private final Mode mode;
+    private final long indexedFrom;
     private final long indexedThrough;
     private final long committedThrough;
     private final int pendingBlocks;
@@ -273,18 +274,43 @@ public final class StateArchiveServingIndexBuildCoordinatorV3 implements AutoClo
 
     BuildProgress(Mode mode, long indexedThrough, long committedThrough,
         int pendingBlocks, long buildSequence) {
+      this(mode, indexedThrough, committedThrough, pendingBlocks, buildSequence, -1);
+    }
+
+    BuildProgress(Mode mode, long indexedThrough, long committedThrough,
+        int pendingBlocks, long buildSequence, long indexedFrom) {
       this.mode = mode;
+      this.indexedFrom = indexedFrom;
       this.indexedThrough = indexedThrough;
       this.committedThrough = committedThrough;
       this.pendingBlocks = pendingBlocks;
       this.buildSequence = buildSequence;
     }
 
-    public Mode getMode() { return mode; }
-    public long getIndexedThrough() { return indexedThrough; }
-    public long getCommittedThrough() { return committedThrough; }
-    public int getPendingBlocks() { return pendingBlocks; }
-    public long getBuildSequence() { return buildSequence; }
+    public Mode getMode() {
+      return mode;
+    }
+
+    public long getIndexedFrom() {
+      return indexedFrom;
+    }
+
+    public long getIndexedThrough() {
+      return indexedThrough;
+    }
+
+    public long getCommittedThrough() {
+      return committedThrough;
+    }
+
+    public int getPendingBlocks() {
+      return pendingBlocks;
+    }
+
+    public long getBuildSequence() {
+      return buildSequence;
+    }
+
   }
 
   public final class LiveServingIndexer {
@@ -299,13 +325,13 @@ public final class StateArchiveServingIndexBuildCoordinatorV3 implements AutoClo
       this.generation = generation;
     }
 
-    /** Publishes every block in the committed range as an individual durable generation. */
+    /** Commits every block and its progress atomically in the same long-lived database. */
     public BuildProgress indexNow(List<BlockReverseDiff> diffs, CommonCheckpointTarget target)
         throws IOException {
       synchronized (StateArchiveServingIndexBuildCoordinatorV3.this) {
         requireOpen();
         if (!valid || mode != Mode.LIVE_IMMEDIATE || session != syncSession
-            || sequence != buildSequence || !generation.equals(catalog.getCurrentGenerationId())) {
+            || sequence != buildSequence || !generation.equals(index.identity())) {
           throw new IllegalStateException("Serving live handle is stale");
         }
         List<BlockReverseDiff> admitted = new ArrayList<>(Objects.requireNonNull(diffs, "diffs"));
@@ -321,7 +347,7 @@ public final class StateArchiveServingIndexBuildCoordinatorV3 implements AutoClo
             published++;
           }
           sequence = buildSequence;
-          generation = catalog.getCurrentGenerationId();
+          generation = index.identity();
           return progress();
         } catch (IOException | RuntimeException failure) {
           if (rangeAccepted) {

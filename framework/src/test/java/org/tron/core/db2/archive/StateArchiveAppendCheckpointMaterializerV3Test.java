@@ -178,7 +178,7 @@ public class StateArchiveAppendCheckpointMaterializerV3Test {
             Thread.currentThread().interrupt();
             throw new IllegalStateException(failure);
           }
-        });
+        }, 10);
     CommonCheckpointFile wal = new CommonCheckpointFile(root.resolve("wal"));
     CommonCheckpointRedoCoordinator coordinator = new CommonCheckpointRedoCoordinator(wal,
         new FakeMaterializer(Authority.CHAINBASE), new FakeMaterializer(Authority.PATH_STATE),

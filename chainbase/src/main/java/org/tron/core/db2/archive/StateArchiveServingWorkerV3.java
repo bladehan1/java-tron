@@ -14,20 +14,32 @@ final class StateArchiveServingWorkerV3 implements AutoCloseable {
   private final Object dispatch = new Object();
   private final Thread thread;
   private final Runnable beforeBuild;
+  private final long tailDelayNanos;
   private CommonCheckpointTarget requested;
   private CommonCheckpointTarget completed;
   private CommonCheckpointTarget handoff;
   private boolean live;
   private boolean closing;
   private long pendingSince;
+  private StateArchiveServingIndexBuildCoordinatorV3 coordinator;
+  private StateArchiveServingIndexBuildCoordinatorV3.LiveServingIndexer liveHandle;
   private volatile IOException failure;
   private volatile BuildProgress progress;
 
   StateArchiveServingWorkerV3(CoordinatorFactory factory,
       StateArchiveFiveLaneSegmentWriterV3 source, Runnable beforeBuild) {
+    this(factory, source, beforeBuild, 15_000);
+  }
+
+  StateArchiveServingWorkerV3(CoordinatorFactory factory,
+      StateArchiveFiveLaneSegmentWriterV3 source, Runnable beforeBuild, long tailDelayMillis) {
     this.factory = factory;
     this.source = source;
     this.beforeBuild = beforeBuild;
+    if (tailDelayMillis < 0 || tailDelayMillis > 60_000) {
+      throw new IllegalArgumentException("Invalid serving tail delay");
+    }
+    tailDelayNanos = java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(tailDelayMillis);
     progress = new BuildProgress(StateArchiveServingIndexBuildCoordinatorV3.Mode.BULK_CATCH_UP,
         -1, -1, 0, 0);
     thread = new Thread(this::run, "state-archive-serving-v3");
@@ -49,12 +61,30 @@ final class StateArchiveServingWorkerV3 implements AutoCloseable {
           throw gap;
         }
         requested = target;
+        ServingIndexTiming.progress(status());
         if (pendingSince == 0) {
           pendingSince = System.nanoTime();
         }
         notifyAll();
-        if (live) {
-          await(target, false);
+      }
+      if (live && !target.equals(completed)) {
+        try {
+          beforeBuild.run();
+          List<BlockReverseDiff> batch = readSource(
+              progress.getIndexedThrough(), target.getLastBlock().getBlockNumber(),
+              MAX_SOURCE_BYTES);
+          progress = liveHandle.indexNow(batch, target);
+          ServingIndexTiming.progress(status());
+          synchronized (this) {
+            completed = target;
+            pendingSince = 0;
+          }
+        } catch (IOException | RuntimeException error) {
+          progress = coordinator.status();
+          ServingIndexTiming.progress(status());
+          IOException cause = new IOException("Foreground serving index failed", error);
+          fail(cause);
+          throw cause;
         }
       }
     }
@@ -71,6 +101,14 @@ final class StateArchiveServingWorkerV3 implements AutoCloseable {
         notifyAll();
         await(target, true);
       }
+      try {
+        thread.join();
+      } catch (InterruptedException interrupted) {
+        Thread.currentThread().interrupt();
+        IOException cause = new IOException("Interrupted joining serving bulk owner", interrupted);
+        fail(cause);
+        throw cause;
+      }
     }
   }
 
@@ -83,7 +121,7 @@ final class StateArchiveServingWorkerV3 implements AutoCloseable {
         : handoff != null && !live
             ? StateArchiveServingIndexBuildCoordinatorV3.Mode.HANDOFF_DRAINING : snapshot.getMode(),
         snapshot.getIndexedThrough(), committed, snapshot.getPendingBlocks(),
-        snapshot.getBuildSequence());
+        snapshot.getBuildSequence(), snapshot.getIndexedFrom());
   }
 
   IOException failure() {
@@ -116,11 +154,13 @@ final class StateArchiveServingWorkerV3 implements AutoCloseable {
   }
 
   private void run() {
-    StateArchiveServingIndexBuildCoordinatorV3 coordinator = null;
-    StateArchiveServingIndexBuildCoordinatorV3.LiveServingIndexer handle = null;
     try {
       coordinator = factory.open();
       progress = coordinator.status();
+      if (coordinator.getIndexedFrom() >= 0
+          && coordinator.getIndexedFrom() != source.getHistoryStartBlock() - 1) {
+        throw new IOException("Serving indexedFrom differs from available history baseline");
+      }
       while (true) {
         CommonCheckpointTarget target;
         boolean enterLive;
@@ -132,10 +172,10 @@ final class StateArchiveServingWorkerV3 implements AutoCloseable {
           if (closing || failure != null) {
             return;
           }
-          // Prototype budget: at most one second before flushing an undersized tail.
+          // Bound tail age without forcing a tiny publication every second during sync.
           if (!live && handoff == null
               && requested.getLastBlock().getBlockNumber() - progress.getIndexedThrough() < 1_000) {
-            long remaining = 1_000_000_000L - (System.nanoTime() - pendingSince);
+            long remaining = tailDelayNanos - (System.nanoTime() - pendingSince);
             if (remaining > 0) {
               wait(Math.max(1, remaining / 1_000_000L));
               continue;
@@ -145,7 +185,7 @@ final class StateArchiveServingWorkerV3 implements AutoCloseable {
           enterLive = handoff != null && !live;
         }
         beforeBuild.run();
-        if (handle == null) {
+        if (liveHandle == null) {
           long cursor = progress.getIndexedThrough();
           if (cursor < 0) {
             cursor = source.getHistoryStartBlock() - 1;
@@ -157,38 +197,41 @@ final class StateArchiveServingWorkerV3 implements AutoCloseable {
           if (cursor == end) {
             coordinator.recoverCommittedRange(Collections.emptyList(), target, true);
           }
+          int readBlocks = 1_000;
           while (cursor < end) {
             synchronized (this) {
               if (closing || failure != null) {
                 return;
               }
             }
-            long batchEnd = Math.min(end, cursor + 1_000);
+            long batchEnd = Math.min(end, cursor + readBlocks);
             List<BlockReverseDiff> batch;
             while (true) {
               try {
-                batch = source.readCommittedDiffs(cursor, batchEnd, MAX_SOURCE_BYTES);
+                batch = readSource(cursor, batchEnd, MAX_SOURCE_BYTES);
                 break;
               } catch (StateArchiveFiveLaneSegmentWriterV3.ServingReadBudgetException tooLarge) {
                 if (batchEnd == cursor + 1) {
                   throw tooLarge;
                 }
                 batchEnd = cursor + (batchEnd - cursor) / 2;
+                readBlocks = Math.toIntExact(batchEnd - cursor);
               }
             }
             coordinator.recoverCommittedRange(batch, target, batchEnd == end);
             coordinator.flushRecoveryBatch();
             progress = coordinator.status();
+            ServingIndexTiming.progress(status());
             cursor = batchEnd;
           }
           if (enterLive) {
-            handle = coordinator.completeInitialSync(target);
+            liveHandle = coordinator.completeInitialSync(target);
           }
         } else if (!target.equals(completed)) {
-          List<BlockReverseDiff> batch = source.readCommittedDiffs(
+          List<BlockReverseDiff> batch = readSource(
               progress.getIndexedThrough(), target.getLastBlock().getBlockNumber(),
               MAX_SOURCE_BYTES);
-          handle.indexNow(batch, target);
+          liveHandle.indexNow(batch, target);
         }
         progress = coordinator.status();
         synchronized (this) {
@@ -196,8 +239,13 @@ final class StateArchiveServingWorkerV3 implements AutoCloseable {
           if (target.equals(requested)) {
             pendingSince = 0;
           }
-          live = failure == null && handle != null;
+          live = failure == null && liveHandle != null;
+          ServingIndexTiming.progress(status());
           notifyAll();
+          if (live) {
+            // No further background writes. Dispatch now owns the same coordinator and DB.
+            return;
+          }
         }
       }
     } catch (InterruptedException interrupted) {
@@ -210,7 +258,7 @@ final class StateArchiveServingWorkerV3 implements AutoCloseable {
       fail(new IOException("Serving build failed", buildFailure));
     } finally {
       try {
-        if (coordinator != null) {
+        if (coordinator != null && liveHandle == null) {
           coordinator.close();
         }
       } catch (IOException closeFailure) {
@@ -222,12 +270,24 @@ final class StateArchiveServingWorkerV3 implements AutoCloseable {
     }
   }
 
+  private List<BlockReverseDiff> readSource(long from, long through, long maxBytes)
+      throws IOException {
+    long started = System.nanoTime();
+    try {
+      return source.readCommittedDiffs(from, through, maxBytes);
+    } finally {
+      ServingIndexTiming.sourceCall(started);
+    }
+  }
+
   private synchronized void fail(IOException cause) {
     failure = cause;
     live = false;
     progress = new BuildProgress(StateArchiveServingIndexBuildCoordinatorV3.Mode.CATCH_UP_REQUIRED,
         progress.getIndexedThrough(), requested == null ? -1
-            : requested.getLastBlock().getBlockNumber(), 0, progress.getBuildSequence());
+            : requested.getLastBlock().getBlockNumber(), 0, progress.getBuildSequence(),
+        progress.getIndexedFrom());
+    ServingIndexTiming.progress(status());
     org.slf4j.LoggerFactory.getLogger("DB").error("Archive serving owner degraded", cause);
     notifyAll();
   }
@@ -244,6 +304,11 @@ final class StateArchiveServingWorkerV3 implements AutoCloseable {
         thread.join();
       } catch (InterruptedException retry) {
         interrupted = true;
+      }
+    }
+    synchronized (dispatch) {
+      if (coordinator != null) {
+        coordinator.close();
       }
     }
     if (interrupted) {

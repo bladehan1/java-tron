@@ -112,6 +112,18 @@ public final class ServingIndexIncrementalPlan {
         new ArrayList<>(ArchiveStoreScope.getStateDatabases()));
     List<BlockReverseDiff> diffs = new ArrayList<>(Objects.requireNonNull(committedDiffs,
         "committedDiffs"));
+    long entries = 0;
+    long inputBytes = 0;
+    for (BlockReverseDiff diff : diffs) {
+      for (BlockReverseDiff.DbGroup group : diff.getGroups()) {
+        for (BlockReverseDiff.Entry entry : group.getEntries()) {
+          inputBytes += entry.estimatedIndexInputBytes();
+          if (++entries > 250_000 || inputBytes > 128L * 1024 * 1024) {
+            throw new IllegalArgumentException("Serving plan input budget exceeded");
+          }
+        }
+      }
+    }
     Map<String, List<KeyChange>> changes = new LinkedHashMap<>();
     participants.forEach(database -> changes.put(database, new ArrayList<>()));
     MessageDigest seed = sha256();
@@ -149,7 +161,13 @@ public final class ServingIndexIncrementalPlan {
         }
         previousDatabase = group.getDbName();
       }
-      byte[] step = sha256().digest(sourceCodec.encode(diff));
+      long digestStarted = System.nanoTime();
+      byte[] step;
+      try {
+        step = sha256().digest(sourceCodec.encode(diff));
+      } finally {
+        ServingIndexTiming.record(ServingIndexTiming.Stage.DIGEST, digestStarted);
+      }
       steps.add(step);
       delta.update(step);
       previousBlock = meta.getBlockNumber();

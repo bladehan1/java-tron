@@ -33,6 +33,10 @@ public final class OldValue {
     return present;
   }
 
+  int valueLength() {
+    return present ? value.length : 0;
+  }
+
   public byte[] getValue() {
     if (!present) {
       throw new IllegalStateException("absent old value has no bytes");
