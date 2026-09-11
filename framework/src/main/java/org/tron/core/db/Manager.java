@@ -1333,9 +1333,7 @@ public class Manager {
                 accountAssetStore::prefixQuery, this::scanPathStateActivationAccounts);
     org.tron.core.config.args.Storage storage = Args.getInstance().getStorage();
     PathStateRuntimeAttachment attachment = storage.isCommonCheckpointEnabled()
-        ? PathStateRuntimeAttachment.commonCheckpoint(collector, this::advancePathStateRoot,
-            transition -> pathStateSnapshotHead.preview(transition),
-            (meta, transition) -> pathStateSnapshotHead.prepareSnapshotDelta(meta, transition))
+        ? PathStateRuntimeAttachment.commonCheckpoint(collector, pathStateSnapshotHead)
         : storage.isPathStateRootAsyncPrepareBenchmark()
         ? PathStateRuntimeAttachment.deferred(collector, this::advancePathStateRoot,
             this::flushPathStateBaseThrough,
@@ -2119,11 +2117,18 @@ public class Manager {
   }
 
   private void commitBlockSession(ISession blockSession, BlockCapsule block) {
+    // This is the block-final handoff after applyBlock.  SnapshotManager.commit() performs the
+    // P66 fold, freezes one BlockChangeView, and prepares Archive old values/diff plus PathState
+    // transition/delta from that same view.  It may run those two preparation branches in
+    // parallel, but this call does not mean that either authority is durable yet.
     blockSession.commit(BlockSnapshotMeta.forBlock(
         block.getNum(),
         block.getBlockId().getBytes(),
         block.getParentHash().getBytes(),
         block.getTimeStamp()));
+    // Header diagnosis is observational and must remain after the commit handoff.  It must not
+    // become a second state-root publication path or be used as proof that checkpoint flush has
+    // completed.
     diagnosePathStateHeader(block);
   }
 

@@ -39,6 +39,14 @@ public final class SnapshotOldValueCollector implements OldValueCollector {
 
   @Override
   public BlockReverseDiff collect(BlockChangeView view) {
+    // Production physical mode has no account/account-asset special case. Projection below
+    // exists only for legacy snapshots that have not materialized proposal 66 themselves.
+    if (accountAssetProjector == null) {
+      return BlockReverseDiff.collect(view);
+    }
+    // This is the Archive side of block-final prepare: resolve old values from each changed
+    // Store's previous Snapshot and encode only logical changes.  The result is attached to the
+    // Snapshot layer; history-file append/force is owned by checkpoint flush, not this method.
     List<BlockReverseDiff.DbGroup> groups = new ArrayList<>();
     List<BlockReverseDiff.Entry> accountAssetEntries = new ArrayList<>();
     boolean targetAssetOptimizationEnabled = accountAssetProjector != null

@@ -209,6 +209,16 @@ public class SnapshotManager implements RevokingDatabase {
       flushCount = flushCount + (size - maxSize.get());
       updateSolidity(size - maxSize.get());
       size = maxSize.get();
+      // Only this prefix is finalized. Spread history append before the batch checkpoint;
+      // current commit(meta) remains revocable and must never write finalized history.
+      if (commonCheckpointRuntimeAttachment != null) {
+        try {
+          commonCheckpointRuntimeAttachment.appendFinalizedHistory(flushCount);
+        } catch (IOException | RuntimeException failure) {
+          hitDown = true;
+          throw new TronError("Finalized Archive append failed", failure, TronError.ErrCode.DB_FLUSH);
+        }
+      }
       flush();
     }
 
@@ -298,7 +308,20 @@ public class SnapshotManager implements RevokingDatabase {
   }
 
   /**
-   * Commits a block session and materializes its reverse diff using the configured collector.
+   * Commits one block-final Snapshot layer and prepares all derived artifacts.
+   *
+   * <p>The P66 materializer first folds the Account/AccountAsset coupled mutation into this
+   * Snapshot.  {@link BlockChangeView#capture(BlockSnapshotMeta, List)} then freezes the changed
+   * keys and post-values, including a reference to the previous Snapshot for old-value lookup.
+   * The archive and PathState branches consume that same immutable view in parallel.  This is a
+   * preparation barrier: the archive branch builds a {@link BlockReverseDiff}, while the PathState
+   * branch builds a transition and its Snapshot delta.  Neither branch is allowed to publish its
+   * durable authority independently at this point.
+   *
+   * <p>After both branches complete, the artifacts are attached to each Store's Snapshot layer
+   * and PathState is published.  Common checkpoint flush later writes the artifacts per Store and
+   * forces the history files under one target.  Keeping this distinction explicit prevents a
+   * future optimization from treating the two CPU tasks as independently durable writes.
    * Plain transaction/pending sessions must continue to use {@link #commit()} or merge/revoke.
    */
   public synchronized void commit(BlockSnapshotMeta meta) {
@@ -317,6 +340,8 @@ public class SnapshotManager implements RevokingDatabase {
       }
     }
 
+    // P66 must be materialized before capture: both consumers need the same post-P66 physical
+    // change view, otherwise AccountAsset and PathState can derive different block artifacts.
     if (p66Materializer != null) {
       long p66Start = System.nanoTime();
       P66CoupledMutationMaterializer.Statistics stats = p66Materializer.materialize();
@@ -332,16 +357,22 @@ public class SnapshotManager implements RevokingDatabase {
       changeView = BlockChangeView.capture(meta, dbs);
     }
     long frozenNanos = System.nanoTime();
-    BlockReverseDiff reverseDiff;
-    PathStateBlockTransition pathStateTransition;
+    BlockReverseDiff reverseDiff = null;
+    PathStateBlockTransition pathStateTransition = null;
     long archiveNanos;
     long pathNanos;
-    if (p66Materializer != null && oldValueCollector != null
-        && pathStateRuntimeAttachment != null) {
+    boolean commonPathState = pathStateRuntimeAttachment != null
+        && pathStateRuntimeAttachment.isCommonCheckpointOnly();
+    // This is the current, still revocable block, NOT the solid prefix selected by flush().
+    // Its diff must not be appended as finalized history here.
+    boolean parallel = p66Materializer != null && oldValueCollector != null
+        && pathStateRuntimeAttachment != null;
+    long parallelStart = System.nanoTime();
+    long[] archiveElapsed = new long[1];
+    Future<BlockReverseDiff> archive = null;
+    if (parallel) {
       BlockChangeView frozen = changeView;
-      long parallelStart = System.nanoTime();
-      long[] archiveElapsed = new long[1];
-      Future<BlockReverseDiff> archive = artifactExecutor.submit(() -> {
+      archive = artifactExecutor.submit(() -> {
         long start = System.nanoTime();
         try {
           return Objects.requireNonNull(oldValueCollector.collect(frozen),
@@ -350,17 +381,39 @@ public class SnapshotManager implements RevokingDatabase {
           archiveElapsed[0] = System.nanoTime() - start;
         }
       });
-      long pathStart = System.nanoTime();
-      Throwable pathFailure = null;
-      pathStateTransition = null;
-      try {
-        pathStateTransition = Objects.requireNonNull(pathStateRuntimeAttachment.capture(frozen),
-            "PathState capture failed before block-final barrier");
-      } catch (Throwable failure) {
-        pathFailure = failure;
+    } else {
+      reverseDiff = oldValueCollector == null ? null : Objects.requireNonNull(
+          oldValueCollector.collect(changeView), "archive collector returned null");
+    }
+    archiveNanos = System.nanoTime();
+    long pathStart = System.nanoTime();
+    Throwable pathFailure = null;
+    try {
+      // Exactly one capture per block. P66 and legacy paths differ only in scheduling/failure
+      // policy; they do not collect or construct the trie twice.
+      if (pathStateRuntimeAttachment != null) {
+        pathStateTransition = pathStateRuntimeAttachment.capture(changeView);
       }
-      long pathElapsed = System.nanoTime() - pathStart;
-      // Never cancel-and-revoke: the other reader must finish before releasing the Snapshot.
+      if ((parallel || commonPathState) && pathStateTransition == null) {
+        throw new IllegalStateException("PathState capture failed before block-final barrier",
+            pathStateRuntimeAttachment.getFailure());
+      }
+    } catch (Throwable failure) {
+      if (!parallel) {
+        if (commonPathState) {
+          throw rejectBlockArtifacts(new IllegalStateException(
+              "Block-final PathState preparation failed", failure));
+        }
+        throw failure;
+      }
+      pathFailure = failure;
+    }
+    pathNanos = System.nanoTime();
+    long pathElapsed = pathNanos - pathStart;
+    if (parallel) {
+      // Never cancel-and-revoke: both readers retain Snapshot references.  Releasing this block
+      // layer before the other branch finishes would make old-value reads or PathState reads race
+      // with Snapshot reclamation and would invalidate the shared-view contract.
       boolean interrupted = false;
       Throwable archiveFailure = null;
       reverseDiff = null;
@@ -386,7 +439,7 @@ public class SnapshotManager implements RevokingDatabase {
           rejected.addSuppressed(archiveFailure);
         }
         pathStateRuntimeAttachment.fail(rejected);
-        throw rejected;
+        throw rejectBlockArtifacts(rejected);
       }
       archiveNanos = System.nanoTime();
       pathNanos = archiveNanos;
@@ -394,40 +447,42 @@ public class SnapshotManager implements RevokingDatabase {
               + "archiveP66Projection=0, pathP66Projection=0", meta.getBlockNumber(),
           TimeUnit.NANOSECONDS.toMillis(archiveElapsed[0]),
           TimeUnit.NANOSECONDS.toMillis(pathElapsed), elapsedMillis(parallelStart, pathNanos));
-    } else {
-      reverseDiff = oldValueCollector == null ? null : Objects.requireNonNull(
-          oldValueCollector.collect(changeView), "archive collector returned null");
-      archiveNanos = System.nanoTime();
-      pathStateTransition = pathStateRuntimeAttachment == null ? null
-          : pathStateRuntimeAttachment.capture(changeView);
-      pathNanos = System.nanoTime();
     }
     PathStateSnapshotDelta pathStateDelta = pathStateTransition == null ? null
         : pathStateRuntimeAttachment.preparedSnapshotDelta(pathStateTransition);
 
+    // Expands optimized heads with inherited entries, not commit/flush. Keep AFTER collecting
+    // changed entries: doing this before capture would turn unchanged keys into apparent changes.
     dbs.forEach(db -> {
       if (db.getHead().isOptimized()) {
         db.getHead().reloadToMem();
       }
     });
 
+    // Shared references, not one copy of the block artifacts per database. The checkpoint
+    // payload reader traverses per-store layers and deduplicates these artifacts by block identity.
+    // All databases carry meta; only archive state databases carry the reverse diff / trie redo.
     for (Chainbase db : dbs) {
       boolean stateDatabase = ArchiveStoreScope.isStateDatabase(db.getDbName());
       ((SnapshotImpl) db.getHead()).attachBlockArtifacts(meta,
           stateDatabase ? reverseDiff : null, stateDatabase ? pathStateDelta : null);
     }
     long attachedNanos = System.nanoTime();
-    if (p66Materializer == null) {
+    if (p66Materializer == null && !commonPathState) {
       --activeSession;
     }
+    // PathState publication advances the volatile/in-memory owner only after both prepared
+    // artifacts have been attached.  Durable CURRENT advancement belongs to the checkpoint
+    // materializer and must not be moved into either parallel prepare branch.
     if (pathStateRuntimeAttachment != null) {
       pathStateRuntimeAttachment.publish(pathStateTransition);
-      if (p66Materializer != null && pathStateRuntimeAttachment.getFailure() != null) {
-        throw new IllegalStateException("Block-final PathState publication failed",
-            pathStateRuntimeAttachment.getFailure());
+      if ((p66Materializer != null || commonPathState)
+          && pathStateRuntimeAttachment.getFailure() != null) {
+        throw rejectBlockArtifacts(new IllegalStateException(
+            "Block-final PathState publication failed", pathStateRuntimeAttachment.getFailure()));
       }
     }
-    if (p66Materializer != null) {
+    if (p66Materializer != null || commonPathState) {
       --activeSession;
     }
     long completedNanos = System.nanoTime();
@@ -439,6 +494,23 @@ public class SnapshotManager implements RevokingDatabase {
           elapsedMillis(pathNanos, attachedNanos), elapsedMillis(attachedNanos, completedNanos),
           elapsedMillis(startedNanos, completedNanos));
     }
+  }
+
+  /**
+   * Common PathState is required state, not a best-effort shadow. Reuse the database fatal-error
+   * route so a failed prepare/adoption cannot leave the node serving with a failed state owner.
+   * The parallel caller must join its Archive reader before reaching this method. Restart uses
+   * the existing Common checkpoint recovery; no in-process retry or history rollback is added.
+   */
+  private IllegalStateException rejectBlockArtifacts(IllegalStateException failure) {
+    if (pathStateRuntimeAttachment != null
+        && pathStateRuntimeAttachment.isCommonCheckpointOnly()) {
+      hitDown = true;
+      pathStateRuntimeAttachment.fail(failure);
+      logger.error("Fatal Common block artifact failure; restart recovery is required", failure);
+      throw new TronError(failure, TronError.ErrCode.DB_FLUSH);
+    }
+    return failure;
   }
 
   private static long elapsedMillis(long startedNanos, long completedNanos) {

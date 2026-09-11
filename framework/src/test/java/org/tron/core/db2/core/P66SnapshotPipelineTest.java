@@ -77,6 +77,7 @@ public class P66SnapshotPipelineTest {
       f.accounts.getHead().put(ADDRESS, before.toByteArray());
       AtomicReference<BlockChangeView> archiveView = new AtomicReference<>();
       AtomicReference<BlockChangeView> pathView = new AtomicReference<>();
+      AtomicInteger pathCaptures = new AtomicInteger();
       CountDownLatch archiveEntered = new CountDownLatch(1);
       CountDownLatch pathEntered = new CountDownLatch(1);
       f.manager.installArchiveCollector(view -> {
@@ -86,6 +87,7 @@ public class P66SnapshotPipelineTest {
         return new SnapshotOldValueCollector().collect(view);
       }, diff -> { });
       f.manager.attachPathStateRuntime(new PathStateRuntimeAttachment(view -> {
+        pathCaptures.incrementAndGet();
         pathView.set(view);
         pathEntered.countDown();
         await(archiveEntered);
@@ -96,6 +98,7 @@ public class P66SnapshotPipelineTest {
         block.commit(meta(1));
       }
       assertTrue(archiveView.get() == pathView.get());
+      assertEquals(1, pathCaptures.get());
       assertEquals(9, Longs.fromByteArray(f.assets.getUnchecked(ASSET)));
       Account after = Account.parseFrom(f.accounts.getUnchecked(ADDRESS));
       assertTrue(after.getAssetOptimized());
@@ -369,9 +372,11 @@ public class P66SnapshotPipelineTest {
             Engine.LEVELDB, new PathStateLayerLimits(16, 16L << 20))) {
       head.admitFreshCommonBaseline(baseline);
       PathStateRuntimeAttachment attachment = PathStateRuntimeAttachment.commonCheckpoint(
-          new PhysicalSnapshotPathStateCollector(), transition -> head.advance(transition),
-          head::preview, head::prepareSnapshotDelta);
+          new PhysicalSnapshotPathStateCollector(), head);
       attachment.synchronizeReadyHead(baselineHead);
+      // Legacy base flush must remain a no-op: only Common may persist this head.
+      attachment.flushBaseThrough(0, addressHash(0));
+      assertFalse(attachment.isFailed());
       f.manager.attachPathStateRuntime(attachment);
       f.manager.installArchiveCollector(new SnapshotOldValueCollector(), diff -> { });
       try (ISession block = f.manager.buildSession()) {

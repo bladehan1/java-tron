@@ -52,6 +52,16 @@ public final class CommonCheckpointRuntimeAttachment implements AutoCloseable {
     }
   }
 
+  public synchronized void appendFinalizedHistory(int flushCount) throws IOException {
+    requireReady();
+    try {
+      runtime.appendFinalizedHistory(flushCount);
+    } catch (IOException | RuntimeException failure) {
+      state = State.FAILED;
+      throw failure;
+    }
+  }
+
   /** Pins one point-only query from a fully recovered and non-failed runtime. */
   public synchronized StateArchiveCheckpointReadSnapshot pinPoint(long targetBlock)
       throws IOException {
