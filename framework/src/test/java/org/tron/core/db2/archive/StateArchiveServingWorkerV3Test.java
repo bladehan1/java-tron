@@ -147,7 +147,7 @@ public class StateArchiveServingWorkerV3Test {
   private StateArchiveServingWorkerV3 worker(Path root,
       StateArchiveFiveLaneSegmentWriterV3 source, Runnable hook) {
     return new StateArchiveServingWorkerV3(
-        () -> new StateArchiveServingIndexBuildCoordinatorV3(root, Engine.LEVELDB, 1000),
+        () -> new StateArchiveServingIndexBuildCoordinatorV3(root, Engine.ROCKSDB, 1000),
         source, hook, 10);
   }
 

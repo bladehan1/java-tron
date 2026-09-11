@@ -24,7 +24,7 @@ public class ServingIndexTimingTest {
     CommonParameter.getInstance().setMetricsPrometheusEnable(true);
     try (PersistentServingKeyIndexGeneration.MutableIndex index =
         new PersistentServingKeyIndexGeneration.MutableIndex(
-            temporaryFolder.newFolder().toPath(), Engine.LEVELDB)) {
+            temporaryFolder.newFolder().toPath(), Engine.ROCKSDB)) {
       try (ServingIndexTiming timing = new ServingIndexTiming("BULK_CATCH_UP", 100, 101)) {
         BlockReverseDiff diff = new BlockReverseDiff(BlockSnapshotMeta.forBlock(101, hash(101),
             hash(100), 303000), Collections.singletonList(new BlockReverseDiff.DbGroup("code",

@@ -506,6 +506,12 @@ final class StateArchiveIndexDatabase {
     }
   }
 
+  static org.rocksdb.LRUCache newServingBlockCache(long capacity) {
+    // Serving has one write owner. Full SST filters can exceed a default cache shard's
+    // budget and are then evicted on release; share the full budget without fragmentation.
+    return new org.rocksdb.LRUCache(capacity, 0, false);
+  }
+
   private static final class RocksResources implements Closeable {
     private final org.rocksdb.LRUCache cache;
     private final org.rocksdb.BloomFilter filter;
@@ -513,7 +519,7 @@ final class StateArchiveIndexDatabase {
 
     private RocksResources(NativeDbConfig config, boolean create) {
       org.rocksdb.RocksDB.loadLibrary();
-      cache = new org.rocksdb.LRUCache(config.getCacheSize());
+      cache = newServingBlockCache(config.getCacheSize());
       filter = new org.rocksdb.BloomFilter(config.getBloomBitsPerKey(), false);
       org.rocksdb.BlockBasedTableConfig table = new org.rocksdb.BlockBasedTableConfig()
           .setBlockSize(config.getBlockSize())
