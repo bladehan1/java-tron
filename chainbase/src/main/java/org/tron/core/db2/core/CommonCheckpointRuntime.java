@@ -233,6 +233,11 @@ public final class CommonCheckpointRuntime implements AutoCloseable {
     if (!(archivePlanner instanceof StateArchiveAppendCheckpointMaterializerV3)) {
       return;
     }
+    long started = nanoTime.getAsLong();
+    long collectUs = 0;
+    long appendUs = 0;
+    long head = -1;
+    boolean success = false;
     try {
       Chainbase state = databases.stream()
           .filter(db -> ArchiveStoreScope.isStateDatabase(db.getDbName())).findFirst()
@@ -250,11 +255,24 @@ public final class CommonCheckpointRuntime implements AutoCloseable {
           throw new IOException("Finalized Archive prefix artifact identity differs");
         }
         diffs.add(diff);
+        head = diff.getMeta().getBlockNumber();
       }
+      collectUs = elapsedUs(started);
+      long appendStarted = nanoTime.getAsLong();
       ((StateArchiveAppendCheckpointMaterializerV3) archivePlanner).appendFinalized(diffs);
+      appendUs = elapsedUs(appendStarted);
+      success = true;
     } catch (IOException | RuntimeException failure) {
       owner.fail(failure);
       throw failure;
+    } finally {
+      // Attribute this call to the next completed PushBlock on the SAME thread, not to head:
+      // head is the finalized prefix target and lags the block currently being executed.
+      // pendingBlocks counts offered layers, not new writes (already appended layers are skipped).
+      // This is separate from checkpoint hotPrepareUs; summing both must not lose moved work.
+      logger.info("Finalized Archive append stages: head={}, pendingBlocks={}, collectUs={}, "
+              + "appendUs={}, totalUs={}, success={}", head, flushCount, collectUs, appendUs,
+          elapsedUs(started), success);
     }
   }
 

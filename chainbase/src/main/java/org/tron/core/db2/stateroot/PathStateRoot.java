@@ -39,6 +39,7 @@ public final class PathStateRoot {
   private final Map<Integer, LinkedHashMap<MutationKey, PathStateParticipant>>
       pendingLeafMutations = new LinkedHashMap<>();
   private final PathMerkleTrie superTrie;
+  private final PathStateNodeOverlay nodeOverlay;
   private volatile boolean rootMaterialized;
 
   public PathStateRoot(PathStateParticipantScope scope, PathNodeStoreFactory storeFactory,
@@ -49,6 +50,7 @@ public final class PathStateRoot {
   private PathStateRoot(PathStateParticipantScope scope, PathNodeStoreFactory storeFactory,
       PathNodeStore superNodeStore, Snapshot snapshot) {
     this.scope = Objects.requireNonNull(scope, "scope");
+    this.nodeOverlay = snapshot == null ? null : snapshot.nodeOverlay;
     PathNodeStoreFactory factory = Objects.requireNonNull(storeFactory, "storeFactory");
     Set<PathNodeStore> uniqueStores = Collections.newSetFromMap(new IdentityHashMap<>());
     for (PathStateParticipant participant : scope.getParticipants()) {
@@ -551,7 +553,7 @@ public final class PathStateRoot {
       snapshots.put(participant.getDbName(),
           participantTries.get(participant.getDbName()).snapshot());
     }
-    return new Snapshot(snapshots, superTrie.snapshot(), stateRoot);
+    return new Snapshot(snapshots, superTrie.snapshot(), stateRoot, nodeOverlay);
   }
 
   static PathStateRoot fromSnapshot(PathStateParticipantScope scope,
@@ -693,12 +695,26 @@ public final class PathStateRoot {
     private final Map<String, PathMerkleTrie.Snapshot> participants;
     private final PathMerkleTrie.Snapshot superTrie;
     private final byte[] stateRoot;
+    private final PathStateNodeOverlay nodeOverlay;
 
     private Snapshot(Map<String, PathMerkleTrie.Snapshot> participants,
-        PathMerkleTrie.Snapshot superTrie, byte[] stateRoot) {
+        PathMerkleTrie.Snapshot superTrie, byte[] stateRoot, PathStateNodeOverlay nodeOverlay) {
       this.participants = Collections.unmodifiableMap(new LinkedHashMap<>(participants));
       this.superTrie = Objects.requireNonNull(superTrie, "superTrie");
       this.stateRoot = Arrays.copyOf(stateRoot, stateRoot.length);
+      this.nodeOverlay = nodeOverlay;
+    }
+
+    PathStateNodeOverlay nodeOverlay() {
+      return nodeOverlay;
+    }
+
+    Snapshot withNodeOverlay(PathStateNodeOverlay overlay) {
+      return new Snapshot(participants, superTrie, stateRoot, overlay);
+    }
+
+    PathNodeStore nodeStore(int storeId, PathNodeStore baseline) {
+      return nodeOverlay == null ? baseline : nodeOverlay.view(storeId, baseline);
     }
 
     public byte[] getStateRoot() {
@@ -710,7 +726,7 @@ public final class PathStateRoot {
       for (Map.Entry<String, PathMerkleTrie.Snapshot> entry : participants.entrySet()) {
         detached.put(entry.getKey(), entry.getValue().detach());
       }
-      return new Snapshot(detached, superTrie.detach(), stateRoot);
+      return new Snapshot(detached, superTrie.detach(), stateRoot, nodeOverlay);
     }
 
     Snapshot reparent(Snapshot newParent) {
@@ -726,7 +742,7 @@ public final class PathStateRoot {
       if (reparented.size() != parent.participants.size()) {
         throw new IllegalArgumentException("snapshot parent participant set differs");
       }
-      return new Snapshot(reparented, superTrie.reparent(parent.superTrie), stateRoot);
+      return new Snapshot(reparented, superTrie.reparent(parent.superTrie), stateRoot, nodeOverlay);
     }
 
     byte[] participantRoot(String dbName) {
