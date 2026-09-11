@@ -196,9 +196,8 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
     List<HeadState> candidateHistory = new ArrayList<>();
     BlockSnapshotMeta replayParent = targetBlock;
 
-    // Foreground rebase work: replay each UNFLUSHED block above the new durable baseline.
-    // replaySnapshotDelta currently reapplies flat mutations to the trie and verifies roots;
-    // it is not a pointer-only splice or a native checkpoint write.
+    // Rebind only the UNFLUSHED encoded-node suffix to the new durable baseline. Do not rerun
+    // trie updates from flat mutations or retain the old resolved tree graph through reparenting.
     for (int index = position.historyIndex; index < history.size(); index++) {
       HeadState retained = history.get(index);
       PathStateRootMetadata child = index + 1 < history.size()
@@ -206,7 +205,7 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
       validateReplayStep(candidateHead, replayParent, retained.deltaToChild, child);
       candidateHistory.add(new HeadState(candidateHead, candidateSnapshot,
           retained.deltaToChild));
-      candidateSnapshot = replay(candidateSnapshot, retained.deltaToChild);
+      candidateSnapshot = rebaseEncodedSuffix(candidateSnapshot, retained.deltaToChild);
       candidateHead = copy(child);
       replayParent = retained.deltaToChild.getMeta();
     }
@@ -449,9 +448,10 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
     Map<Integer, RecordingStore> recordings = new LinkedHashMap<>();
     PathStateRoot candidate = PathStateRoot.fromSnapshot(scope,
         participant -> recordings.computeIfAbsent(participant.getStoreId(), ignored ->
-            new RecordingStore(stores.participant(participant.getDbName()).nodeStore())),
+            new RecordingStore(stores.participant(participant.getDbName()).nodeStore(),
+                snapshot, participant.getStoreId())),
         recordings.computeIfAbsent(0, ignored ->
-            new RecordingStore(stores.superStore().nodeStore())), snapshot);
+            new RecordingStore(stores.superStore().nodeStore(), snapshot, 0)), snapshot);
     PathStateRoot.ParallelApplyStats parallelStats = transition.getMutations().isEmpty() ? null
         : candidate.applyParallel(transition.getMutations(), participantExecutor, branchExecutor);
     PathStateRoot.Snapshot nextSnapshot = candidate.snapshot();
@@ -523,19 +523,26 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
     throw new IOException("PathState checkpoint target is outside reversible history");
   }
 
-  private PathStateRoot.Snapshot replay(PathStateRoot.Snapshot parent,
+  private PathStateRoot.Snapshot rebaseEncodedSuffix(PathStateRoot.Snapshot parent,
       PathStateSnapshotDelta delta) throws IOException {
-    Map<Integer, RecordingStore> recordings = new LinkedHashMap<>();
-    PathStateRoot candidate = PathStateRoot.fromSnapshot(scope,
-        participant -> recordings.computeIfAbsent(participant.getStoreId(), ignored ->
-            new RecordingStore(stores.participant(participant.getDbName()).nodeStore())),
-        recordings.computeIfAbsent(0, ignored ->
-            new RecordingStore(stores.superStore().nodeStore())), parent);
     try {
-      candidate.replaySnapshotDelta(delta);
-      return candidate.snapshot();
+      PathStateNodeOverlay nodes = new PathStateNodeOverlay(parent.nodeOverlay(), delta, scope);
+      PathStateRoot candidate = new PathStateRoot(scope,
+          participant -> nodes.view(participant.getStoreId(),
+              stores.participant(participant.getDbName()).nodeStore()),
+          nodes.view(0, stores.superStore().nodeStore()));
+      // Reopen shallow roots from the already prepared node bytes. Verify the super-root binds
+      // all participant roots; descendants keep normal lazy hash validation on subsequent reads.
+      // No native writes, flat-mutation replay, or retention of the previous resolved graph.
+      candidate.restoreStoredRoots(delta.getStateRoot());
+      for (PathStateSnapshotDelta.StoreDelta store : delta.getStores()) {
+        if (!Arrays.equals(candidate.participantRoot(store.getDbName()), store.getStoreRoot())) {
+          throw new IllegalArgumentException("checkpoint suffix Store root mismatch");
+        }
+      }
+      return candidate.snapshot().reparent(parent).withNodeOverlay(nodes);
     } catch (IllegalArgumentException | IllegalStateException failure) {
-      throw new IOException("path-state checkpoint suffix replay failed", failure);
+      throw new IOException("path-state checkpoint suffix node rebase failed", failure);
     }
   }
 
@@ -794,8 +801,13 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
     private final AtomicLong deleteCalls = new AtomicLong();
     private final AtomicLong putBytes = new AtomicLong();
 
-    private RecordingStore(PathNodeStore base) {
-      this.base = Objects.requireNonNull(base, "base");
+    private final PathStatePhysicalStoreSet.ResidentNodeStore nativeReadSource;
+
+    private RecordingStore(PathNodeStore base, PathStateRoot.Snapshot snapshot, int storeId) {
+      this.base = snapshot.nodeStore(storeId, Objects.requireNonNull(base, "base"));
+      // Keep the original native counter source: an in-memory suffix hit is not a native read.
+      nativeReadSource = base instanceof PathStatePhysicalStoreSet.ResidentNodeStore
+          ? (PathStatePhysicalStoreSet.ResidentNodeStore) base : null;
       initialNativeReads = base instanceof PathStatePhysicalStoreSet.ResidentNodeStore
           ? ((PathStatePhysicalStoreSet.ResidentNodeStore) base).getNativeReads() : 0;
     }
@@ -866,8 +878,8 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
     }
 
     private long nativeReads() {
-      return base instanceof PathStatePhysicalStoreSet.ResidentNodeStore
-          ? ((PathStatePhysicalStoreSet.ResidentNodeStore) base).getNativeReads()
+      return nativeReadSource != null
+          ? nativeReadSource.getNativeReads()
               - initialNativeReads : directReads.get();
     }
 

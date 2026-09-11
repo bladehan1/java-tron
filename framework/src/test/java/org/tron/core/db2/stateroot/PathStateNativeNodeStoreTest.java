@@ -16,7 +16,9 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -31,6 +33,7 @@ import org.tron.common.arch.Arch;
 import org.tron.core.config.args.StorageConfig.NativeDbConfig;
 import org.tron.core.db2.archive.BlockReverseDiff;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
+import org.tron.core.db2.common.WrappedByteArray;
 import org.tron.core.db2.core.CommonCheckpointBaseline;
 import org.tron.core.db2.core.CommonCheckpointPayload;
 import org.tron.core.db2.core.CommonCheckpointTarget;
@@ -979,6 +982,126 @@ public class PathStateNativeNodeStoreTest {
       assertEquals(100, head.getHead().getBlockNumber());
       assertEquals(100, head.retentionCensus().getHeadBlockNumber());
     }
+  }
+
+  @Test
+  public void commonCheckpointRebaseReusesLargeNodeSuffixAndContinuesAfterReopen()
+      throws Exception {
+    PathStateParticipantScope scope = new PathStateCanonicalizer().participantScope();
+    Path root = temporaryFolder.newFolder("physical-common-node-suffix").toPath();
+    preparePublishedPhysicalTarget(root, scope);
+    byte[] formatIdentity = bytes(122);
+    PathStateRootMetadata finalHead;
+    try (PathStatePhysicalOverlayHead head = PathStatePhysicalOverlayHead.open(root,
+        Engine.ROCKSDB, new PathStateLayerLimits(8, 1L << 24))) {
+      PathStateRootMetadata initial = head.getHead();
+      CommonCheckpointBaseline baseline = commonBaseline(formatIdentity, initial);
+      head.admitFreshCommonBaseline(baseline);
+      PathStateCheckpointMaterializer materializer = head.checkpointMaterializer(formatIdentity,
+          baseline);
+      List<PathStateSnapshotDelta> deltas = new ArrayList<>();
+      byte[] parentHash = initial.getBlockHash();
+      for (int number = 1; number <= 12; number++) {
+        PathStateBlockTransition transition = nodeSuffixTransition(number, parentHash);
+        deltas.add(head.prepareSnapshotDelta(BlockSnapshotMeta.forBlock(number,
+            transition.getBlockHash(), parentHash, number * 3L), transition));
+        head.advance(transition);
+        parentHash = transition.getBlockHash();
+        if (number < 3) {
+          continue;
+        }
+        PathStateBlockTransition next = nodeSuffixTransition(number + 1, parentHash);
+        byte[] oracleNextRoot = head.preview(next);
+        byte[] beforeHead = head.getHead().encode();
+        CommonCheckpointPayload payload = commonPayload(formatIdentity,
+            deltas.subList(number - 3, number - 2));
+        CommonCheckpointTarget target = CommonCheckpointTarget.from(payload);
+        materializer.materialize(payload, target);
+        materializer.publish(target);
+        long encodesBefore = PathMerkleTrie.nodeEncodeCountTotal();
+        head.prepareCommonCheckpointRebase(target).apply();
+        long encodes = PathMerkleTrie.nodeEncodeCountTotal() - encodesBefore;
+        // Root/super-leaf verification is bounded by the participant set, not 512 mutations
+        // per retained block. Three shallow views still verify the 27-participant super trie;
+        // this fixture performs 261 encodes there, rather than rebuilding the changed subtries.
+        assertTrue("suffix rebase unexpectedly rebuilt nodes: " + encodes, encodes < 512);
+        if (number == 3) {
+          PathStateRoot reference = new PathStateRoot(scope, ignored -> suffixReferenceStore(),
+              suffixReferenceStore());
+          reference.put("account", new byte[]{1, 2}, new byte[]{3, 4});
+          reference.put("proposal", new byte[]{5, 6}, new byte[]{7, 8});
+          reference.rootHash();
+          reference.replaySnapshotDelta(deltas.get(0));
+          long referenceBefore = PathMerkleTrie.nodeEncodeCountTotal();
+          reference.replaySnapshotDelta(deltas.get(1));
+          reference.replaySnapshotDelta(deltas.get(2));
+          long referenceEncodes = PathMerkleTrie.nodeEncodeCountTotal() - referenceBefore;
+          assertArrayEquals(head.getHead().getStateRoot(), reference.rootHash());
+          assertTrue("encoded-node rebase did not reduce reference work", referenceEncodes
+              > encodes * 4);
+          System.out.println("suffix rebase encodes: prepared=" + encodes
+              + ", flatReplay=" + referenceEncodes);
+        }
+        assertArrayEquals(beforeHead, head.getHead().encode());
+        assertEquals(2, head.retentionCensus().getSuffixBlocks());
+        assertEquals(3, head.retentionCensus().getMaxSnapshotDepth());
+        assertArrayEquals(oracleNextRoot, head.preview(next));
+      }
+      CommonCheckpointPayload tail = commonPayload(formatIdentity, deltas.subList(10, 12));
+      CommonCheckpointTarget target = CommonCheckpointTarget.from(tail);
+      materializer.materialize(tail, target);
+      materializer.publish(target);
+      head.prepareCommonCheckpointRebase(target).apply();
+      assertEquals(1, head.retentionCensus().getMaxSnapshotDepth());
+      finalHead = head.getHead();
+    }
+    BlockSnapshotMeta finalMeta = BlockSnapshotMeta.forBlock(finalHead.getBlockNumber(),
+        finalHead.getBlockHash(), finalHead.getParentHash(), finalHead.getTimestamp());
+    try (PathStatePhysicalOverlayHead reopened = PathStatePhysicalOverlayHead.openCommonCheckpoint(
+        root, Engine.ROCKSDB, new PathStateLayerLimits(8, 1L << 24), 1L << 20, 2, 2,
+        formatIdentity, finalMeta, P66Phase.P66_ON)) {
+      assertArrayEquals(finalHead.getStateRoot(), reopened.getHead().getStateRoot());
+      PathStateBlockTransition next = nodeSuffixTransition(13, finalHead.getBlockHash());
+      reopened.prepareSnapshotDelta(BlockSnapshotMeta.forBlock(13, next.getBlockHash(),
+          next.getParentHash(), next.getTimestamp()), next);
+      assertEquals(13, reopened.advance(next).getBlockNumber());
+    }
+  }
+
+  private static PathStateBlockTransition nodeSuffixTransition(int number, byte[] parentHash) {
+    List<PathStateMutation> mutations = new ArrayList<>();
+    for (int index = 0; index < 512; index++) {
+      byte[] key = new byte[]{(byte) (index >>> 8), (byte) index};
+      // Repeated deletions/reinsertions exercise shadowed paths and changing branch shapes.
+      mutations.add(number % 3 == 0 && index % 2 == 0
+          ? PathStateMutation.delete("code", key)
+          : PathStateMutation.put("code", key, new byte[]{(byte) number, (byte) index}));
+    }
+    mutations.add(PathStateMutation.put("proposal", new byte[]{1}, new byte[]{(byte) number}));
+    return new PathStateBlockTransition(number, bytes(122 + number), parentHash,
+        number * 3L, P66Phase.P66_ON, mutations);
+  }
+
+  private static PathNodeStore suffixReferenceStore() {
+    return new PathNodeStore() {
+      private final Map<WrappedByteArray, byte[]> nodes = new HashMap<>();
+
+      @Override
+      public byte[] get(byte[] path) {
+        byte[] value = nodes.get(WrappedByteArray.of(path));
+        return value == null ? null : Arrays.copyOf(value, value.length);
+      }
+
+      @Override
+      public void put(byte[] path, byte[] value) {
+        nodes.put(WrappedByteArray.copyOf(path), Arrays.copyOf(value, value.length));
+      }
+
+      @Override
+      public void delete(byte[] path) {
+        nodes.remove(WrappedByteArray.of(path));
+      }
+    };
   }
 
   @Test
