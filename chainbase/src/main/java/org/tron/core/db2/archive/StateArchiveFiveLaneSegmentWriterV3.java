@@ -233,6 +233,17 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
     append(bundle, -1, null, SyncFaultHook.NONE);
   }
 
+  /**
+   * Appends finalized bytes before the next Common target exists. Do not seal an unmarked tail:
+   * startup recovery must still be able to trim it to the last authorized Common boundary.
+   */
+  public synchronized void appendFinalized(EncodedBundle bundle) throws IOException {
+    if (activeCheckpointSequence >= 0) {
+      throw new IllegalStateException("State Archive checkpoint append is active");
+    }
+    append(bundle, -1, null, SyncFaultHook.NONE, true);
+  }
+
   /** Appends one bundle under the Common identity needed to prove any intervening rotation. */
   public synchronized void appendForCheckpoint(EncodedBundle bundle, long checkpointSequence,
       byte[] commonTargetDigest) throws IOException {
@@ -256,6 +267,12 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
 
   private void append(EncodedBundle bundle, long checkpointSequence,
       byte[] commonTargetDigest, SyncFaultHook faultHook) throws IOException {
+    append(bundle, checkpointSequence, commonTargetDigest, faultHook, false);
+  }
+
+  private void append(EncodedBundle bundle, long checkpointSequence,
+      byte[] commonTargetDigest, SyncFaultHook faultHook, boolean deferUnmarkedRotation)
+      throws IOException {
     requireUsable();
     Objects.requireNonNull(bundle, "bundle");
     List<byte[]> frames = bundle.getLanes().stream().map(EncodedLane::getFrame)
@@ -274,7 +291,9 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
           throw new IllegalArgumentException("State Archive writer compression mismatch");
         }
         LaneState state = lanes.get(lane.getLaneId());
-        if (state != null && StateArchiveSegmentFormatV3.shouldRotate(
+        if (state != null
+            && (!deferUnmarkedRotation || state.markedBlockFrameCount == state.blockFrameCount)
+            && StateArchiveSegmentFormatV3.shouldRotate(
             state.blockFrameCount, state.dataEndOffset, rotationTargetBytes)) {
           // A fully marked segment belongs to the preceding checkpoint. Seal it without
           // adding its old marker to the new checkpoint's durability proof.
@@ -870,7 +889,9 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
       }
       return;
     }
-    Map<Long, Map<Integer, byte[]>> bundles = new java.util.TreeMap<>();
+    // Keep locations, not the entire encoded archive, while validating cross-lane bundles.
+    // A growing live archive otherwise consumes heap proportional to all history body bytes.
+    Map<Long, Map<Integer, FrameReference>> bundles = new java.util.TreeMap<>();
     Map<Integer, Long> expectedSequence = new HashMap<>();
     Map<Integer, byte[]> expectedPreviousChain = new HashMap<>();
     List<ScannedSegment> scannedSegments = new ArrayList<>();
@@ -927,6 +948,22 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
         List<LaneTarget> laneTargets = buildLaneTargets(scannedSegments, commonHead);
         if (laneTargets.stream().noneMatch(StateArchiveFiveLaneSegmentWriterV3::mutates)) {
           intent = null;
+          final long verifiedHead = commonHead;
+          if (scannedSegments.stream().allMatch(scanned ->
+              scanned.lastBlock <= verifiedHead && !scanned.tailDamaged)) {
+            for (ScannedSegment scanned : scannedSegments) {
+              if (scanned.seal == null) {
+                LaneState state = scanned.openState();
+                state.lastMeta = appendHead;
+                if (lanes.putIfAbsent(state.laneId, state) != null) {
+                  throw new IOException("Multiple open State Archive lane segments");
+                }
+              }
+            }
+            rebuildLastDurabilityProof(scannedSegments, bundles);
+            validateCatalogSelection();
+            return; // Verified zero-action recovery must not scan all history a second time.
+          }
         } else {
           intent = new Intent(baselineHistoryDigest,
             activeRecoveryRequest.authorizedCeiling,
@@ -969,6 +1006,8 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
         throw failure;
       }
       closeScanned(scannedSegments);
+      scannedSegments.clear();
+      bundles.clear();
       lanes.clear();
       sealedSegments.clear();
       appendHead = null;
@@ -992,7 +1031,7 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
   }
 
   private void rebuildLastDurabilityProof(List<ScannedSegment> scannedSegments,
-      Map<Long, Map<Integer, byte[]>> bundles) {
+      Map<Long, Map<Integer, FrameReference>> bundles) throws IOException {
     if (appendHead == null) {
       return;
     }
@@ -1094,15 +1133,15 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
     verifyDurabilityProof(proof);
   }
 
-  private RecoveryPoint recoveryPointAt(Map<Long, Map<Integer, byte[]>> bundles,
-      long blockNumber) {
-    Map<Integer, byte[]> laneFrames = bundles.get(blockNumber);
+  private RecoveryPoint recoveryPointAt(Map<Long, Map<Integer, FrameReference>> bundles,
+      long blockNumber) throws IOException {
+    Map<Integer, FrameReference> laneFrames = bundles.get(blockNumber);
     if (laneFrames == null || laneFrames.size() != StateArchiveFileFormatV3.fiveLaneIds().length) {
       return null;
     }
     List<byte[]> frames = new ArrayList<>();
     for (int laneId : StateArchiveFileFormatV3.fiveLaneIds()) {
-      frames.add(laneFrames.get(laneId));
+      frames.add(laneFrames.get(laneId).read());
     }
     DecodedBundle decoded = codec.decode(frames);
     return recoveryPoint(decoded.getDiff().getMeta(), decoded.getResultHistoryDigest());
@@ -1188,8 +1227,9 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
   }
 
   private void verifyRecoveryPoint(RecoveryPoint expected,
-      Map<Long, Map<Integer, byte[]>> bundles, String name, boolean required) {
-    Map<Integer, byte[]> laneFrames = bundles.get(expected.getBlockNumber());
+      Map<Long, Map<Integer, FrameReference>> bundles, String name, boolean required)
+      throws IOException {
+    Map<Integer, FrameReference> laneFrames = bundles.get(expected.getBlockNumber());
     if (laneFrames == null || laneFrames.size() != StateArchiveFileFormatV3.fiveLaneIds().length) {
       if (required) {
         throw new IllegalArgumentException("State Archive cannot verify " + name);
@@ -1198,7 +1238,7 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
     }
     List<byte[]> frames = new ArrayList<>();
     for (int laneId : StateArchiveFileFormatV3.fiveLaneIds()) {
-      frames.add(laneFrames.get(laneId));
+      frames.add(laneFrames.get(laneId).read());
     }
     DecodedBundle decoded = codec.decode(frames);
     RecoveryPoint actual = recoveryPoint(decoded.getDiff().getMeta(),
@@ -1288,7 +1328,7 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
   }
 
   private ScannedSegment scanSegment(Path path, ParsedName name,
-      Map<Long, Map<Integer, byte[]>> bundles, boolean recovering) throws IOException {
+      Map<Long, Map<Integer, FrameReference>> bundles, boolean recovering) throws IOException {
     FileChannel data = FileChannel.open(path, StandardOpenOption.READ,
         StandardOpenOption.WRITE);
     Path indexPath = indexPath(name.laneId, name.segmentSeq);
@@ -1353,8 +1393,9 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
         byte[] frame = readExact(data, offset, (int) totalLength);
         if (frameType == StateArchiveFileFormatV3.BLOCK_FRAME_TYPE) {
           scanned.addBlock(offset, frame);
-          byte[] duplicate = bundles.computeIfAbsent(blockNumber(frame),
-              ignored -> new HashMap<>()).put(name.laneId, frame);
+          FrameReference duplicate = bundles.computeIfAbsent(blockNumber(frame),
+              ignored -> new HashMap<>()).put(name.laneId,
+                  new FrameReference(path, offset, frame.length));
           if (duplicate != null) {
             throw new IllegalArgumentException("Duplicate State Archive lane block frame");
           }
@@ -1402,23 +1443,23 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
     }
   }
 
-  private long rebuildBundleHead(Map<Long, Map<Integer, byte[]>> bundles,
-      Long recoveryBoundary) {
+  private long rebuildBundleHead(Map<Long, Map<Integer, FrameReference>> bundles,
+      Long recoveryBoundary) throws IOException {
     long commonHead = -1;
-    for (Map.Entry<Long, Map<Integer, byte[]>> entry : bundles.entrySet()) {
+    for (Map.Entry<Long, Map<Integer, FrameReference>> entry : bundles.entrySet()) {
       if (recoveryBoundary != null && entry.getKey() > recoveryBoundary) {
         break;
       }
       List<byte[]> frames = new ArrayList<>();
       for (int laneId : StateArchiveFileFormatV3.fiveLaneIds()) {
-        byte[] frame = entry.getValue().get(laneId);
+        FrameReference frame = entry.getValue().get(laneId);
         if (frame == null) {
           if (recoveryBoundary != null) {
             return commonHead;
           }
           throw new IllegalArgumentException("Incomplete State Archive five-lane bundle");
         }
-        frames.add(frame);
+        frames.add(frame.read());
       }
       DecodedBundle decoded;
       try {
@@ -1435,6 +1476,24 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
       commonHead = appendHead.getBlockNumber();
     }
     return commonHead;
+  }
+
+  private static final class FrameReference {
+    private final Path path;
+    private final long offset;
+    private final int length;
+
+    private FrameReference(Path path, long offset, int length) {
+      this.path = path;
+      this.offset = offset;
+      this.length = length;
+    }
+
+    private byte[] read() throws IOException {
+      try (FileChannel channel = FileChannel.open(path, StandardOpenOption.READ)) {
+        return readExact(channel, offset, length);
+      }
+    }
   }
 
   private static void closeScanned(List<ScannedSegment> scannedSegments)
@@ -2122,6 +2181,7 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
     private long lastCheckpointSequence = -1;
     private byte[] previousMarkerDigest = new byte[StateArchiveFileFormatV3.HASH_LENGTH];
     private ScannedMarker lastMarker;
+    private final List<ScannedMarker> markers = new ArrayList<>();
     private boolean tailDamaged;
 
     private ScannedSegment(Path dataPath, FileChannel data, FileChannel index,
@@ -2190,6 +2250,7 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
       lastCheckpointSequence = marker.getCheckpointSequence();
       previousMarkerDigest = marker.getEncodedFrameDigest();
       lastMarker = new ScannedMarker(offset, marker);
+      markers.add(lastMarker);
     }
 
     private void setSeal(SegmentSeal value) {
@@ -2303,8 +2364,7 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
             StateArchiveFiveLaneRecoveryIntentV3.NO_TARGET_SEGMENT, 0, 0,
             header.getHeaderDigest(), new byte[32], new byte[32]);
       }
-      long targetDataEnd = expectedIndex.get(keepCount - 1).getFrameOffset()
-          + expectedIndex.get(keepCount - 1).getFrameLength();
+      long targetDataEnd = retainedDataEnd(keepCount, commonHead);
       byte[] targetIndex = targetIndexBytes(keepCount);
       int flags = targetDataEnd < originalDataEnd
           ? StateArchiveFiveLaneRecoveryIntentV3.DATA_TRUNCATE : 0;
@@ -2347,6 +2407,19 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
       return bytes.array();
     }
 
+    private long retainedDataEnd(int keepCount, long commonHead) {
+      long end = expectedIndex.get(keepCount - 1).getFrameOffset()
+          + expectedIndex.get(keepCount - 1).getFrameLength();
+      // A published SAP3 proof points at these marker bytes. Trimming to the last block frame
+      // alone would destroy the proof for the very Common boundary being recovered.
+      for (ScannedMarker scanned : markers) {
+        if (scanned.marker.getLastBlock() <= commonHead) {
+          end = Math.max(end, scanned.marker.getMarkerEndOffset());
+        }
+      }
+      return end;
+    }
+
     private void repairTo(long commonHead, RecoveryFaultHook faultHook) throws IOException {
       int keepCount = retainedCount(commonHead);
       if (keepCount == 0) {
@@ -2358,9 +2431,7 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
         faultHook.after(RecoveryStage.LANE_DATA_APPLIED, header.getLaneId());
         return;
       }
-      long keepDataEnd = keepCount == 0 ? StateArchiveFileFormatV3.PART_HEADER_LENGTH
-          : expectedIndex.get(keepCount - 1).getFrameOffset()
-              + expectedIndex.get(keepCount - 1).getFrameLength();
+      long keepDataEnd = retainedDataEnd(keepCount, commonHead);
       if (data.size() != keepDataEnd || tailDamaged) {
         data.truncate(keepDataEnd);
         data.force(false);

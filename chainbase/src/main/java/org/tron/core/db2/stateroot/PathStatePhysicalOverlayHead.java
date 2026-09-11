@@ -196,6 +196,9 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
     List<HeadState> candidateHistory = new ArrayList<>();
     BlockSnapshotMeta replayParent = targetBlock;
 
+    // Foreground rebase work: replay each UNFLUSHED block above the new durable baseline.
+    // replaySnapshotDelta currently reapplies flat mutations to the trie and verifies roots;
+    // it is not a pointer-only splice or a native checkpoint write.
     for (int index = position.historyIndex; index < history.size(); index++) {
       HeadState retained = history.get(index);
       PathStateRootMetadata child = index + 1 < history.size()
@@ -391,6 +394,9 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
   }
 
   @Override
+  // Computes trie changes through RecordingStore: reads may hit native stores, but node/flat
+  // writes remain in pending.delta. advance() adopts this candidate in memory; Common redo
+  // materialization later writes the bytes to the durable databases.
   public synchronized PathStateSnapshotDelta prepareSnapshotDelta(BlockSnapshotMeta meta,
       PathStateBlockTransition transition) throws IOException {
     requireHealthy();

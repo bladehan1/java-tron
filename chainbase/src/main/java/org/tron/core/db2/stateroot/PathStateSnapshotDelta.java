@@ -15,6 +15,9 @@ import org.tron.core.db2.archive.BlockSnapshotMeta;
  *
  * <p>This object contains the actual F/N mutations needed by a future common-checkpoint redo
  * payload. It is memory-only in this slice and does not publish CURRENT or write a native Store.
+ * Unlike BlockChangeView (input physical Store changes), this is derived output: secure-key flat
+ * leaf writes, changed encoded trie nodes, and parent/child roots. Keeping these writes on the
+ * block Snapshot lets checkpoint redo replay bytes without executing the trie algorithm again.
  */
 public final class PathStateSnapshotDelta {
 

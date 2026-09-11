@@ -16,6 +16,8 @@ import org.tron.core.db2.archive.BlockSnapshotMeta;
 public final class PathStateRuntimeAttachment {
 
   private final PathStateTransitionCollector collector;
+  // Common mode has one owner for prepare/preview/advance, not independent callback owners.
+  private final PathStateHead commonHead;
   private final TransitionSink sink;
   private final BaseFlushSink baseFlushSink;
   private final TransitionPreviewer previewer;
@@ -68,6 +70,25 @@ public final class PathStateRuntimeAttachment {
 
   /** Creates the production in-memory head used exclusively by the common checkpoint owner. */
   public static PathStateRuntimeAttachment commonCheckpoint(PathStateTransitionCollector collector,
+      PathStateHead head) {
+    return new PathStateRuntimeAttachment(collector, head);
+  }
+
+  private PathStateRuntimeAttachment(PathStateTransitionCollector collector, PathStateHead head) {
+    this.collector = Objects.requireNonNull(collector, "collector");
+    this.commonHead = Objects.requireNonNull(head, "head");
+    sink = null;
+    baseFlushSink = null;
+    previewer = null;
+    snapshotDeltaPreparer = null;
+    deferredCapture = false;
+    commonCheckpointOnly = true;
+    deferredQueue = null;
+    deferredWorker = null;
+  }
+
+  /** Legacy callback adapter retained for isolated runtime tests. */
+  public static PathStateRuntimeAttachment commonCheckpoint(PathStateTransitionCollector collector,
       TransitionSink sink, TransitionPreviewer previewer,
       SnapshotDeltaPreparer snapshotDeltaPreparer) {
     return new PathStateRuntimeAttachment(collector, sink, (blockNumber, blockHash) -> { },
@@ -85,6 +106,7 @@ public final class PathStateRuntimeAttachment {
       SnapshotDeltaPreparer snapshotDeltaPreparer, boolean deferredCapture,
       boolean commonCheckpointOnly) {
     this.collector = Objects.requireNonNull(collector, "collector");
+    this.commonHead = null;
     this.sink = Objects.requireNonNull(sink, "sink");
     this.baseFlushSink = Objects.requireNonNull(baseFlushSink, "baseFlushSink");
     this.previewer = previewer;
@@ -106,12 +128,14 @@ public final class PathStateRuntimeAttachment {
 
   /** Computes producer metadata without observing, publishing, or failing this runtime. */
   public synchronized byte[] preview(BlockChangeView view) {
-    if (failure != null || previewer == null || status().getState() != State.READY) {
+    if (failure != null || (commonHead == null && previewer == null)
+        || status().getState() != State.READY) {
       return null;
     }
     try {
       PathStateBlockTransition transition = collectAndValidate(view);
-      byte[] candidate = previewer.prepare(transition);
+      byte[] candidate = commonHead == null ? previewer.prepare(transition)
+          : commonHead.preview(transition);
       if (candidate == null || candidate.length != 32) {
         throw new IOException("path-state preview root must be exactly 32 bytes");
       }
@@ -123,7 +147,10 @@ public final class PathStateRuntimeAttachment {
     }
   }
 
-  /** Capture failures fail only this shadow runtime and never reject the canonical block. */
+  /**
+   * Collects physical mutations and prepares trie/flat redo writes in memory. Common mode calls
+   * its head directly; SnapshotManager checks failure before accepting the block session.
+   */
   public synchronized PathStateBlockTransition capture(BlockChangeView view) {
     BlockChangeView admitted = Objects.requireNonNull(view, "view");
     observe(admitted);
@@ -136,8 +163,10 @@ public final class PathStateRuntimeAttachment {
     }
     try {
       PathStateBlockTransition transition = collectAndValidate(admitted);
-      PathStateSnapshotDelta snapshotDelta = snapshotDeltaPreparer == null ? null
-          : snapshotDeltaPreparer.prepare(admitted.getMeta(), transition);
+      PathStateSnapshotDelta snapshotDelta = commonHead != null
+          ? commonHead.prepareSnapshotDelta(admitted.getMeta(), transition)
+          : snapshotDeltaPreparer == null ? null
+              : snapshotDeltaPreparer.prepare(admitted.getMeta(), transition);
       validateSnapshotDelta(admitted.getMeta(), transition, snapshotDelta);
       pending = transition;
       pendingSnapshotDelta = snapshotDelta;
@@ -148,7 +177,7 @@ public final class PathStateRuntimeAttachment {
     }
   }
 
-  /** Durable publication failures are retained as observable fail-stop state. */
+  /** Accepts the prepared head; in Common mode this is volatile, not durable CURRENT publication. */
   public void publish(PathStateBlockTransition transition) {
     if (deferredCapture) {
       publishDeferred(transition);
@@ -165,7 +194,11 @@ public final class PathStateRuntimeAttachment {
       if (pending != transition) {
         throw new IOException("path-state publication differs from captured transition");
       }
-      sink.accept(transition);
+      if (commonHead != null) {
+        commonHead.advance(transition);
+      } else {
+        sink.accept(transition);
+      }
       readyBlockNumber = transition.getBlockNumber();
       readyBlockHash = transition.getBlockHash();
       pending = null;
@@ -287,7 +320,7 @@ public final class PathStateRuntimeAttachment {
 
   /** Compacts only after Chainbase has durably refreshed the matching prefix. */
   public synchronized void flushBaseThrough(long blockNumber, byte[] blockHash) {
-    if (failure != null) {
+    if (failure != null || commonCheckpointOnly) {
       return;
     }
     try {

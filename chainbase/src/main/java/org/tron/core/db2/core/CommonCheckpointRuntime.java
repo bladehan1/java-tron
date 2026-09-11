@@ -7,6 +7,8 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
 import java.util.function.LongSupplier;
+import org.tron.core.db2.archive.ArchiveStoreScope;
+import org.tron.core.db2.archive.BlockReverseDiff;
 import org.tron.core.db2.archive.StateArchiveAppendCheckpointMaterializerV3;
 import org.tron.core.db2.archive.StateArchiveCheckpointMaterializer;
 import org.tron.core.db2.archive.StateArchiveCheckpointPlanner;
@@ -162,6 +164,15 @@ public final class CommonCheckpointRuntime implements AutoCloseable {
   /**
    * Captures and applies the immutable Snapshot prefix, then rebases it without a second Store
    * write. The caller must hold the SnapshotManager monitor for the whole call.
+   *
+   * <p>This is the durability side of the block-final pipeline.  The preceding commit stage has
+   * already attached one prepared artifact to each Store Snapshot.  Here the runtime captures a
+   * common payload and forces Archive history. The owner then forces Common redo WAL,
+   * materializes the authorities, publishes their common target and retires WAL. Only AFTER
+   * durable publication does the completion callback below rebase memory: Chainbase unlinks the
+   * flushed prefix; PathState rebuilds the retained suffix against the new durable baseline.
+   * Rebase does not write a checkpoint Store. Per-database materialization concurrency is a
+   * separate concern from this in-memory lifecycle operation.
    */
   public synchronized CommonCheckpointTarget checkpointAndRebase(int flushCount)
       throws IOException {
@@ -178,6 +189,9 @@ public final class CommonCheckpointRuntime implements AutoCloseable {
       timing.head = target.getLastBlock().getBlockNumber();
       if (capture != null) {
         CommonCheckpointHotRecovery.requireWalDynamicIdentity(payload, target.getLastBlock());
+        // Archive prepare may encode and force the history prefix, but it only becomes readable
+        // after the owner publishes the common target.  This keeps file durability ahead of W
+        // without letting the Archive worker publish a height that Chainbase/PathState lack.
         long hotPrepareStart = nanoTime.getAsLong();
         CommonCheckpointTarget prepared = archivePlanner.prepare(capture);
         timing.hotPrepareUs = elapsedUs(hotPrepareStart);
@@ -187,6 +201,8 @@ public final class CommonCheckpointRuntime implements AutoCloseable {
       }
       long ownerApplyStart = nanoTime.getAsLong();
       owner.apply(payload, () -> {
+        // Durable materialization/publication has completed. These are MEMORY plans only;
+        // prepare both before changing pointers so a failed prepare cannot partially unlink them.
         long chainbasePrepareStart = nanoTime.getAsLong();
         CommonCheckpointSnapshotRebaser.Plan chainbasePlan =
             rebaser.prepare(databases, target, flushCount);
@@ -206,6 +222,36 @@ public final class CommonCheckpointRuntime implements AutoCloseable {
       timing.totalUs = elapsedUs(totalStart);
       emitTiming(timing);
       return target;
+    } catch (IOException | RuntimeException failure) {
+      owner.fail(failure);
+      throw failure;
+    }
+  }
+
+  /** Called only after SnapshotManager has selected a non-revocable prefix. */
+  public synchronized void appendFinalizedHistory(int flushCount) throws IOException {
+    if (!(archivePlanner instanceof StateArchiveAppendCheckpointMaterializerV3)) {
+      return;
+    }
+    try {
+      Chainbase state = databases.stream()
+          .filter(db -> ArchiveStoreScope.isStateDatabase(db.getDbName())).findFirst()
+          .orElseThrow(() -> new IllegalStateException("Common has no state database"));
+      Snapshot layer = state.getHead().getRoot();
+      List<BlockReverseDiff> diffs = new ArrayList<>(flushCount);
+      for (int index = 0; index < flushCount; index++) {
+        layer = layer.getNext();
+        if (!Snapshot.isImpl(layer)) {
+          throw new IOException("Finalized Archive prefix is missing a Snapshot layer");
+        }
+        SnapshotImpl block = (SnapshotImpl) layer;
+        BlockReverseDiff diff = block.getPreparedArchiveBlock();
+        if (diff == null || !diff.getMeta().equals(block.getBlockSnapshotMeta())) {
+          throw new IOException("Finalized Archive prefix artifact identity differs");
+        }
+        diffs.add(diff);
+      }
+      ((StateArchiveAppendCheckpointMaterializerV3) archivePlanner).appendFinalized(diffs);
     } catch (IOException | RuntimeException failure) {
       owner.fail(failure);
       throw failure;

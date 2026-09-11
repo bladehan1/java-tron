@@ -53,11 +53,32 @@ public final class StateArchiveAppendCheckpointMaterializerV3
     this.commonFormatIdentity = requireDigest(commonFormatIdentity, "Common format identity");
     this.bindingEngine = Objects.requireNonNull(bindingEngine, "bindingEngine");
     this.compressionId = compressionId;
-    this.writer = new StateArchiveFiveLaneSegmentWriterV3(directory,
-        baselineHistoryDigest, compressionId, rotationTargetBytes);
+    this.writer = openWriter(baselineHistoryDigest, rotationTargetBytes);
     this.servingWorker = new StateArchiveServingWorkerV3(
         () -> new StateArchiveServingIndexBuildCoordinatorV3(directory, bindingEngine, 1_000),
         writer, beforeServingBuild);
+  }
+
+  private StateArchiveFiveLaneSegmentWriterV3 openWriter(byte[] baselineHistoryDigest,
+      long rotationTargetBytes) throws IOException {
+    Optional<CommonCheckpointTarget> readable =
+        StateArchiveCheckpointMaterializer.loadReadableTargetIfPresent(directory);
+    Path proofFile = directory.resolve(StateArchiveFiveLaneDurabilityProofV3.FILE_NAME);
+    if (readable.isPresent() && Files.isRegularFile(proofFile, LinkOption.NOFOLLOW_LINKS)) {
+      CommonCheckpointTarget target = requireTarget(readable.get());
+      ArchiveDurabilityProof proof = StateArchiveFiveLaneDurabilityProofV3.decode(
+          Files.readAllBytes(proofFile));
+      if (matches(proof, target)) {
+        // Only an exactly published SAP3 target authorizes this startup trim. A newer prepared
+        // proof may belong to pending Common WAL and must instead retain the existing redo path.
+        // recover validates the full identity and uses its durable intent for torn/open tails.
+        return StateArchiveFiveLaneSegmentWriterV3.recover(directory, baselineHistoryDigest,
+            compressionId, rotationTargetBytes, proof.getTarget(), proof.getTarget(),
+            StateArchiveFiveLaneSegmentWriterV3.RecoveryFaultHook.NONE);
+      }
+    }
+    return new StateArchiveFiveLaneSegmentWriterV3(directory, baselineHistoryDigest,
+        compressionId, rotationTargetBytes);
   }
 
   @Override
@@ -83,7 +104,26 @@ public final class StateArchiveAppendCheckpointMaterializerV3
         new byte[StateArchiveFileFormatV3.HASH_LENGTH], admitted);
   }
 
-  /** Appends, group-forces, rereads and persists SAP3 before the Common WAL is published. */
+  /** Spreads encoding/append over solidification; leaves force and readable publication to Common. */
+  public synchronized void appendFinalized(List<BlockReverseDiff> diffs) throws IOException {
+    requireOpen();
+    // The first checkpoint establishes the exact startup recovery identity. Before that, retain
+    // the existing checkpoint-bound append path rather than invent a numeric recovery ceiling.
+    if (writer.getLastDurabilityProof() == null) {
+      return;
+    }
+    List<BlockReverseDiff> admitted = admittedDiffs(diffs);
+    int first = firstMissing(admitted, writer.getAppendHead());
+    byte[] previousHistory = writer.getResultHistoryDigest();
+    for (int index = first; index < admitted.size(); index++) {
+      EncodedBundle bundle = codec.encode(admitted.get(index), previousHistory,
+          writerCompressionId());
+      writer.appendFinalized(bundle);
+      previousHistory = bundle.getResultHistoryDigest();
+    }
+  }
+
+  /** Appends any missing bytes, group-forces, rereads and persists SAP3 before Common WAL. */
   @Override
   public synchronized CommonCheckpointTarget prepare(CommonCheckpointCapture capture)
       throws IOException {

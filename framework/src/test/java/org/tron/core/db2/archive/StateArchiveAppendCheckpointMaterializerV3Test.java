@@ -36,6 +36,46 @@ public class StateArchiveAppendCheckpointMaterializerV3Test {
   public final TemporaryFolder temporaryFolder = new TemporaryFolder();
 
   @Test
+  public void finalizedAppendDefersUnmarkedRotationAndReopensBeforeCommonPrepare()
+      throws Exception {
+    Path root = temporaryFolder.newFolder("early-finalized").toPath();
+    byte[] format = hash(72);
+    byte[] baseline = hash(82);
+    List<BlockReverseDiff> diffs = Arrays.asList(diff(2, 1400), diff(3, 1400));
+    try (StateArchiveAppendCheckpointMaterializerV3 archive = materializer(
+        root, format, baseline, 1500)) {
+      List<BlockReverseDiff> first = Collections.singletonList(diff(1, 0));
+      StateArchiveHotBatchDescriptor initial = archive.planCheckpoint(first);
+      CommonCheckpointTarget published = archive.prepare(CommonCheckpointCapture.create(
+          payload(format, first, initial), first, initial));
+      archive.publish(published);
+      archive.appendFinalized(diffs.subList(0, 1));
+      archive.appendFinalized(diffs);
+      archive.appendFinalized(diffs);
+      assertEquals(published, archive.loadPublishedTargetIfPresent().get());
+    }
+    // Simulates a failure after finalized body append but before PathState/Common persistence.
+    // No dynamic rewind: reopen, verify the prefix and bind it to the existing Common protocol.
+    try (StateArchiveAppendCheckpointMaterializerV3 archive = materializer(
+        root, format, baseline, 1500)) {
+      // Restart replays from Common, so the first solid prefix may be shorter than the file tail.
+      archive.appendFinalized(diffs.subList(0, 1));
+      archive.appendFinalized(diffs);
+      StateArchiveHotBatchDescriptor descriptor = archive.planCheckpoint(diffs);
+      CommonCheckpointPayload payload = payload(format, diffs, descriptor);
+      CommonCheckpointTarget target = CommonCheckpointTarget.from(payload);
+      archive.prepare(CommonCheckpointCapture.create(payload, diffs, descriptor));
+      assertEquals(Status.MATERIALIZED, archive.inspect(target));
+      StateArchiveFiveLaneSegmentWriterV3.ArchiveDurabilityProof proof =
+          StateArchiveFiveLaneDurabilityProofV3.decode(Files.readAllBytes(
+              root.resolve(StateArchiveFiveLaneDurabilityProofV3.FILE_NAME)));
+      assertEquals(5, proof.getFileTails().size());
+      archive.publish(target);
+      assertEquals(Status.PUBLISHED, archive.inspect(target));
+    }
+  }
+
+  @Test
   public void preparesBeforeWalPublishesAndReopensExactTarget() throws Exception {
     Path root = temporaryFolder.newFolder("append-materializer").toPath();
     byte[] format = hash(70);

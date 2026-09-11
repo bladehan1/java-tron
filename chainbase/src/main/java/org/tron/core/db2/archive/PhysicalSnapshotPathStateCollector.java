@@ -12,6 +12,10 @@ import org.tron.core.db2.stateroot.PathStateTransitionCollector;
 public final class PhysicalSnapshotPathStateCollector implements PathStateTransitionCollector {
   @Override
   public PathStateBlockTransition collect(BlockChangeView view) {
+    // This is the PathState side of the same prepare barrier.  P66 has already been materialized
+    // in the Snapshot, so this collector consumes exact physical mutations and records the old
+    // physical value needed by PathState's transition/rebase logic.  It does not advance durable
+    // CURRENT; the owner publishes that only after both prepare branches have joined.
     boolean enabled = SnapshotOldValueCollector.resolveTargetAssetOptimization(view);
     List<PathStateMutation> mutations = new ArrayList<>();
     for (BlockChangeView.DatabaseChanges database : view.getDatabases()) {
