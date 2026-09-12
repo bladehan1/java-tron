@@ -1926,6 +1926,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     private final PathNodeStore base;
     private final ResidentNodeCache cache;
     private final int storeId;
+    private final PathStateOperationTimer nativeTimer;
     private final AtomicLong hits = new AtomicLong();
     private final AtomicLong cleanHits = new AtomicLong();
     private final AtomicLong updatedHits = new AtomicLong();
@@ -1935,6 +1936,8 @@ public final class PathStatePhysicalStoreSet implements Closeable {
       this.base = Objects.requireNonNull(base, "base");
       this.cache = Objects.requireNonNull(cache, "cache");
       this.storeId = storeId;
+      nativeTimer = storeId == 4 && PathStateOperationTimer.enabled()
+          ? new PathStateOperationTimer() : null;
     }
 
     @Override
@@ -1949,7 +1952,15 @@ public final class PathStatePhysicalStoreSet implements Closeable {
         }
         return owned(lookup.value);
       }
-      byte[] value = base.get(path);
+      byte[] value;
+      long started = nativeTimer == null ? 0 : nativeTimer.start();
+      try {
+        value = base.get(path);
+      } finally {
+        if (nativeTimer != null) {
+          nativeTimer.finish(started);
+        }
+      }
       nativeReads.incrementAndGet();
       cache.put(storeId, path, value, false);
       return owned(value);
@@ -1987,6 +1998,10 @@ public final class PathStatePhysicalStoreSet implements Closeable {
 
     long getUpdatedHits() {
       return updatedHits.get();
+    }
+
+    long[] nativeReadTiming() {
+      return nativeTimer == null ? null : nativeTimer.snapshot();
     }
 
     long getNativeReads() {

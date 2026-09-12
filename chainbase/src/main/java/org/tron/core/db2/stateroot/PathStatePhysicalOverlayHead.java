@@ -452,6 +452,10 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
                 snapshot, participant.getStoreId())),
         recordings.computeIfAbsent(0, ignored ->
             new RecordingStore(stores.superStore().nodeStore(), snapshot, 0)), snapshot);
+    boolean attribution = PathStateOperationTimer.enabled();
+    if (attribution) {
+      candidate.enableAccountReadTiming();
+    }
     PathStateRoot.ParallelApplyStats parallelStats = transition.getMutations().isEmpty() ? null
         : candidate.applyParallel(transition.getMutations(), participantExecutor, branchExecutor);
     PathStateRoot.Snapshot nextSnapshot = candidate.snapshot();
@@ -490,6 +494,30 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
         head, transition, nextSnapshot, deltas, superNodes);
     long nativeReads = recordings.values().stream().mapToLong(RecordingStore::nativeReads).sum();
     RecordingStats stats = RecordingStats.collect(recordings);
+    if (attribution) {
+      String blockHash = org.tron.common.utils.ByteArray.toHexString(transition.getBlockHash());
+      long[][] timing = candidate.accountReadTiming();
+      if (timing != null) {
+        for (int i = 0; i < timing.length; i++) {
+          String operation = i == 0 ? "node_read" : i == 1 ? "hash_verify" : "decode";
+          PathStateAttributionMetrics.operation(operation, timing[i][0], timing[i][1], timing[i][2]);
+          logger.info("Path-state account attribution: head={}, blockHash={}, status=prepared, store=4, "
+                  + "operation={}, sampleEvery=64, calls={}, samples={}, sampledNanos={}",
+              transition.getBlockNumber(), blockHash, operation, timing[i][0], timing[i][1], timing[i][2]);
+        }
+      }
+      RecordingStore accountRecording = recordings.get(4);
+      if (accountRecording != null) {
+        accountRecording.logReadAttribution(transition.getBlockNumber(), blockHash);
+      }
+      if (parallelStats != null) {
+        parallelStats.exportAttribution();
+      }
+      PathStateAttributionMetrics.prepared(transition.getBlockNumber());
+      logger.info("Path-state participant attribution: head={}, status=prepared, "
+              + "layout=store:mutations:submitToStartNanos:workNanos, perStore={}",
+          transition.getBlockNumber(), parallelStats == null ? "" : parallelStats.perStoreTiming());
+    }
     long finishedNanos = System.nanoTime();
     long prepareMillis = TimeUnit.NANOSECONDS.toMillis(finishedNanos - startedNanos);
     return new PreparedOverlay(transition, metadata, nextSnapshot, delta, nodeMutations,
@@ -796,6 +824,11 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
     private final Map<BytesKey, byte[]> changes = new ConcurrentHashMap<>();
     private final Map<BytesKey, byte[]> reads = new ConcurrentHashMap<>();
     private final long initialNativeReads;
+    private final long initialCleanHits;
+    private final long initialUpdatedHits;
+    private final long[] initialNativeTiming;
+    private final AtomicLong readRequests;
+    private final AtomicLong changedReadHits;
     private final AtomicLong directReads = new AtomicLong();
     private final AtomicLong putCalls = new AtomicLong();
     private final AtomicLong deleteCalls = new AtomicLong();
@@ -808,15 +841,27 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
       // Keep the original native counter source: an in-memory suffix hit is not a native read.
       nativeReadSource = base instanceof PathStatePhysicalStoreSet.ResidentNodeStore
           ? (PathStatePhysicalStoreSet.ResidentNodeStore) base : null;
+      initialCleanHits = nativeReadSource == null ? 0 : nativeReadSource.getCleanHits();
+      initialUpdatedHits = nativeReadSource == null ? 0 : nativeReadSource.getUpdatedHits();
+      initialNativeTiming = nativeReadSource == null ? null : nativeReadSource.nativeReadTiming();
+      boolean attribution = storeId == 4 && PathStateOperationTimer.enabled();
+      readRequests = attribution ? new AtomicLong() : null;
+      changedReadHits = attribution ? new AtomicLong() : null;
       initialNativeReads = base instanceof PathStatePhysicalStoreSet.ResidentNodeStore
           ? ((PathStatePhysicalStoreSet.ResidentNodeStore) base).getNativeReads() : 0;
     }
 
     @Override
     public byte[] get(byte[] path) {
+      if (readRequests != null) {
+        readRequests.incrementAndGet();
+      }
       BytesKey key = new BytesKey(path);
       byte[] changed = changes.get(key);
       if (changed != null) {
+        if (changedReadHits != null) {
+          changedReadHits.incrementAndGet();
+        }
         return changed == ABSENT ? null : Arrays.copyOf(changed, changed.length);
       }
       byte[] value = reads.computeIfAbsent(key, ignored -> {
@@ -839,6 +884,42 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
     public void delete(byte[] path) {
       deleteCalls.incrementAndGet();
       changes.put(new BytesKey(path), ABSENT);
+    }
+
+    private void logReadAttribution(long head, String blockHash) {
+      if (readRequests == null) {
+        return;
+      }
+      long requests = readRequests.get();
+      long changed = changedReadHits.get();
+      long baseReads = directReads.get();
+      long local = requests - changed - baseReads;
+      long clean = nativeReadSource == null ? -1
+          : nativeReadSource.getCleanHits() - initialCleanHits;
+      long updated = nativeReadSource == null ? -1
+          : nativeReadSource.getUpdatedHits() - initialUpdatedHits;
+      long nativeCount = nativeReadSource == null ? -1 : nativeReads();
+      PathStateAttributionMetrics.cache("requests", requests);
+      PathStateAttributionMetrics.cache("changed_hits", changed);
+      PathStateAttributionMetrics.cache("local_read_hits", local);
+      PathStateAttributionMetrics.cache("base_reads", baseReads);
+      PathStateAttributionMetrics.cache("resident_clean", clean);
+      PathStateAttributionMetrics.cache("resident_updated", updated);
+      PathStateAttributionMetrics.cache("native_reads", nativeCount);
+      logger.info("Path-state account cache attribution: head={}, status=prepared, store=4, "
+              + "requests={}, changedHits={}, localReadHits={}, baseReads={}, residentClean={}, "
+              + "residentUpdated={}, nativeReads={}", head, requests, changed, local,
+          baseReads, clean, updated, nativeCount);
+      if (initialNativeTiming != null) {
+        long[] after = nativeReadSource.nativeReadTiming();
+        long calls = after[0] - initialNativeTiming[0];
+        long samples = after[1] - initialNativeTiming[1];
+        long nanos = after[2] - initialNativeTiming[2];
+        PathStateAttributionMetrics.operation("native_get", calls, samples, nanos);
+        logger.info("Path-state account attribution: head={}, blockHash={}, status=prepared, store=4, "
+                + "operation=native_get, sampleEvery=64, calls={}, samples={}, sampledNanos={}",
+            head, blockHash, calls, samples, nanos);
+      }
     }
 
     private long putCalls() {

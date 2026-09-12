@@ -64,6 +64,21 @@ public final class PathMerkleTrie {
   private final AtomicLong hashReferenceCreateCount = new AtomicLong();
   private final AtomicLong hashReferenceResolveCount = new AtomicLong();
 
+  private PathStateOperationTimer readTimer;
+  private PathStateOperationTimer hashTimer;
+  private PathStateOperationTimer decodeTimer;
+
+  void enableReadTiming() {
+    readTimer = new PathStateOperationTimer();
+    hashTimer = new PathStateOperationTimer();
+    decodeTimer = new PathStateOperationTimer();
+  }
+
+  long[][] readTiming() {
+    return readTimer == null ? null
+        : new long[][]{readTimer.snapshot(), hashTimer.snapshot(), decodeTimer.snapshot()};
+  }
+
   public PathMerkleTrie(PathNodeStore nodeStore) {
     this(nodeStore, true);
   }
@@ -1068,25 +1083,61 @@ public final class PathMerkleTrie {
   private Node resolve(Node node, byte[] expectedPath) {
     if (node instanceof HashRefNode) {
       HashRefNode reference = (HashRefNode) node;
-      if (!Arrays.equals(reference.path, expectedPath)) {
-        throw new IllegalStateException("hashed path trie node moved from its durable path");
+      StoredNode stored = loadVerifiedNode(reference, expectedPath);
+      rememberMaterialized(stored, reference.path);
+      return retainResolvedReplacement(reference, decodeStoredNode(stored, expectedPath),
+          expectedPath);
+    }
+    if (node instanceof StoredNode) {
+      return decodeStoredNode((StoredNode) node, expectedPath);
+    }
+    return node;
+  }
+
+  // nodeStore may serve an overlay/cache hit; this read is not necessarily native or device I/O.
+  private StoredNode loadVerifiedNode(HashRefNode reference, byte[] expectedPath) {
+    if (!Arrays.equals(reference.path, expectedPath)) {
+      throw new IllegalStateException("hashed path trie node moved from its durable path");
+    }
+    byte[] encoded;
+    long readStarted = readTimer == null ? 0 : readTimer.start();
+    try {
+      encoded = nodeStore.get(reference.path);
+    } finally {
+      if (readTimer != null) {
+        readTimer.finish(readStarted);
       }
-      byte[] encoded = nodeStore.get(reference.path);
-      nodeHashVerifyCount.incrementAndGet();
+    }
+    nodeHashVerifyCount.incrementAndGet();
+    long hashStarted = hashTimer == null ? 0 : hashTimer.start();
+    try {
       if (encoded == null || !Arrays.equals(Hash.sha3(encoded), reference.expectedHash)) {
         throw new IllegalStateException("path-state durable child is missing or corrupt");
       }
-      hashReferenceResolveCount.incrementAndGet();
-      StoredNode stored = new StoredNode(encoded, reference.path, reference.expectedHash);
-      rememberMaterialized(stored, reference.path);
-      return retainResolvedReplacement(reference, resolve(stored, expectedPath), expectedPath);
+    } finally {
+      if (hashTimer != null) {
+        hashTimer.finish(hashStarted);
+      }
     }
-    if (!(node instanceof StoredNode)) {
-      return node;
-    }
-    StoredNode stored = (StoredNode) node;
+    hashReferenceResolveCount.incrementAndGet();
+    return new StoredNode(encoded, reference.path, reference.expectedHash);
+  }
+
+  // Decode one stored node, preserving lazy child references and its known encoding/hash.
+  private Node decodeStoredNode(StoredNode stored, byte[] expectedPath) {
     nodeDecodeCount.incrementAndGet();
-    byte[] storedEncoding = encodedNode(node);
+    long started = decodeTimer == null ? 0 : decodeTimer.start();
+    try {
+      return decodeStoredNodeBody(stored, expectedPath);
+    } finally {
+      if (decodeTimer != null) {
+        decodeTimer.finish(started);
+      }
+    }
+  }
+
+  private Node decodeStoredNodeBody(StoredNode stored, byte[] expectedPath) {
+    byte[] storedEncoding = encodedNode(stored);
     if (!Arrays.equals(stored.path, expectedPath)) {
       throw new IllegalStateException("stored path trie node moved from its durable path");
     }

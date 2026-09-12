@@ -28,6 +28,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
 import javax.annotation.PostConstruct;
 import lombok.Getter;
@@ -75,6 +76,7 @@ public class SnapshotManager implements RevokingDatabase {
   public static final int DEFAULT_MIN_FLUSH_COUNT = 1;
   private P66CoupledMutationMaterializer p66Materializer;
   private ExecutorService artifactExecutor;
+  private boolean blockFinalizationActive;
 
   public synchronized void installP66SnapshotLane(Chainbase assets) {
     installP66SnapshotLane(assets, false);
@@ -196,6 +198,7 @@ public class SnapshotManager implements RevokingDatabase {
   }
 
   public synchronized ISession buildSession(boolean forceEnable) {
+    requireNoBlockFinalization();
     if (disabled && !forceEnable) {
       return new Session(this);
     }
@@ -257,6 +260,7 @@ public class SnapshotManager implements RevokingDatabase {
   }
 
   public synchronized void merge() {
+    requireNoBlockFinalization();
     if (activeSession <= 0) {
       throw new RevokingStoreIllegalStateException(activeSession);
     }
@@ -271,6 +275,7 @@ public class SnapshotManager implements RevokingDatabase {
   }
 
   public synchronized void revoke() {
+    requireNoBlockFinalization();
     if (disabled) {
       return;
     }
@@ -294,6 +299,7 @@ public class SnapshotManager implements RevokingDatabase {
   }
 
   public synchronized void commit() {
+    requireNoBlockFinalization();
     if (activeSession <= 0) {
       throw new RevokingStoreIllegalStateException(activeSession);
     }
@@ -325,6 +331,17 @@ public class SnapshotManager implements RevokingDatabase {
    * Plain transaction/pending sessions must continue to use {@link #commit()} or merge/revoke.
    */
   public synchronized void commit(BlockSnapshotMeta meta) {
+    finalizeBlock(meta, stages -> {
+      stages.normalizeSnapshot();
+      stages.startBlockDiff();
+      stages.buildPathState();
+      stages.completeArtifacts();
+      stages.commitSession();
+    }, () -> { });
+  }
+
+  private synchronized void finalizeBlock(BlockSnapshotMeta meta,
+      Consumer<ISession.BlockFinalization> pipeline, Runnable sessionCommitted) {
     Objects.requireNonNull(meta, "meta");
     long startedNanos = System.nanoTime();
     if (activeSession <= 0) {
@@ -340,159 +357,266 @@ public class SnapshotManager implements RevokingDatabase {
       }
     }
 
-    // P66 must be materialized before capture: both consumers need the same post-P66 physical
-    // change view, otherwise AccountAsset and PathState can derive different block artifacts.
-    if (p66Materializer != null) {
-      long p66Start = System.nanoTime();
-      P66CoupledMutationMaterializer.Statistics stats = p66Materializer.materialize();
-      logger.info("P66 Snapshot materialized: head={}, changedAccounts={}, migratedAccounts={}, "
-              + "emptyAssetSkips={}, assetPuts={}, assetDeletes={}, prefixQueries={}, "
-              + "prefixRows={}, activationAccountScans=0, duplicateRootMigrations=0, "
-              + "materializeMs={}", meta.getBlockNumber(), stats.changedAccounts,
-          stats.migratedAccounts, stats.emptyAssetSkips, stats.assetPuts, stats.assetDeletes,
-          stats.prefixQueries, stats.prefixRows, elapsedMillis(p66Start, System.nanoTime()));
+    if (blockFinalizationActive) {
+      throw new IllegalStateException("Block finalization is already active");
     }
-    BlockChangeView changeView = null;
-    if (oldValueCollector != null || pathStateRuntimeAttachment != null) {
-      changeView = BlockChangeView.capture(meta, dbs);
+    BlockFinalization stages = new BlockFinalization(meta, startedNanos, sessionCommitted);
+    blockFinalizationActive = true;
+    try {
+      Objects.requireNonNull(pipeline, "pipeline").accept(stages);
+      if (stages.phase != 5) {
+        throw new IllegalStateException("Block finalization did not commit its session");
+      }
+      stages.logCompletedStages();
+    } finally {
+      stages.open = false;
+      try {
+        stages.joinOutstandingArchive();
+      } finally {
+        blockFinalizationActive = false;
+      }
     }
-    long frozenNanos = System.nanoTime();
-    BlockReverseDiff reverseDiff = null;
-    PathStateBlockTransition pathStateTransition = null;
-    long archiveNanos;
-    long pathNanos;
-    boolean commonPathState = pathStateRuntimeAttachment != null
+  }
+
+  private void requireNoBlockFinalization() {
+    if (blockFinalizationActive) {
+      throw new IllegalStateException("Session mutation during block finalization");
+    }
+  }
+
+  private final class BlockFinalization implements ISession.BlockFinalization {
+    private final BlockSnapshotMeta meta;
+    private final long startedNanos;
+    private final Runnable sessionCommitted;
+    private final Thread owner = Thread.currentThread();
+    private final boolean commonPathState = pathStateRuntimeAttachment != null
         && pathStateRuntimeAttachment.isCommonCheckpointOnly();
-    // This is the current, still revocable block, NOT the solid prefix selected by flush().
-    // Its diff must not be appended as finalized history here.
-    boolean parallel = p66Materializer != null && oldValueCollector != null
+    private final boolean parallel = p66Materializer != null && oldValueCollector != null
         && pathStateRuntimeAttachment != null;
-    long parallelStart = System.nanoTime();
-    long[] archiveElapsed = new long[1];
-    Future<BlockReverseDiff> archive = null;
-    if (parallel) {
-      BlockChangeView frozen = changeView;
-      archive = artifactExecutor.submit(() -> {
-        long start = System.nanoTime();
-        try {
-          return Objects.requireNonNull(oldValueCollector.collect(frozen),
-              "archive collector returned null");
-        } finally {
-          archiveElapsed[0] = System.nanoTime() - start;
+    private boolean open = true;
+    private boolean legacySessionEnded;
+    private int phase;
+    private BlockChangeView changeView;
+    private BlockReverseDiff reverseDiff;
+    private PathStateBlockTransition pathStateTransition;
+    private Future<BlockReverseDiff> archive;
+    private final long[] archiveElapsed = new long[1];
+    private Throwable pathFailure;
+    private long frozenNanos;
+    private long archiveNanos;
+    private long pathNanos;
+    private long pathElapsed;
+    private long parallelStart;
+    private long attachedNanos;
+
+    private BlockFinalization(BlockSnapshotMeta meta, long startedNanos,
+        Runnable sessionCommitted) {
+      this.meta = meta;
+      this.startedNanos = startedNanos;
+      this.sessionCommitted = sessionCommitted;
+    }
+
+    private void requirePhase(int expected) {
+      if (!open || Thread.currentThread() != owner || phase != expected) {
+        throw new IllegalStateException("Invalid block finalization stage: " + phase);
+      }
+      // A failing stage cannot be retried against a partially prepared snapshot.
+      phase = -1;
+    }
+
+    @Override
+    public void normalizeSnapshot() {
+      requirePhase(0);
+      // P66 must be materialized before capture: both consumers need the same post-P66 physical
+      // change view, otherwise AccountAsset and PathState can derive different block artifacts.
+      if (p66Materializer != null) {
+        long p66Start = System.nanoTime();
+        P66CoupledMutationMaterializer.Statistics stats = p66Materializer.materialize();
+        logger.info("P66 Snapshot materialized: head={}, changedAccounts={}, migratedAccounts={}, "
+                + "emptyAssetSkips={}, assetPuts={}, assetDeletes={}, prefixQueries={}, "
+                + "prefixRows={}, activationAccountScans=0, duplicateRootMigrations=0, "
+                + "materializeMs={}", meta.getBlockNumber(), stats.changedAccounts,
+            stats.migratedAccounts, stats.emptyAssetSkips, stats.assetPuts, stats.assetDeletes,
+            stats.prefixQueries, stats.prefixRows, elapsedMillis(p66Start, System.nanoTime()));
+      }
+      if (oldValueCollector != null || pathStateRuntimeAttachment != null) {
+        changeView = BlockChangeView.capture(meta, dbs);
+      }
+      frozenNanos = System.nanoTime();
+      phase = 1;
+    }
+
+    @Override
+    public void startBlockDiff() {
+      requirePhase(1);
+      parallelStart = System.nanoTime();
+      if (parallel) {
+        BlockChangeView frozen = changeView;
+        archive = artifactExecutor.submit(() -> {
+          long start = System.nanoTime();
+          try {
+            return Objects.requireNonNull(oldValueCollector.collect(frozen),
+                "archive collector returned null");
+          } finally {
+            archiveElapsed[0] = System.nanoTime() - start;
+          }
+        });
+      } else {
+        reverseDiff = oldValueCollector == null ? null : Objects.requireNonNull(
+            oldValueCollector.collect(changeView), "archive collector returned null");
+      }
+      archiveNanos = System.nanoTime();
+      phase = 2;
+    }
+
+    @Override
+    public void buildPathState() {
+      requirePhase(2);
+      long pathStart = System.nanoTime();
+      try {
+        // Exactly one capture per block. P66 and legacy paths differ only in scheduling/failure
+        // policy; they do not collect or construct the trie twice.
+        if (pathStateRuntimeAttachment != null) {
+          pathStateTransition = pathStateRuntimeAttachment.capture(changeView);
+        }
+        if ((parallel || commonPathState) && pathStateTransition == null) {
+          throw new IllegalStateException("PathState capture failed before block-final barrier",
+              pathStateRuntimeAttachment.getFailure());
+        }
+      } catch (Throwable failure) {
+        if (!parallel) {
+          if (commonPathState) {
+            throw rejectBlockArtifacts(new IllegalStateException(
+                "Block-final PathState preparation failed", failure));
+          }
+          throw failure;
+        }
+        pathFailure = failure;
+      }
+      pathNanos = System.nanoTime();
+      pathElapsed = pathNanos - pathStart;
+      phase = 3;
+    }
+
+    @Override
+    public void completeArtifacts() {
+      requirePhase(3);
+      if (parallel) {
+        // Never cancel-and-revoke: both readers retain Snapshot references.  Releasing this block
+        // layer before the other branch finishes would make old-value reads or PathState reads race
+        // with Snapshot reclamation and would invalidate the shared-view contract.
+        boolean interrupted = false;
+        Throwable archiveFailure = null;
+        reverseDiff = null;
+        while (true) {
+          try {
+            reverseDiff = archive.get();
+            break;
+          } catch (InterruptedException failure) {
+            interrupted = true;
+          } catch (ExecutionException failure) {
+            archiveFailure = failure.getCause();
+            break;
+          }
+        }
+        if (interrupted) {
+          Thread.currentThread().interrupt();
+        }
+        if (pathFailure != null || archiveFailure != null || interrupted) {
+          Throwable failure = pathFailure != null ? pathFailure : archiveFailure;
+          IllegalStateException rejected = new IllegalStateException(
+              "Block-final parallel barrier failed", failure);
+          if (pathFailure != null && archiveFailure != null) {
+            rejected.addSuppressed(archiveFailure);
+          }
+          pathStateRuntimeAttachment.fail(rejected);
+          throw rejectBlockArtifacts(rejected);
+        }
+        archiveNanos = System.nanoTime();
+        pathNanos = archiveNanos;
+        logger.info("Block-final parallel barrier: head={}, archiveMs={}, pathMs={}, wallMs={}, "
+                + "archiveP66Projection=0, pathP66Projection=0", meta.getBlockNumber(),
+            TimeUnit.NANOSECONDS.toMillis(archiveElapsed[0]),
+            TimeUnit.NANOSECONDS.toMillis(pathElapsed), elapsedMillis(parallelStart, pathNanos));
+      }
+      PathStateSnapshotDelta pathStateDelta = pathStateTransition == null ? null
+          : pathStateRuntimeAttachment.preparedSnapshotDelta(pathStateTransition);
+
+      // Expands optimized heads with inherited entries, not commit/flush. Keep AFTER collecting
+      // changed entries: doing this before capture would turn unchanged keys into apparent changes.
+      dbs.forEach(db -> {
+        if (db.getHead().isOptimized()) {
+          db.getHead().reloadToMem();
         }
       });
-    } else {
-      reverseDiff = oldValueCollector == null ? null : Objects.requireNonNull(
-          oldValueCollector.collect(changeView), "archive collector returned null");
-    }
-    archiveNanos = System.nanoTime();
-    long pathStart = System.nanoTime();
-    Throwable pathFailure = null;
-    try {
-      // Exactly one capture per block. P66 and legacy paths differ only in scheduling/failure
-      // policy; they do not collect or construct the trie twice.
+
+      // Shared references, not one copy of the block artifacts per database. The checkpoint
+      // payload reader traverses per-store layers and deduplicates these artifacts by block identity.
+      // All databases carry meta; only archive state databases carry the reverse diff / trie redo.
+      for (Chainbase db : dbs) {
+        boolean stateDatabase = ArchiveStoreScope.isStateDatabase(db.getDbName());
+        ((SnapshotImpl) db.getHead()).attachBlockArtifacts(meta,
+            stateDatabase ? reverseDiff : null, stateDatabase ? pathStateDelta : null);
+      }
+      attachedNanos = System.nanoTime();
+      if (p66Materializer == null && !commonPathState) {
+        --activeSession;
+        legacySessionEnded = true;
+      }
+      // PathState publication advances the volatile/in-memory owner only after both prepared
+      // artifacts have been attached.  Durable CURRENT advancement belongs to the checkpoint
+      // materializer and must not be moved into either parallel prepare branch.
       if (pathStateRuntimeAttachment != null) {
-        pathStateTransition = pathStateRuntimeAttachment.capture(changeView);
-      }
-      if ((parallel || commonPathState) && pathStateTransition == null) {
-        throw new IllegalStateException("PathState capture failed before block-final barrier",
-            pathStateRuntimeAttachment.getFailure());
-      }
-    } catch (Throwable failure) {
-      if (!parallel) {
-        if (commonPathState) {
+        pathStateRuntimeAttachment.publish(pathStateTransition);
+        if ((p66Materializer != null || commonPathState)
+            && pathStateRuntimeAttachment.getFailure() != null) {
           throw rejectBlockArtifacts(new IllegalStateException(
-              "Block-final PathState preparation failed", failure));
+              "Block-final PathState publication failed", pathStateRuntimeAttachment.getFailure()));
         }
-        throw failure;
       }
-      pathFailure = failure;
+      phase = 4;
     }
-    pathNanos = System.nanoTime();
-    long pathElapsed = pathNanos - pathStart;
-    if (parallel) {
-      // Never cancel-and-revoke: both readers retain Snapshot references.  Releasing this block
-      // layer before the other branch finishes would make old-value reads or PathState reads race
-      // with Snapshot reclamation and would invalidate the shared-view contract.
+
+    @Override
+    public void commitSession() {
+      requirePhase(4);
+      if (!legacySessionEnded) {
+        --activeSession;
+      }
+      sessionCommitted.run();
+      phase = 5;
+    }
+
+    private void logCompletedStages() {
+      long completedNanos = System.nanoTime();
+      if (changeView != null && p66Materializer == null) {
+        logger.info("Block-final artifact stages: head={}, freezeMs={}, archiveMs={}, "
+                + "pathCaptureMs={}, attachMs={}, publishMs={}, totalMs={}",
+            meta.getBlockNumber(), elapsedMillis(startedNanos, frozenNanos),
+            elapsedMillis(frozenNanos, archiveNanos), elapsedMillis(archiveNanos, pathNanos),
+            elapsedMillis(pathNanos, attachedNanos), elapsedMillis(attachedNanos, completedNanos),
+            elapsedMillis(startedNanos, completedNanos));
+      }
+    }
+
+    private void joinOutstandingArchive() {
+      if (archive == null) {
+        return;
+      }
       boolean interrupted = false;
-      Throwable archiveFailure = null;
-      reverseDiff = null;
       while (true) {
         try {
-          reverseDiff = archive.get();
+          archive.get();
           break;
         } catch (InterruptedException failure) {
           interrupted = true;
         } catch (ExecutionException failure) {
-          archiveFailure = failure.getCause();
           break;
         }
       }
       if (interrupted) {
         Thread.currentThread().interrupt();
       }
-      if (pathFailure != null || archiveFailure != null || interrupted) {
-        Throwable failure = pathFailure != null ? pathFailure : archiveFailure;
-        IllegalStateException rejected = new IllegalStateException(
-            "Block-final parallel barrier failed", failure);
-        if (pathFailure != null && archiveFailure != null) {
-          rejected.addSuppressed(archiveFailure);
-        }
-        pathStateRuntimeAttachment.fail(rejected);
-        throw rejectBlockArtifacts(rejected);
-      }
-      archiveNanos = System.nanoTime();
-      pathNanos = archiveNanos;
-      logger.info("Block-final parallel barrier: head={}, archiveMs={}, pathMs={}, wallMs={}, "
-              + "archiveP66Projection=0, pathP66Projection=0", meta.getBlockNumber(),
-          TimeUnit.NANOSECONDS.toMillis(archiveElapsed[0]),
-          TimeUnit.NANOSECONDS.toMillis(pathElapsed), elapsedMillis(parallelStart, pathNanos));
-    }
-    PathStateSnapshotDelta pathStateDelta = pathStateTransition == null ? null
-        : pathStateRuntimeAttachment.preparedSnapshotDelta(pathStateTransition);
-
-    // Expands optimized heads with inherited entries, not commit/flush. Keep AFTER collecting
-    // changed entries: doing this before capture would turn unchanged keys into apparent changes.
-    dbs.forEach(db -> {
-      if (db.getHead().isOptimized()) {
-        db.getHead().reloadToMem();
-      }
-    });
-
-    // Shared references, not one copy of the block artifacts per database. The checkpoint
-    // payload reader traverses per-store layers and deduplicates these artifacts by block identity.
-    // All databases carry meta; only archive state databases carry the reverse diff / trie redo.
-    for (Chainbase db : dbs) {
-      boolean stateDatabase = ArchiveStoreScope.isStateDatabase(db.getDbName());
-      ((SnapshotImpl) db.getHead()).attachBlockArtifacts(meta,
-          stateDatabase ? reverseDiff : null, stateDatabase ? pathStateDelta : null);
-    }
-    long attachedNanos = System.nanoTime();
-    if (p66Materializer == null && !commonPathState) {
-      --activeSession;
-    }
-    // PathState publication advances the volatile/in-memory owner only after both prepared
-    // artifacts have been attached.  Durable CURRENT advancement belongs to the checkpoint
-    // materializer and must not be moved into either parallel prepare branch.
-    if (pathStateRuntimeAttachment != null) {
-      pathStateRuntimeAttachment.publish(pathStateTransition);
-      if ((p66Materializer != null || commonPathState)
-          && pathStateRuntimeAttachment.getFailure() != null) {
-        throw rejectBlockArtifacts(new IllegalStateException(
-            "Block-final PathState publication failed", pathStateRuntimeAttachment.getFailure()));
-      }
-    }
-    if (p66Materializer != null || commonPathState) {
-      --activeSession;
-    }
-    long completedNanos = System.nanoTime();
-    if (changeView != null && p66Materializer == null) {
-      logger.info("Block-final artifact stages: head={}, freezeMs={}, archiveMs={}, "
-              + "pathCaptureMs={}, attachMs={}, publishMs={}, totalMs={}",
-          meta.getBlockNumber(), elapsedMillis(startedNanos, frozenNanos),
-          elapsedMillis(frozenNanos, archiveNanos), elapsedMillis(archiveNanos, pathNanos),
-          elapsedMillis(pathNanos, attachedNanos), elapsedMillis(attachedNanos, completedNanos),
-          elapsedMillis(startedNanos, completedNanos));
     }
   }
 
@@ -1319,6 +1443,7 @@ public class SnapshotManager implements RevokingDatabase {
     private SnapshotManager snapshotManager;
     private boolean applySnapshot = true;
     private boolean disableOnExit = false;
+    private final int sessionDepth;
 
     public Session(SnapshotManager snapshotManager) {
       this(snapshotManager, false);
@@ -1327,6 +1452,7 @@ public class SnapshotManager implements RevokingDatabase {
     public Session(SnapshotManager snapshotManager, boolean disableOnExit) {
       this.snapshotManager = snapshotManager;
       this.disableOnExit = disableOnExit;
+      this.sessionDepth = snapshotManager.activeSession;
     }
 
     @Override
@@ -1339,6 +1465,17 @@ public class SnapshotManager implements RevokingDatabase {
     public void commit(BlockSnapshotMeta meta) {
       snapshotManager.commit(meta);
       applySnapshot = false;
+    }
+
+    @Override
+    public void finalizeBlock(BlockSnapshotMeta meta,
+        Consumer<ISession.BlockFinalization> pipeline) {
+      synchronized (snapshotManager) {
+        if (!applySnapshot || sessionDepth != snapshotManager.activeSession) {
+          throw new IllegalStateException("Session is completed or is not the active layer");
+        }
+        snapshotManager.finalizeBlock(meta, pipeline, () -> applySnapshot = false);
+      }
     }
 
     @Override

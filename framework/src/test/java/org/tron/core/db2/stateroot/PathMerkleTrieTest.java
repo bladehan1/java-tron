@@ -23,6 +23,70 @@ import org.tron.core.trie.TrieImpl;
 public class PathMerkleTrieTest {
 
   @Test
+  public void nativeTimingExcludesResidentHitsIncludingCachedAbsence() {
+    String previous = System.getProperty("tron.pathstate.attribution");
+    try {
+      System.setProperty("tron.pathstate.attribution", "true");
+      InMemoryPathNodeStore base = new InMemoryPathNodeStore();
+      byte[] key = new byte[]{1};
+      base.put(key, value("node"));
+      PathStatePhysicalStoreSet.ResidentNodeStore resident =
+          new PathStatePhysicalStoreSet.ResidentNodeStore(base,
+              new PathStatePhysicalStoreSet.ResidentNodeCache(4096), 4);
+      resident.get(key);
+      resident.get(key);
+      resident.get(new byte[]{2});
+      resident.get(new byte[]{2});
+      assertEquals(2, resident.nativeReadTiming()[0]);
+      assertEquals(1, resident.nativeReadTiming()[1]);
+      assertEquals(2, resident.getCleanHits());
+      assertEquals(2, resident.getNativeReads());
+    } finally {
+      if (previous == null) {
+        System.clearProperty("tron.pathstate.attribution");
+      } else {
+        System.setProperty("tron.pathstate.attribution", previous);
+      }
+    }
+  }
+
+  @Test
+  public void sampledReadTimingPreservesLazyReadsRootAndCorruptionChecks() {
+    InMemoryPathNodeStore sourceStore = new InMemoryPathNodeStore();
+    PathMerkleTrie source = new PathMerkleTrie(sourceStore);
+    for (int i = 0; i < 16; i++) {
+      source.put(filledKey(i << 4), value("long-value-for-hashed-child-reference-" + i));
+    }
+    byte[] root = source.rootHash();
+    InMemoryPathNodeStore measuredStore = new InMemoryPathNodeStore();
+    measuredStore.nodes.putAll(copyNodeMap(sourceStore.nodes));
+    PathMerkleTrie measured = new PathMerkleTrie(measuredStore);
+    measured.restoreRoot(root);
+    measured.enableReadTiming();
+    for (int i = 0; i < 16; i++) {
+      assertArrayEquals(source.get(filledKey(i << 4)), measured.get(filledKey(i << 4)));
+    }
+    assertArrayEquals(root, measured.rootHash());
+    long[][] timing = measured.readTiming();
+    assertEquals(16, timing[0][0]);
+    assertEquals(1, timing[0][1]);
+    assertEquals(16, timing[1][0]);
+    assertTrue(timing[2][0] >= 16);
+    assertTrue(timing[2][1] > 0);
+    long reads = timing[0][0];
+    measured.get(filledKey(0));
+    assertEquals(reads, measured.readTiming()[0][0]);
+
+    PathMerkleTrie corrupt = new PathMerkleTrie(measuredStore);
+    corrupt.restoreRoot(root);
+    corrupt.enableReadTiming();
+    measuredStore.nodes.put("00", new byte[]{1});
+    assertThrows(IllegalStateException.class, () -> corrupt.get(filledKey(0)));
+    assertEquals(1, corrupt.readTiming()[0][0]);
+    assertEquals(1, corrupt.readTiming()[1][0]);
+  }
+
+  @Test
   public void emptyAndSingleLeafMatchIndependentTrieOracle() {
     InMemoryPathNodeStore store = new InMemoryPathNodeStore();
     PathMerkleTrie trie = new PathMerkleTrie(store);
