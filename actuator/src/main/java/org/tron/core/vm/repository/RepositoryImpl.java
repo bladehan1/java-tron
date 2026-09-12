@@ -26,6 +26,7 @@ import org.tron.common.utils.Commons;
 import org.tron.common.utils.Sha256Hash;
 import org.tron.common.utils.StorageUtils;
 import org.tron.common.utils.StringUtil;
+import org.tron.core.db2.core.ExecutionAttribution;
 import org.tron.core.ChainBaseManager;
 import org.tron.core.capsule.AbiCapsule;
 import org.tron.core.capsule.AccountCapsule;
@@ -854,6 +855,7 @@ public class RepositoryImpl implements Repository {
     if (parent == null && readOnlyRoot) {
       throw new IllegalStateException("Historical Repository root cannot be committed");
     }
+    long started = ExecutionAttribution.start();
     Repository repository = null;
     if (parent != null) {
       repository = parent;
@@ -870,6 +872,7 @@ public class RepositoryImpl implements Repository {
     commitDelegatedResourceAccountIndexCache(repository);
     commitTransientStorage(repository);
     commitNewContractCache(repository);
+    ExecutionAttribution.stage("repository_commit", started);
   }
 
   @Override

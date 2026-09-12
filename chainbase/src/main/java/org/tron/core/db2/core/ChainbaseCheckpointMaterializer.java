@@ -137,7 +137,13 @@ public final class ChainbaseCheckpointMaterializer implements CommonCheckpointMa
         throw new IOException("Chainbase checkpoint Store has no SnapshotRoot: "
             + store.getDbName());
       }
+      boolean observe = Boolean.getBoolean("tron.chainbase.executionAttribution");
+      long started = observe ? System.nanoTime() : 0;
       ((SnapshotRoot) root).applyCheckpointMutations(batch(store));
+      if (observe) {
+        ExecutionAttribution.checkpoint(admittedTarget, store.getDbName(),
+            store.getMutations().size(), System.nanoTime() - started);
+      }
       faultHook.after(Stage.AFTER_STORE_BATCH, store.getDbName());
     }
     recordMaterialized(admittedTarget, encode(admittedTarget));

@@ -154,6 +154,7 @@ import org.tron.core.db2.core.CommonCheckpointRedoCoordinator;
 import org.tron.core.db2.core.CommonCheckpointRuntime;
 import org.tron.core.db2.core.CommonCheckpointRuntimeAttachment;
 import org.tron.core.db2.core.CommonCheckpointRuntimeOwner;
+import org.tron.core.db2.core.ExecutionAttribution;
 import org.tron.core.db2.core.SnapshotManager;
 import org.tron.core.db2.stateroot.PathStateBlockTransition;
 import org.tron.core.db2.stateroot.PathStateCanonicalizer;
@@ -2658,6 +2659,7 @@ public class Manager {
       trxCap.setInBlock(true);
     }
 
+    long detailStarted = ExecutionAttribution.start(ExecutionAttribution.Phase.VALIDATE);
     validateTapos(trxCap);
     validateCommon(trxCap);
 
@@ -2672,14 +2674,25 @@ public class Manager {
     if (!trxCap.isInBlock()) {
       trxCap.sanitize();
     }
+    ExecutionAttribution.stage("validate", detailStarted);
+    detailStarted = ExecutionAttribution.start(ExecutionAttribution.Phase.TRACE_INIT);
     TransactionTrace trace = new TransactionTrace(trxCap, StoreFactory.getInstance(),
         new RuntimeImpl());
     trxCap.setTrxTrace(trace);
 
+    ExecutionAttribution.stage("trace_init", detailStarted);
+    long feePartStarted = ExecutionAttribution.start(ExecutionAttribution.Phase.BANDWIDTH);
     consumeBandwidth(trxCap, trace);
+    ExecutionAttribution.stage("bandwidth", feePartStarted);
+    feePartStarted = ExecutionAttribution.start(ExecutionAttribution.Phase.MULTISIGN);
     consumeMultiSignFee(trxCap, trace);
+    ExecutionAttribution.stage("multisign", feePartStarted);
+    feePartStarted = ExecutionAttribution.start(ExecutionAttribution.Phase.MEMO);
     consumeMemoFee(trxCap, trace);
+    ExecutionAttribution.stage("memo", feePartStarted);
 
+    ExecutionAttribution.stage("fees", detailStarted);
+    detailStarted = ExecutionAttribution.start(ExecutionAttribution.Phase.RUNTIME);
     trace.init(blockCap, eventPluginLoaded);
     trace.checkIsConstant();
     trace.exec();
@@ -2699,10 +2712,14 @@ public class Manager {
       }
     }
 
+    ExecutionAttribution.stage("runtime", detailStarted);
+    detailStarted = ExecutionAttribution.start(ExecutionAttribution.Phase.FINALIZATION);
     trace.finalization();
     if (getDynamicPropertiesStore().supportVM()) {
       trxCap.setResult(trace.getTransactionContext());
     }
+    ExecutionAttribution.stage("finalization", detailStarted);
+    detailStarted = ExecutionAttribution.start(ExecutionAttribution.Phase.RESULT);
     chainBaseManager.getTransactionStore().put(trxCap.getTransactionId().getBytes(), trxCap);
 
     Optional.ofNullable(transactionCache)
@@ -2746,6 +2763,8 @@ public class Manager {
              Hex.toHexString(transactionInfo.getId()), cost, type, contract.getType().name());
     }
     Metrics.histogramObserve(requestTimer);
+    ExecutionAttribution.stage("result", detailStarted);
+    ExecutionAttribution.phase(ExecutionAttribution.Phase.OTHER);
     return transactionInfo.getInstance();
   }
 
@@ -3022,9 +3041,13 @@ public class Manager {
         new TransactionRetCapsule(block);
     HistoryBlockHashUtil.write(this, block);
     long transactionStartedNanos = System.nanoTime();
-    try {
+    try (ExecutionAttribution detail = ExecutionAttribution.open(
+        block.getNum(), block.getBlockId().toString())) {
+      long loopStarted = ExecutionAttribution.start();
       merkleContainer.resetCurrentMerkleTree();
+      ExecutionAttribution.phase(ExecutionAttribution.Phase.CALLBACK);
       accountStateCallBack.preExecute(block);
+      ExecutionAttribution.phase(ExecutionAttribution.Phase.OTHER);
       List<TransactionInfo> results = new ArrayList<>();
       long num = block.getNum();
       for (TransactionCapsule transactionCapsule : block.getTransactions()) {
@@ -3039,15 +3062,27 @@ public class Manager {
         if (block.generatedByMyself) {
           transactionCapsule.setVerified(true);
         }
+        long callbackStarted = ExecutionAttribution.start(ExecutionAttribution.Phase.CALLBACK);
         accountStateCallBack.preExeTrans();
+        ExecutionAttribution.stage("callback", callbackStarted);
+        ExecutionAttribution.phase(ExecutionAttribution.Phase.OTHER);
         TransactionInfo result = processTransaction(transactionCapsule, block);
+        callbackStarted = ExecutionAttribution.start(ExecutionAttribution.Phase.CALLBACK);
         accountStateCallBack.exeTransFinish();
+        ExecutionAttribution.stage("callback", callbackStarted);
+        ExecutionAttribution.phase(ExecutionAttribution.Phase.OTHER);
         if (Objects.nonNull(result)) {
           results.add(result);
         }
       }
       transactionRetCapsule.addAllTransactionInfos(results);
+      long finishStarted = ExecutionAttribution.start(ExecutionAttribution.Phase.CALLBACK);
       accountStateCallBack.executePushFinish();
+      ExecutionAttribution.stage("callback", finishStarted);
+      ExecutionAttribution.stage("loop", loopStarted);
+      if (detail != null) {
+        detail.publish();
+      }
     } finally {
       accountStateCallBack.exceptionFinish();
     }
