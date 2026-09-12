@@ -19,8 +19,8 @@ public class Metrics {
     throw new IllegalStateException("Metrics");
   }
 
-  public static synchronized  void init() {
-    if(initialized) {
+  public static synchronized void init() {
+    if (initialized) {
       return;
     }
     if (CommonParameter.getInstance().isMetricsPrometheusEnable()) {
