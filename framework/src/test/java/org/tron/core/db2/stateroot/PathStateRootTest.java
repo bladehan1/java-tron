@@ -28,6 +28,43 @@ public class PathStateRootTest {
   private static final PathStateParticipant STORAGE = participant(22, "storage-row");
 
   @Test
+  public void readTimingCoversThreeParticipantsWithoutChangingRoot() {
+    List<PathStateParticipant> participants = new ArrayList<>(participants());
+    participants.add(participant(5, "account-asset"));
+    PathStateParticipantScope scope = new PathStateParticipantScope(participants);
+    Map<Integer, InMemoryPathNodeStore> stores = new LinkedHashMap<>();
+    for (PathStateParticipant participant : participants) {
+      stores.put(participant.getStoreId(), new InMemoryPathNodeStore());
+    }
+    InMemoryPathNodeStore superStore = new InMemoryPathNodeStore();
+    PathStateRoot original = new PathStateRoot(scope,
+        participant -> stores.get(participant.getStoreId()), superStore);
+    for (PathStateParticipant participant : participants) {
+      for (int i = 0; i < 128; i++) {
+        original.put(participant.getDbName(), bytes("key-" + i), bytes("stored-value-" + i));
+      }
+    }
+    byte[] expected = original.rootHash();
+    PathStateRoot restored = new PathStateRoot(scope,
+        participant -> stores.get(participant.getStoreId()), superStore);
+    restored.restoreStoredRoots(expected);
+    restored.enableParticipantReadTiming();
+    for (PathStateParticipant participant : participants) {
+      for (int i = 0; i < 128; i++) {
+        restored.put(participant.getDbName(), bytes("key-" + i), bytes("stored-value-" + i));
+      }
+      if (!PathStateOperationTimer.observesStore(participant.getStoreId())) {
+        continue;
+      }
+      for (long[] timing : restored.participantReadTiming(participant.getStoreId())) {
+        assertTrue(timing[0] > 0);
+        assertTrue(timing[1] > 0);
+      }
+    }
+    assertArrayEquals(expected, restored.rootHash());
+  }
+
+  @Test
   public void aggregatesEveryParticipantIntoIndependentOracleSuperRoot() {
     List<PathStateParticipant> participants = participants();
     PathStateRoot stateRoot = stateRoot(participants);

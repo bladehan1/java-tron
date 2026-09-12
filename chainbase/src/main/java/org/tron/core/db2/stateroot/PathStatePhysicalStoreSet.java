@@ -1936,7 +1936,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
       this.base = Objects.requireNonNull(base, "base");
       this.cache = Objects.requireNonNull(cache, "cache");
       this.storeId = storeId;
-      nativeTimer = storeId == 4 && PathStateOperationTimer.enabled()
+      nativeTimer = PathStateOperationTimer.observesStore(storeId) && PathStateOperationTimer.enabled()
           ? new PathStateOperationTimer() : null;
     }
 

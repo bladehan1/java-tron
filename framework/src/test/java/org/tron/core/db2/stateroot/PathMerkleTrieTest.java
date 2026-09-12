@@ -27,20 +27,22 @@ public class PathMerkleTrieTest {
     String previous = System.getProperty("tron.pathstate.attribution");
     try {
       System.setProperty("tron.pathstate.attribution", "true");
-      InMemoryPathNodeStore base = new InMemoryPathNodeStore();
-      byte[] key = new byte[]{1};
-      base.put(key, value("node"));
-      PathStatePhysicalStoreSet.ResidentNodeStore resident =
-          new PathStatePhysicalStoreSet.ResidentNodeStore(base,
-              new PathStatePhysicalStoreSet.ResidentNodeCache(4096), 4);
-      resident.get(key);
-      resident.get(key);
-      resident.get(new byte[]{2});
-      resident.get(new byte[]{2});
-      assertEquals(2, resident.nativeReadTiming()[0]);
-      assertEquals(1, resident.nativeReadTiming()[1]);
-      assertEquals(2, resident.getCleanHits());
-      assertEquals(2, resident.getNativeReads());
+      for (int storeId : new int[]{4, 5, 22}) {
+        InMemoryPathNodeStore base = new InMemoryPathNodeStore();
+        byte[] key = new byte[]{1};
+        base.put(key, value("node"));
+        PathStatePhysicalStoreSet.ResidentNodeStore resident =
+            new PathStatePhysicalStoreSet.ResidentNodeStore(base,
+                new PathStatePhysicalStoreSet.ResidentNodeCache(4096), storeId);
+        resident.get(key);
+        resident.get(key);
+        resident.get(new byte[]{2});
+        resident.get(new byte[]{2});
+        assertEquals(2, resident.nativeReadTiming()[0]);
+        assertEquals(1, resident.nativeReadTiming()[1]);
+        assertEquals(2, resident.getCleanHits());
+        assertEquals(2, resident.getNativeReads());
+      }
     } finally {
       if (previous == null) {
         System.clearProperty("tron.pathstate.attribution");

@@ -12,6 +12,10 @@ final class PathStateOperationTimer {
     return Boolean.getBoolean("tron.pathstate.attribution");
   }
 
+  static boolean observesStore(int storeId) {
+    return storeId == 4 || storeId == 5 || storeId == 22;
+  }
+
   long start() {
     return ((calls.getAndIncrement() & 63) == 0) ? System.nanoTime() : 0;
   }

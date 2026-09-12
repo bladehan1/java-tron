@@ -14,17 +14,17 @@ final class PathStateAttributionMetrics {
     return PathStateOperationTimer.enabled() && Metrics.enabled();
   }
 
-  static void operation(String operation, long calls, long samples, long nanos) {
+  static void operation(int storeId, String operation, long calls, long samples, long nanos) {
     if (enabled()) {
-      Export.CALLS.labels("4", operation).inc(calls);
-      Export.SAMPLES.labels("4", operation).inc(samples);
-      Export.SECONDS.labels("4", operation).inc(nanos / 1e9);
+      Export.CALLS.labels(Integer.toString(storeId), operation).inc(calls);
+      Export.SAMPLES.labels(Integer.toString(storeId), operation).inc(samples);
+      Export.SECONDS.labels(Integer.toString(storeId), operation).inc(nanos / 1e9);
     }
   }
 
-  static void cache(String kind, long count) {
+  static void cache(int storeId, String kind, long count) {
     if (count >= 0 && enabled()) {
-      Export.CACHE.labels("4", kind).inc(count);
+      Export.CACHE.labels(Integer.toString(storeId), kind).inc(count);
     }
   }
 
