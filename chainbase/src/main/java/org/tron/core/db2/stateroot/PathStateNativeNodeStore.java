@@ -78,6 +78,16 @@ final class PathStateNativeNodeStore implements Closeable {
 
   static PathStateNativeNodeStore open(Path directory, Engine engine, String storageProfile,
       NativeDbConfig config, int cacheShardBits, boolean readStatistics) throws IOException {
+    return open(directory, engine, storageProfile, config, cacheShardBits, readStatistics,
+        config.getCacheSize());
+  }
+
+  static PathStateNativeNodeStore open(Path directory, Engine engine, String storageProfile,
+      NativeDbConfig config, int cacheShardBits, boolean readStatistics, long cacheBytes)
+      throws IOException {
+    if (cacheBytes <= 0) {
+      throw new IllegalArgumentException("native cache size must be positive");
+    }
     Path path = Objects.requireNonNull(directory, "directory").toAbsolutePath().normalize();
     Engine selected = Objects.requireNonNull(engine, "engine");
     String profile = Objects.requireNonNull(storageProfile, "storageProfile");
@@ -90,11 +100,12 @@ final class PathStateNativeNodeStore implements Closeable {
       throw new IOException("path-state node database is not a directory: " + path);
     }
     Delegate opened = selected == Engine.LEVELDB ? new LevelDelegate(path, settings)
-        : new RocksDelegate(path, settings, cacheShardBits, readStatistics);
+        : new RocksDelegate(path, settings, cacheShardBits, readStatistics, cacheBytes);
     logger.info("Path-state database opened: directory={}, engine={}, profile={}, blockBytes={}, "
             + "writeBufferBytes={}, cacheBytes={}, maxOpenFiles={}, requestedCacheShardBits={}, readStatistics={}",
         path, selected, profile,
-        settings.getBlockSize(), settings.getWriteBufferSize(), settings.getCacheSize(),
+        settings.getBlockSize(), settings.getWriteBufferSize(),
+        selected == Engine.ROCKSDB ? cacheBytes : settings.getCacheSize(),
         settings.getMaxOpenFiles(), cacheShardBits, selected == Engine.ROCKSDB && readStatistics);
     return new PathStateNativeNodeStore(path, selected, profile, opened);
   }
@@ -316,12 +327,12 @@ final class PathStateNativeNodeStore implements Closeable {
     private final org.rocksdb.RocksDB database;
 
     private RocksDelegate(Path directory, NativeDbConfig config, int cacheShardBits,
-        boolean readStatistics)
+        boolean readStatistics, long cacheBytes)
         throws IOException {
       // Preserve the existing auto-sharded constructor unless the caller selected a measured
       // Store/budget combination. In particular, do not extrapolate 64MiB results to small DBs.
-      blockCache = cacheShardBits < 0 ? new LRUCache(config.getCacheSize())
-          : new LRUCache(config.getCacheSize(), cacheShardBits, false);
+      blockCache = cacheShardBits < 0 ? new LRUCache(cacheBytes)
+          : new LRUCache(cacheBytes, cacheShardBits, false);
       bloomFilter = new BloomFilter(config.getBloomBitsPerKey(), false);
       BlockBasedTableConfig table = new BlockBasedTableConfig()
           .setBlockSize(config.getBlockSize())
