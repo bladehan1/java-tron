@@ -31,6 +31,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Stream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.capsule.utils.MarketUtils;
 import org.tron.core.db2.stateroot.PathStateCanonicalizer.P66Phase;
 import org.tron.core.db2.stateroot.PathStateParticipantDescriptor.StoreIdentity;
@@ -140,7 +141,7 @@ public final class PathStateRebuildCoordinator {
       List<StoreResult> storeResults = new ArrayList<>(completedStores.values());
       long totalEntries = 0;
       for (StoreResult completed : storeResults) {
-        totalEntries = Math.addExact(totalEntries, completed.getEntryCount());
+        totalEntries = StrictMathWrapper.addExact(totalEntries, completed.getEntryCount());
       }
 
       admittedSource.verifyIdentity(identity);
@@ -415,9 +416,9 @@ public final class PathStateRebuildCoordinator {
       putBytes(inputDigest, key);
       putBytes(inputDigest, value);
       previousKey = key;
-      entryCount = Math.addExact(entryCount, 1L);
-      keyBytes = Math.addExact(keyBytes, key.length);
-      valueBytes = Math.addExact(valueBytes, value.length);
+      entryCount = StrictMathWrapper.addExact(entryCount, 1L);
+      keyBytes = StrictMathWrapper.addExact(keyBytes, key.length);
+      valueBytes = StrictMathWrapper.addExact(valueBytes, value.length);
       logProgressIfDue();
     }
 
@@ -627,7 +628,7 @@ public final class PathStateRebuildCoordinator {
         store.getComparatorId())) {
       return MarketUtils.comparePriceKey(left, right);
     }
-    for (int index = 0; index < Math.min(left.length, right.length); index++) {
+    for (int index = 0; index < StrictMathWrapper.min(left.length, right.length); index++) {
       int compared = Integer.compare(left[index] & 0xff, right[index] & 0xff);
       if (compared != 0) {
         return compared;

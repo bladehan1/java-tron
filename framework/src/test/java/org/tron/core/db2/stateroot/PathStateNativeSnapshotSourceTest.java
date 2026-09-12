@@ -19,6 +19,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
+import org.tron.common.math.StrictMathWrapper;
 import org.tron.common.storage.leveldb.LevelDbDataSourceImpl;
 import org.tron.common.utils.ByteArray;
 import org.tron.core.capsule.utils.MarketUtils;
@@ -188,7 +189,7 @@ public class PathStateNativeSnapshotSourceTest {
   }
 
   private static int compareUnsigned(byte[] left, byte[] right) {
-    for (int index = 0; index < Math.min(left.length, right.length); index++) {
+    for (int index = 0; index < StrictMathWrapper.min(left.length, right.length); index++) {
       int compared = Integer.compare(left[index] & 0xff, right[index] & 0xff);
       if (compared != 0) {
         return compared;

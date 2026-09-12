@@ -4,6 +4,7 @@ import java.io.ByteArrayOutputStream;
 import java.util.Arrays;
 import java.util.Objects;
 import org.tron.common.crypto.Hash;
+import org.tron.common.math.StrictMathWrapper;
 
 /**
  * Ascending-key MPT builder that commits completed subtrees and retains only the right frontier.
@@ -240,7 +241,7 @@ final class PathStateStackTrie {
   private static byte[] rlpList(byte[]... items) {
     int length = 0;
     for (byte[] item : items) {
-      length = Math.addExact(length, item.length);
+      length = StrictMathWrapper.addExact(length, item.length);
     }
     byte[] prefix = rlpLength(length, 0xc0, 0xf7);
     ByteArrayOutputStream output = new ByteArrayOutputStream(prefix.length + length);
@@ -279,7 +280,7 @@ final class PathStateStackTrie {
   }
 
   private static int commonPrefix(byte[] left, byte[] right) {
-    int length = Math.min(left.length, right.length);
+    int length = StrictMathWrapper.min(left.length, right.length);
     int index = 0;
     while (index < length && left[index] == right[index]) {
       index++;
@@ -317,7 +318,7 @@ final class PathStateStackTrie {
   }
 
   private static int compareUnsigned(byte[] left, byte[] right) {
-    for (int index = 0; index < Math.min(left.length, right.length); index++) {
+    for (int index = 0; index < StrictMathWrapper.min(left.length, right.length); index++) {
       int compared = Integer.compare(left[index] & 0xff, right[index] & 0xff);
       if (compared != 0) {
         return compared;

@@ -17,6 +17,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.db2.archive.ArchiveProgressEnvelope.Kind;
 import org.tron.core.db2.core.SnapshotManager;
 
@@ -830,7 +831,7 @@ public final class StateArchiveRuntimeOwner implements Closeable {
           changed.put(store, (long) entries.size()));
       return new ServingIndexApplyStatistics(plan.getIndexedFrom(), plan.getIndexedThrough(),
           plan.getSourceStepDigests().size(), changed, generationCreated,
-          Math.max(0, elapsedNanos));
+          StrictMathWrapper.max(0, elapsedNanos));
     }
 
     private static ServingIndexApplyStatistics zeroAction(BlockSnapshotMeta head) {

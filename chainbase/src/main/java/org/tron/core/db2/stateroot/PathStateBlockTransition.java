@@ -15,6 +15,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
+import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.db2.stateroot.PathStateCanonicalizer.P66Phase;
 import org.tron.core.db2.stateroot.PathStateParticipantDescriptor.StoreIdentity;
 
@@ -203,7 +204,7 @@ public final class PathStateBlockTransition {
   }
 
   private static int compareUnsigned(byte[] left, byte[] right) {
-    for (int i = 0; i < Math.min(left.length, right.length); i++) {
+    for (int i = 0; i < StrictMathWrapper.min(left.length, right.length); i++) {
       int comparison = Integer.compare(left[i] & 0xff, right[i] & 0xff);
       if (comparison != 0) {
         return comparison;

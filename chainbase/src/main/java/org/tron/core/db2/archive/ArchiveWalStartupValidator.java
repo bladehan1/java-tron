@@ -5,6 +5,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
+import org.tron.common.math.StrictMathWrapper;
 
 /** Validates recovered Chainbase WAL identity before the normal archive writer is attached. */
 final class ArchiveWalStartupValidator {
@@ -58,8 +59,9 @@ final class ArchiveWalStartupValidator {
     }
     long count;
     try {
-      count = Math.addExact(Math.subtractExact(recoveredBinding.getLast().getEpoch(),
-          recoveredBinding.getFirst().getEpoch()), 1L);
+      count = StrictMathWrapper.addExact(
+          StrictMathWrapper.subtractExact(recoveredBinding.getLast().getEpoch(),
+              recoveredBinding.getFirst().getEpoch()), 1L);
     } catch (ArithmeticException invalid) {
       throw new ArchivePersistenceException("Recovered Archive WAL binding range overflows",
           invalid);

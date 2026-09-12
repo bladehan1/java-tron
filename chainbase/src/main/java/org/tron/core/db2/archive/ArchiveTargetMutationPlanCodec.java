@@ -14,6 +14,7 @@ import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.db2.archive.P66AccountAssetCodec.Phase;
 
 /** Checksummed bounded codec for one durable target mutation plan. */
@@ -59,7 +60,7 @@ final class ArchiveTargetMutationPlanCodec {
       }
       output.flush();
       byte[] payload = bytes.toByteArray();
-      int length = Math.addExact(payload.length, Integer.BYTES);
+      int length = StrictMathWrapper.addExact(payload.length, Integer.BYTES);
       if (length > MAX_ENCODED_LENGTH) {
         throw new IllegalArgumentException("Mutation plan is too large");
       }

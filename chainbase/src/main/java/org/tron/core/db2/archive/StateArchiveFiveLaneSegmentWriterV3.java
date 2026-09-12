@@ -22,6 +22,7 @@ import java.util.Objects;
 import java.util.TreeMap;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
+import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.db2.archive.StateArchiveFiveLaneBlockCodecV3.DecodedBundle;
 import org.tron.core.db2.archive.StateArchiveFiveLaneBlockCodecV3.EncodedBundle;
 import org.tron.core.db2.archive.StateArchiveFiveLaneBlockCodecV3.EncodedLane;
@@ -329,10 +330,10 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
   public synchronized long getHistoryStartBlock() {
     long first = Long.MAX_VALUE;
     for (CurrentSegment segment : getCurrentSegments()) {
-      first = Math.min(first, segment.getFirstBlock());
+      first = StrictMathWrapper.min(first, segment.getFirstBlock());
     }
     for (SealedSegment segment : sealedSegments) {
-      first = Math.min(first, segment.getFirstBlock());
+      first = StrictMathWrapper.min(first, segment.getFirstBlock());
     }
     return first == Long.MAX_VALUE ? -1 : first;
   }
@@ -375,7 +376,7 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
         success = true;
         return Collections.emptyList();
       }
-      int blockCount = Math.toIntExact(through - fromExclusive);
+      int blockCount = StrictMathWrapper.toIntExact(through - fromExclusive);
       int[] laneIds = StateArchiveFileFormatV3.fiveLaneIds();
       byte[][][] bundles = new byte[laneIds.length][blockCount][];
       if (servingSegments == null) {
@@ -399,8 +400,9 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
           SealedSegment segment = selected.getValue();
           if (segment.getLastBlock() >= first) {
             readIndexedRange(laneId, segment.getSegmentSeq(), segment.getFirstBlock(),
-                Math.max(first, segment.getFirstBlock()),
-                Math.min(through, segment.getLastBlock()), segment.getSegmentHeaderDigest(),
+                StrictMathWrapper.max(first, segment.getFirstBlock()),
+                StrictMathWrapper.min(through, segment.getLastBlock()),
+                segment.getSegmentHeaderDigest(),
                 first, bundles[laneOrdinal], maxEncodedBytes);
           }
           selected = segments.higherEntry(selected.getKey());
@@ -408,7 +410,8 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
         LaneState current = lanes.get(laneId);
         if (current != null && current.firstBlock <= through && current.lastBlock >= first) {
           readIndexedRange(laneId, current.segmentSeq, current.firstBlock,
-              Math.max(first, current.firstBlock), Math.min(through, current.lastBlock),
+              StrictMathWrapper.max(first, current.firstBlock),
+              StrictMathWrapper.min(through, current.lastBlock),
               current.headerDigest, first, bundles[laneOrdinal], maxEncodedBytes);
         }
       }
@@ -471,9 +474,10 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
       for (long block = first; block <= last; block++) {
         int entryInBatch = (int) ((block - first) % 256);
         if (entryInBatch == 0) {
-          long offset = Math.addExact(StateArchiveFileFormatV3.BLOCK_INDEX_HEADER_LENGTH,
-              Math.multiplyExact(block - segmentFirst, entryBytes));
-          int count = (int) Math.min(256, last - block + 1);
+          long offset = StrictMathWrapper.addExact(
+              StateArchiveFileFormatV3.BLOCK_INDEX_HEADER_LENGTH,
+              StrictMathWrapper.multiplyExact(block - segmentFirst, entryBytes));
+          int count = (int) StrictMathWrapper.min(256, last - block + 1);
           entries = readExact(index, offset, count * entryBytes);
         }
         BlockIndexEntry entry = StateArchiveSegmentFormatV3.decodeBlockIndexEntry(
@@ -494,7 +498,7 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
             != entry.getEncodedFrameDigestPrefix()) {
           throw new IOException("State Archive serving block index frame mismatch");
         }
-        int slot = Math.toIntExact(block - rangeFirst);
+        int slot = StrictMathWrapper.toIntExact(block - rangeFirst);
         if (laneFrames[slot] != null) {
           throw new IOException("Duplicate State Archive serving source lane frame");
         }
@@ -1551,7 +1555,7 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
     long next = 0;
     for (SealedSegment segment : sealedSegments) {
       if (segment.getLaneId() == laneId) {
-        next = Math.max(next, segment.getSegmentSeq() + 1);
+        next = StrictMathWrapper.max(next, segment.getSegmentSeq() + 1);
       }
     }
     return next;
@@ -1785,7 +1789,7 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
     long remaining = length;
     while (remaining > 0) {
       bytes.clear();
-      bytes.limit((int) Math.min(bytes.capacity(), remaining));
+      bytes.limit((int) StrictMathWrapper.min(bytes.capacity(), remaining));
       int read = channel.read(bytes);
       if (read < 0) {
         throw new IOException("Unexpected end of State Archive digest prefix");
@@ -1808,7 +1812,7 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
     int offset = 0;
     while (offset < bytes.length) {
       staging.clear();
-      int length = Math.min(staging.remaining(), bytes.length - offset);
+      int length = StrictMathWrapper.min(staging.remaining(), bytes.length - offset);
       staging.put(bytes, offset, length);
       staging.flip();
       writeFully(channel, staging);
@@ -2429,7 +2433,7 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
       // alone would destroy the proof for the very Common boundary being recovered.
       for (ScannedMarker scanned : markers) {
         if (scanned.marker.getLastBlock() <= commonHead) {
-          end = Math.max(end, scanned.marker.getMarkerEndOffset());
+          end = StrictMathWrapper.max(end, scanned.marker.getMarkerEndOffset());
         }
       }
       return end;

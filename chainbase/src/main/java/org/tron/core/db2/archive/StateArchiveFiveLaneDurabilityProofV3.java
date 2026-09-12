@@ -13,6 +13,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
+import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.db2.archive.StateArchiveFiveLaneRecoveryIntentV3.RecoveryPoint;
 import org.tron.core.db2.archive.StateArchiveFiveLaneSegmentWriterV3.ArchiveDurabilityProof;
 import org.tron.core.db2.archive.StateArchiveFiveLaneSegmentWriterV3.FileTailProof;
@@ -44,7 +45,7 @@ public final class StateArchiveFiveLaneDurabilityProofV3 {
     ArchiveDurabilityProof admitted = Objects.requireNonNull(proof, "proof");
     List<FileTailProof> tails = admitted.getFileTails();
     byte[] tailBytes = encodeTails(tails);
-    int totalLength = Math.addExact(HEADER_LENGTH + TRAILER_LENGTH, tailBytes.length);
+    int totalLength = StrictMathWrapper.addExact(HEADER_LENGTH + TRAILER_LENGTH, tailBytes.length);
     ByteBuffer bytes = ByteBuffer.allocate(totalLength);
     bytes.putInt(MAGIC);
     bytes.putShort(StateArchiveFileFormatV3.MAJOR_VERSION);
@@ -90,8 +91,8 @@ public final class StateArchiveFiveLaneDurabilityProofV3 {
     require(bytes.getInt() == HEADER_LENGTH, "proof header length");
     require(Short.toUnsignedInt(bytes.getShort()) == TAIL_LENGTH, "proof tail length");
     int tailCount = Short.toUnsignedInt(bytes.getShort());
-    int expectedLength = Math.addExact(HEADER_LENGTH + TRAILER_LENGTH,
-        Math.multiplyExact(tailCount, TAIL_LENGTH));
+    int expectedLength = StrictMathWrapper.addExact(HEADER_LENGTH + TRAILER_LENGTH,
+        StrictMathWrapper.multiplyExact(tailCount, TAIL_LENGTH));
     require(bytes.getLong() == expectedLength && encoded.length == expectedLength,
         "proof total length");
     require(bytes.getInt() == 0 && bytes.getInt() == 0, "proof flags or reserved field");
@@ -170,7 +171,8 @@ public final class StateArchiveFiveLaneDurabilityProofV3 {
   }
 
   private static byte[] encodeTails(List<FileTailProof> tails) {
-    ByteBuffer bytes = ByteBuffer.allocate(Math.multiplyExact(tails.size(), TAIL_LENGTH));
+    ByteBuffer bytes = ByteBuffer.allocate(
+        StrictMathWrapper.multiplyExact(tails.size(), TAIL_LENGTH));
     for (FileTailProof tail : tails) {
       bytes.putShort((short) tail.getLaneId());
       bytes.putShort((short) 0);

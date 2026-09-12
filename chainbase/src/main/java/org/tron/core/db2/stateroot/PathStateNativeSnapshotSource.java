@@ -14,6 +14,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.capsule.utils.MarketUtils;
 import org.tron.core.db2.archive.LatestStateGenerationAdapter.SnapshotCapableStore;
 import org.tron.core.db2.archive.LatestStateGenerationAdapter.StoreSnapshot;
@@ -322,7 +323,7 @@ public final class PathStateNativeSnapshotSource
   }
 
   private static int compareUnsigned(byte[] left, byte[] right) {
-    for (int index = 0; index < Math.min(left.length, right.length); index++) {
+    for (int index = 0; index < StrictMathWrapper.min(left.length, right.length); index++) {
       int compared = Integer.compare(left[index] & 0xff, right[index] & 0xff);
       if (compared != 0) {
         return compared;

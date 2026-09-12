@@ -9,6 +9,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.stream.Stream;
+import org.tron.common.math.StrictMathWrapper;
 
 /** Read-only first-stage admission for the current archive base format. */
 public final class ArchiveFormatAdmissionValidator {
@@ -94,8 +95,8 @@ public final class ArchiveFormatAdmissionValidator {
     ArchiveParticipantDescriptor.current().requireExactParticipants(head.getDatabases());
     long expectedRecordCount;
     try {
-      expectedRecordCount = Math.addExact(
-          Math.subtractExact(coverage.getHeadEpoch(), coverage.getFirstEpoch()), 1);
+      expectedRecordCount = StrictMathWrapper.addExact(
+          StrictMathWrapper.subtractExact(coverage.getHeadEpoch(), coverage.getFirstEpoch()), 1);
     } catch (ArithmeticException failure) {
       throw new ArchivePersistenceException("History coverage range overflows", failure);
     }

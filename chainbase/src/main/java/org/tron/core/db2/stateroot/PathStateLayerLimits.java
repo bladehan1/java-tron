@@ -7,6 +7,7 @@ import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.Objects;
 import java.util.stream.Stream;
+import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.db2.stateroot.PathStateRootMetadata.Kind;
 
 /** Explicit count and logical-byte admission limits for current-only reversible layers. */
@@ -33,7 +34,7 @@ public final class PathStateLayerLimits {
   void verifyCanBegin(PathStateStoreManifest manifest, Path candidate) throws IOException {
     Usage usage = usageExcluding(manifest, candidate);
     try {
-      requireWithin(Math.addExact(usage.layers, 1), usage.logicalBytes);
+      requireWithin(StrictMathWrapper.addExact(usage.layers, 1), usage.logicalBytes);
     } catch (ArithmeticException overflow) {
       throw new IOException("path-state layer count overflow", overflow);
     }
@@ -44,9 +45,9 @@ public final class PathStateLayerLimits {
     Usage usage = usageExcluding(manifest, candidate);
     long candidateBytes;
     try {
-      candidateBytes = Math.addExact(nativeLogicalBytes, metadata.encode().length);
-      requireWithin(Math.addExact(usage.layers, 1),
-          Math.addExact(usage.logicalBytes, candidateBytes));
+      candidateBytes = StrictMathWrapper.addExact(nativeLogicalBytes, metadata.encode().length);
+      requireWithin(StrictMathWrapper.addExact(usage.layers, 1),
+          StrictMathWrapper.addExact(usage.logicalBytes, candidateBytes));
     } catch (ArithmeticException overflow) {
       throw new IOException("path-state layer limit accounting overflow", overflow);
     }
@@ -93,15 +94,15 @@ public final class PathStateLayerLimits {
         if (metadata != null) {
           requireSame(metadata, progress,
               "path-state layer metadata and native progress differ");
-          layers = Math.addExact(layers, 1);
-          logicalBytes = Math.addExact(logicalBytes,
-              Math.addExact(nativeBytes, metadata.encode().length));
+          layers = StrictMathWrapper.addExact(layers, 1);
+          logicalBytes = StrictMathWrapper.addExact(logicalBytes,
+              StrictMathWrapper.addExact(nativeBytes, metadata.encode().length));
         } else if (intent != null && progress != null) {
           requireSame(intent, progress,
               "path-state layer intent and native progress differ");
-          layers = Math.addExact(layers, 1);
-          logicalBytes = Math.addExact(logicalBytes,
-              Math.addExact(nativeBytes, intent.encode().length));
+          layers = StrictMathWrapper.addExact(layers, 1);
+          logicalBytes = StrictMathWrapper.addExact(logicalBytes,
+              StrictMathWrapper.addExact(nativeBytes, intent.encode().length));
         } else if (progress != null) {
           throw new IOException("path-state layer has orphaned native progress");
         }

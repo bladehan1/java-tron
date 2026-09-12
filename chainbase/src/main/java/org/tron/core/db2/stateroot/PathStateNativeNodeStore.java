@@ -28,6 +28,7 @@ import org.rocksdb.StatsLevel;
 import org.rocksdb.TickerType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.config.args.StorageConfig.NativeDbConfig;
 import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
 
@@ -137,12 +138,12 @@ final class PathStateNativeNodeStore implements Closeable {
       Objects.requireNonNull(mutation, "mutation");
     }
     delegate.writeBatch(supplied, sync);
-    writeBatchCalls = Math.addExact(writeBatchCalls, 1L);
-    writeBatchMutations = Math.addExact(writeBatchMutations, supplied.size());
+    writeBatchCalls = StrictMathWrapper.addExact(writeBatchCalls, 1L);
+    writeBatchMutations = StrictMathWrapper.addExact(writeBatchMutations, supplied.size());
     if (sync) {
-      syncedWriteBatchCalls = Math.addExact(syncedWriteBatchCalls, 1L);
+      syncedWriteBatchCalls = StrictMathWrapper.addExact(syncedWriteBatchCalls, 1L);
     } else {
-      unsyncedWriteBatchCalls = Math.addExact(unsyncedWriteBatchCalls, 1L);
+      unsyncedWriteBatchCalls = StrictMathWrapper.addExact(unsyncedWriteBatchCalls, 1L);
     }
   }
 

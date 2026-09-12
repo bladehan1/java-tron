@@ -5,6 +5,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Objects;
 import org.tron.common.crypto.Hash;
+import org.tron.common.math.StrictMathWrapper;
 
 /**
  * Experimental byte contract for the TASK-016 current path-state commitment.
@@ -107,10 +108,11 @@ public final class PathStateCommitmentCodec {
     int payloadLength = 0;
     for (int i = 0; i < rawItems.length; i++) {
       encoded[i] = rlpItem(Objects.requireNonNull(rawItems[i], "raw RLP item"));
-      payloadLength = Math.addExact(payloadLength, encoded[i].length);
+      payloadLength = StrictMathWrapper.addExact(payloadLength, encoded[i].length);
     }
     byte[] prefix = rlpLength(payloadLength, RLP_SHORT_LIST_OFFSET, RLP_LONG_LIST_OFFSET);
-    ByteBuffer result = ByteBuffer.allocate(Math.addExact(prefix.length, payloadLength));
+    ByteBuffer result = ByteBuffer.allocate(
+        StrictMathWrapper.addExact(prefix.length, payloadLength));
     result.put(prefix);
     for (byte[] item : encoded) {
       result.put(item);
@@ -123,7 +125,7 @@ public final class PathStateCommitmentCodec {
       return Arrays.copyOf(raw, raw.length);
     }
     byte[] prefix = rlpLength(raw.length, RLP_SHORT_ITEM_OFFSET, RLP_LONG_ITEM_OFFSET);
-    ByteBuffer result = ByteBuffer.allocate(Math.addExact(prefix.length, raw.length));
+    ByteBuffer result = ByteBuffer.allocate(StrictMathWrapper.addExact(prefix.length, raw.length));
     result.put(prefix);
     result.put(raw);
     return result.array();

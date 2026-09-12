@@ -10,6 +10,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
+import org.tron.common.math.StrictMathWrapper;
 
 /**
  * Ordered history body/index/marker writer. A marker is the durable history boundary H; reader
@@ -90,7 +91,7 @@ public final class ArchiveHistoryWriter
     }
     try {
       for (int start = 0; start < diffs.size(); start += MAX_RESTART_TAIL_RECORDS) {
-        int end = Math.min(diffs.size(), start + MAX_RESTART_TAIL_RECORDS);
+        int end = StrictMathWrapper.min(diffs.size(), start + MAX_RESTART_TAIL_RECORDS);
         persistChunk(diffs.subList(start, end));
       }
     } catch (IOException | RuntimeException e) {

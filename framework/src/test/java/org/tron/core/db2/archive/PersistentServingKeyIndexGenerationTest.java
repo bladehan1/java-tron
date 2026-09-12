@@ -23,6 +23,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
+import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.db2.archive.ArchiveReadSnapshot.PinnedHistory;
 import org.tron.core.db2.archive.ArchiveReadSnapshot.PinnedLatestState;
 import org.tron.core.db2.archive.HistoryIndexRecord.KeyGroup;
@@ -612,7 +613,7 @@ public class PersistentServingKeyIndexGenerationTest {
     byte[] batch = new byte[16];
     byte[] digest = new byte[32];
     byte[] encoded = bytes(generationId);
-    System.arraycopy(encoded, 0, batch, 0, Math.min(batch.length, encoded.length));
+    System.arraycopy(encoded, 0, batch, 0, StrictMathWrapper.min(batch.length, encoded.length));
     return new ArchiveProgressEnvelope(ArchiveProgressEnvelope.Kind.READER_VISIBLE, null, epoch,
         blockHash, batch, digest, PARTICIPANTS);
   }

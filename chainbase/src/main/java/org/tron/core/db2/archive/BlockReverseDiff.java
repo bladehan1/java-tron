@@ -6,6 +6,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
+import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
 
 /** Immutable reverse diff for one canonical block. */
@@ -96,7 +97,7 @@ public final class BlockReverseDiff {
   }
 
   static int compareUnsigned(byte[] left, byte[] right) {
-    int length = Math.min(left.length, right.length);
+    int length = StrictMathWrapper.min(left.length, right.length);
     for (int i = 0; i < length; i++) {
       int comparison = Integer.compare(left[i] & 0xff, right[i] & 0xff);
       if (comparison != 0) {

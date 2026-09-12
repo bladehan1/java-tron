@@ -7,6 +7,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
+import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.db2.stateroot.PathStateNativeNodeStore.BatchMutation;
 import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
 
@@ -66,7 +67,7 @@ final class PathStateStoreTrieBuilder implements Closeable {
     byte[] key = requireSecureKey(secureKey);
     byte[] value = nonEmpty(encodedValue, "encodedValue");
     pendingRows.add(BatchMutation.put(spoolKey(key), value));
-    inputRows = Math.addExact(inputRows, 1L);
+    inputRows = StrictMathWrapper.addExact(inputRows, 1L);
     if (pendingRows.size() >= DEFAULT_WRITE_BATCH_ROWS) {
       flushRows();
     }
@@ -83,7 +84,7 @@ final class PathStateStoreTrieBuilder implements Closeable {
       byte[] value = entry.getValue();
       trie.update(key, value);
       leafSink.put(key, value);
-      sortedRows = Math.addExact(sortedRows, 1L);
+      sortedRows = StrictMathWrapper.addExact(sortedRows, 1L);
       if (sortedRows % BUILD_PROGRESS_ROWS == 0) {
         buildProgress.report(sortedRows, elapsedMillis(startedNanos));
       }

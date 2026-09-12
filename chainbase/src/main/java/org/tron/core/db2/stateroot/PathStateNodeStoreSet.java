@@ -17,6 +17,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
+import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.db2.stateroot.PathStateRootMetadata.Kind;
 
 /** Exact-27 participant and super-trie namespace views over one BASE or LAYER native database. */
@@ -583,8 +584,8 @@ public final class PathStateNodeStoreSet implements Closeable {
         store.scanAll(entry -> {
           byte[] key = entry.getKey();
           if (!Arrays.equals(key, LOGICAL_BYTES_KEY)) {
-            actual[0] = Math.addExact(actual[0],
-                Math.addExact(key.length, entry.getValue().length));
+            actual[0] = StrictMathWrapper.addExact(actual[0],
+                StrictMathWrapper.addExact(key.length, entry.getValue().length));
           }
         });
       } catch (ArithmeticException overflow) {
@@ -815,8 +816,8 @@ public final class PathStateNodeStoreSet implements Closeable {
       nativeStore.scanAll(entry -> {
         byte[] key = entry.getKey();
         if (!Arrays.equals(key, LOGICAL_BYTES_KEY)) {
-          total[0] = Math.addExact(total[0],
-              Math.addExact(key.length, entry.getValue().length));
+          total[0] = StrictMathWrapper.addExact(total[0],
+              StrictMathWrapper.addExact(key.length, entry.getValue().length));
         }
       });
       return total[0];
@@ -896,9 +897,11 @@ public final class PathStateNodeStoreSet implements Closeable {
       throws IOException {
     try {
       long adjusted = previous == null ? total
-          : Math.subtractExact(total, Math.addExact(key.length, previous.length));
+          : StrictMathWrapper.subtractExact(total,
+              StrictMathWrapper.addExact(key.length, previous.length));
       return next == null ? adjusted
-          : Math.addExact(adjusted, Math.addExact(key.length, next.length));
+          : StrictMathWrapper.addExact(adjusted,
+              StrictMathWrapper.addExact(key.length, next.length));
     } catch (ArithmeticException overflow) {
       throw new IOException("path-state logical bytes overflow", overflow);
     }
@@ -1103,7 +1106,7 @@ public final class PathStateNodeStoreSet implements Closeable {
     for (Integer storeId : storeIds) {
       Map<BytesKey, byte[]> participantPending = pending.get(storeId);
       synchronized (participantPending) {
-        size = Math.addExact(size, participantPending.size());
+        size = StrictMathWrapper.addExact(size, participantPending.size());
       }
     }
     return size;
@@ -1242,13 +1245,13 @@ public final class PathStateNodeStoreSet implements Closeable {
 
     void putNode(byte[] path, byte[] encodedNode) {
       add(PathStateNativeNodeStore.BatchMutation.put(namespace.key(path), encodedNode));
-      nodeEntries = Math.addExact(nodeEntries, 1L);
+      nodeEntries = StrictMathWrapper.addExact(nodeEntries, 1L);
     }
 
     void putLeaf(byte[] secureKey, byte[] encodedValue) {
       add(PathStateNativeNodeStore.BatchMutation.put(
           rebuildLeafKey(storeId, secureKey), encodedValue));
-      leafEntries = Math.addExact(leafEntries, 1L);
+      leafEntries = StrictMathWrapper.addExact(leafEntries, 1L);
     }
 
     long getNodeEntries() {

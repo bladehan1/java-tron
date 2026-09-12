@@ -15,6 +15,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import lombok.extern.slf4j.Slf4j;
+import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
 import org.tron.core.db2.core.CommonCheckpointBaseline;
 import org.tron.core.db2.core.CommonCheckpointMemoryRebaser;
@@ -305,8 +306,8 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
         pending.stats.nodePuts, pending.stats.nodeDeletes, pending.stats.nodeRlpBytes,
         pending.stats.nodeRlpFinalBytes, pending.stats.uniqueNodePaths,
         pending.stats.overwriteWrites(), pending.nodeCreates, pending.nodeEncodes,
-        Math.max(0L, pending.nodeCreates - pending.nodeEncodes),
-        Math.max(0L, pending.nodeCreates - pending.nodeEncodes - pending.nodeDecodes),
+        StrictMathWrapper.max(0L, pending.nodeCreates - pending.nodeEncodes),
+        StrictMathWrapper.max(0L, pending.nodeCreates - pending.nodeEncodes - pending.nodeDecodes),
         pending.nodeKeccaks,
         pending.nodeDecodes, pending.nodeHashVerifies, pending.hashRefsCreated,
         pending.hashRefsResolved);
