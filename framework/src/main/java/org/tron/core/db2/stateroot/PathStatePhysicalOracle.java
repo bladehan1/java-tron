@@ -15,6 +15,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.capsule.BytesCapsule;
 import org.tron.core.db2.common.DB;
 import org.tron.core.trie.TrieImpl;
@@ -95,7 +96,7 @@ final class PathStatePhysicalOracle {
                 identity.getDbName(), parent.getMetadata().getBlockNumber());
             roots.add(parentRoot);
           }
-          totalRows = Math.addExact(totalRows, rows[0]);
+          totalRows = StrictMathWrapper.addExact(totalRows, rows[0]);
           participantComplete = true;
         } catch (ArithmeticException overflow) {
           throw new IOException("physical oracle row count overflow", overflow);

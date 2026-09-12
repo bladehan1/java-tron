@@ -29,6 +29,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
+import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.config.args.StorageConfig.NativeDbConfig;
 import org.tron.core.config.args.StorageConfig.StateArchiveHotStoreConfig;
 import org.tron.core.db2.archive.BlockReverseDiff.DbGroup;
@@ -144,7 +145,7 @@ public final class StateArchiveHotStore implements Closeable {
       long maxBlocks, long maxEncodedBytes) throws IOException {
     return openOrCreate(root, formatIdentity, engine, baseBlockNumber, baseBlockHash,
         maxFrozenGenerations, maxBlocks, maxEncodedBytes,
-        Math.max(1, maxFrozenGenerations / 2), maxFrozenGenerations,
+        StrictMathWrapper.max(1, maxFrozenGenerations / 2), maxFrozenGenerations,
         NativeDbConfig.large(), stage -> { });
   }
 
@@ -153,7 +154,7 @@ public final class StateArchiveHotStore implements Closeable {
       long maxBlocks, long maxEncodedBytes, FaultHook faultHook) throws IOException {
     return openOrCreate(suppliedRoot, formatIdentity, engine, baseBlockNumber, baseBlockHash,
         maxFrozenGenerations, maxBlocks, maxEncodedBytes,
-        Math.max(1, maxFrozenGenerations / 2), maxFrozenGenerations,
+        StrictMathWrapper.max(1, maxFrozenGenerations / 2), maxFrozenGenerations,
         NativeDbConfig.large(), faultHook);
   }
 
@@ -293,7 +294,7 @@ public final class StateArchiveHotStore implements Closeable {
       }
       byte[] record = encodeRecord(block, codec);
       byte[] recordDigest = Hashing.sha256().hashBytes(record).asBytes();
-      encodedBytes = Math.addExact(encodedBytes, record.length);
+      encodedBytes = StrictMathWrapper.addExact(encodedBytes, record.length);
       resultContentDigest = nextContentDigest(resultContentDigest, meta, record);
       orderedRecords.putLong(meta.getBlockNumber()).putBytes(recordDigest);
       blocks.add(new StateArchiveHotBatchDescriptor.BlockDigest(meta, recordDigest));
@@ -359,7 +360,7 @@ public final class StateArchiveHotStore implements Closeable {
       previousBlock = meta.getBlockNumber();
       previousHash = meta.getBlockHash();
       blockCount++;
-      encodedBytes = Math.addExact(encodedBytes, record.length);
+      encodedBytes = StrictMathWrapper.addExact(encodedBytes, record.length);
       contentDigest = nextContentDigest(contentDigest, meta, record);
     }
     mutations.add(StateArchiveIndexDatabase.put(META_START_BLOCK, longBytes(startBlock)));
@@ -509,7 +510,7 @@ public final class StateArchiveHotStore implements Closeable {
     faultHook.after(Stage.AFTER_SEAL);
 
     long frozenId = current.id;
-    long nextId = Math.addExact(frozenId, 1);
+    long nextId = StrictMathWrapper.addExact(frozenId, 1);
     GenerationMeta next = createOrValidateNext(current, nextId);
     faultHook.after(Stage.AFTER_NEW_GENERATION);
     persistCatalog(nextId);
@@ -561,7 +562,7 @@ public final class StateArchiveHotStore implements Closeable {
             throw new ArchivePersistenceException("Hot Archive index locator is corrupt");
           }
           if (block <= generation.publishedBlock) {
-            candidate = Math.min(candidate, block);
+            candidate = StrictMathWrapper.min(candidate, block);
           }
         }
       }
@@ -667,8 +668,8 @@ public final class StateArchiveHotStore implements Closeable {
     long frozenBlocks = 0;
     long frozenBytes = 0;
     for (GenerationMeta generation : frozen) {
-      frozenBlocks = Math.addExact(frozenBlocks, generation.blockCount);
-      frozenBytes = Math.addExact(frozenBytes, generation.encodedBytes);
+      frozenBlocks = StrictMathWrapper.addExact(frozenBlocks, generation.blockCount);
+      frozenBytes = StrictMathWrapper.addExact(frozenBytes, generation.encodedBytes);
     }
     int frozenCount = frozen.size();
     BacklogLevel level = frozenCount >= redFrozenGenerations ? BacklogLevel.RED
@@ -695,7 +696,7 @@ public final class StateArchiveHotStore implements Closeable {
     if (sealed.blockCount == 0) {
       throw new ArchivePersistenceException("Hot Archive sealed generation is empty");
     }
-    long nextId = Math.addExact(sealed.id, 1);
+    long nextId = StrictMathWrapper.addExact(sealed.id, 1);
     GenerationMeta next = createOrValidateNext(sealed, nextId);
     persistCatalog(nextId);
     return next;
@@ -942,7 +943,7 @@ public final class StateArchiveHotStore implements Closeable {
           block.getArchiveRecordDigest())) {
         throw new ArchivePersistenceException("Hot Archive descriptor body identity differs");
       }
-      encodedBytes = Math.addExact(encodedBytes, record.length);
+      encodedBytes = StrictMathWrapper.addExact(encodedBytes, record.length);
       contentDigest = nextContentDigest(contentDigest, diff.getMeta(), record);
     }
     if (encodedBytes != descriptor.getEncodedBytes()
@@ -1468,8 +1469,8 @@ public final class StateArchiveHotStore implements Closeable {
     private GenerationMeta appended(BlockSnapshotMeta meta, byte[] record) {
       long first = blockCount == 0 ? meta.getBlockNumber() : startBlock;
       return new GenerationMeta(id, baseBlock, baseHash, first, meta.getBlockNumber(),
-          meta.getBlockHash(), Math.addExact(blockCount, 1),
-          Math.addExact(encodedBytes, record.length),
+          meta.getBlockHash(), StrictMathWrapper.addExact(blockCount, 1),
+          StrictMathWrapper.addExact(encodedBytes, record.length),
           nextContentDigest(contentDigest, meta, record), false, meta.getBlockNumber(),
           meta.getBlockHash(), nextContentDigest(contentDigest, meta, record), publishedTarget,
           publishedDescriptor, null);

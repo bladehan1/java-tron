@@ -15,6 +15,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
+import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.db2.archive.StateArchiveSegmentFormatV3.CurrentSegment;
 import org.tron.core.db2.archive.StateArchiveSegmentFormatV3.SealedSegment;
 
@@ -106,8 +107,8 @@ final class StateArchiveHistoryCatalogV3 {
 
   private static byte[] encodeGeneration(Generation generation) {
     generation.validate();
-    int totalLength = Math.addExact(HEADER_LENGTH + TRAILER_LENGTH,
-        Math.addExact(generation.current.size() * CURRENT_RECORD_LENGTH,
+    int totalLength = StrictMathWrapper.addExact(HEADER_LENGTH + TRAILER_LENGTH,
+        StrictMathWrapper.addExact(generation.current.size() * CURRENT_RECORD_LENGTH,
             generation.sealed.size() * StateArchiveFileFormatV3.SEGMENT_MAP_ENTRY_LENGTH));
     ByteBuffer bytes = ByteBuffer.allocate(totalLength);
     bytes.putInt(GENERATION_MAGIC);

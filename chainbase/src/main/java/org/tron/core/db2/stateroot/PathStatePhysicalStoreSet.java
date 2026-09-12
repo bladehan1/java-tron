@@ -26,6 +26,7 @@ import java.util.stream.Stream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.tron.common.crypto.Hash;
+import org.tron.common.math.StrictMathWrapper;
 import org.tron.common.parameter.CommonParameter;
 import org.tron.core.config.args.StorageConfig.NativeDbConfig;
 import org.tron.core.config.args.StorageConfig.PathStateDbSettingsConfig;
@@ -318,7 +319,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
         pendingBytes[0] = 0;
       }
       pending.add(PathStateNativeNodeStore.BatchMutation.put(storedKey, encodedLeaf));
-      pendingBytes[0] = Math.addExact(pendingBytes[0], mutationBytes);
+      pendingBytes[0] = StrictMathWrapper.addExact(pendingBytes[0], mutationBytes);
       cursor[0] = key;
       progress[0]++;
       progress[1] += key.length + physicalValue.length;
@@ -1089,8 +1090,8 @@ public final class PathStatePhysicalStoreSet implements Closeable {
           throw new IOException("physical reverse journal is not a regular file: " + file);
         }
         long length = Files.size(file);
-        total = Math.addExact(total, length);
-        count = Math.addExact(count, 1);
+        total = StrictMathWrapper.addExact(total, length);
+        count = StrictMathWrapper.addExact(count, 1);
         PathStatePhysicalReverseJournal journal = loadReverseJournal(file);
         ReverseJournalIndexEntry entry = new ReverseJournalIndexEntry(file, length,
             journal.getChildTarget(), journal.getParentTarget());
@@ -1133,7 +1134,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     long total = 0;
     try {
       for (ReverseJournalIndexEntry entry : journals.values()) {
-        total = Math.addExact(total, entry.length);
+        total = StrictMathWrapper.addExact(total, entry.length);
       }
     } catch (ArithmeticException overflow) {
       throw new IOException("physical reverse journal usage overflow", overflow);
@@ -1168,7 +1169,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     long total = 0;
     try {
       for (ReverseJournalIndexEntry entry : reverseJournalIndex.values()) {
-        total = Math.addExact(total, entry.length);
+        total = StrictMathWrapper.addExact(total, entry.length);
       }
       return total;
     } catch (ArithmeticException overflow) {
@@ -1680,7 +1681,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
   }
 
   private static long rowsPerSecond(long rows, long startedNanos) {
-    long elapsedNanos = Math.max(1L, System.nanoTime() - startedNanos);
+    long elapsedNanos = StrictMathWrapper.max(1L, System.nanoTime() - startedNanos);
     return (long) (rows * 1_000_000_000D / elapsedNanos);
   }
 
@@ -2166,7 +2167,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
           encodedNode.length);
       flushBeforeOversizedMutation(key.length + value.length);
       pending.add(PathStateNativeNodeStore.BatchMutation.put(key, value));
-      pendingBytes = Math.addExact(pendingBytes, key.length + value.length);
+      pendingBytes = StrictMathWrapper.addExact(pendingBytes, key.length + value.length);
       flushIfFull();
     }
 
@@ -2175,7 +2176,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
       byte[] key = prefixed(TRIE_NODE_PREFIX, path, "path");
       flushBeforeOversizedMutation(key.length);
       pending.add(PathStateNativeNodeStore.BatchMutation.delete(key));
-      pendingBytes = Math.addExact(pendingBytes, key.length);
+      pendingBytes = StrictMathWrapper.addExact(pendingBytes, key.length);
       flushIfFull();
     }
 

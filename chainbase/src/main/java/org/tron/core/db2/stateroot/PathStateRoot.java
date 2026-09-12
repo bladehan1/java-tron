@@ -16,6 +16,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import org.tron.common.math.StrictMathWrapper;
 
 /**
  * Current-only per-Store trie and super-trie aggregator for TASK-016.
@@ -203,7 +204,7 @@ public final class PathStateRoot {
             .append(participantWork.queueNanos).append(':').append(participantWork.elapsedNanos);
       }
       totalWorkNanos += participantWork.elapsedNanos;
-      maxMutations = Math.max(maxMutations, participantWork.mutations.size());
+      maxMutations = StrictMathWrapper.max(maxMutations, participantWork.mutations.size());
       if (participantWork.elapsedNanos > maxElapsedNanos) {
         maxElapsedNanos = participantWork.elapsedNanos;
         maxElapsedStoreId = participantWork.participant.getStoreId();
@@ -747,7 +748,7 @@ public final class PathStateRoot {
   }
 
   private static int compareUnsigned(byte[] left, byte[] right) {
-    for (int i = 0; i < Math.min(left.length, right.length); i++) {
+    for (int i = 0; i < StrictMathWrapper.min(left.length, right.length); i++) {
       int result = Integer.compare(left[i] & 0xff, right[i] & 0xff);
       if (result != 0) {
         return result;
@@ -829,7 +830,7 @@ public final class PathStateRoot {
     int maxTrieDepth() {
       int depth = superTrie.depth();
       for (PathMerkleTrie.Snapshot participant : participants.values()) {
-        depth = Math.max(depth, participant.depth());
+        depth = StrictMathWrapper.max(depth, participant.depth());
       }
       return depth;
     }

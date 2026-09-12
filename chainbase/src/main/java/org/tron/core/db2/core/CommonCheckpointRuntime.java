@@ -7,6 +7,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
 import java.util.function.LongSupplier;
+import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.db2.archive.ArchiveStoreScope;
 import org.tron.core.db2.archive.BlockReverseDiff;
 import org.tron.core.db2.archive.StateArchiveAppendCheckpointMaterializerV3;
@@ -309,7 +310,7 @@ public final class CommonCheckpointRuntime implements AutoCloseable {
   }
 
   private long elapsedUs(long start) {
-    return Math.max(0L, (nanoTime.getAsLong() - start) / 1_000L);
+    return StrictMathWrapper.max(0L, (nanoTime.getAsLong() - start) / 1_000L);
   }
 
   private void emitTiming(Timing timing) {

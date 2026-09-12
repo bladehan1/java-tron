@@ -30,6 +30,7 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.tron.common.arch.Arch;
+import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.config.args.StorageConfig.NativeDbConfig;
 import org.tron.core.db2.archive.BlockReverseDiff;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
@@ -2207,7 +2208,7 @@ public class PathStateNativeNodeStoreTest {
   }
 
   private static int compareUnsigned(byte[] left, byte[] right) {
-    for (int index = 0; index < Math.min(left.length, right.length); index++) {
+    for (int index = 0; index < StrictMathWrapper.min(left.length, right.length); index++) {
       int compared = Integer.compare(left[index] & 0xff, right[index] & 0xff);
       if (compared != 0) {
         return compared;

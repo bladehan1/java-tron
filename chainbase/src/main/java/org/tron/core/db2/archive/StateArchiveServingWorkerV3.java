@@ -3,6 +3,7 @@ package org.tron.core.db2.archive;
 import java.io.IOException;
 import java.util.Collections;
 import java.util.List;
+import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.db2.archive.StateArchiveServingIndexBuildCoordinatorV3.BuildProgress;
 import org.tron.core.db2.core.CommonCheckpointTarget;
 
@@ -177,7 +178,7 @@ final class StateArchiveServingWorkerV3 implements AutoCloseable {
               && requested.getLastBlock().getBlockNumber() - progress.getIndexedThrough() < 1_000) {
             long remaining = tailDelayNanos - (System.nanoTime() - pendingSince);
             if (remaining > 0) {
-              wait(Math.max(1, remaining / 1_000_000L));
+              wait(StrictMathWrapper.max(1, remaining / 1_000_000L));
               continue;
             }
           }
@@ -204,7 +205,7 @@ final class StateArchiveServingWorkerV3 implements AutoCloseable {
                 return;
               }
             }
-            long batchEnd = Math.min(end, cursor + readBlocks);
+            long batchEnd = StrictMathWrapper.min(end, cursor + readBlocks);
             List<BlockReverseDiff> batch;
             while (true) {
               try {
@@ -215,7 +216,7 @@ final class StateArchiveServingWorkerV3 implements AutoCloseable {
                   throw tooLarge;
                 }
                 batchEnd = cursor + (batchEnd - cursor) / 2;
-                readBlocks = Math.toIntExact(batchEnd - cursor);
+                readBlocks = StrictMathWrapper.toIntExact(batchEnd - cursor);
               }
             }
             coordinator.recoverCommittedRange(batch, target, batchEnd == end);

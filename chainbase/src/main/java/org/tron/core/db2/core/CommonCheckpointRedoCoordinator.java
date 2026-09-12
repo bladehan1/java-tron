@@ -5,6 +5,7 @@ import java.util.EnumMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.function.LongSupplier;
+import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.db2.core.CommonCheckpointMaterializer.Authority;
 import org.tron.core.db2.core.CommonCheckpointMaterializer.Status;
 import org.slf4j.Logger;
@@ -279,7 +280,7 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
   }
 
   private long elapsedUs(long start) {
-    return Math.max(0L, (nanoTime.getAsLong() - start) / 1_000L);
+    return StrictMathWrapper.max(0L, (nanoTime.getAsLong() - start) / 1_000L);
   }
 
   private void emitTiming(Timing timing) {

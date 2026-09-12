@@ -19,6 +19,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.support.DefaultListableBeanFactory;
 import org.tron.common.application.TronApplicationContext;
 import org.tron.common.log.LogService;
+import org.tron.common.math.StrictMathWrapper;
 import org.tron.common.prometheus.Metrics;
 import org.tron.common.utils.BlockFile;
 import org.tron.core.ChainBaseManager;
@@ -130,7 +131,7 @@ public final class BlockReplay {
       byte[] expectedParentBlockId) throws Exception {
     try (BlockFile.Reader reader = BlockFile.open(input)) {
       BlockFile.Header header = reader.getHeader();
-      long selectedCount = Math.min(header.getCount(), maxBlocks);
+      long selectedCount = StrictMathWrapper.min(header.getCount(), maxBlocks);
       if (apply) {
         long expectedStart = chainBaseManager.getHeadBlockNum() + 1;
         if (header.getStart() != expectedStart) {
@@ -182,7 +183,7 @@ public final class BlockReplay {
         reader.hasNext();
       }
       return new ReplayResult(apply, header.getStart(), lastHeight, processed,
-          Math.min(warmupBlocks, processed), measured, measuredNanos, lastBlockId);
+          StrictMathWrapper.min(warmupBlocks, processed), measured, measuredNanos, lastBlockId);
     }
   }
 
@@ -206,7 +207,7 @@ public final class BlockReplay {
         break;
       }
       ReplayResult part = replay(inputFile.path, tronNetDelegate, chainBaseManager,
-          Math.max(0, warmupBlocks - processed), remaining, apply, previousBlockId);
+          StrictMathWrapper.max(0, warmupBlocks - processed), remaining, apply, previousBlockId);
       processed += part.processed;
       warmup += part.warmup;
       measured += part.measured;

@@ -8,6 +8,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.db2.archive.HistoricalRangeOverlay.KeyRange;
 import org.tron.core.db2.archive.P66AccountAssetCodec.DecodedAssetRow;
 import org.tron.core.db2.archive.P66AccountAssetCodec.Phase;
@@ -141,8 +142,8 @@ public final class HistoricalAccountAssetPrefixResolver {
       final long entryBytes;
       final long updated;
       try {
-        entryBytes = Math.addExact((long) keyBytes, valueBytes);
-        updated = Math.addExact(currentTotal, entryBytes);
+        entryBytes = StrictMathWrapper.addExact((long) keyBytes, valueBytes);
+        updated = StrictMathWrapper.addExact(currentTotal, entryBytes);
       } catch (ArithmeticException overflow) {
         throw new ArchiveQueryLimitExceededException(
             "AccountAsset total-byte budget overflow");

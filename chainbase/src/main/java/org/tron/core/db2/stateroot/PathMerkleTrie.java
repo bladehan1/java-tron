@@ -16,6 +16,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicLong;
 import org.tron.common.crypto.Hash;
+import org.tron.common.math.StrictMathWrapper;
 
 /** Backend-neutral secure-key MPT with path-local immutable node updates. */
 public final class PathMerkleTrie {
@@ -26,7 +27,7 @@ public final class PathMerkleTrie {
   private static final byte[] EMPTY_RLP_ITEM = new byte[]{(byte) 0x80};
   private static final int PARALLEL_UPDATE_THRESHOLD = 4;
   private static final Comparator<BytesKey> UNSIGNED_KEY_COMPARATOR = (left, right) -> {
-    int length = Math.min(left.bytes.length, right.bytes.length);
+    int length = StrictMathWrapper.min(left.bytes.length, right.bytes.length);
     for (int i = 0; i < length; i++) {
       int compared = Integer.compare(left.bytes[i] & 0xff, right.bytes[i] & 0xff);
       if (compared != 0) {
@@ -358,7 +359,7 @@ public final class PathMerkleTrie {
       int offset, byte[] path) {
     int shared = extension.path.length;
     for (BatchMutation mutation : mutations) {
-      shared = Math.min(shared,
+      shared = StrictMathWrapper.min(shared,
           commonPrefix(extension.path, 0, mutation.nibbles, offset));
     }
     if (shared == extension.path.length) {
@@ -413,7 +414,7 @@ public final class PathMerkleTrie {
   }
 
   private static int compareNibbles(byte[] left, byte[] right) {
-    for (int index = 0; index < Math.min(left.length, right.length); index++) {
+    for (int index = 0; index < StrictMathWrapper.min(left.length, right.length); index++) {
       int compared = Byte.compare(left[index], right[index]);
       if (compared != 0) {
         return compared;
@@ -1020,7 +1021,7 @@ public final class PathMerkleTrie {
   }
 
   private static int commonPrefix(byte[] left, int leftOffset, byte[] right, int rightOffset) {
-    int length = Math.min(left.length - leftOffset, right.length - rightOffset);
+    int length = StrictMathWrapper.min(left.length - leftOffset, right.length - rightOffset);
     int shared = 0;
     while (shared < length && left[leftOffset + shared] == right[rightOffset + shared]) {
       shared++;
@@ -1260,14 +1261,15 @@ public final class PathMerkleTrie {
       payloadOffset = offset + 1 + lengthBytes;
       payloadLength = 0;
       for (int index = offset + 1; index < payloadOffset; index++) {
-        payloadLength = Math.addExact(Math.multiplyExact(payloadLength, 256),
+        payloadLength = StrictMathWrapper.addExact(
+            StrictMathWrapper.multiplyExact(payloadLength, 256),
             encoded[index] & 0xff);
       }
       if (payloadLength < 56) {
         throw new IllegalStateException("path-state RLP uses a non-canonical long form");
       }
     }
-    int end = Math.addExact(payloadOffset, payloadLength);
+    int end = StrictMathWrapper.addExact(payloadOffset, payloadLength);
     if (end > encoded.length) {
       throw new IllegalStateException("path-state RLP payload exceeds its node");
     }
@@ -1375,10 +1377,10 @@ public final class PathMerkleTrie {
   private static byte[] rlpList(byte[]... encodedItems) {
     int payloadLength = 0;
     for (byte[] item : encodedItems) {
-      payloadLength = Math.addExact(payloadLength, item.length);
+      payloadLength = StrictMathWrapper.addExact(payloadLength, item.length);
     }
     byte[] prefix = rlpLength(payloadLength, 0xc0, 0xf7);
-    byte[] result = Arrays.copyOf(prefix, Math.addExact(prefix.length, payloadLength));
+    byte[] result = Arrays.copyOf(prefix, StrictMathWrapper.addExact(prefix.length, payloadLength));
     int offset = prefix.length;
     for (byte[] item : encodedItems) {
       System.arraycopy(item, 0, result, offset, item.length);

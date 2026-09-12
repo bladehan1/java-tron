@@ -6,6 +6,7 @@ import java.util.ArrayDeque;
 import java.util.Arrays;
 import java.util.Deque;
 import java.util.Objects;
+import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.db2.stateroot.PathStateRebuildCoordinator.SnapshotIdentity;
 import org.tron.core.db2.stateroot.PathStateRootMetadata.Kind;
 
@@ -61,8 +62,8 @@ public final class PathStateCatchUpQueue {
     long nextMutations;
     long nextBytes;
     try {
-      nextMutations = Math.addExact(queuedMutations, admitted.getMutations().size());
-      nextBytes = Math.addExact(queuedBytes, logicalBytes(admitted));
+      nextMutations = StrictMathWrapper.addExact(queuedMutations, admitted.getMutations().size());
+      nextBytes = StrictMathWrapper.addExact(queuedBytes, logicalBytes(admitted));
     } catch (ArithmeticException overflow) {
       return failOverflow(overflow);
     }
@@ -231,14 +232,14 @@ public final class PathStateCatchUpQueue {
     long bytes = Long.BYTES * 2L + PathStateBlockTransition.HASH_LENGTH * 2L
         + Integer.BYTES;
     for (PathStateMutation mutation : transition.getMutations()) {
-      bytes = Math.addExact(bytes,
+      bytes = StrictMathWrapper.addExact(bytes,
           mutation.getDbName().getBytes(StandardCharsets.UTF_8).length);
-      bytes = Math.addExact(bytes, mutation.getCanonicalKey().length);
+      bytes = StrictMathWrapper.addExact(bytes, mutation.getCanonicalKey().length);
       byte[] value = mutation.getCanonicalValue();
       if (value != null) {
-        bytes = Math.addExact(bytes, value.length);
+        bytes = StrictMathWrapper.addExact(bytes, value.length);
       }
-      bytes = Math.addExact(bytes, Integer.BYTES * 3L + 1L);
+      bytes = StrictMathWrapper.addExact(bytes, Integer.BYTES * 3L + 1L);
     }
     return bytes;
   }

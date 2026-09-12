@@ -27,6 +27,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.OptionalLong;
 import java.util.stream.Stream;
+import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
 
 /** Persistent immutable exact-key serving generation backed by the configured database engine. */
@@ -1044,7 +1045,7 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
       ExactKey key, List<Long> epochs, int firstPageIndex) {
     for (int start = 0, page = firstPageIndex; start < epochs.size();
         start += EPOCHS_PER_PAGE, page++) {
-      int end = Math.min(start + EPOCHS_PER_PAGE, epochs.size());
+      int end = StrictMathWrapper.min(start + EPOCHS_PER_PAGE, epochs.size());
       batch.add(StateArchiveIndexDatabase.put(keyPageKey(key.dbName, key.rawKey, page),
           encodeEpochPage(toArray(epochs.subList(start, end)))));
     }

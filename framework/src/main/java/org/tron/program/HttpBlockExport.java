@@ -23,6 +23,7 @@ import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import org.tron.common.math.StrictMathWrapper;
 import org.tron.common.utils.BlockFile;
 import org.tron.common.utils.ByteArray;
 import org.tron.core.capsule.BlockCapsule;
@@ -82,7 +83,7 @@ public final class HttpBlockExport {
   private static void export(Options options, java.io.PrintStream output) throws IOException {
     long next = options.start;
     while (next <= options.end) {
-      long chunkEnd = Math.min(options.end, next + options.chunkSize - 1L);
+      long chunkEnd = StrictMathWrapper.min(options.end, next + options.chunkSize - 1L);
       Path target = Paths.get(options.outputDirectory)
           .resolve(String.format("%d-%d.dat", next, chunkEnd));
       if (Files.isRegularFile(target) && !options.overwrite) {
@@ -92,7 +93,7 @@ public final class HttpBlockExport {
         List<BlockFile.Record> records = fetchChunk(options, next, chunkEnd);
         long chunkStart = next;
         BlockFile.write(target, next, chunkEnd, options.overwrite,
-            height -> records.get(Math.toIntExact(height - chunkStart)));
+            height -> records.get(StrictMathWrapper.toIntExact(height - chunkStart)));
         output.printf("Downloaded chunk [%d, %d] %s%n", next, chunkEnd, target);
       }
       if (chunkEnd == Long.MAX_VALUE) {
@@ -140,7 +141,7 @@ public final class HttpBlockExport {
             : new IOException(e.getMessage(), e);
         if (attempt < options.retries) {
           try {
-            Thread.sleep(Math.min(5000L, attempt * 1000L));
+            Thread.sleep(StrictMathWrapper.min(5000L, attempt * 1000L));
           } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             throw new IOException("Interrupted while retrying HTTP request", interrupted);

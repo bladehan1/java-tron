@@ -8,6 +8,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
 
 /** Immutable deterministic coalescing target for one consecutive Snapshot flush range. */
@@ -131,8 +132,8 @@ public final class PathStateFlushTarget {
       List<PathStateSnapshotDelta.Mutation> superNodes) {
     long bytes = mutationsBytes(superNodes);
     for (StoreTarget store : stores) {
-      bytes = Math.addExact(bytes, mutationsBytes(store.flatMutations));
-      bytes = Math.addExact(bytes, mutationsBytes(store.nodeMutations));
+      bytes = StrictMathWrapper.addExact(bytes, mutationsBytes(store.flatMutations));
+      bytes = StrictMathWrapper.addExact(bytes, mutationsBytes(store.nodeMutations));
     }
     return bytes;
   }
@@ -140,10 +141,10 @@ public final class PathStateFlushTarget {
   private static long mutationsBytes(List<PathStateSnapshotDelta.Mutation> mutations) {
     long bytes = 0;
     for (PathStateSnapshotDelta.Mutation mutation : mutations) {
-      bytes = Math.addExact(bytes, mutation.getKey().length);
+      bytes = StrictMathWrapper.addExact(bytes, mutation.getKey().length);
       byte[] value = mutation.getValue();
       if (value != null) {
-        bytes = Math.addExact(bytes, value.length);
+        bytes = StrictMathWrapper.addExact(bytes, value.length);
       }
     }
     return bytes;
@@ -154,7 +155,7 @@ public final class PathStateFlushTarget {
   }
 
   private static int compareUnsigned(byte[] left, byte[] right) {
-    for (int index = 0; index < Math.min(left.length, right.length); index++) {
+    for (int index = 0; index < StrictMathWrapper.min(left.length, right.length); index++) {
       int compared = Integer.compare(left[index] & 0xff, right[index] & 0xff);
       if (compared != 0) {
         return compared;

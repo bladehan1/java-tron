@@ -14,6 +14,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalLong;
+import org.tron.common.math.StrictMathWrapper;
 
 /**
  * Immutable backend-neutral prototype of one derived serving-key-index generation.
@@ -502,7 +503,7 @@ public final class ServingKeyIndexGeneration implements ServingKeyIndex {
       }
       List<EpochPage> pages = new ArrayList<>();
       for (int start = 0; start < epochs.size(); start += layout.getMaxEpochsPerPage()) {
-        int end = Math.min(start + layout.getMaxEpochsPerPage(), epochs.size());
+        int end = StrictMathWrapper.min(start + layout.getMaxEpochsPerPage(), epochs.size());
         pages.add(new EpochPage(toArray(epochs.subList(start, end))));
       }
       return new KeyChangeIndex(first, last, null,
@@ -535,7 +536,7 @@ public final class ServingKeyIndexGeneration implements ServingKeyIndex {
           high = middle;
         }
       }
-      return Math.max(0, low - 1);
+      return StrictMathWrapper.max(0, low - 1);
     }
 
     private boolean isInline() {
