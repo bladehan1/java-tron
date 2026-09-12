@@ -2,12 +2,17 @@ package org.tron.core.vm.repository;
 
 import org.apache.commons.lang3.tuple.Pair;
 import org.tron.common.runtime.vm.DataWord;
+import org.tron.common.utils.ByteArray;
 import org.tron.core.capsule.*;
 import org.tron.core.store.*;
 import org.tron.core.vm.program.Storage;
 import org.tron.protos.Protocol;
 
 public interface Repository {
+
+  default boolean isHistorical() {
+    return false;
+  }
 
   AssetIssueCapsule getAssetIssue(byte[] tokenId);
 
@@ -26,6 +31,20 @@ public interface Repository {
   AccountCapsule getAccount(byte[] address);
 
   BytesCapsule getDynamicProperty(byte[] bytesKey);
+
+  default long getDynamicPropertyLong(String key) {
+    BytesCapsule value = getDynamicProperty(
+        key.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    if (value == null) {
+      Long defaultValue = isHistorical()
+          ? DynamicPropertiesStore.getLongPropertyDefault(key) : null;
+      if (defaultValue != null) {
+        return defaultValue;
+      }
+      throw new IllegalArgumentException("Dynamic property is missing: " + key);
+    }
+    return ByteArray.toLong(value.getData());
+  }
 
   DelegatedResourceCapsule getDelegatedResource(byte[] key);
 

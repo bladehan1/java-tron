@@ -26,6 +26,11 @@ public class SnapshotRoot extends AbstractSnapshot<byte[], byte[]> {
   @Getter
   private Snapshot solidity;
   private boolean isAccountDB;
+  private boolean coupledMutationsMaterialized;
+
+  void useMaterializedCoupledMutations() {
+    coupledMutationsMaterialized = true;
+  }
 
   private TronCache<WrappedByteArray, WrappedByteArray> cache;
   private static final List<String> CACHE_DBS = CommonParameter.getInstance()
@@ -42,7 +47,7 @@ public class SnapshotRoot extends AbstractSnapshot<byte[], byte[]> {
   }
 
   private boolean needOptAsset() {
-    return isAccountDB && ChainBaseManager.getInstance().getDynamicPropertiesStore()
+    return isAccountDB && !coupledMutationsMaterialized && ChainBaseManager.getInstance().getDynamicPropertiesStore()
             .getAllowAccountAssetOptimizationFromRoot() == 1;
   }
 
@@ -121,7 +126,21 @@ public class SnapshotRoot extends AbstractSnapshot<byte[], byte[]> {
     }
   }
 
+  /** Applies a fully coalesced common-checkpoint Store batch with an explicit sync barrier. */
+  void applyCheckpointMutations(Map<WrappedByteArray, WrappedByteArray> batch) {
+    if (needOptAsset()) {
+      processAccount(batch, true);
+    } else {
+      ((Flusher) db).flushSynced(batch);
+      putCache(batch);
+    }
+  }
+
   private void processAccount(Map<WrappedByteArray, WrappedByteArray> batch) {
+    processAccount(batch, false);
+  }
+
+  private void processAccount(Map<WrappedByteArray, WrappedByteArray> batch, boolean synced) {
     AccountAssetStore assetStore = ChainBaseManager.getInstance().getAccountAssetStore();
     Map<WrappedByteArray, WrappedByteArray> accounts = new HashMap<>();
     Map<WrappedByteArray, WrappedByteArray> assets = new HashMap<>();
@@ -140,10 +159,18 @@ public class SnapshotRoot extends AbstractSnapshot<byte[], byte[]> {
         accounts.put(k, WrappedByteArray.of(item.getData()));
       }
     });
-    ((Flusher) db).flush(accounts);
+    if (synced) {
+      ((Flusher) db).flushSynced(accounts);
+    } else {
+      ((Flusher) db).flush(accounts);
+    }
     putCache(accounts);
     if (assets.size() > 0) {
-      assetStore.updateByBatch(AccountAssetStore.convert(assets));
+      if (synced) {
+        assetStore.updateByBatchSynced(AccountAssetStore.convert(assets));
+      } else {
+        assetStore.updateByBatch(AccountAssetStore.convert(assets));
+      }
     }
   }
 
@@ -220,7 +247,9 @@ public class SnapshotRoot extends AbstractSnapshot<byte[], byte[]> {
 
   @Override
   public Snapshot newInstance() {
-    return new SnapshotRoot(db.newInstance());
+    SnapshotRoot replacement = new SnapshotRoot(db.newInstance());
+    replacement.coupledMutationsMaterialized = coupledMutationsMaterialized;
+    return replacement;
   }
 
   @Override
