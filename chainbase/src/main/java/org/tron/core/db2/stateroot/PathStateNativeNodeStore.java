@@ -10,7 +10,9 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import org.iq80.leveldb.DB;
@@ -21,6 +23,9 @@ import org.rocksdb.ChecksumType;
 import org.rocksdb.CompressionType;
 import org.rocksdb.LRUCache;
 import org.rocksdb.RocksDBException;
+import org.rocksdb.Statistics;
+import org.rocksdb.StatsLevel;
+import org.rocksdb.TickerType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.tron.core.config.args.StorageConfig.NativeDbConfig;
@@ -67,6 +72,11 @@ final class PathStateNativeNodeStore implements Closeable {
   /** Cache sharding is a runtime choice, never part of the persisted root or store format. */
   static PathStateNativeNodeStore open(Path directory, Engine engine, String storageProfile,
       NativeDbConfig config, int cacheShardBits) throws IOException {
+    return open(directory, engine, storageProfile, config, cacheShardBits, false);
+  }
+
+  static PathStateNativeNodeStore open(Path directory, Engine engine, String storageProfile,
+      NativeDbConfig config, int cacheShardBits, boolean readStatistics) throws IOException {
     Path path = Objects.requireNonNull(directory, "directory").toAbsolutePath().normalize();
     Engine selected = Objects.requireNonNull(engine, "engine");
     String profile = Objects.requireNonNull(storageProfile, "storageProfile");
@@ -79,13 +89,19 @@ final class PathStateNativeNodeStore implements Closeable {
       throw new IOException("path-state node database is not a directory: " + path);
     }
     Delegate opened = selected == Engine.LEVELDB ? new LevelDelegate(path, settings)
-        : new RocksDelegate(path, settings, cacheShardBits);
+        : new RocksDelegate(path, settings, cacheShardBits, readStatistics);
     logger.info("Path-state database opened: directory={}, engine={}, profile={}, blockBytes={}, "
-            + "writeBufferBytes={}, cacheBytes={}, maxOpenFiles={}, requestedCacheShardBits={}",
+            + "writeBufferBytes={}, cacheBytes={}, maxOpenFiles={}, requestedCacheShardBits={}, readStatistics={}",
         path, selected, profile,
         settings.getBlockSize(), settings.getWriteBufferSize(), settings.getCacheSize(),
-        settings.getMaxOpenFiles(), cacheShardBits);
+        settings.getMaxOpenFiles(), cacheShardBits, selected == Engine.ROCKSDB && readStatistics);
     return new PathStateNativeNodeStore(path, selected, profile, opened);
+  }
+
+  /** Database-wide counters, including flat/metadata reads and other concurrent readers. */
+  Map<String, Long> readStatistics() {
+    requireOpen();
+    return delegate instanceof RocksDelegate ? ((RocksDelegate) delegate).readStatistics() : null;
   }
 
   byte[] get(byte[] key) {
@@ -288,6 +304,7 @@ final class PathStateNativeNodeStore implements Closeable {
 
   private static final class RocksDelegate implements Delegate {
 
+    private final Statistics statistics;
     private final LRUCache blockCache;
     private final BloomFilter bloomFilter;
     private final org.rocksdb.Options options;
@@ -297,7 +314,8 @@ final class PathStateNativeNodeStore implements Closeable {
         new org.rocksdb.WriteOptions().setSync(false);
     private final org.rocksdb.RocksDB database;
 
-    private RocksDelegate(Path directory, NativeDbConfig config, int cacheShardBits)
+    private RocksDelegate(Path directory, NativeDbConfig config, int cacheShardBits,
+        boolean readStatistics)
         throws IOException {
       // Preserve the existing auto-sharded constructor unless the caller selected a measured
       // Store/budget combination. In particular, do not extrapolate 64MiB results to small DBs.
@@ -331,6 +349,11 @@ final class PathStateNativeNodeStore implements Closeable {
           .setMaxBytesForLevelBase(config.getMaxBytesForLevelBase())
           .setMaxBytesForLevelMultiplier(config.getMaxBytesForLevelMultiplier())
           .setTableFormatConfig(table);
+      statistics = readStatistics ? new Statistics() : null;
+      if (statistics != null) {
+        statistics.setStatsLevel(StatsLevel.EXCEPT_DETAILED_TIMERS);
+        options.setStatistics(statistics);
+      }
       try {
         database = org.rocksdb.RocksDB.open(options, directory.toString());
       } catch (RocksDBException failure) {
@@ -339,9 +362,33 @@ final class PathStateNativeNodeStore implements Closeable {
         options.close();
         bloomFilter.close();
         blockCache.close();
+        if (statistics != null) {
+          statistics.close();
+        }
         throw new IOException("failed to open path-state RocksDB node database", failure);
       }
     }
+
+    private Map<String, Long> readStatistics() {
+      if (statistics == null) {
+        return null;
+      }
+      Map<String, Long> result = new LinkedHashMap<>();
+      for (TickerType ticker : READ_TICKERS) {
+        result.put(ticker.name().toLowerCase(Locale.ROOT), statistics.getTickerCount(ticker));
+      }
+      return result;
+    }
+
+    private static final TickerType[] READ_TICKERS = {
+        TickerType.BLOCK_CACHE_FILTER_HIT, TickerType.BLOCK_CACHE_FILTER_MISS,
+        TickerType.BLOCK_CACHE_FILTER_BYTES_INSERT,
+        TickerType.BLOCK_CACHE_INDEX_HIT, TickerType.BLOCK_CACHE_INDEX_MISS,
+        TickerType.BLOCK_CACHE_INDEX_BYTES_INSERT,
+        TickerType.BLOCK_CACHE_DATA_HIT, TickerType.BLOCK_CACHE_DATA_MISS,
+        TickerType.BLOCK_CACHE_DATA_BYTES_INSERT,
+        TickerType.BLOOM_FILTER_USEFUL, TickerType.BYTES_READ
+    };
 
     @Override
     public byte[] get(byte[] key) {
@@ -404,6 +451,9 @@ final class PathStateNativeNodeStore implements Closeable {
       options.close();
       bloomFilter.close();
       blockCache.close();
+      if (statistics != null) {
+        statistics.close();
+      }
     }
   }
 

@@ -16,6 +16,11 @@ final class PathStateOperationTimer {
     return storeId == 4 || storeId == 5 || storeId == 22;
   }
 
+  static boolean observesRocksDb(int storeId) {
+    return (storeId == 5 || storeId == 22) && enabled()
+        && Boolean.getBoolean("tron.pathstate.rocksdbStats");
+  }
+
   long start() {
     return ((calls.getAndIncrement() & 63) == 0) ? System.nanoTime() : 0;
   }

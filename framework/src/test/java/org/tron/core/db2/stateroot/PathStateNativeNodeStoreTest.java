@@ -49,6 +49,42 @@ public class PathStateNativeNodeStoreTest {
   public final TemporaryFolder temporaryFolder = new TemporaryFolder();
 
   @Test
+  public void optionalRocksStatisticsObserveRealSstReadsAndDefaultOff() throws Exception {
+    org.rocksdb.RocksDB.loadLibrary();
+    Path directory = temporaryFolder.newFolder("rocks-statistics").toPath();
+    byte[] key = "N-key".getBytes(StandardCharsets.UTF_8);
+    byte[] value = new byte[4096];
+    Arrays.fill(value, (byte) 7);
+    try (org.rocksdb.BloomFilter filter = new org.rocksdb.BloomFilter(10, false);
+        org.rocksdb.Options options = new org.rocksdb.Options().setCreateIfMissing(true)
+            .setCompressionType(org.rocksdb.CompressionType.NO_COMPRESSION)
+            .setTableFormatConfig(new org.rocksdb.BlockBasedTableConfig().setFilter(filter));
+        org.rocksdb.RocksDB database = org.rocksdb.RocksDB.open(options, directory.toString());
+        org.rocksdb.FlushOptions flush = new org.rocksdb.FlushOptions().setWaitForFlush(true)) {
+      database.put(key, value);
+      database.flush(flush);
+    }
+    try (PathStateNativeNodeStore store = PathStateNativeNodeStore.open(directory, Engine.ROCKSDB,
+        "small", NativeDbConfig.small(), -1, true)) {
+      Map<String, Long> before = store.readStatistics();
+      assertArrayEquals(value, store.get(key));
+      Map<String, Long> first = store.readStatistics();
+      assertTrue(first.get("block_cache_data_miss") > before.get("block_cache_data_miss"));
+      assertArrayEquals(value, store.get(key));
+      Map<String, Long> second = store.readStatistics();
+      assertTrue(second.get("block_cache_data_hit") > first.get("block_cache_data_hit"));
+      assertTrue(second.get("bytes_read") > first.get("bytes_read"));
+      assertEquals(11, second.size());
+      assertEquals(Long.valueOf(0), before.get("bytes_read"));
+    }
+    try (PathStateNativeNodeStore store =
+        PathStateNativeNodeStore.open(directory, Engine.ROCKSDB)) {
+      assertNull(store.readStatistics());
+      assertArrayEquals(value, store.get(key));
+    }
+  }
+
+  @Test
   public void nativeStoresOwnBytesAndPreserveSyncedMutationsAcrossReopen() throws Exception {
     for (Engine engine : availableEngines()) {
       Path directory = new File(temporaryFolder.getRoot(), "native-" + engine).toPath();

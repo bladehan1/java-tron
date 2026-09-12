@@ -1694,7 +1694,8 @@ public final class PathStatePhysicalStoreSet implements Closeable {
         ResidentNodeCache residentNodeCache, String storageProfile, NativeDbConfig dbSettings)
         throws IOException {
       nativeStore = PathStateNativeNodeStore.open(directory, engine, storageProfile, dbSettings,
-          cacheShardBitsFor(storeId, dbSettings.getCacheSize()));
+          cacheShardBitsFor(storeId, dbSettings.getCacheSize()),
+          PathStateOperationTimer.observesRocksDb(storeId));
       nodeStore = new ResidentNodeStore(new PhysicalNodeStore(nativeStore), residentNodeCache,
           storeId);
     }
@@ -1998,6 +1999,11 @@ public final class PathStatePhysicalStoreSet implements Closeable {
 
     long getUpdatedHits() {
       return updatedHits.get();
+    }
+
+    Map<String, Long> readStatistics() {
+      return base instanceof PhysicalNodeStore
+          ? ((PhysicalNodeStore) base).nativeStore.readStatistics() : null;
     }
 
     long[] nativeReadTiming() {
