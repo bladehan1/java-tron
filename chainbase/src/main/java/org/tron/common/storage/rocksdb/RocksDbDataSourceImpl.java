@@ -14,7 +14,9 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -32,9 +34,13 @@ import org.rocksdb.RocksDBException;
 import org.rocksdb.RocksIterator;
 import org.rocksdb.Snapshot;
 import org.rocksdb.Status;
+import org.rocksdb.Statistics;
+import org.rocksdb.StatsLevel;
+import org.rocksdb.TickerType;
 import org.rocksdb.WriteBatch;
 import org.rocksdb.WriteOptions;
 import org.tron.common.error.TronDBException;
+import org.tron.common.prometheus.ChainbaseRocksDbExports;
 import org.tron.common.setting.RocksDbSettings;
 import org.tron.common.storage.EngineSourceIdentityFile;
 import org.tron.common.storage.WriteOptionsWrapper;
@@ -59,6 +65,8 @@ public class RocksDbDataSourceImpl extends DbStat implements DbSourceInter<byte[
   private ReadWriteLock resetDbLock = new ReentrantReadWriteLock();
   private final StampedLock snapshotLifecycleLock = new StampedLock();
   private Options options;
+  private Statistics readStatistics;
+  private ChainbaseRocksDbExports.Registration readRegistration;
   private volatile String snapshotSourceIdentity;
 
   public RocksDbDataSourceImpl(String parentPath, String name) {
@@ -116,11 +124,22 @@ public class RocksDbDataSourceImpl extends DbStat implements DbSourceInter<byte[
       if (!isAlive()) {
         return;
       }
-      if (this.options != null) {
-        this.options.close();
+      if (readRegistration != null) {
+        readRegistration.close();
+        readRegistration = null;
       }
-      database.close();
       alive = false;
+      try {
+        database.close();
+      } finally {
+        try {
+          if (this.options != null) {
+            this.options.close();
+          }
+        } finally {
+          closeReadStatistics();
+        }
+      }
     } catch (Exception e) {
       logger.error("Failed to find the dbStore file on the closeDB: {}.", dataBaseName, e);
     }
@@ -224,6 +243,14 @@ public class RocksDbDataSourceImpl extends DbStat implements DbSourceInter<byte[
           snapshotSourceIdentity = EngineSourceIdentityFile.loadOrCreate(dbPath, "ROCKSDB",
               dataBaseName);
           this.options = RocksDbSettings.getOptionsByDbName(dataBaseName);
+          if (ChainbaseRocksDbExports.selected(dataBaseName)) {
+            readStatistics = this.options.statistics();
+            if (readStatistics == null) {
+              readStatistics = new Statistics();
+              readStatistics.setStatsLevel(StatsLevel.EXCEPT_DETAILED_TIMERS);
+              this.options.setStatistics(readStatistics);
+            }
+          }
           database = RocksDB.open(this.options, dbPath.toString());
         } catch (RocksDBException e) {
           if (Objects.equals(e.getStatus().getCode(), Status.Code.Corruption)) {
@@ -240,6 +267,11 @@ public class RocksDbDataSourceImpl extends DbStat implements DbSourceInter<byte[
         }
 
         alive = true;
+        if (readStatistics != null) {
+          Statistics openedStatistics = readStatistics;
+          readRegistration = ChainbaseRocksDbExports.register(dataBaseName,
+              () -> readAttribution(openedStatistics));
+        }
       } catch (IOException ioe) {
         throw new RuntimeException(
             String.format("failed to init database: %s", dataBaseName), ioe);
@@ -247,7 +279,55 @@ public class RocksDbDataSourceImpl extends DbStat implements DbSourceInter<byte[
 
       logger.debug("Init DB {} done.", dataBaseName);
     } finally {
+      if (!alive) {
+        closeReadStatistics();
+      }
       resetDbLock.writeLock().unlock();
+    }
+  }
+
+  private void closeReadStatistics() {
+    if (readStatistics != null) {
+      readStatistics.close();
+      readStatistics = null;
+    }
+  }
+
+  private static final TickerType[] READ_TICKERS = {
+      TickerType.BLOCK_CACHE_FILTER_HIT, TickerType.BLOCK_CACHE_FILTER_MISS,
+      TickerType.BLOCK_CACHE_FILTER_BYTES_INSERT,
+      TickerType.BLOCK_CACHE_INDEX_HIT, TickerType.BLOCK_CACHE_INDEX_MISS,
+      TickerType.BLOCK_CACHE_INDEX_BYTES_INSERT,
+      TickerType.BLOCK_CACHE_DATA_HIT, TickerType.BLOCK_CACHE_DATA_MISS,
+      TickerType.BLOCK_CACHE_DATA_BYTES_INSERT,
+      TickerType.BLOOM_FILTER_USEFUL, TickerType.BYTES_READ
+  };
+
+  private Map<String, Long> readAttribution(Statistics expected) {
+    // Never queue a scrape behind reset/close, nor touch a superseded native handle.
+    if (!resetDbLock.readLock().tryLock()) {
+      return null;
+    }
+    try {
+      if (!alive || readStatistics != expected) {
+        return null;
+      }
+      Map<String, Long> result = new LinkedHashMap<>();
+      for (TickerType ticker : READ_TICKERS) {
+        result.put(ticker.name().toLowerCase(Locale.ROOT), expected.getTickerCount(ticker));
+      }
+      for (String property : Arrays.asList("rocksdb.block-cache-capacity",
+          "rocksdb.block-cache-usage", "rocksdb.block-cache-pinned-usage",
+          "rocksdb.estimate-table-readers-mem")) {
+        try {
+          result.put(property, database.getLongProperty(property));
+        } catch (RocksDBException unsupported) {
+          // Missing native properties remain absent, not zero.
+        }
+      }
+      return result;
+    } finally {
+      resetDbLock.readLock().unlock();
     }
   }
 

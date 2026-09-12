@@ -28,6 +28,7 @@ public class Metrics {
         DefaultExports.initialize();
         new OperatingSystemExports().register(CollectorRegistry.defaultRegistry);
         new GuavaCacheExports().register(CollectorRegistry.defaultRegistry);
+        new ChainbaseRocksDbExports().register(CollectorRegistry.defaultRegistry);
         int port = CommonParameter.getInstance().getMetricsPrometheusPort();
         new HTTPServer.Builder().withPort(port).build();
         logger.info("prometheus exposed on port : {}", port);
