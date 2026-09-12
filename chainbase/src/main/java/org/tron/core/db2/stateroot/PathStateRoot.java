@@ -444,16 +444,21 @@ public final class PathStateRoot {
     return participantTries.get(participant.getDbName()).rootHash();
   }
 
-  synchronized void enableAccountReadTiming() {
-    PathMerkleTrie account = participantTries.get("account");
-    if (account != null) {
-      account.enableReadTiming();
+  synchronized void enableParticipantReadTiming() {
+    for (PathStateParticipant participant : scope.getParticipants()) {
+      if (PathStateOperationTimer.observesStore(participant.getStoreId())) {
+        participantTries.get(participant.getDbName()).enableReadTiming();
+      }
     }
   }
 
-  synchronized long[][] accountReadTiming() {
-    PathMerkleTrie account = participantTries.get("account");
-    return account == null ? null : account.readTiming();
+  synchronized long[][] participantReadTiming(int storeId) {
+    for (PathStateParticipant participant : scope.getParticipants()) {
+      if (participant.getStoreId() == storeId) {
+        return participantTries.get(participant.getDbName()).readTiming();
+      }
+    }
+    return null;
   }
 
   synchronized long nodeDecodeCount() {

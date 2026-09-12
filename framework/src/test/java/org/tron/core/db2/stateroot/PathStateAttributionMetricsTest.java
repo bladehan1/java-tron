@@ -18,17 +18,24 @@ public class PathStateAttributionMetricsTest {
       System.setProperty("tron.pathstate.attribution", "true");
       CommonParameter.getInstance().setMetricsPrometheusEnable(false);
       double before = sample(prefix + "calls_total", labels, values);
-      PathStateAttributionMetrics.operation("decode", 5, 1, 500);
+      PathStateAttributionMetrics.operation(4, "decode", 5, 1, 500);
       assertEquals(before, sample(prefix + "calls_total", labels, values), 0);
       CommonParameter.getInstance().setMetricsPrometheusEnable(true);
       System.setProperty("tron.pathstate.attribution", "false");
-      PathStateAttributionMetrics.operation("decode", 5, 1, 500);
+      PathStateAttributionMetrics.operation(4, "decode", 5, 1, 500);
       assertEquals(before, sample(prefix + "calls_total", labels, values), 0);
       System.setProperty("tron.pathstate.attribution", "true");
       double samples = sample(prefix + "samples_total", labels, values);
-      PathStateAttributionMetrics.operation("decode", 5, 0, 0);
+      PathStateAttributionMetrics.operation(4, "decode", 5, 0, 0);
       assertEquals(before + 5, sample(prefix + "calls_total", labels, values), 0);
       assertEquals(samples, sample(prefix + "samples_total", labels, values), 0);
+      for (int storeId : new int[]{5, 22}) {
+        String[] other = {Integer.toString(storeId), "decode"};
+        double previous = sample(prefix + "calls_total", labels, other);
+        PathStateAttributionMetrics.operation(storeId, "decode", storeId, 1, 1000);
+        assertEquals(previous + storeId, sample(prefix + "calls_total", labels, other), 0);
+        assertEquals(before + 5, sample(prefix + "calls_total", labels, values), 0);
+      }
       String[] participantLabels = {"store", "stage"};
       String[] participantValues = {"4", "work"};
       String histogram = "tron_pathstate_prepared_participant_seconds";

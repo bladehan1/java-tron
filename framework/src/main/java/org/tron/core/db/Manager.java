@@ -2116,6 +2116,13 @@ public class Manager {
     }
   }
 
+  private static final class BlockApplyMetrics {
+    private static final Histogram DURATION = Histogram.build()
+        .name("tron_block_apply_stage_seconds")
+        .help("Session opening including checkpoint, or block execution, in successful blocks.")
+        .labelNames("stage").register();
+  }
+
   private void finalizeBlockSession(ISession blockSession, BlockCapsule block) {
     blockSession.finalizeBlock(BlockSnapshotMeta.forBlock(
         block.getNum(), block.getBlockId().getBytes(), block.getParentHash().getBytes(),
@@ -2475,9 +2482,11 @@ public class Manager {
             }
             long oldSolidNum = getDynamicPropertiesStore().getLatestSolidifiedBlockNum();
             long applyStartedNanos = System.nanoTime();
+            long sessionOpenedNanos;
             long appliedNanos;
             long committedNanos;
             try (ISession tmpSession = revokingStore.buildSession()) {
+              sessionOpenedNanos = System.nanoTime();
               applyBlock(newBlock, txs);
               appliedNanos = System.nanoTime();
               finalizeBlockSession(tmpSession, newBlock);
@@ -2491,14 +2500,23 @@ public class Manager {
             long newSolidNum = getDynamicPropertiesStore().getLatestSolidifiedBlockNum();
             blockTrigger(newBlock, oldSolidNum, newSolidNum);
             long triggeredNanos = System.nanoTime();
+            if (Boolean.getBoolean("tron.pathstate.attribution") && Metrics.enabled()) {
+              BlockApplyMetrics.DURATION.labels("session_open")
+                  .observe((sessionOpenedNanos - applyStartedNanos) / 1e9);
+              BlockApplyMetrics.DURATION.labels("block_execute")
+                  .observe((appliedNanos - sessionOpenedNanos) / 1e9);
+            }
             logger.info("PushBlock core stages: head={}, verifyMs={}, preApplyMs={}, applyMs={}, "
-                    + "commitMs={}, triggerMs={}, throughTriggerMs={}", newBlock.getNum(),
+                    + "commitMs={}, triggerMs={}, throughTriggerMs={}, sessionOpenMs={}, "
+                    + "blockExecuteMs={}", newBlock.getNum(),
                 elapsedMillis(startedNanos, verifiedNanos),
                 elapsedMillis(verifiedNanos, applyStartedNanos),
                 elapsedMillis(applyStartedNanos, appliedNanos),
                 elapsedMillis(appliedNanos, committedNanos),
                 elapsedMillis(committedNanos, triggeredNanos),
-                elapsedMillis(startedNanos, triggeredNanos));
+                elapsedMillis(startedNanos, triggeredNanos),
+                elapsedMillis(applyStartedNanos, sessionOpenedNanos),
+                elapsedMillis(sessionOpenedNanos, appliedNanos));
           }
           logger.info(SAVE_BLOCK, newBlock);
         }

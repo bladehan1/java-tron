@@ -120,7 +120,8 @@ public class P66SnapshotPipelineTest {
       boolean[] observed = new boolean[operations.length];
       for (ILoggingEvent event : appender.list) {
         String message = event.getFormattedMessage();
-        if (!message.startsWith("Path-state account attribution:")) {
+        if (!message.startsWith("Path-state read attribution:")
+            || !message.contains("store=4,")) {
           continue;
         }
         Matcher match = pattern.matcher(message);
@@ -138,7 +139,7 @@ public class P66SnapshotPipelineTest {
       if (evidence != null) {
         java.util.List<String> messages = new java.util.ArrayList<>();
         for (ILoggingEvent event : appender.list) {
-          if (event.getFormattedMessage().startsWith("Path-state account attribution:")) {
+          if (event.getFormattedMessage().startsWith("Path-state read attribution:")) {
             messages.add(event.getFormattedMessage());
           }
         }
