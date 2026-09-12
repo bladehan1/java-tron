@@ -109,6 +109,25 @@ public final class PathStateRoot {
   synchronized ParallelApplyStats applyParallel(Collection<PathStateMutation> mutations,
       ExecutorService participantExecutor, ExecutorService branchExecutor) {
     List<PreparedMutation> prepared = prepare(mutations);
+    List<ParticipantWork> work = prepareParticipantWork(prepared);
+    List<Future<?>> futures = new ArrayList<>(work.size());
+    // Preserve the existing wall boundary: grouping/sorting is outside this measurement.
+    long startedNanos = System.nanoTime();
+    boolean attribution = PathStateOperationTimer.enabled();
+    for (ParticipantWork participantWork : work) {
+      if (attribution) {
+        participantWork.submittedNanos = System.nanoTime();
+      }
+      futures.add(Objects.requireNonNull(participantExecutor, "participantExecutor").submit(
+          () -> applyParticipant(participantWork, branchExecutor)));
+    }
+    awaitParticipants(futures);
+    recordPendingLeafMutations(prepared);
+    rootMaterialized = false;
+    return summarizeParallelApply(prepared, work, startedNanos);
+  }
+
+  private static List<ParticipantWork> prepareParticipantWork(List<PreparedMutation> prepared) {
     Map<Integer, List<PreparedMutation>> grouped = new LinkedHashMap<>();
     for (PreparedMutation mutation : prepared) {
       grouped.computeIfAbsent(mutation.participant.getStoreId(), ignored -> new ArrayList<>())
@@ -123,26 +142,31 @@ public final class PathStateRoot {
       return compared != 0 ? compared
           : Integer.compare(left.participant.getStoreId(), right.participant.getStoreId());
     });
-    List<Future<?>> futures = new ArrayList<>(work.size());
-    long startedNanos = System.nanoTime();
-    for (ParticipantWork participantWork : work) {
-      futures.add(Objects.requireNonNull(participantExecutor, "participantExecutor").submit(() -> {
-        long participantStartedNanos = System.nanoTime();
-        List<PathMerkleTrie.BatchMutation> batch =
-            new ArrayList<>(participantWork.mutations.size());
-        for (PreparedMutation mutation : participantWork.mutations) {
-          batch.add(new PathMerkleTrie.BatchMutation(mutation.secureKey, mutation.encodedValue,
-              mutation.previousValueKnown, mutation.previousEncodedValue));
-        }
-        PathMerkleTrie participantTrie = participantTries.get(
-            participantWork.participant.getDbName());
-        participantTrie.applyBatch(batch,
-            Objects.requireNonNull(branchExecutor, "branchExecutor"),
-            usesDeferredNodeEncoding(participantWork.participant));
-        participantTrie.rootHash();
-        participantWork.elapsedNanos = System.nanoTime() - participantStartedNanos;
-      }));
+    return work;
+  }
+
+  // Called by a worker while the coordinator holds the root monitor; do not synchronize here.
+  private void applyParticipant(ParticipantWork participantWork, ExecutorService branchExecutor) {
+    long participantStartedNanos = System.nanoTime();
+    participantWork.queueNanos = participantWork.submittedNanos == 0 ? 0
+        : participantStartedNanos - participantWork.submittedNanos;
+    List<PathMerkleTrie.BatchMutation> batch =
+        new ArrayList<>(participantWork.mutations.size());
+    for (PreparedMutation mutation : participantWork.mutations) {
+      batch.add(new PathMerkleTrie.BatchMutation(mutation.secureKey, mutation.encodedValue,
+          mutation.previousValueKnown, mutation.previousEncodedValue));
     }
+    PathMerkleTrie participantTrie = participantTries.get(
+        participantWork.participant.getDbName());
+    participantTrie.applyBatch(batch,
+        Objects.requireNonNull(branchExecutor, "branchExecutor"),
+        usesDeferredNodeEncoding(participantWork.participant));
+    participantTrie.rootHash();
+    participantWork.elapsedNanos = System.nanoTime() - participantStartedNanos;
+  }
+
+  // Cancellation requests on failure preserve the existing behavior; they do not join workers.
+  private static void awaitParticipants(List<Future<?>> futures) {
     try {
       for (Future<?> future : futures) {
         future.get();
@@ -159,14 +183,25 @@ public final class PathStateRoot {
       }
       throw new IllegalStateException("parallel path-state prepare failed", cause);
     }
-    recordPendingLeafMutations(prepared);
-    rootMaterialized = false;
+  }
+
+  private static ParallelApplyStats summarizeParallelApply(List<PreparedMutation> prepared,
+      List<ParticipantWork> work, long startedNanos) {
     long totalWorkNanos = 0;
+    StringBuilder perStore = new StringBuilder();
     int maxMutations = 0;
     int authoritativePreviousValues = 0;
     long maxElapsedNanos = 0;
     int maxElapsedStoreId = 0;
     for (ParticipantWork participantWork : work) {
+      if (participantWork.submittedNanos != 0) {
+        if (perStore.length() != 0) {
+          perStore.append(';');
+        }
+        perStore.append(participantWork.participant.getStoreId()).append(':')
+            .append(participantWork.mutations.size()).append(':')
+            .append(participantWork.queueNanos).append(':').append(participantWork.elapsedNanos);
+      }
       totalWorkNanos += participantWork.elapsedNanos;
       maxMutations = Math.max(maxMutations, participantWork.mutations.size());
       if (participantWork.elapsedNanos > maxElapsedNanos) {
@@ -183,7 +218,7 @@ public final class PathStateRoot {
         maxMutations,
         TimeUnit.NANOSECONDS.toMillis(maxElapsedNanos), maxElapsedStoreId,
         TimeUnit.NANOSECONDS.toMillis(totalWorkNanos),
-        TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedNanos));
+        TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedNanos), perStore.toString(), work);
   }
 
   private static void cancel(List<? extends Future<?>> futures) {
@@ -204,11 +239,14 @@ public final class PathStateRoot {
     private final int maxParticipantStoreId;
     private final long participantWorkMillis;
     private final long wallMillis;
+    private final String perStoreTiming;
+    private final List<ParticipantWork> participantTimings;
 
     private ParallelApplyStats(int participantCount, int mutationCount,
         int authoritativePreviousValues,
         int maxParticipantMutations, long maxParticipantMillis, int maxParticipantStoreId,
-        long participantWorkMillis, long wallMillis) {
+        long participantWorkMillis, long wallMillis, String perStoreTiming,
+        List<ParticipantWork> participantTimings) {
       this.participantCount = participantCount;
       this.mutationCount = mutationCount;
       this.authoritativePreviousValues = authoritativePreviousValues;
@@ -217,6 +255,8 @@ public final class PathStateRoot {
       this.maxParticipantStoreId = maxParticipantStoreId;
       this.participantWorkMillis = participantWorkMillis;
       this.wallMillis = wallMillis;
+      this.perStoreTiming = perStoreTiming;
+      this.participantTimings = participantTimings;
     }
 
     int participantCount() {
@@ -247,6 +287,19 @@ public final class PathStateRoot {
       return participantWorkMillis;
     }
 
+    void exportAttribution() {
+      for (ParticipantWork participant : participantTimings) {
+        if (participant.submittedNanos != 0) {
+          PathStateAttributionMetrics.participant(participant.participant.getStoreId(),
+              participant.queueNanos, participant.elapsedNanos);
+        }
+      }
+    }
+
+    String perStoreTiming() {
+      return perStoreTiming;
+    }
+
     long wallMillis() {
       return wallMillis;
     }
@@ -257,6 +310,8 @@ public final class PathStateRoot {
     private final PathStateParticipant participant;
     private final List<PreparedMutation> mutations;
     private long elapsedNanos;
+    private long submittedNanos;
+    private long queueNanos;
 
     private ParticipantWork(List<PreparedMutation> mutations) {
       this.mutations = mutations;
@@ -387,6 +442,18 @@ public final class PathStateRoot {
       }
     }
     return participantTries.get(participant.getDbName()).rootHash();
+  }
+
+  synchronized void enableAccountReadTiming() {
+    PathMerkleTrie account = participantTries.get("account");
+    if (account != null) {
+      account.enableReadTiming();
+    }
+  }
+
+  synchronized long[][] accountReadTiming() {
+    PathMerkleTrie account = participantTries.get("account");
+    return account == null ? null : account.readTiming();
   }
 
   synchronized long nodeDecodeCount() {

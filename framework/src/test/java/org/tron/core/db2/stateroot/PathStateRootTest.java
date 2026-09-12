@@ -233,11 +233,25 @@ public class PathStateRootTest {
     ExecutorService participants = Executors.newFixedThreadPool(4);
     ExecutorService branches = Executors.newFixedThreadPool(8);
     PathStateRoot.ParallelApplyStats stats;
+    String previousAttribution = System.getProperty("tron.pathstate.attribution");
     try {
+      System.setProperty("tron.pathstate.attribution", "true");
       stats = parallel.applyParallel(changes, participants, branches);
     } finally {
+      if (previousAttribution == null) {
+        System.clearProperty("tron.pathstate.attribution");
+      } else {
+        System.setProperty("tron.pathstate.attribution", previousAttribution);
+      }
       participants.shutdownNow();
       branches.shutdownNow();
+    }
+    assertEquals(3, stats.perStoreTiming().split(";").length);
+    for (String participant : stats.perStoreTiming().split(";")) {
+      String[] fields = participant.split(":");
+      assertEquals(4, fields.length);
+      assertTrue(Long.parseLong(fields[2]) >= 0);
+      assertTrue(Long.parseLong(fields[3]) >= 0);
     }
     assertEquals(3, stats.participantCount());
     assertEquals(96, stats.mutationCount());

@@ -2116,16 +2116,16 @@ public class Manager {
     }
   }
 
-  private void commitBlockSession(ISession blockSession, BlockCapsule block) {
-    // This is the block-final handoff after applyBlock.  SnapshotManager.commit() performs the
-    // P66 fold, freezes one BlockChangeView, and prepares Archive old values/diff plus PathState
-    // transition/delta from that same view.  It may run those two preparation branches in
-    // parallel, but this call does not mean that either authority is durable yet.
-    blockSession.commit(BlockSnapshotMeta.forBlock(
-        block.getNum(),
-        block.getBlockId().getBytes(),
-        block.getParentHash().getBytes(),
-        block.getTimeStamp()));
+  private void finalizeBlockSession(ISession blockSession, BlockCapsule block) {
+    blockSession.finalizeBlock(BlockSnapshotMeta.forBlock(
+        block.getNum(), block.getBlockId().getBytes(), block.getParentHash().getBytes(),
+        block.getTimeStamp()), stages -> {
+          stages.normalizeSnapshot();
+          stages.startBlockDiff();
+          stages.buildPathState();
+          stages.completeArtifacts();
+          stages.commitSession();
+        });
     // Header diagnosis is observational and must remain after the commit handoff.  It must not
     // become a second state-root publication path or be used as proof that checkpoint flush has
     // completed.
@@ -2228,7 +2228,7 @@ public class Manager {
             tx.setVerified(false);
           }
           applyBlock(item.getBlk().setSwitch(true));
-          commitBlockSession(tmpSession, item.getBlk());
+          finalizeBlockSession(tmpSession, item.getBlk());
         } catch (AccountResourceInsufficientException
             | ValidateSignatureException
             | ContractValidateException
@@ -2266,7 +2266,7 @@ public class Manager {
               // todo  process the exception carefully later
               try (ISession tmpSession = revokingStore.buildSession()) {
                 applyBlock(khaosBlock.getBlk().setSwitch(true));
-                commitBlockSession(tmpSession, khaosBlock.getBlk());
+                finalizeBlockSession(tmpSession, khaosBlock.getBlk());
               } catch (AccountResourceInsufficientException
                   | ValidateSignatureException
                   | ContractValidateException
@@ -2480,7 +2480,7 @@ public class Manager {
             try (ISession tmpSession = revokingStore.buildSession()) {
               applyBlock(newBlock, txs);
               appliedNanos = System.nanoTime();
-              commitBlockSession(tmpSession, newBlock);
+              finalizeBlockSession(tmpSession, newBlock);
               committedNanos = System.nanoTime();
             } catch (Throwable throwable) {
               logger.error(throwable.getMessage(), throwable);

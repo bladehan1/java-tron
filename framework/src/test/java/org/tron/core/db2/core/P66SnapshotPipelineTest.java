@@ -9,9 +9,14 @@ import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.google.common.primitives.Bytes;
 import com.google.common.primitives.Longs;
 import com.google.protobuf.ByteString;
+import io.prometheus.client.CollectorRegistry;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.Collections;
@@ -21,11 +26,15 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
+import org.slf4j.LoggerFactory;
+import org.tron.common.parameter.CommonParameter;
 import org.tron.common.storage.leveldb.LevelDbDataSourceImpl;
 import org.tron.core.config.args.Args;
 import org.tron.core.db2.ISession;
@@ -70,6 +79,153 @@ public class P66SnapshotPipelineTest {
     Args.clearParam();
   }
 
+  private static void finalizeBlock(ISession session, BlockSnapshotMeta meta) {
+    session.finalizeBlock(meta, stages -> {
+      stages.normalizeSnapshot();
+      stages.startBlockDiff();
+      stages.buildPathState();
+      stages.completeArtifacts();
+      stages.commitSession();
+    });
+  }
+
+  @Test
+  public void attributionPrometheusMatchesRealPreparedLogWindow() throws Exception {
+    boolean previousMetrics = CommonParameter.getInstance()
+        .isMetricsPrometheusEnable();
+    String previousAttribution = System.getProperty("tron.pathstate.attribution");
+    Logger dbLogger = (Logger)
+        LoggerFactory.getLogger("DB");
+    Level previousLevel = dbLogger.getLevel();
+    ListAppender<ILoggingEvent> appender =
+        new ListAppender<>();
+    String[] operations = {"node_read", "hash_verify", "decode", "native_get"};
+    double[][] before = new double[operations.length][3];
+    String[] metrics = {"calls_total", "samples_total", "sampled_seconds_total"};
+    for (int i = 0; i < operations.length; i++) {
+      for (int j = 0; j < metrics.length; j++) {
+        before[i][j] = attributionMetric(metrics[j], operations[i]);
+      }
+    }
+    try {
+      CommonParameter.getInstance().setMetricsPrometheusEnable(true);
+      System.setProperty("tron.pathstate.attribution", "true");
+      dbLogger.setLevel(Level.INFO);
+      appender.start();
+      dbLogger.addAppender(appender);
+      realPathStateForkRewindCheckpointAndNativeReopenMatchPhysicalOracle(true);
+      Pattern pattern = Pattern.compile(
+          "operation=(\\w+), sampleEvery=64, calls=(\\d+), samples=(\\d+), sampledNanos=(\\d+)");
+      long[][] totals = new long[operations.length][3];
+      boolean[] observed = new boolean[operations.length];
+      for (ILoggingEvent event : appender.list) {
+        String message = event.getFormattedMessage();
+        if (!message.startsWith("Path-state account attribution:")) {
+          continue;
+        }
+        Matcher match = pattern.matcher(message);
+        assertTrue(message, match.find());
+        for (int i = 0; i < operations.length; i++) {
+          if (operations[i].equals(match.group(1))) {
+            observed[i] = true;
+            for (int j = 0; j < 3; j++) {
+              totals[i][j] += Long.parseLong(match.group(j + 2));
+            }
+          }
+        }
+      }
+      String evidence = System.getProperty("tron.pathstate.attribution.evidence");
+      if (evidence != null) {
+        java.util.List<String> messages = new java.util.ArrayList<>();
+        for (ILoggingEvent event : appender.list) {
+          if (event.getFormattedMessage().startsWith("Path-state account attribution:")) {
+            messages.add(event.getFormattedMessage());
+          }
+        }
+        java.nio.file.Files.write(java.nio.file.Paths.get(evidence), messages,
+            StandardCharsets.UTF_8);
+      }
+      for (int i = 0; i < operations.length; i++) {
+        assertTrue(operations[i], observed[i]);
+        assertTrue(operations[i] + " must exercise real calls", totals[i][0] > 0);
+        assertTrue(operations[i] + " must exercise timed samples", totals[i][1] > 0);
+        for (int j = 0; j < 3; j++) {
+          double expected = j == 2 ? totals[i][j] / 1e9 : totals[i][j];
+          assertEquals(operations[i], expected,
+              attributionMetric(metrics[j], operations[i]) - before[i][j], 1e-9);
+        }
+      }
+    } finally {
+      dbLogger.detachAppender(appender);
+      appender.stop();
+      dbLogger.setLevel(previousLevel);
+      CommonParameter.getInstance()
+          .setMetricsPrometheusEnable(previousMetrics);
+      if (previousAttribution == null) {
+        System.clearProperty("tron.pathstate.attribution");
+      } else {
+        System.setProperty("tron.pathstate.attribution", previousAttribution);
+      }
+    }
+  }
+
+  private static double attributionMetric(String suffix, String operation) {
+    Double value = CollectorRegistry.defaultRegistry.getSampleValue(
+        "tron_pathstate_prepared_operation_" + suffix,
+        new String[]{"store", "operation"}, new String[]{"4", operation});
+    return value == null ? 0 : value;
+  }
+
+  @Test
+  public void rejectsOutOfOrderAndEscapedStagesAndRevokesFailedSession() throws Exception {
+    try (Fixture f = fixture()) {
+      byte[] before = account(false, 5).toByteArray();
+      f.accounts.getHead().put(ADDRESS, before);
+      AtomicReference<ISession.BlockFinalization> escaped = new AtomicReference<>();
+      try (ISession block = f.manager.buildSession()) {
+        f.accounts.put(ADDRESS, account(false, 9).toByteArray());
+        assertThrows(IllegalStateException.class, () ->
+            block.finalizeBlock(meta(1), stages -> {
+              escaped.set(stages);
+              stages.startBlockDiff();
+            }));
+      }
+      assertArrayEquals(before, f.accounts.getUnchecked(ADDRESS));
+      assertThrows(IllegalStateException.class,
+          () -> escaped.get().normalizeSnapshot());
+      try (ISession block = f.manager.buildSession()) {
+        finalizeBlock(block, meta(1));
+        assertThrows(IllegalStateException.class,
+            () -> finalizeBlock(block, meta(1)));
+      }
+    }
+  }
+
+  @Test
+  public void rejectsFinalizingAnOuterSessionWhileNestedLayerIsActive() throws Exception {
+    try (Fixture f = fixture(); ISession outer = f.manager.buildSession()) {
+      try (ISession nested = f.manager.buildSession()) {
+        assertThrows(IllegalStateException.class, () -> finalizeBlock(outer, meta(1)));
+      }
+      finalizeBlock(outer, meta(1));
+    }
+  }
+
+  @Test
+  public void rejectsNestedSessionInsideFinalization() throws Exception {
+    try (Fixture f = fixture(); ISession block = f.manager.buildSession()) {
+      block.finalizeBlock(meta(1), stages -> {
+        assertThrows(IllegalStateException.class, block::commit);
+        assertThrows(IllegalStateException.class, f.manager::buildSession);
+        stages.normalizeSnapshot();
+        stages.startBlockDiff();
+        stages.buildPathState();
+        stages.completeArtifacts();
+        stages.commitSession();
+      });
+    }
+  }
+
   @Test
   public void migratesOnceBeforeFreezeAndBothConsumersSeeExactPhysicalValues() throws Exception {
     try (Fixture f = fixture()) {
@@ -95,7 +251,7 @@ public class P66SnapshotPipelineTest {
       }, transition -> { }));
       try (ISession block = f.manager.buildSession()) {
         f.accounts.put(ADDRESS, account(false, 9).toByteArray());
-        block.commit(meta(1));
+        finalizeBlock(block, meta(1));
       }
       assertTrue(archiveView.get() == pathView.get());
       assertEquals(1, pathCaptures.get());
@@ -126,7 +282,7 @@ public class P66SnapshotPipelineTest {
         P66CoupledMutationMaterializer.Statistics stats = f.materialize();
         assertEquals(0, stats.changedAccounts);
         assertEquals(0, stats.prefixQueries);
-        block.commit(meta(1));
+        finalizeBlock(block, meta(1));
       }
       assertFalse(Account.parseFrom(f.accounts.getUnchecked(ADDRESS)).getAssetOptimized());
       assertNull(f.assets.getUnchecked(ASSET));
@@ -201,7 +357,7 @@ public class P66SnapshotPipelineTest {
       }, transition -> published.incrementAndGet()));
       try (ISession block = f.manager.buildSession()) {
         f.accounts.put(ADDRESS, account(false, 9).toByteArray());
-        assertThrows(IllegalStateException.class, () -> block.commit(meta(1)));
+        assertThrows(IllegalStateException.class, () -> finalizeBlock(block, meta(1)));
         assertNull(((SnapshotImpl) f.accounts.getHead()).getBlockSnapshotMeta());
         assertEquals(0, published.get());
       }
@@ -229,7 +385,7 @@ public class P66SnapshotPipelineTest {
       Thread committer = new Thread(() -> {
         try (ISession block = f.manager.buildSession()) {
           f.accounts.put(ADDRESS, account(false, 9).toByteArray());
-          assertThrows(IllegalStateException.class, () -> block.commit(meta(1)));
+          assertThrows(IllegalStateException.class, () -> finalizeBlock(block, meta(1)));
           assertTrue(Thread.currentThread().isInterrupted());
         } catch (Throwable failure) {
           unexpected.set(failure);
@@ -279,7 +435,7 @@ public class P66SnapshotPipelineTest {
       manager.enable();
       try (ISession block = manager.buildSession()) {
         accounts.put(ADDRESS, account(false, 17).toByteArray());
-        block.commit(meta(1));
+        finalizeBlock(block, meta(1));
       }
       assertEquals(17, assetStore.getBalance(Account.parseFrom(accounts.getUnchecked(ADDRESS)),
           new byte[]{'1'}));
@@ -326,7 +482,7 @@ public class P66SnapshotPipelineTest {
       }));
       try (ISession block = f.manager.buildSession()) {
         f.accounts.put(ADDRESS, account(false, 9).toByteArray());
-        assertThrows(IllegalStateException.class, () -> block.commit(meta(1)));
+        assertThrows(IllegalStateException.class, () -> finalizeBlock(block, meta(1)));
         assertEquals(1, archiveFinished.get());
         assertNull(((SnapshotImpl) f.accounts.getHead()).getBlockSnapshotMeta());
       }
@@ -340,8 +496,19 @@ public class P66SnapshotPipelineTest {
     }
   }
 
+  private static byte[] baselineAccount(int seed) {
+    return Account.newBuilder().setAddress(ByteString.copyFrom(address(seed)))
+        .setAccountName(ByteString.copyFromUtf8("persisted-account-for-read-attribution-" + seed))
+        .setAssetOptimized(true).build().toByteArray();
+  }
+
   @Test
   public void realPathStateForkRewindCheckpointAndNativeReopenMatchPhysicalOracle()
+      throws Exception {
+    realPathStateForkRewindCheckpointAndNativeReopenMatchPhysicalOracle(false);
+  }
+
+  private void realPathStateForkRewindCheckpointAndNativeReopenMatchPhysicalOracle(boolean seeded)
       throws Exception {
     Path path = temporaryFolder.newFolder().toPath();
     Path oraclePath = temporaryFolder.newFolder().toPath();
@@ -353,6 +520,11 @@ public class P66SnapshotPipelineTest {
         Engine.LEVELDB)) {
       PathStateRoot root = stores.createRoot();
       root.put("properties", FLAG, Longs.toByteArray(1));
+      if (seeded) {
+        for (int i = 2; i < 130; i++) {
+          root.put("account", address(i), baselineAccount(i));
+        }
+      }
       stores.persistFlatSnapshot(root);
     }
     try (PathStatePhysicalStoreSet stores = PathStatePhysicalStoreSet.open(path, scope,
@@ -370,6 +542,11 @@ public class P66SnapshotPipelineTest {
     try (Fixture f = fixture();
         PathStatePhysicalOverlayHead head = PathStatePhysicalOverlayHead.open(path,
             Engine.LEVELDB, new PathStateLayerLimits(16, 16L << 20))) {
+      if (seeded) {
+        for (int i = 2; i < 130; i++) {
+          f.accounts.getHead().put(address(i), baselineAccount(i));
+        }
+      }
       head.admitFreshCommonBaseline(baseline);
       PathStateRuntimeAttachment attachment = PathStateRuntimeAttachment.commonCheckpoint(
           new PhysicalSnapshotPathStateCollector(), head);
@@ -381,19 +558,37 @@ public class P66SnapshotPipelineTest {
       f.manager.installArchiveCollector(new SnapshotOldValueCollector(), diff -> { });
       try (ISession block = f.manager.buildSession()) {
         f.accounts.put(ADDRESS, account(false, 9).toByteArray());
-        block.commit(meta(1));
+        if (seeded) {
+          for (int i = 2; i < 130; i++) {
+            f.accounts.put(address(i), Account.parseFrom(baselineAccount(i)).toBuilder()
+                .setBalance(9).build().toByteArray());
+          }
+        }
+        finalizeBlock(block, meta(1));
       }
       f.manager.fastPop();
       attachment.synchronizeReadyHead(head.rewindTo(0, addressHash(0)));
       BlockSnapshotMeta fork = BlockSnapshotMeta.forBlock(1, addressHash(7), addressHash(0), 3000);
       try (ISession block = f.manager.buildSession()) {
         f.accounts.put(ADDRESS, account(false, 13).toByteArray());
-        block.commit(fork);
+        if (seeded) {
+          for (int i = 2; i < 130; i++) {
+            f.accounts.put(address(i), Account.parseFrom(baselineAccount(i)).toBuilder()
+                .setBalance(13).build().toByteArray());
+          }
+        }
+        finalizeBlock(block, fork);
       }
       try (PathStatePhysicalStoreSet oracle = PathStatePhysicalStoreSet.open(oraclePath, scope,
           Engine.LEVELDB)) {
         PathStateRoot root = oracle.createRoot();
         root.put("properties", FLAG, Longs.toByteArray(1));
+        if (seeded) {
+          for (int i = 2; i < 130; i++) {
+            root.put("account", address(i), Account.parseFrom(baselineAccount(i)).toBuilder()
+                .setBalance(13).build().toByteArray());
+          }
+        }
         root.put("account", ADDRESS, f.accounts.getUnchecked(ADDRESS));
         root.put("account-asset", ASSET, Longs.toByteArray(13));
         expected = root.rootHash();
@@ -435,7 +630,7 @@ public class P66SnapshotPipelineTest {
           null, (meta, transition) -> delta(meta, transition)));
       try (ISession block = f.manager.buildSession()) {
         f.accounts.put(ADDRESS, account(false, 9).toByteArray());
-        block.commit(meta(1));
+        finalizeBlock(block, meta(1));
       }
       payload = new CommonCheckpointPayloadFactory().capture(CommonCheckpointFormat.identity(),
           f.manager.getDbs(), 1);
