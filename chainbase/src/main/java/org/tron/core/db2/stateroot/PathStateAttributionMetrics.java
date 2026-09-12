@@ -28,6 +28,12 @@ final class PathStateAttributionMetrics {
     }
   }
 
+  static void rocksDb(int storeId, String ticker, long delta) {
+    if (enabled() && PathStateOperationTimer.observesRocksDb(storeId) && delta >= 0) {
+      Export.ROCKS_DB.labels(Integer.toString(storeId), ticker).inc(delta);
+    }
+  }
+
   static void participant(int storeId, long submitToStartNanos, long workNanos) {
     if (enabled()) {
       String store = Integer.toString(storeId);
@@ -44,6 +50,10 @@ final class PathStateAttributionMetrics {
   }
 
   private static final class Export {
+    private static final Counter ROCKS_DB = Counter.build()
+        .name("tron_pathstate_prepared_rocksdb_ticker_total")
+        .help("Database-wide ticker deltas during successful prepare windows; not N-only or disk IO.")
+        .labelNames("store", "ticker").register();
     private static final Counter CALLS = Counter.build()
         .name("tron_pathstate_prepared_operation_calls_total")
         .help("Observed operation calls in completed PathState prepare attempts.")

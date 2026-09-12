@@ -832,6 +832,7 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
     private final long initialCleanHits;
     private final long initialUpdatedHits;
     private final long[] initialNativeTiming;
+    private final Map<String, Long> initialReadStatistics;
     private final AtomicLong readRequests;
     private final AtomicLong changedReadHits;
     private final AtomicLong directReads = new AtomicLong();
@@ -850,6 +851,7 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
       initialCleanHits = nativeReadSource == null ? 0 : nativeReadSource.getCleanHits();
       initialUpdatedHits = nativeReadSource == null ? 0 : nativeReadSource.getUpdatedHits();
       initialNativeTiming = nativeReadSource == null ? null : nativeReadSource.nativeReadTiming();
+      initialReadStatistics = nativeReadSource == null ? null : nativeReadSource.readStatistics();
       boolean attribution = PathStateOperationTimer.observesStore(storeId)
           && PathStateOperationTimer.enabled();
       readRequests = attribution ? new AtomicLong() : null;
@@ -896,6 +898,17 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
     private void logReadAttribution(long head, String blockHash) {
       if (readRequests == null) {
         return;
+      }
+      if (initialReadStatistics != null) {
+        Map<String, Long> after = nativeReadSource.readStatistics();
+        Map<String, Long> deltas = new LinkedHashMap<>();
+        initialReadStatistics.forEach((ticker, before) -> {
+          long delta = after.get(ticker) - before;
+          deltas.put(ticker, delta);
+          PathStateAttributionMetrics.rocksDb(storeId, ticker, delta);
+        });
+        logger.info("Path-state RocksDB attribution: head={}, blockHash={}, status=prepared, "
+                + "store={}, scope=database, tickers={}", head, blockHash, storeId, deltas);
       }
       long requests = readRequests.get();
       long changed = changedReadHits.get();

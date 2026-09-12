@@ -8,6 +8,45 @@ import org.tron.common.parameter.CommonParameter;
 
 public class PathStateAttributionMetricsTest {
   @Test
+  public void rocksStatisticsRequireIndependentFlagAndOnlyObserveTwoStores() {
+    String attribution = System.getProperty("tron.pathstate.attribution");
+    String rocks = System.getProperty("tron.pathstate.rocksdbStats");
+    boolean metrics = CommonParameter.getInstance().isMetricsPrometheusEnable();
+    String name = "tron_pathstate_prepared_rocksdb_ticker_total";
+    String[] labels = {"store", "ticker"};
+    String[] values = {"5", "block_cache_data_miss"};
+    try {
+      CommonParameter.getInstance().setMetricsPrometheusEnable(true);
+      System.setProperty("tron.pathstate.attribution", "true");
+      System.clearProperty("tron.pathstate.rocksdbStats");
+      double before = sample(name, labels, values);
+      PathStateAttributionMetrics.rocksDb(5, "block_cache_data_miss", 7);
+      assertEquals(before, sample(name, labels, values), 0);
+      System.setProperty("tron.pathstate.rocksdbStats", "true");
+      org.junit.Assert.assertTrue(PathStateOperationTimer.observesRocksDb(5));
+      org.junit.Assert.assertTrue(PathStateOperationTimer.observesRocksDb(22));
+      org.junit.Assert.assertFalse(PathStateOperationTimer.observesRocksDb(4));
+      PathStateAttributionMetrics.rocksDb(5, "block_cache_data_miss", 7);
+      assertEquals(before + 7, sample(name, labels, values), 0);
+      System.setProperty("tron.pathstate.attribution", "false");
+      PathStateAttributionMetrics.rocksDb(5, "block_cache_data_miss", 7);
+      assertEquals(before + 7, sample(name, labels, values), 0);
+    } finally {
+      CommonParameter.getInstance().setMetricsPrometheusEnable(metrics);
+      if (attribution == null) {
+        System.clearProperty("tron.pathstate.attribution");
+      } else {
+        System.setProperty("tron.pathstate.attribution", attribution);
+      }
+      if (rocks == null) {
+        System.clearProperty("tron.pathstate.rocksdbStats");
+      } else {
+        System.setProperty("tron.pathstate.rocksdbStats", rocks);
+      }
+    }
+  }
+
+  @Test
   public void gatesExportAndPreservesZeroSamplesAndParticipantUnits() {
     boolean previousMetrics = CommonParameter.getInstance().isMetricsPrometheusEnable();
     String previousAttribution = System.getProperty("tron.pathstate.attribution");
