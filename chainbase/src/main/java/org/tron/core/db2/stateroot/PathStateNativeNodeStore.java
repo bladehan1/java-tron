@@ -61,6 +61,12 @@ final class PathStateNativeNodeStore implements Closeable {
   /** Opens one independent database with an explicit validated resource profile. */
   static PathStateNativeNodeStore open(Path directory, Engine engine, String storageProfile,
       NativeDbConfig config) throws IOException {
+    return open(directory, engine, storageProfile, config, -1);
+  }
+
+  /** Cache sharding is a runtime choice, never part of the persisted root or store format. */
+  static PathStateNativeNodeStore open(Path directory, Engine engine, String storageProfile,
+      NativeDbConfig config, int cacheShardBits) throws IOException {
     Path path = Objects.requireNonNull(directory, "directory").toAbsolutePath().normalize();
     Engine selected = Objects.requireNonNull(engine, "engine");
     String profile = Objects.requireNonNull(storageProfile, "storageProfile");
@@ -73,11 +79,12 @@ final class PathStateNativeNodeStore implements Closeable {
       throw new IOException("path-state node database is not a directory: " + path);
     }
     Delegate opened = selected == Engine.LEVELDB ? new LevelDelegate(path, settings)
-        : new RocksDelegate(path, settings);
+        : new RocksDelegate(path, settings, cacheShardBits);
     logger.info("Path-state database opened: directory={}, engine={}, profile={}, blockBytes={}, "
-            + "writeBufferBytes={}, cacheBytes={}, maxOpenFiles={}", path, selected, profile,
+            + "writeBufferBytes={}, cacheBytes={}, maxOpenFiles={}, requestedCacheShardBits={}",
+        path, selected, profile,
         settings.getBlockSize(), settings.getWriteBufferSize(), settings.getCacheSize(),
-        settings.getMaxOpenFiles());
+        settings.getMaxOpenFiles(), cacheShardBits);
     return new PathStateNativeNodeStore(path, selected, profile, opened);
   }
 
@@ -290,8 +297,12 @@ final class PathStateNativeNodeStore implements Closeable {
         new org.rocksdb.WriteOptions().setSync(false);
     private final org.rocksdb.RocksDB database;
 
-    private RocksDelegate(Path directory, NativeDbConfig config) throws IOException {
-      blockCache = new LRUCache(config.getCacheSize());
+    private RocksDelegate(Path directory, NativeDbConfig config, int cacheShardBits)
+        throws IOException {
+      // Preserve the existing auto-sharded constructor unless the caller selected a measured
+      // Store/budget combination. In particular, do not extrapolate 64MiB results to small DBs.
+      blockCache = cacheShardBits < 0 ? new LRUCache(config.getCacheSize())
+          : new LRUCache(config.getCacheSize(), cacheShardBits, false);
       bloomFilter = new BloomFilter(config.getBloomBitsPerKey(), false);
       BlockBasedTableConfig table = new BlockBasedTableConfig()
           .setBlockSize(config.getBlockSize())

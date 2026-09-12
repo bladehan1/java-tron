@@ -181,6 +181,13 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     return "small";
   }
 
+  static int cacheShardBitsFor(int storeId, long cacheBytes) {
+    // Stable Store 4 is account. Its measured 1.7MiB filters cannot stay in a 1MiB shard.
+    // Sixteen shards keep the same 64MiB budget and allow 4MiB per shard. Other Stores and
+    // custom budgets keep native defaults until independently validated.
+    return storeId == 4 && cacheBytes == 64L * 1024 * 1024 ? 4 : -1;
+  }
+
   private static NativeDbConfig storageProfileFor(String dbName,
       PathStateDbSettingsConfig settings) {
     String profile = storageProfileNameFor(dbName);
@@ -1686,7 +1693,8 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     private PhysicalStore(Path directory, Engine engine, int storeId,
         ResidentNodeCache residentNodeCache, String storageProfile, NativeDbConfig dbSettings)
         throws IOException {
-      nativeStore = PathStateNativeNodeStore.open(directory, engine, storageProfile, dbSettings);
+      nativeStore = PathStateNativeNodeStore.open(directory, engine, storageProfile, dbSettings,
+          cacheShardBitsFor(storeId, dbSettings.getCacheSize()));
       nodeStore = new ResidentNodeStore(new PhysicalNodeStore(nativeStore), residentNodeCache,
           storeId);
     }
