@@ -189,6 +189,10 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     return storeId == 4 && cacheBytes == 64L * 1024 * 1024 ? 4 : -1;
   }
 
+  static boolean useLargeReadCache(int storeId, Engine engine, boolean enabled) {
+    return enabled && engine == Engine.ROCKSDB && (storeId == 5 || storeId == 22);
+  }
+
   private static NativeDbConfig storageProfileFor(String dbName,
       PathStateDbSettingsConfig settings) {
     String profile = storageProfileNameFor(dbName);
@@ -1694,9 +1698,13 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     private PhysicalStore(Path directory, Engine engine, int storeId,
         ResidentNodeCache residentNodeCache, String storageProfile, NativeDbConfig dbSettings)
         throws IOException {
+      // Opt-in validation candidate; never mutate the shared giant resource profile.
+      boolean largeReadCache = useLargeReadCache(storeId, engine,
+          Boolean.getBoolean("tron.pathstate.largeReadCacheBenchmark"));
+      long cacheBytes = largeReadCache ? 256L << 20 : dbSettings.getCacheSize();
       nativeStore = PathStateNativeNodeStore.open(directory, engine, storageProfile, dbSettings,
-          cacheShardBitsFor(storeId, dbSettings.getCacheSize()),
-          PathStateOperationTimer.observesRocksDb(storeId));
+          largeReadCache ? 2 : cacheShardBitsFor(storeId, cacheBytes),
+          PathStateOperationTimer.observesRocksDb(storeId), cacheBytes);
       nodeStore = new ResidentNodeStore(new PhysicalNodeStore(nativeStore), residentNodeCache,
           storeId);
     }

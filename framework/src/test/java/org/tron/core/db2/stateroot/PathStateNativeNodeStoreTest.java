@@ -153,6 +153,32 @@ public class PathStateNativeNodeStoreTest {
   }
 
   @Test
+  public void largeReadCacheCandidateOnlySelectsTwoRocksStores() {
+    for (int storeId = 0; storeId <= 27; storeId++) {
+      assertEquals(storeId == 5 || storeId == 22,
+          PathStatePhysicalStoreSet.useLargeReadCache(storeId, Engine.ROCKSDB, true));
+      assertFalse(PathStatePhysicalStoreSet.useLargeReadCache(storeId, Engine.ROCKSDB, false));
+      assertFalse(PathStatePhysicalStoreSet.useLargeReadCache(storeId, Engine.LEVELDB, true));
+    }
+  }
+
+  @Test
+  public void largeReadCachePreservesSharedProfileAndReopen() throws Exception {
+    NativeDbConfig settings = NativeDbConfig.giant();
+    Path directory = temporaryFolder.newFolder("large-read-cache").toPath();
+    for (int pass = 0; pass < 2; pass++) {
+      try (PathStateNativeNodeStore store = PathStateNativeNodeStore.open(directory,
+          Engine.ROCKSDB, "giant", settings, 2, true, 256L << 20)) {
+        if (pass == 0) {
+          store.put(new byte[]{1}, new byte[]{2});
+        }
+        assertArrayEquals(new byte[]{2}, store.get(new byte[]{1}));
+        assertEquals(64L << 20, settings.getCacheSize());
+      }
+    }
+  }
+
+  @Test
   public void accountCacheShardsPreserveBudgetWritesAndReopen() throws Exception {
     assertEquals(4, PathStatePhysicalStoreSet.cacheShardBitsFor(4, 64L << 20));
     assertEquals(-1, PathStatePhysicalStoreSet.cacheShardBitsFor(4, 32L << 20));
