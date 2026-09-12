@@ -79,18 +79,24 @@ public class SnapshotImpl extends AbstractSnapshot<Key, Value> {
   }
 
   private byte[] get(Snapshot head, byte[] key) {
+    long readStarted = ExecutionAttribution.sample(getDbName(), "snapshot");
+    int layers = 0;
     Snapshot snapshot = head;
     Value value;
 
     while (Snapshot.isImpl(snapshot)) {
+      layers++;
       if ((value = ((SnapshotImpl) snapshot).db.get(Key.of(key))) != null) {
+        ExecutionAttribution.sampled(getDbName(), "snapshot", readStarted, layers, true);
         return value.getBytes();
       }
 
       snapshot = snapshot.getPrevious();
     }
 
-    return snapshot == null ? null : snapshot.get(key);
+    byte[] result = snapshot == null ? null : snapshot.get(key);
+    ExecutionAttribution.sampled(getDbName(), "snapshot", readStarted, layers, false);
+    return result;
   }
 
   @Override

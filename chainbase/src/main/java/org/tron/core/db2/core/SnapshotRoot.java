@@ -53,12 +53,17 @@ public class SnapshotRoot extends AbstractSnapshot<byte[], byte[]> {
 
   @Override
   public byte[] get(byte[] key) {
+    long readStarted = ExecutionAttribution.sample(getDbName(), "root");
     WrappedByteArray cache = getCache(key);
     if (cache != null) {
+      ExecutionAttribution.sampled(getDbName(), "root", readStarted, 0, true);
       return cache.getBytes();
     }
+    long nativeStarted = ExecutionAttribution.sample(getDbName(), "database");
     byte[] value = db.get(key);
+    ExecutionAttribution.sampled(getDbName(), "database", nativeStarted, 0, false);
     putCache(key, value);
+    ExecutionAttribution.sampled(getDbName(), "root", readStarted, 0, false);
     return value;
   }
 

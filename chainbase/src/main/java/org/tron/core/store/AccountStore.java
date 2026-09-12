@@ -8,6 +8,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.tron.common.parameter.CommonParameter;
 import org.tron.common.utils.Commons;
+import org.tron.core.db2.core.ExecutionAttribution;
 import org.tron.core.capsule.AccountCapsule;
 import org.tron.core.capsule.BlockCapsule;
 import org.tron.core.db.TronStoreWithRevoking;
@@ -61,7 +62,10 @@ public class AccountStore extends TronStoreWithRevoking<AccountCapsule> {
   @Override
   public AccountCapsule get(byte[] key) {
     byte[] value = revokingDB.getUnchecked(key);
-    return ArrayUtils.isEmpty(value) ? null : new AccountCapsule(value);
+    long started = ExecutionAttribution.sample("account", "decode");
+    AccountCapsule result = ArrayUtils.isEmpty(value) ? null : new AccountCapsule(value);
+    ExecutionAttribution.sampled("account", "decode", started, 0, false);
+    return result;
   }
 
   @Override

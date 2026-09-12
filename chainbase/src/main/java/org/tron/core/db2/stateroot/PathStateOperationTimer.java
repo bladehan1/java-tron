@@ -17,7 +17,8 @@ final class PathStateOperationTimer {
   }
 
   static boolean observesRocksDb(int storeId) {
-    return (storeId == 5 || storeId == 22) && enabled()
+    return (storeId == 5 || storeId == 22
+        || (storeId == 4 && Boolean.getBoolean("tron.chainbase.executionAttribution"))) && enabled()
         && Boolean.getBoolean("tron.pathstate.rocksdbStats");
   }
 
