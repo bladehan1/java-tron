@@ -109,8 +109,37 @@ public class PathStateNativeNodeStoreTest {
     assertTrue(nativeOptions.contains("max_write_buffer_number=2"));
     assertTrue(nativeOptions.contains("compression=kSnappyCompression"));
     assertTrue(nativeOptions.contains("block_size=4096"));
-    assertTrue(nativeOptions.contains("filter_policy=rocksdb.BuiltinBloomFilter"));
+    // RocksDB 5.x and 9.x persist different names for the same configured Bloom policy.
+    assertTrue(nativeOptions, nativeOptions.contains("filter_policy=rocksdb.BuiltinBloomFilter")
+        || nativeOptions.contains("filter_policy=bloomfilter"));
     assertTrue(nativeOptions.contains("checksum=kCRC32c"));
+  }
+
+  @Test
+  public void accountCacheShardsPreserveBudgetWritesAndReopen() throws Exception {
+    assertEquals(4, PathStatePhysicalStoreSet.cacheShardBitsFor(4, 64L << 20));
+    assertEquals(-1, PathStatePhysicalStoreSet.cacheShardBitsFor(4, 32L << 20));
+    assertEquals(-1, PathStatePhysicalStoreSet.cacheShardBitsFor(4, 128L << 20));
+    assertEquals(-1, PathStatePhysicalStoreSet.cacheShardBitsFor(5, 64L << 20));
+    assertEquals(-1, PathStatePhysicalStoreSet.cacheShardBitsFor(22, 64L << 20));
+    Path directory = temporaryFolder.newFolder("account-cache-shards").toPath();
+    for (int pass = 0; pass < 2; pass++) {
+      try (PathStateNativeNodeStore store = PathStateNativeNodeStore.open(directory,
+          Engine.ROCKSDB, "giant", NativeDbConfig.giant(),
+          PathStatePhysicalStoreSet.cacheShardBitsFor(4, 64L << 20))) {
+        if (pass == 0) {
+          store.put(new byte[]{1}, new byte[]{2});
+          store.put(new byte[]{3}, new byte[]{4});
+          store.delete(new byte[]{3});
+        }
+        assertArrayEquals(new byte[]{2}, store.get(new byte[]{1}));
+        assertNull(store.get(new byte[]{3}));
+      }
+      String log = new String(Files.readAllBytes(directory.resolve("LOG")),
+          StandardCharsets.UTF_8);
+      assertTrue("native cache must retain 64MiB", log.contains("capacity : 67108864"));
+      assertTrue("native cache must use 16 shards", log.contains("num_shard_bits : 4"));
+    }
   }
 
   @Test
