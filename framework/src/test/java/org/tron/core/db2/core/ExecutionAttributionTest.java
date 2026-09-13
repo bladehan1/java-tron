@@ -8,13 +8,23 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import io.prometheus.client.CollectorRegistry;
+import java.lang.reflect.Field;
+import java.util.concurrent.FutureTask;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 import org.junit.After;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
 import org.tron.common.parameter.CommonParameter;
+import org.tron.common.storage.rocksdb.RocksDbDataSourceImpl;
 import org.tron.core.db2.common.DB;
 
 public class ExecutionAttributionTest {
+  @Rule
+  public TemporaryFolder temporaryFolder = new TemporaryFolder();
+
   private String previous;
   private boolean metrics;
   private org.tron.core.config.args.Storage storage;
@@ -38,6 +48,98 @@ public class ExecutionAttributionTest {
       System.setProperty("tron.chainbase.executionAttribution", previous);
     }
     CommonParameter.getInstance().setMetricsPrometheusEnable(metrics);
+  }
+
+  @Test
+  public void databaseTimingPreservesLockingValuesAndFailureRelease() throws Exception {
+    RocksDbDataSourceImpl db = new RocksDbDataSourceImpl(
+        temporaryFolder.newFolder().toString(), "account");
+    byte[] key = {1};
+    byte[] value = {2};
+    db.putData(key, value);
+    Field field = RocksDbDataSourceImpl.class.getDeclaredField("resetDbLock");
+    field.setAccessible(true);
+    ReentrantReadWriteLock lock = (ReentrantReadWriteLock) field.get(db);
+    double lockCalls = read("database_lock", "calls");
+    double getCalls = read("database_get", "calls");
+    FutureTask<byte[]> task = new FutureTask<>(() -> {
+      try (ExecutionAttribution attempt = ExecutionAttribution.open(4, "locked")) {
+        byte[] result = db.getData(key);
+        attempt.publish();
+        return result;
+      }
+    });
+    Thread reader = new Thread(task);
+    try {
+      lock.writeLock().lock();
+      try {
+        reader.start();
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (!lock.hasQueuedThread(reader) && System.nanoTime() < deadline) {
+          Thread.yield();
+        }
+        assertTrue("reader must wait for reset lock", lock.hasQueuedThread(reader));
+        assertEquals(getCalls, read("database_get", "calls"), 0);
+      } finally {
+        lock.writeLock().unlock();
+      }
+      assertArrayEquals(value, task.get(5, TimeUnit.SECONDS));
+      assertEquals(lockCalls + 1, read("database_lock", "calls"), 0);
+      assertEquals(getCalls + 1, read("database_get", "calls"), 0);
+      try (ExecutionAttribution attempt = ExecutionAttribution.open(5, "invalid")) {
+        org.junit.Assert.assertThrows(IllegalArgumentException.class, () -> db.getData(null));
+        assertEquals(0, lock.getReadLockCount());
+        assertNull(db.getData(new byte[] {3}));
+        assertArrayEquals(value, db.getData(key));
+        attempt.publish();
+      }
+      assertEquals(lockCalls + 4, read("database_lock", "calls"), 0);
+      assertEquals(getCalls + 3, read("database_get", "calls"), 0);
+    } finally {
+      reader.join(5000);
+      db.closeDB();
+    }
+  }
+
+  @Test
+  public void callerScopesPartitionReadsAndRestoreAfterExceptions() {
+    double owner = siteCalls("bandwidth_owner");
+    double history = siteCalls("balance_history");
+    double other = siteCalls("other");
+    double total = read("snapshot", "calls");
+    try (ExecutionAttribution attempt = ExecutionAttribution.open(3, "sites")) {
+      try (ExecutionAttribution.ReadScope ignored = ExecutionAttribution.readSite(
+          ExecutionAttribution.ReadSite.BANDWIDTH_OWNER)) {
+        sampledAccountRead();
+        try (ExecutionAttribution.ReadScope nested = ExecutionAttribution.readSite(
+            ExecutionAttribution.ReadSite.BALANCE_HISTORY)) {
+          sampledAccountRead();
+          throw new IllegalStateException("read failed");
+        } catch (IllegalStateException expected) {
+          sampledAccountRead();
+        }
+      }
+      sampledAccountRead();
+      attempt.publish();
+    }
+    assertEquals(owner + 2, siteCalls("bandwidth_owner"), 0);
+    assertEquals(history + 1, siteCalls("balance_history"), 0);
+    assertEquals(other + 1, siteCalls("other"), 0);
+    assertEquals(total + 4, read("snapshot", "calls"), 0);
+    assertNull(ExecutionAttribution.readSite(ExecutionAttribution.ReadSite.BANDWIDTH_OWNER));
+  }
+
+  private static void sampledAccountRead() {
+    long started = ExecutionAttribution.sample("account", "snapshot");
+    ExecutionAttribution.sampled("account", "snapshot", started, 0, false);
+  }
+
+  private static double siteCalls(String site) {
+    Double value = CollectorRegistry.defaultRegistry.getSampleValue(
+        "tron_chainbase_execution_site_read_total",
+        new String[] {"phase", "site", "store", "operation", "kind"},
+        new String[] {"other", site, "account", "snapshot", "calls"});
+    return value == null ? 0 : value;
   }
 
   @Test

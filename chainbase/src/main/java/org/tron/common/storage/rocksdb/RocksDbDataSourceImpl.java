@@ -50,6 +50,7 @@ import org.tron.core.db.common.DbSourceInter;
 import org.tron.core.db.common.iterator.RockStoreIterator;
 import org.tron.core.db2.common.Instance;
 import org.tron.core.db2.common.WrappedByteArray;
+import org.tron.core.db2.core.ExecutionAttribution;
 import org.tron.core.exception.TronError;
 
 
@@ -348,11 +349,18 @@ public class RocksDbDataSourceImpl extends DbStat implements DbSourceInter<byte[
 
   @Override
   public byte[] getData(byte[] key) {
+    long lockStarted = ExecutionAttribution.sample(dataBaseName, "database_lock");
     resetDbLock.readLock().lock();
     try {
+      ExecutionAttribution.sampled(dataBaseName, "database_lock", lockStarted, 0, false);
       throwIfNotAlive();
       checkArgNotNull(key, "key");
-      return database.get(key);
+      long getStarted = ExecutionAttribution.sample(dataBaseName, "database_get");
+      try {
+        return database.get(key);
+      } finally {
+        ExecutionAttribution.sampled(dataBaseName, "database_get", getStarted, 0, false);
+      }
     } catch (RocksDBException e) {
       throw new RuntimeException(dataBaseName, e);
     } finally {
