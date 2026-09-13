@@ -17,6 +17,8 @@ public final class ExecutionAttribution implements AutoCloseable {
   private final Map<String, long[]> stages = new LinkedHashMap<>();
   private final Map<String, long[]> reads = new LinkedHashMap<>();
   private final Map<Phase, Map<String, long[]>> phaseReads = new EnumMap<>(Phase.class);
+  private final Map<String, long[]> siteReads = new LinkedHashMap<>();
+  private ReadSite site = ReadSite.OTHER;
   private Phase phase = Phase.OTHER;
   private boolean published;
 
@@ -24,6 +26,38 @@ public final class ExecutionAttribution implements AutoCloseable {
     OTHER, VALIDATE, TRACE_INIT, BANDWIDTH, MULTISIGN, MEMO, RUNTIME, FINALIZATION, RESULT, CALLBACK;
 
     private final String label = name().toLowerCase(Locale.ROOT);
+  }
+
+  public enum ReadSite {
+    OTHER, BANDWIDTH_OWNER, BANDWIDTH_RECEIVER, BALANCE_HISTORY;
+
+    private final String label = name().toLowerCase(Locale.ROOT);
+  }
+
+  /** Narrow caller scope; restores the enclosing site even when a read throws. */
+  public static ReadScope readSite(ReadSite site) {
+    ExecutionAttribution current = CURRENT.get();
+    return current == null ? null : new ReadScope(current, site);
+  }
+
+  public static final class ReadScope implements AutoCloseable {
+    private final ExecutionAttribution owner;
+    private final ReadSite previous;
+
+    private ReadScope(ExecutionAttribution owner, ReadSite site) {
+      this.owner = owner;
+      this.previous = owner.site;
+      owner.site = site;
+    }
+
+    @Override
+    public void close() {
+      owner.site = previous;
+    }
+  }
+
+  private String siteKey(String key) {
+    return phase.label + ":" + site.label + ":" + key;
   }
 
   public static long start(Phase phase) {
@@ -82,6 +116,7 @@ public final class ExecutionAttribution implements AutoCloseable {
     long[] row = current.reads.computeIfAbsent(key, ignored -> new long[5]);
     current.phaseReads.computeIfAbsent(current.phase, ignored -> new LinkedHashMap<>())
         .computeIfAbsent(key, ignored -> new long[5])[0]++;
+    current.siteReads.computeIfAbsent(current.siteKey(key), ignored -> new long[5])[0]++;
     return (row[0]++ & 63) == 0 ? System.nanoTime() : 0;
   }
 
@@ -95,6 +130,7 @@ public final class ExecutionAttribution implements AutoCloseable {
       String key = store + ":" + operation;
       long elapsed = System.nanoTime() - start;
       finish(current.reads.get(key), elapsed, layers, hit);
+      finish(current.siteReads.get(current.siteKey(key)), elapsed, layers, hit);
       finish(current.phaseReads.get(current.phase).get(key), elapsed, layers, hit);
     }
   }
@@ -134,6 +170,19 @@ public final class ExecutionAttribution implements AutoCloseable {
         String[] kinds = {"calls", "samples", "nanos", "layers", "hits"};
         for (int i = 0; i < kinds.length; i++) {
           Export.READS.labels(parts[0], parts[1], kinds[i]).inc(row[i]);
+        }
+      }
+    });
+    siteReads.forEach((name, row) -> {
+      String[] parts = name.split(":");
+      logger.info("Chainbase execution site read: head={}, blockHash={}, status=executed, "
+          + "phase={}, site={}, store={}, operation={}, calls={}, samples={}, nanos={}, "
+          + "layers={}, hits={}", head, hash, parts[0], parts[1], parts[2], parts[3],
+          row[0], row[1], row[2], row[3], row[4]);
+      if (Metrics.enabled()) {
+        String[] kinds = {"calls", "samples", "nanos", "layers", "hits"};
+        for (int i = 0; i < kinds.length; i++) {
+          Export.SITE_READS.labels(parts[0], parts[1], parts[2], parts[3], kinds[i]).inc(row[i]);
         }
       }
     });
@@ -182,6 +231,10 @@ public final class ExecutionAttribution implements AutoCloseable {
         .name("tron_chainbase_execution_phase_read_total")
         .help("Partition of loop read counters by caller phase; sampled time is not total IO.")
         .labelNames("phase", "store", "operation", "kind").register();
+    private static final Counter SITE_READS = Counter.build()
+        .name("tron_chainbase_execution_site_read_total")
+        .help("Caller site partition of loop reads; sampled time is not total IO.")
+        .labelNames("phase", "site", "store", "operation", "kind").register();
     private static final Counter READS = Counter.build()
         .name("tron_chainbase_execution_read_total")
         .help("Loop-thread reads; sampled nanoseconds/layers/hits, not physical disk IO.")
