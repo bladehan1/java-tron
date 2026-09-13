@@ -834,6 +834,7 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
     private final long initialUpdatedHits;
     private final long[] initialNativeTiming;
     private final Map<String, Long> initialReadStatistics;
+    private final Map<String, Long> initialReadPerf;
     private final AtomicLong readRequests;
     private final AtomicLong changedReadHits;
     private final AtomicLong directReads = new AtomicLong();
@@ -853,6 +854,7 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
       initialUpdatedHits = nativeReadSource == null ? 0 : nativeReadSource.getUpdatedHits();
       initialNativeTiming = nativeReadSource == null ? null : nativeReadSource.nativeReadTiming();
       initialReadStatistics = nativeReadSource == null ? null : nativeReadSource.readStatistics();
+      initialReadPerf = nativeReadSource == null ? null : nativeReadSource.readPerfStatistics();
       boolean attribution = PathStateOperationTimer.observesStore(storeId)
           && PathStateOperationTimer.enabled();
       readRequests = attribution ? new AtomicLong() : null;
@@ -910,6 +912,18 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
         });
         logger.info("Path-state RocksDB attribution: head={}, blockHash={}, status=prepared, "
                 + "store={}, scope=database, tickers={}", head, blockHash, storeId, deltas);
+      }
+      if (initialReadPerf != null) {
+        Map<String, Long> after = nativeReadSource.readPerfStatistics();
+        Map<String, Long> deltas = new LinkedHashMap<>();
+        initialReadPerf.forEach((kind, before) -> {
+          long delta = after.get(kind) - before;
+          deltas.put(kind, delta);
+          PathStateAttributionMetrics.nativeGetPerf(storeId, kind, delta);
+        });
+        logger.info("Path-state native get perf attribution: head={}, blockHash={}, "
+                + "status=prepared, store={}, scope=database_get, sampleEvery={}, counters={}",
+            head, blockHash, storeId, PathStateNativeGetPerf.SAMPLE_EVERY, deltas);
       }
       long requests = readRequests.get();
       long changed = changedReadHits.get();

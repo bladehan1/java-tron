@@ -8,6 +8,41 @@ import org.tron.common.parameter.CommonParameter;
 
 public class PathStateAttributionMetricsTest {
   @Test
+  public void nativeGetPerfPreservesUnitsAndStoreIsolation() {
+    boolean oldMetrics = CommonParameter.getInstance().isMetricsPrometheusEnable();
+    String oldAttribution = System.getProperty("tron.pathstate.attribution");
+    String oldStats = System.getProperty("tron.pathstate.rocksdbStats");
+    String metric = "tron_pathstate_prepared_native_get_perf_total";
+    String[] labels = {"store", "kind"};
+    String[] values = {"5", "sampled_block_read_nanos"};
+    try {
+      System.setProperty("tron.pathstate.attribution", "true");
+      System.setProperty("tron.pathstate.rocksdbStats", "true");
+      CommonParameter.getInstance().setMetricsPrometheusEnable(false);
+      double before = sample(metric, labels, values);
+      PathStateAttributionMetrics.nativeGetPerf(5, values[1], 17);
+      assertEquals(before, sample(metric, labels, values), 0);
+      CommonParameter.getInstance().setMetricsPrometheusEnable(true);
+      PathStateAttributionMetrics.nativeGetPerf(5, values[1], 17);
+      PathStateAttributionMetrics.nativeGetPerf(5, values[1], -1);
+      PathStateAttributionMetrics.nativeGetPerf(22, values[1], 23);
+      assertEquals(before + 17, sample(metric, labels, values), 0);
+    } finally {
+      CommonParameter.getInstance().setMetricsPrometheusEnable(oldMetrics);
+      restoreProperty("tron.pathstate.attribution", oldAttribution);
+      restoreProperty("tron.pathstate.rocksdbStats", oldStats);
+    }
+  }
+
+  private static void restoreProperty(String name, String value) {
+    if (value == null) {
+      System.clearProperty(name);
+    } else {
+      System.setProperty(name, value);
+    }
+  }
+
+  @Test
   public void rocksStatisticsRequireIndependentFlagAndOnlyObserveTwoStores() {
     String attribution = System.getProperty("tron.pathstate.attribution");
     String rocks = System.getProperty("tron.pathstate.rocksdbStats");

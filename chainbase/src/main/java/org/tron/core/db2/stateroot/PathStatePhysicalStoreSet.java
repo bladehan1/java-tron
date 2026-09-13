@@ -2028,6 +2028,11 @@ public final class PathStatePhysicalStoreSet implements Closeable {
           ? ((PhysicalNodeStore) base).nativeStore.readStatistics() : null;
     }
 
+    Map<String, Long> readPerfStatistics() {
+      return base instanceof PhysicalNodeStore
+          ? ((PhysicalNodeStore) base).nativeStore.readPerfStatistics() : null;
+    }
+
     long[] nativeReadTiming() {
       return nativeTimer == null ? null : nativeTimer.snapshot();
     }

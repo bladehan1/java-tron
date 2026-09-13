@@ -116,6 +116,12 @@ final class PathStateNativeNodeStore implements Closeable {
     return delegate instanceof RocksDelegate ? ((RocksDelegate) delegate).readStatistics() : null;
   }
 
+  Map<String, Long> readPerfStatistics() {
+    requireOpen();
+    return delegate instanceof RocksDelegate && ((RocksDelegate) delegate).readPerf != null
+        ? ((RocksDelegate) delegate).readPerf.snapshot() : null;
+  }
+
   byte[] get(byte[] key) {
     requireOpen();
     byte[] ownedKey = nonEmpty(key, "key");
@@ -317,18 +323,21 @@ final class PathStateNativeNodeStore implements Closeable {
   private static final class RocksDelegate implements Delegate {
 
     private final Statistics statistics;
+    private final PathStateNativeGetPerf readPerf;
     private final LRUCache blockCache;
     private final BloomFilter bloomFilter;
     private final org.rocksdb.Options options;
-    private final org.rocksdb.WriteOptions syncWrites =
-        new org.rocksdb.WriteOptions().setSync(true);
-    private final org.rocksdb.WriteOptions unsyncedWrites =
-        new org.rocksdb.WriteOptions().setSync(false);
+    private final org.rocksdb.WriteOptions syncWrites;
+    private final org.rocksdb.WriteOptions unsyncedWrites;
     private final org.rocksdb.RocksDB database;
 
     private RocksDelegate(Path directory, NativeDbConfig config, int cacheShardBits,
         boolean readStatistics, long cacheBytes)
         throws IOException {
+      readPerf = readStatistics && Boolean.getBoolean(PathStateNativeGetPerf.PROPERTY)
+          ? new PathStateNativeGetPerf() : null;
+      syncWrites = new org.rocksdb.WriteOptions().setSync(true);
+      unsyncedWrites = new org.rocksdb.WriteOptions().setSync(false);
       // Preserve the existing auto-sharded constructor unless the caller selected a measured
       // Store/budget combination. In particular, do not extrapolate 64MiB results to small DBs.
       blockCache = cacheShardBits < 0 ? new LRUCache(cacheBytes)
@@ -405,7 +414,7 @@ final class PathStateNativeNodeStore implements Closeable {
     @Override
     public byte[] get(byte[] key) {
       try {
-        return database.get(key);
+        return readPerf == null ? database.get(key) : readPerf.get(database, key);
       } catch (RocksDBException failure) {
         throw new IllegalStateException("failed to read path-state RocksDB node", failure);
       }

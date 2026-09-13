@@ -34,6 +34,12 @@ final class PathStateAttributionMetrics {
     }
   }
 
+  static void nativeGetPerf(int storeId, String kind, long delta) {
+    if (enabled() && PathStateOperationTimer.observesRocksDb(storeId) && delta >= 0) {
+      Export.NATIVE_GET_PERF.labels(Integer.toString(storeId), kind).inc(delta);
+    }
+  }
+
   static void participant(int storeId, long submitToStartNanos, long workNanos) {
     if (enabled()) {
       String store = Integer.toString(storeId);
@@ -50,6 +56,10 @@ final class PathStateAttributionMetrics {
   }
 
   private static final class Export {
+    private static final Counter NATIVE_GET_PERF = Counter.build()
+        .name("tron_pathstate_prepared_native_get_perf_total")
+        .help("Point-get perf deltas; kind states units; sampled times may overlap.")
+        .labelNames("store", "kind").register();
     private static final Counter ROCKS_DB = Counter.build()
         .name("tron_pathstate_prepared_rocksdb_ticker_total")
         .help("Database-wide ticker deltas during successful prepare windows; not N-only or disk IO.")
