@@ -21,6 +21,10 @@ import org.tron.core.Constant;
 @Slf4j
 public class RocksDbSettings {
 
+  // Opt-in, account-only capacity experiment; accepts 8 (control) or 64 (candidate) MiB.
+  public static final String ACCOUNT_CACHE_BENCHMARK_MIB =
+      "tron.chainbase.accountCacheBenchmarkMiB";
+
   private static RocksDbSettings rocksDbSettings;
 
   @Getter
@@ -159,6 +163,7 @@ public class RocksDbSettings {
     this.targetFileSizeMultiplier = targetFileSizeMultiplier;
     return this;
   }
+
   public static LRUCache getCache() {
     return cache;
   }
@@ -179,6 +184,11 @@ public class RocksDbSettings {
    * @return a new Options instance that must be closed
    */
   public static Options getOptionsByDbName(String dbName) {
+    String benchmarkMiB = "account".equals(dbName)
+        ? System.getProperty(ACCOUNT_CACHE_BENCHMARK_MIB) : null;
+    if (benchmarkMiB != null && !"8".equals(benchmarkMiB) && !"64".equals(benchmarkMiB)) {
+      throw new IllegalArgumentException(ACCOUNT_CACHE_BENCHMARK_MIB + " must be 8 or 64");
+    }
     RocksDbSettings settings = getSettings();
 
     Options options = new Options();
@@ -211,8 +221,10 @@ public class RocksDbSettings {
     options.setTargetFileSizeBase(settings.getTargetFileSizeBase());
 
     // table options
-    final BlockBasedTableConfig tableCfg;
-    options.setTableFormatConfig(tableCfg = new BlockBasedTableConfig());
+    final BlockBasedTableConfig tableCfg = new BlockBasedTableConfig();
+    options.setTableFormatConfig(tableCfg);
+    // These legacy builder changes occur after native factory creation. Keep their ordering
+    // during the capacity experiment; applying them would also change Bloom and table policy.
     tableCfg.setBlockSize(settings.getBlockSize());
     tableCfg.setBlockCache(RocksDbSettings.getCache());
     tableCfg.setCacheIndexAndFilterBlocks(true);
@@ -237,6 +249,15 @@ public class RocksDbSettings {
       options.setMaxBackgroundFlushes(1);
     }
 
+    if (benchmarkMiB != null) {
+      // Freeze the observed production table defaults for both arms, also under CI where
+      // optimizeForSmallDb replaces the table factory. Only capacity differs (16 shards).
+      // The native factory retains shared ownership after the Java cache handle closes.
+      try (LRUCache benchmarkCache = new LRUCache(
+          Long.parseLong(benchmarkMiB) * 1024 * 1024, 4, false)) {
+        options.setTableFormatConfig(new BlockBasedTableConfig().setBlockCache(benchmarkCache));
+      }
+    }
     return options;
   }
 
