@@ -1,0 +1,397 @@
+package org.tron.core.db2.core;
+
+import java.io.IOException;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Objects;
+import java.util.function.LongSupplier;
+import org.tron.common.math.StrictMathWrapper;
+import org.tron.core.db2.archive.ArchiveStoreScope;
+import org.tron.core.db2.archive.BlockReverseDiff;
+import org.tron.core.db2.archive.StateArchiveAppendCheckpointMaterializerV3;
+import org.tron.core.db2.archive.StateArchiveCheckpointMaterializer;
+import org.tron.core.db2.archive.StateArchiveCheckpointPlanner;
+import org.tron.core.db2.archive.StateArchiveCheckpointReadSnapshot;
+import org.tron.core.db2.archive.StateArchiveHotCheckpointMaterializer;
+import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/** Isolated composition boundary for the next-format common-checkpoint runtime. */
+public final class CommonCheckpointRuntime implements AutoCloseable {
+
+  private static final Logger logger = LoggerFactory.getLogger("DB");
+
+  private final CommonCheckpointRuntimeOwner owner;
+  private final List<Chainbase> databases;
+  private final Path archiveDirectory;
+  private final byte[] formatIdentity;
+  private final Engine engine;
+  private final StateArchiveCheckpointReadSnapshot.PinnedLatestStateFactory latestFactory;
+  private final CommonCheckpointMemoryRebaser memoryRebaser;
+  private final CommonCheckpointHotRecovery hotRecovery;
+  private final StateArchiveCheckpointPlanner archivePlanner;
+  private final CommonCheckpointMaterializedStore materializedStore;
+  private final LongSupplier nanoTime;
+  private final TimingSink timingSink;
+  private final CommonCheckpointPayloadFactory payloadFactory = new CommonCheckpointPayloadFactory();
+  private final CommonCheckpointSnapshotRebaser rebaser = new CommonCheckpointSnapshotRebaser();
+  private CommonCheckpointTarget publishedTarget;
+
+  public CommonCheckpointRuntime(CommonCheckpointRuntimeOwner owner, List<Chainbase> databases,
+      Path archiveDirectory, byte[] formatIdentity, Engine engine,
+      StateArchiveCheckpointReadSnapshot.PinnedLatestStateFactory latestFactory,
+      CommonCheckpointMemoryRebaser memoryRebaser) {
+    this(owner, databases, archiveDirectory, formatIdentity, engine, latestFactory,
+        memoryRebaser, null, null, null, System::nanoTime,
+        CommonCheckpointRuntime::logTiming);
+  }
+
+  /** Constructs the default-off Hot DB v2 path selected by the dual-gated Manager branch. */
+  public CommonCheckpointRuntime(CommonCheckpointRuntimeOwner owner, List<Chainbase> databases,
+      Path archiveDirectory, byte[] formatIdentity, Engine engine,
+      StateArchiveCheckpointReadSnapshot.PinnedLatestStateFactory latestFactory,
+      CommonCheckpointMemoryRebaser memoryRebaser,
+      StateArchiveHotCheckpointMaterializer hotMaterializer,
+      CommonCheckpointHotRecovery hotRecovery) {
+    this(owner, databases, archiveDirectory, formatIdentity, engine, latestFactory,
+        memoryRebaser, null, Objects.requireNonNull(hotMaterializer, "hotMaterializer"),
+        Objects.requireNonNull(hotRecovery, "hotRecovery"), System::nanoTime,
+        CommonCheckpointRuntime::logTiming);
+  }
+
+  /** Constructs the default-off append-file v3 participant without Hot DB recovery. */
+  public CommonCheckpointRuntime(CommonCheckpointRuntimeOwner owner, List<Chainbase> databases,
+      Path archiveDirectory, byte[] formatIdentity, Engine engine,
+      StateArchiveCheckpointReadSnapshot.PinnedLatestStateFactory latestFactory,
+      CommonCheckpointMemoryRebaser memoryRebaser,
+      StateArchiveCheckpointPlanner archivePlanner) {
+    this(owner, databases, archiveDirectory, formatIdentity, engine, latestFactory,
+        memoryRebaser, null, Objects.requireNonNull(archivePlanner, "archivePlanner"),
+        null, System::nanoTime, CommonCheckpointRuntime::logTiming);
+  }
+
+  public CommonCheckpointRuntime(CommonCheckpointRuntimeOwner owner, List<Chainbase> databases,
+      Path archiveDirectory, byte[] formatIdentity, Engine engine,
+      StateArchiveCheckpointReadSnapshot.PinnedLatestStateFactory latestFactory,
+      CommonCheckpointMemoryRebaser memoryRebaser,
+      CommonCheckpointMaterializedStore materializedStore) {
+    this(owner, databases, archiveDirectory, formatIdentity, engine, latestFactory,
+        memoryRebaser, materializedStore, null, null, System::nanoTime,
+        CommonCheckpointRuntime::logTiming);
+  }
+
+  CommonCheckpointRuntime(CommonCheckpointRuntimeOwner owner, List<Chainbase> databases,
+      Path archiveDirectory, byte[] formatIdentity, Engine engine,
+      StateArchiveCheckpointReadSnapshot.PinnedLatestStateFactory latestFactory,
+      CommonCheckpointMemoryRebaser memoryRebaser, LongSupplier nanoTime,
+      TimingSink timingSink) {
+    this(owner, databases, archiveDirectory, formatIdentity, engine, latestFactory,
+        memoryRebaser, null, null, null, nanoTime, timingSink);
+  }
+
+  CommonCheckpointRuntime(CommonCheckpointRuntimeOwner owner, List<Chainbase> databases,
+      Path archiveDirectory, byte[] formatIdentity, Engine engine,
+      StateArchiveCheckpointReadSnapshot.PinnedLatestStateFactory latestFactory,
+      CommonCheckpointMemoryRebaser memoryRebaser,
+      StateArchiveHotCheckpointMaterializer hotMaterializer,
+      CommonCheckpointHotRecovery hotRecovery, LongSupplier nanoTime, TimingSink timingSink) {
+    this(owner, databases, archiveDirectory, formatIdentity, engine, latestFactory,
+        memoryRebaser, null, hotMaterializer, hotRecovery, nanoTime, timingSink);
+  }
+
+  CommonCheckpointRuntime(CommonCheckpointRuntimeOwner owner, List<Chainbase> databases,
+      Path archiveDirectory, byte[] formatIdentity, Engine engine,
+      StateArchiveCheckpointReadSnapshot.PinnedLatestStateFactory latestFactory,
+      CommonCheckpointMemoryRebaser memoryRebaser,
+      CommonCheckpointMaterializedStore materializedStore,
+      StateArchiveCheckpointPlanner archivePlanner,
+      CommonCheckpointHotRecovery hotRecovery, LongSupplier nanoTime, TimingSink timingSink) {
+    this.owner = Objects.requireNonNull(owner, "owner");
+    this.databases = new ArrayList<>(Objects.requireNonNull(databases, "databases"));
+    if (this.databases.isEmpty() || this.databases.contains(null)) {
+      throw new IllegalArgumentException("common checkpoint runtime requires registered Stores");
+    }
+    this.archiveDirectory = Objects.requireNonNull(archiveDirectory, "archiveDirectory");
+    this.formatIdentity = requireDigest(formatIdentity);
+    this.engine = Objects.requireNonNull(engine, "engine");
+    this.latestFactory = Objects.requireNonNull(latestFactory, "latestFactory");
+    this.memoryRebaser = Objects.requireNonNull(memoryRebaser, "memoryRebaser");
+    this.materializedStore = materializedStore;
+    this.hotRecovery = hotRecovery;
+    this.archivePlanner = archivePlanner;
+    if (archivePlanner instanceof StateArchiveHotCheckpointMaterializer
+        != (hotRecovery != null)) {
+      throw new IllegalArgumentException(
+          "Hot common checkpoint runtime requires materializer and recovery together");
+    }
+    if (archivePlanner != null) {
+      owner.requireMaterializer(archivePlanner);
+    }
+    this.nanoTime = Objects.requireNonNull(nanoTime, "nanoTime");
+    this.timingSink = Objects.requireNonNull(timingSink, "timingSink");
+  }
+
+  /** Completes durable redo before this runtime admits checkpoint reads or new flushes. */
+  public synchronized CommonCheckpointRedoCoordinator.RecoveryAction recoverBeforeServing()
+      throws IOException {
+    try {
+      if (hotRecovery != null) {
+        hotRecovery.reconcileBeforeCommonRedo();
+      }
+      CommonCheckpointRedoCoordinator.RecoveryAction action = owner.recoverBeforeServing();
+      publishedTarget = archivePlanner == null
+          ? StateArchiveCheckpointMaterializer.loadPublishedTargetIfPresent(
+              archiveDirectory, formatIdentity, engine, materializedStore).orElse(null) : null;
+      if (archivePlanner instanceof StateArchiveAppendCheckpointMaterializerV3) {
+        publishedTarget = ((StateArchiveAppendCheckpointMaterializerV3) archivePlanner)
+            .loadPublishedTargetIfPresent().orElse(null);
+      }
+      if (publishedTarget != null) {
+        owner.requirePublishedBeforeServing(publishedTarget);
+        if (archivePlanner != null) {
+          archivePlanner.afterCommit(publishedTarget);
+        }
+      }
+      return action;
+    } catch (IOException | RuntimeException failure) {
+      owner.fail(failure);
+      throw failure;
+    }
+  }
+
+  /**
+   * Captures and applies the immutable Snapshot prefix, then rebases it without a second Store
+   * write. The caller must hold the SnapshotManager monitor for the whole call.
+   *
+   * <p>This is the durability side of the block-final pipeline.  The preceding commit stage has
+   * already attached one prepared artifact to each Store Snapshot.  Here the runtime captures a
+   * common payload and forces Archive history. The owner then forces Common redo WAL,
+   * materializes the authorities, publishes their common target and retires WAL. Only AFTER
+   * durable publication does the completion callback below rebase memory: Chainbase unlinks the
+   * flushed prefix; PathState rebuilds the retained suffix against the new durable baseline.
+   * Rebase does not write a checkpoint Store. Per-database materialization concurrency is a
+   * separate concern from this in-memory lifecycle operation.
+   */
+  public synchronized CommonCheckpointTarget checkpointAndRebase(int flushCount)
+      throws IOException {
+    try {
+      long totalStart = nanoTime.getAsLong();
+      Timing timing = new Timing(flushCount);
+      long captureStart = nanoTime.getAsLong();
+      CommonCheckpointCapture capture = archivePlanner == null ? null
+          : payloadFactory.captureV2(formatIdentity, databases, flushCount, archivePlanner);
+      CommonCheckpointPayload payload = capture == null
+          ? payloadFactory.capture(formatIdentity, databases, flushCount) : capture.getPayload();
+      timing.payloadCaptureUs = elapsedUs(captureStart);
+      CommonCheckpointTarget target = CommonCheckpointTarget.from(payload);
+      timing.head = target.getLastBlock().getBlockNumber();
+      if (capture != null) {
+        CommonCheckpointHotRecovery.requireWalDynamicIdentity(payload, target.getLastBlock());
+        // Archive prepare may encode and force the history prefix, but it only becomes readable
+        // after the owner publishes the common target.  This keeps file durability ahead of W
+        // without letting the Archive worker publish a height that Chainbase/PathState lack.
+        long hotPrepareStart = nanoTime.getAsLong();
+        CommonCheckpointTarget prepared = archivePlanner.prepare(capture);
+        timing.hotPrepareUs = elapsedUs(hotPrepareStart);
+        if (!target.equals(prepared)) {
+          throw new IOException("Hot Archive prepared checkpoint target differs");
+        }
+      }
+      long ownerApplyStart = nanoTime.getAsLong();
+      owner.apply(payload, () -> {
+        // Durable materialization/publication has completed. These are MEMORY plans only;
+        // prepare both before changing pointers so a failed prepare cannot partially unlink them.
+        long chainbasePrepareStart = nanoTime.getAsLong();
+        CommonCheckpointSnapshotRebaser.Plan chainbasePlan =
+            rebaser.prepare(databases, target, flushCount);
+        timing.chainbaseRebasePrepareUs = elapsedUs(chainbasePrepareStart);
+        long pathStatePrepareStart = nanoTime.getAsLong();
+        CommonCheckpointMemoryRebaser.RebasePlan pathStatePlan = memoryRebaser.prepare(target);
+        timing.pathStateRebasePrepareUs = elapsedUs(pathStatePrepareStart);
+        long chainbaseApplyStart = nanoTime.getAsLong();
+        chainbasePlan.apply();
+        timing.chainbaseRebaseApplyUs = elapsedUs(chainbaseApplyStart);
+        long pathStateApplyStart = nanoTime.getAsLong();
+        pathStatePlan.apply();
+        timing.pathStateRebaseApplyUs = elapsedUs(pathStateApplyStart);
+      });
+      timing.ownerApplyUs = elapsedUs(ownerApplyStart);
+      publishedTarget = target;
+      timing.totalUs = elapsedUs(totalStart);
+      emitTiming(timing);
+      return target;
+    } catch (IOException | RuntimeException failure) {
+      owner.fail(failure);
+      throw failure;
+    }
+  }
+
+  /** Called only after SnapshotManager has selected a non-revocable prefix. */
+  public synchronized void appendFinalizedHistory(int flushCount) throws IOException {
+    if (!(archivePlanner instanceof StateArchiveAppendCheckpointMaterializerV3)) {
+      return;
+    }
+    long started = nanoTime.getAsLong();
+    long collectUs = 0;
+    long appendUs = 0;
+    long head = -1;
+    boolean success = false;
+    try {
+      Chainbase state = databases.stream()
+          .filter(db -> ArchiveStoreScope.isStateDatabase(db.getDbName())).findFirst()
+          .orElseThrow(() -> new IllegalStateException("Common has no state database"));
+      Snapshot layer = state.getHead().getRoot();
+      List<BlockReverseDiff> diffs = new ArrayList<>(flushCount);
+      for (int index = 0; index < flushCount; index++) {
+        layer = layer.getNext();
+        if (!Snapshot.isImpl(layer)) {
+          throw new IOException("Finalized Archive prefix is missing a Snapshot layer");
+        }
+        SnapshotImpl block = (SnapshotImpl) layer;
+        BlockReverseDiff diff = block.getPreparedArchiveBlock();
+        if (diff == null || !diff.getMeta().equals(block.getBlockSnapshotMeta())) {
+          throw new IOException("Finalized Archive prefix artifact identity differs");
+        }
+        diffs.add(diff);
+        head = diff.getMeta().getBlockNumber();
+      }
+      collectUs = elapsedUs(started);
+      long appendStarted = nanoTime.getAsLong();
+      ((StateArchiveAppendCheckpointMaterializerV3) archivePlanner).appendFinalized(diffs);
+      appendUs = elapsedUs(appendStarted);
+      success = true;
+    } catch (IOException | RuntimeException failure) {
+      owner.fail(failure);
+      throw failure;
+    } finally {
+      // Attribute this call to the next completed PushBlock on the SAME thread, not to head:
+      // head is the finalized prefix target and lags the block currently being executed.
+      // pendingBlocks counts offered layers, not new writes (already appended layers are skipped).
+      // This is separate from checkpoint hotPrepareUs; summing both must not lose moved work.
+      logger.info("Finalized Archive append stages: head={}, pendingBlocks={}, collectUs={}, "
+              + "appendUs={}, totalUs={}, success={}", head, flushCount, collectUs, appendUs,
+          elapsedUs(started), success);
+    }
+  }
+
+  /** Pins one point-only historical request under the same publication gate. */
+  public synchronized StateArchiveCheckpointReadSnapshot pinPoint(long targetBlock)
+      throws IOException {
+    if (archivePlanner != null) {
+      throw new IOException("Hot Archive runtime point reads are not integrated");
+    }
+    CommonCheckpointTarget target = publishedTarget;
+    if (target == null) {
+      throw new IOException("State Archive has no published common-checkpoint target");
+    }
+    return StateArchiveCheckpointReadSnapshot.pin(targetBlock, owner, archiveDirectory,
+        target, engine, latestFactory);
+  }
+
+  public CommonCheckpointRuntimeOwner.State getState() {
+    return owner.getState();
+  }
+
+  @Override
+  public void close() {
+    owner.close();
+  }
+
+  private static byte[] requireDigest(byte[] value) {
+    byte[] admitted = Arrays.copyOf(Objects.requireNonNull(value, "formatIdentity"),
+        value.length);
+    if (admitted.length != 32) {
+      throw new IllegalArgumentException("formatIdentity must contain exactly 32 bytes");
+    }
+    return admitted;
+  }
+
+  private long elapsedUs(long start) {
+    return StrictMathWrapper.max(0L, (nanoTime.getAsLong() - start) / 1_000L);
+  }
+
+  private void emitTiming(Timing timing) {
+    try {
+      timingSink.accept(timing);
+    } catch (RuntimeException ignored) {
+      // Diagnostics must not turn an already completed checkpoint into a caller-visible failure.
+    }
+  }
+
+  private static void logTiming(Timing timing) {
+    logger.info("Common checkpoint runtime stages: head={}, blocks={}, payloadCaptureUs={}, "
+            + "hotPrepareUs={}, ownerApplyUs={}, chainbaseRebasePrepareUs={}, "
+            + "pathStateRebasePrepareUs={}, "
+            + "chainbaseRebaseApplyUs={}, pathStateRebaseApplyUs={}, totalUs={}",
+        timing.head, timing.blocks, timing.payloadCaptureUs, timing.hotPrepareUs,
+        timing.ownerApplyUs,
+        timing.chainbaseRebasePrepareUs, timing.pathStateRebasePrepareUs,
+        timing.chainbaseRebaseApplyUs, timing.pathStateRebaseApplyUs, timing.totalUs);
+  }
+
+  static final class Timing {
+
+    private long head;
+    private final int blocks;
+    private long payloadCaptureUs;
+    private long hotPrepareUs;
+    private long ownerApplyUs;
+    private long chainbaseRebasePrepareUs;
+    private long pathStateRebasePrepareUs;
+    private long chainbaseRebaseApplyUs;
+    private long pathStateRebaseApplyUs;
+    private long totalUs;
+
+    private Timing(int blocks) {
+      this.blocks = blocks;
+    }
+
+    long getHead() {
+      return head;
+    }
+
+    int getBlocks() {
+      return blocks;
+    }
+
+    long getPayloadCaptureUs() {
+      return payloadCaptureUs;
+    }
+
+    long getHotPrepareUs() {
+      return hotPrepareUs;
+    }
+
+    long getOwnerApplyUs() {
+      return ownerApplyUs;
+    }
+
+    long getChainbaseRebasePrepareUs() {
+      return chainbaseRebasePrepareUs;
+    }
+
+    long getPathStateRebasePrepareUs() {
+      return pathStateRebasePrepareUs;
+    }
+
+    long getChainbaseRebaseApplyUs() {
+      return chainbaseRebaseApplyUs;
+    }
+
+    long getPathStateRebaseApplyUs() {
+      return pathStateRebaseApplyUs;
+    }
+
+    long getTotalUs() {
+      return totalUs;
+    }
+  }
+
+  @FunctionalInterface
+  interface TimingSink {
+    void accept(Timing timing);
+  }
+}

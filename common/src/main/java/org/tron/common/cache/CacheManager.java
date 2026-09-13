@@ -2,6 +2,7 @@ package org.tron.common.cache;
 
 import com.google.common.cache.CacheLoader;
 import com.google.common.cache.CacheStats;
+import com.google.common.cache.RemovalCause;
 import com.google.common.collect.Maps;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -34,6 +35,11 @@ public class CacheManager {
 
   public static void release(TronCache<?, ?> cache) {
     cache.invalidateAll();
+  }
+
+  public static Map<String, Map<RemovalCause, Long>> removalCounts() {
+    return CACHES.values().stream().collect(Collectors.toMap(c -> c.getName().toString(),
+        TronCache::removalCounts));
   }
 
   public static Map<String, CacheStats> stats() {

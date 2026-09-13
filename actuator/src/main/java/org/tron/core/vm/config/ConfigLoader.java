@@ -1,11 +1,11 @@
 package org.tron.core.vm.config;
 
-import static org.tron.core.capsule.ReceiptCapsule.checkForEnergyLimit;
-
 import lombok.extern.slf4j.Slf4j;
 import org.tron.common.parameter.CommonParameter;
 import org.tron.core.store.DynamicPropertiesStore;
 import org.tron.core.store.StoreFactory;
+import org.tron.core.vm.HistoricalCapabilityException;
+import org.tron.core.vm.repository.Repository;
 
 @Slf4j(topic = "VMConfigLoader")
 public class ConfigLoader {
@@ -21,8 +21,9 @@ public class ConfigLoader {
       DynamicPropertiesStore ds = storeFactory.getChainBaseManager().getDynamicPropertiesStore();
       VMConfig.setVmTrace(CommonParameter.getInstance().isVmTrace());
       if (ds != null) {
-        VMConfig.initVmHardFork(checkForEnergyLimit(ds));
         VMConfig.Snapshot snapshot = new VMConfig.Snapshot();
+        snapshot.energyLimitHardFork = ds.getLatestBlockHeaderNumber()
+            >= CommonParameter.getInstance().getBlockNumForEnergyLimit();
         snapshot.allowMultiSign = ds.getAllowMultiSign() == 1;
         snapshot.allowTvmTransferTrc10 = ds.getAllowTvmTransferTrc10() == 1;
         snapshot.allowTvmConstantinople = ds.getAllowTvmConstantinople() == 1;
@@ -53,9 +54,62 @@ public class ConfigLoader {
         if (isolate) {
           VMConfig.setLocalSnapshot(snapshot);
         } else {
+          VMConfig.initVmHardFork(snapshot.energyLimitHardFork);
           VMConfig.setGlobalSnapshot(snapshot);
         }
       }
     }
+  }
+
+  /** Loads an isolated VM view exclusively from a Repository's request-owned state source. */
+  public static void load(Repository repository) {
+    if (disable) {
+      throw new HistoricalCapabilityException(
+          "Historical VM config loading cannot be disabled");
+    }
+    VMConfig.setVmTrace(CommonParameter.getInstance().isVmTrace());
+    VMConfig.Snapshot snapshot = new VMConfig.Snapshot();
+    snapshot.energyLimitHardFork = property(repository, "latest_block_header_number")
+        >= CommonParameter.getInstance().getBlockNumForEnergyLimit();
+    snapshot.allowMultiSign = enabled(repository, "ALLOW_MULTI_SIGN");
+    snapshot.allowTvmTransferTrc10 = enabled(repository, "ALLOW_TVM_TRANSFER_TRC10");
+    snapshot.allowTvmConstantinople = enabled(repository, "ALLOW_TVM_CONSTANTINOPLE");
+    snapshot.allowTvmSolidity059 = enabled(repository, "ALLOW_TVM_SOLIDITY_059");
+    snapshot.allowShieldedTRC20Transaction =
+        enabled(repository, "ALLOW_SHIELDED_TRC20_TRANSACTION");
+    snapshot.allowTvmIstanbul = enabled(repository, "ALLOW_TVM_ISTANBUL");
+    snapshot.allowTvmFreeze = enabled(repository, "ALLOW_TVM_FREEZE");
+    snapshot.allowTvmVote = enabled(repository, "ALLOW_TVM_VOTE");
+    snapshot.allowTvmLondon = enabled(repository, "ALLOW_TVM_LONDON");
+    snapshot.allowTvmCompatibleEvm = enabled(repository, "ALLOW_TVM_COMPATIBLE_EVM");
+    snapshot.allowHigherLimitForMaxCpuTimeOfOneTx =
+        enabled(repository, "ALLOW_HIGHER_LIMIT_FOR_MAX_CPU_TIME_OF_ONE_TX");
+    snapshot.allowTvmFreezeV2 = property(repository, "UNFREEZE_DELAY_DAYS") > 0;
+    snapshot.allowOptimizedReturnValueOfChainId =
+        enabled(repository, "ALLOW_OPTIMIZED_RETURN_VALUE_OF_CHAIN_ID");
+    snapshot.allowDynamicEnergy = enabled(repository, "ALLOW_DYNAMIC_ENERGY");
+    snapshot.dynamicEnergyThreshold = property(repository, "DYNAMIC_ENERGY_THRESHOLD");
+    snapshot.dynamicEnergyIncreaseFactor = property(repository, "DYNAMIC_ENERGY_INCREASE_FACTOR");
+    snapshot.dynamicEnergyMaxFactor = property(repository, "DYNAMIC_ENERGY_MAX_FACTOR");
+    snapshot.allowTvmShanghai = enabled(repository, "ALLOW_TVM_SHANGHAI");
+    snapshot.allowEnergyAdjustment = enabled(repository, "ALLOW_ENERGY_ADJUSTMENT");
+    snapshot.allowStrictMath = enabled(repository, "ALLOW_STRICT_MATH");
+    snapshot.allowTvmCancun = enabled(repository, "ALLOW_TVM_CANCUN");
+    snapshot.disableJavaLangMath = enabled(repository, "CONSENSUS_LOGIC_OPTIMIZATION");
+    snapshot.allowTvmBlob = enabled(repository, "ALLOW_TVM_BLOB");
+    snapshot.allowTvmSelfdestructRestriction =
+        enabled(repository, "ALLOW_TVM_SELFDESTRUCT_RESTRICTION");
+    snapshot.allowTvmOsaka = enabled(repository, "ALLOW_TVM_OSAKA");
+    snapshot.allowHardenResourceCalculation =
+        enabled(repository, "ALLOW_HARDEN_RESOURCE_CALCULATION");
+    VMConfig.setLocalSnapshot(snapshot);
+  }
+
+  public static long property(Repository repository, String key) {
+    return repository.getDynamicPropertyLong(key);
+  }
+
+  private static boolean enabled(Repository repository, String key) {
+    return property(repository, key) == 1L;
   }
 }

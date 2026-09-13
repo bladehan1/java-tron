@@ -72,6 +72,24 @@ public class StorageTest {
   }
 
   @Test
+  public void archiveDatabaseProfilesAreBridgedFromConfiguration() {
+    Assert.assertEquals("ROCKSDB", storage.getPathStateRootEngine());
+    Assert.assertNotNull(storage.getPathStateRootDbSettings());
+    Assert.assertEquals(16 * 1024 * 1024,
+        storage.getPathStateRootDbSettings().getSmall().getWriteBufferSize());
+    Assert.assertEquals(64 * 1024 * 1024L,
+        storage.getPathStateRootDbSettings().getGiant().getCacheSize());
+    Assert.assertNotNull(storage.getStateArchiveServingIndexDbSettings());
+    Assert.assertEquals("ROCKSDB", storage.getStateArchiveServingIndexEngine());
+    Assert.assertEquals(64 * 1024 * 1024,
+        storage.getStateArchiveServingIndexDbSettings().getWriteBufferSize());
+    Assert.assertNotNull(storage.getStateArchiveHotStoreSettings());
+    Assert.assertFalse(storage.getStateArchiveHotStoreSettings().isEnabled());
+    Assert.assertEquals("ROCKSDB", storage.getStateArchiveHotStoreSettings().getEngine());
+    Assert.assertEquals(10_000L, storage.getStateArchiveHotStoreSettings().getMaxBlocks());
+  }
+
+  @Test
   public void getPath() {
     Assert.assertEquals("storage_directory_test", StorageUtils.getPathByDbName("account"));
     Assert.assertEquals("test_path", StorageUtils.getPathByDbName("test_name"));
