@@ -18,6 +18,7 @@ import org.junit.rules.TemporaryFolder;
 import org.tron.core.db2.archive.BlockReverseDiff.DbGroup;
 import org.tron.core.db2.archive.BlockReverseDiff.Entry;
 import org.tron.core.db2.archive.PersistentServingKeyIndexGeneration.MutableIndex;
+import org.tron.core.db2.archive.StateArchiveFiveLaneRecoveryIntentV3.RecoveryPoint;
 import org.tron.core.db2.archive.StateArchiveServingIndexBuildCoordinatorV3.LiveServingIndexer;
 import org.tron.core.db2.core.CommonCheckpointTarget;
 import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
@@ -139,9 +140,12 @@ public class StateArchiveCatalogAndServingCornerCaseTest {
     try (StateArchiveFiveLaneSegmentWriterV3 writer =
         new StateArchiveFiveLaneSegmentWriterV3(root, baseline,
             StateArchiveFileFormatV3.COMPRESSION_NONE, 1_500)) {
-      writer.append(firstBundle);
+      writer.appendForCheckpoint(firstBundle, 1, hash(60));
       preRotationCurrent = Files.readAllBytes(current);
-      writer.append(secondBundle);
+      writer.appendForCheckpoint(secondBundle, 1, hash(60));
+      // The normal reopen takes the fast path, which requires the persisted proof boundary.
+      StateArchiveFiveLaneDurabilityProofV3.publish(root,
+          writer.sync(1, point(secondBundle), hash(60)));
     }
     Path generations = root.resolve(StateArchiveHistoryCatalogV3.DIRECTORY)
         .resolve("generations");
@@ -158,9 +162,13 @@ public class StateArchiveCatalogAndServingCornerCaseTest {
     }
     Files.delete(manifest);
     Files.write(current, preRotationCurrent);
+    // The rewound generation number republishes during the healing scan; drop its stale file.
+    Files.deleteIfExists(generations.resolve(String.format("catalog-%020d.bin", 1)));
+    // A rewound Catalog diverges from the proof boundary: the normal open fails closed, so the
+    // manifest republication and rotation promotion heal through the explicit recovery scan.
     try (StateArchiveFiveLaneSegmentWriterV3 recoveredPublication =
-        new StateArchiveFiveLaneSegmentWriterV3(root, baseline,
-            StateArchiveFileFormatV3.COMPRESSION_NONE, 1_500)) {
+        StateArchiveFiveLaneSegmentWriterV3.recover(root, baseline,
+            StateArchiveFileFormatV3.COMPRESSION_NONE, 1_500, 2)) {
       assertEquals(2, recoveredPublication.getAppendHead().getBlockNumber());
     }
 
@@ -173,9 +181,16 @@ public class StateArchiveCatalogAndServingCornerCaseTest {
     Files.write(current, validCurrent);
 
     Files.delete(manifest);
-    assertThrows(IllegalArgumentException.class,
+    assertThrows(IOException.class,
         () -> new StateArchiveFiveLaneSegmentWriterV3(root, baseline,
             StateArchiveFileFormatV3.COMPRESSION_NONE, 1_500));
+  }
+
+  private static RecoveryPoint point(
+      StateArchiveFiveLaneBlockCodecV3.EncodedBundle bundle) {
+    BlockSnapshotMeta meta = bundle.getDiff().getMeta();
+    return new RecoveryPoint(meta.getEpoch(), meta.getBlockNumber(), meta.getTimestamp(),
+        meta.getBlockHash(), meta.getParentHash(), bundle.getResultHistoryDigest());
   }
 
   private static List<BlockReverseDiff> diffs(int first, int count, int parent) {
