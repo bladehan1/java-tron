@@ -193,10 +193,6 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     return enabled && engine == Engine.ROCKSDB && (storeId == 5 || storeId == 22);
   }
 
-  static boolean useAccountReadCache(int storeId, Engine engine, boolean enabled) {
-    return enabled && engine == Engine.ROCKSDB && storeId == 4;
-  }
-
   private static NativeDbConfig storageProfileFor(String dbName,
       PathStateDbSettingsConfig settings) {
     String profile = storageProfileNameFor(dbName);
@@ -1705,19 +1701,10 @@ public final class PathStatePhysicalStoreSet implements Closeable {
       // Opt-in validation candidate; never mutate the shared giant resource profile.
       boolean largeReadCache = useLargeReadCache(storeId, engine,
           Boolean.getBoolean("tron.pathstate.largeReadCacheBenchmark"));
-      boolean accountReadCache = useAccountReadCache(storeId, engine,
-          Boolean.getBoolean("tron.pathstate.accountReadCacheBenchmark"));
-      long cacheBytes = largeReadCache || accountReadCache
-          ? 256L << 20 : dbSettings.getCacheSize();
-      int shardBits = cacheShardBitsFor(storeId, cacheBytes);
-      if (largeReadCache) {
-        shardBits = 2;
-      } else if (accountReadCache) {
-        // Isolate capacity sensitivity: retain account's existing sixteen shards.
-        shardBits = 4;
-      }
+      long cacheBytes = largeReadCache ? 256L << 20 : dbSettings.getCacheSize();
       nativeStore = PathStateNativeNodeStore.open(directory, engine, storageProfile, dbSettings,
-          shardBits, PathStateOperationTimer.observesRocksDb(storeId), cacheBytes);
+          largeReadCache ? 2 : cacheShardBitsFor(storeId, cacheBytes),
+          PathStateOperationTimer.observesRocksDb(storeId), cacheBytes);
       nodeStore = new ResidentNodeStore(new PhysicalNodeStore(nativeStore), residentNodeCache,
           storeId);
     }
