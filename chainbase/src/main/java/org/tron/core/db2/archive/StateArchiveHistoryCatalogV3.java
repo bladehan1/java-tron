@@ -164,6 +164,13 @@ final class StateArchiveHistoryCatalogV3 {
     atomicMove(currentTemporary, root.resolve(CURRENT));
     directorySync.sync(root);
     selected = prepared.generation;
+    pruneRetainedGenerations();
+  }
+
+  void pruneRetainedGenerations() throws IOException {
+    if (selected == null) {
+      return;
+    }
     long oldestRetained = selected.generation - MAX_RETAINED_GENERATIONS;
     for (Map.Entry<Long, Path> entry : new ArrayList<>(
         generationFiles.headMap(oldestRetained, true).entrySet())) {

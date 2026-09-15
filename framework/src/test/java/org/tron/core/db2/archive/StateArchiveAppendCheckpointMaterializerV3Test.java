@@ -315,12 +315,24 @@ public class StateArchiveAppendCheckpointMaterializerV3Test {
     assertEquals(generation + 1, aligned.getGeneration());
     assertTrue(aligned.getTerminals().stream().allMatch(terminal ->
         terminal.getCurrent().getCurrentLastBlock() == 2));
+    byte[] retainedGeneration = Files.readAllBytes(catalogGeneration(
+        root, aligned.getGeneration()));
+    StateArchiveHistoryCatalogV3 catalog = StateArchiveHistoryCatalogV3.openOrEmpty(root);
+    for (int index = 0; index < 4; index++) {
+      StateArchiveHistoryCatalogV3.Generation selected = catalog.selected();
+      catalog.publish(10_000, selected.getCurrent(), selected.getSealed(),
+          selected.getTerminals());
+    }
+    long committedGeneration = catalog.selected().getGeneration();
+    Files.write(catalogGeneration(root, aligned.getGeneration()), retainedGeneration);
+    assertEquals(4, catalogGenerationCount(root));
     try (StateArchiveAppendCheckpointMaterializerV3 secondReopen = materializer(
         root, format, baseline, 10_000)) {
       assertEquals(2, secondReopen.appendWriter().getAppendHead().getBlockNumber());
     }
-    assertEquals(aligned.getGeneration(),
+    assertEquals(committedGeneration,
         StateArchiveHistoryCatalogV3.openOrEmpty(root).selected().getGeneration());
+    assertEquals(3, catalogGenerationCount(root));
   }
 
   @Test
@@ -625,6 +637,19 @@ public class StateArchiveAppendCheckpointMaterializerV3Test {
       byte[] format, byte[] baseline, long rotationTarget) throws Exception {
     return new StateArchiveAppendCheckpointMaterializerV3(root, format, Engine.LEVELDB,
         baseline, StateArchiveFileFormatV3.COMPRESSION_NONE, rotationTarget);
+  }
+
+  private static Path catalogGeneration(Path root, long generation) {
+    return root.resolve("catalog/generations")
+        .resolve(String.format("catalog-%020d.bin", generation));
+  }
+
+  private static long catalogGenerationCount(Path root) throws Exception {
+    try (java.util.stream.Stream<Path> files = Files.list(
+        root.resolve("catalog/generations"))) {
+      return files.filter(path -> path.getFileName().toString().matches(
+          "catalog-[0-9]{20}\\.bin")).count();
+    }
   }
 
   private static CommonCheckpointCapture capture(Path root, byte[] format, byte[] baseline,
