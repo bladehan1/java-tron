@@ -2,7 +2,9 @@ package org.tron.core.config.args;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotSame;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
 import com.typesafe.config.Config;
@@ -54,6 +56,230 @@ public class StorageConfigTest {
     StorageConfig sc = StorageConfig.fromConfig(empty);
     assertEquals(1, sc.getCheckpoint().getVersion());
     assertTrue(sc.getCheckpoint().isSync());
+  }
+
+  @Test
+  public void testStateArchiveDefaultsAndOverrides() {
+    StorageConfig defaults = StorageConfig.fromConfig(withRef());
+    assertFalse(defaults.getStateArchive().isEnabled());
+    assertEquals("state-archive", defaults.getStateArchive().getDirectory());
+    assertEquals(1073741824L, defaults.getStateArchive().getMaxSegmentSize());
+    assertEquals(256, defaults.getStateArchive().getQueueCapacity());
+    assertEquals("ROCKSDB", defaults.getStateArchive().getServingIndexEngine());
+    assertFalse(defaults.getStateArchive().getHotStore().isEnabled());
+    assertEquals("ROCKSDB", defaults.getStateArchive().getHotStore().getEngine());
+    assertEquals(10000L, defaults.getStateArchive().getHotStore().getMaxBlocks());
+    assertEquals(2147483648L,
+        defaults.getStateArchive().getHotStore().getMaxEncodedBytes());
+    assertEquals(8, defaults.getStateArchive().getHotStore().getMaxFrozenGenerations());
+    assertEquals(4, defaults.getStateArchive().getHotStore().getYellowFrozenGenerations());
+    assertEquals(7, defaults.getStateArchive().getHotStore().getRedFrozenGenerations());
+    assertFalse(defaults.getStateArchive().getAppendFile().isEnabled());
+    assertEquals(3, defaults.getStateArchive().getAppendFile().getFormatVersion());
+    assertEquals(2000000000L,
+        defaults.getStateArchive().getAppendFile().getSegmentTargetBytes());
+
+    StorageConfig configured = StorageConfig.fromConfig(withRef(
+        "storage.stateArchive { enabled = true, directory = archive-test, "
+            + "maxSegmentSize = 134217728, queueCapacity = 8, "
+            + "servingIndexEngine = leveldb, hotStore.engine = leveldb }"));
+    assertTrue(configured.getStateArchive().isEnabled());
+    assertEquals("archive-test", configured.getStateArchive().getDirectory());
+    assertEquals(134217728L, configured.getStateArchive().getMaxSegmentSize());
+    assertEquals(8, configured.getStateArchive().getQueueCapacity());
+    assertEquals("LEVELDB", configured.getStateArchive().getServingIndexEngine());
+    assertEquals("LEVELDB", configured.getStateArchive().getHotStore().getEngine());
+  }
+
+  @Test
+  public void testArchiveNativeDatabaseProfileDefaultsAndOverrides() {
+    StorageConfig defaults = StorageConfig.fromConfig(withRef());
+    assertEquals(67108864,
+        defaults.getStateArchive().getServingIndex().getWriteBufferSize());
+    assertEquals(33554432L,
+        defaults.getStateArchive().getServingIndex().getCacheSize());
+    assertNotSame(defaults.getStateArchive().getServingIndex(),
+        defaults.getStateArchive().getHotStore().getDbSettings());
+    assertEquals(16777216,
+        defaults.getPathStateRoot().getDbSettings().getSmall().getWriteBufferSize());
+    assertEquals(67108864,
+        defaults.getPathStateRoot().getDbSettings().getGiant().getWriteBufferSize());
+    assertEquals(67108864L,
+        defaults.getPathStateRoot().getDbSettings().getGiant().getCacheSize());
+
+    StorageConfig configured = StorageConfig.fromConfig(withRef(
+        "storage.pathStateRoot.dbSettings.small.cacheSize = 1048576\n"
+            + "storage.pathStateRoot.dbSettings.giant.maxOpenFiles = 321\n"
+            + "storage.stateArchive.servingIndex.writeBufferSize = 8388608\n"
+            + "storage.stateArchive.hotStore.dbSettings.writeBufferSize = 4194304"));
+    assertEquals(1048576L,
+        configured.getPathStateRoot().getDbSettings().getSmall().getCacheSize());
+    assertEquals(321,
+        configured.getPathStateRoot().getDbSettings().getGiant().getMaxOpenFiles());
+    assertEquals(8388608,
+        configured.getStateArchive().getServingIndex().getWriteBufferSize());
+    assertEquals(4194304,
+        configured.getStateArchive().getHotStore().getDbSettings().getWriteBufferSize());
+    assertEquals(67108864,
+        defaults.getStateArchive().getHotStore().getDbSettings().getWriteBufferSize());
+  }
+
+  @Test(expected = IllegalArgumentException.class)
+  public void testHotStoreRejectsInvalidFrozenWatermarks() {
+    StorageConfig.fromConfig(withRef(
+        "storage.stateArchive.hotStore.yellowFrozenGenerations = 7\n"
+            + "storage.stateArchive.hotStore.redFrozenGenerations = 7"));
+  }
+
+  @Test(expected = IllegalArgumentException.class)
+  public void testArchiveNativeDatabaseProfileRejectsInvalidValues() {
+    StorageConfig.fromConfig(withRef(
+        "storage.pathStateRoot.dbSettings.large.maxOpenFiles = 0"));
+  }
+
+  @Test(expected = IllegalArgumentException.class)
+  public void testStateArchiveRejectsSmallSegments() {
+    StorageConfig.fromConfig(withRef("storage.stateArchive.maxSegmentSize = 1024"));
+  }
+
+  @Test
+  public void testP66SnapshotRequiresCommonAndAcceptsExplicitOptIn() {
+    assertThrows(IllegalArgumentException.class, () -> StorageConfig.fromConfig(withRef(
+        "storage.commonCheckpoint.p66SnapshotEnabled = true")));
+    StorageConfig configured = StorageConfig.fromConfig(withRef(
+        "storage.stateArchive.enabled = true\n"
+            + "storage.pathStateRoot.enabled = true\n"
+            + "storage.commonCheckpoint.enabled = true\n"
+            + "storage.commonCheckpoint.p66SnapshotEnabled = true"));
+    assertTrue(configured.getCommonCheckpoint().isP66SnapshotEnabled());
+  }
+
+  @Test
+  public void testCommonCheckpointDefaultsAndAdmission() {
+    StorageConfig defaults = StorageConfig.fromConfig(withRef());
+    assertFalse(defaults.getCommonCheckpoint().isEnabled());
+    assertFalse(defaults.getCommonCheckpoint().isP66SnapshotEnabled());
+    assertEquals("common-checkpoint", defaults.getCommonCheckpoint().getDirectory());
+
+    StorageConfig configured = StorageConfig.fromConfig(withRef(
+        "storage.stateArchive.enabled = true\n"
+            + "storage.pathStateRoot.enabled = true\n"
+            + "storage.commonCheckpoint { enabled = true, directory = common-test }"));
+    assertTrue(configured.getCommonCheckpoint().isEnabled());
+    assertEquals("common-test", configured.getCommonCheckpoint().getDirectory());
+  }
+
+  @Test(expected = IllegalArgumentException.class)
+  public void testCommonCheckpointRequiresBothAuthorities() {
+    StorageConfig.fromConfig(withRef("storage.commonCheckpoint.enabled = true"));
+  }
+
+  @Test(expected = IllegalArgumentException.class)
+  public void testHotStoreRequiresCommonCheckpoint() {
+    StorageConfig.fromConfig(withRef(
+        "storage.stateArchive.enabled = true\n"
+            + "storage.stateArchive.hotStore.enabled = true"));
+  }
+
+  @Test
+  public void testHotStoreAdmitsOnlyWithCommonCheckpointAuthorities() {
+    StorageConfig configured = StorageConfig.fromConfig(withRef(
+        "storage.stateArchive.enabled = true\n"
+            + "storage.stateArchive.hotStore.enabled = true\n"
+            + "storage.pathStateRoot.enabled = true\n"
+            + "storage.commonCheckpoint.enabled = true"));
+    assertTrue(configured.getStateArchive().getHotStore().isEnabled());
+  }
+
+  @Test
+  public void testAppendFileAdmitsOnlyWithCommonCheckpointAuthorities() {
+    StorageConfig configured = StorageConfig.fromConfig(withRef(
+        "storage.stateArchive.enabled = true\n"
+            + "storage.stateArchive.appendFile.enabled = true\n"
+            + "storage.pathStateRoot.enabled = true\n"
+            + "storage.commonCheckpoint.enabled = true"));
+    assertTrue(configured.getStateArchive().getAppendFile().isEnabled());
+  }
+
+  @Test(expected = IllegalArgumentException.class)
+  public void testAppendFileRequiresCommonCheckpoint() {
+    StorageConfig.fromConfig(withRef(
+        "storage.stateArchive.enabled = true\n"
+            + "storage.stateArchive.appendFile.enabled = true"));
+  }
+
+  @Test(expected = IllegalArgumentException.class)
+  public void testAppendFileRejectsHotStoreCombination() {
+    StorageConfig.fromConfig(withRef(
+        "storage.stateArchive.enabled = true\n"
+            + "storage.stateArchive.appendFile.enabled = true\n"
+            + "storage.stateArchive.hotStore.enabled = true\n"
+            + "storage.pathStateRoot.enabled = true\n"
+            + "storage.commonCheckpoint.enabled = true"));
+  }
+
+  @Test(expected = IllegalArgumentException.class)
+  public void testCommonCheckpointRejectsBenchmarkMode() {
+    StorageConfig.fromConfig(withRef(
+        "storage.stateArchive.enabled = true\n"
+            + "storage.pathStateRoot.enabled = true\n"
+            + "storage.pathStateRoot.volatileSnapshotBenchmark = true\n"
+            + "storage.commonCheckpoint.enabled = true"));
+  }
+
+  @Test
+  public void testPathStateRootDefaultsAndOverrides() {
+    StorageConfig defaults = StorageConfig.fromConfig(withRef());
+    assertFalse(defaults.getPathStateRoot().isEnabled());
+    assertEquals("shadow", defaults.getPathStateRoot().getMode());
+    assertEquals("path-state-root", defaults.getPathStateRoot().getDirectory());
+    assertEquals("ROCKSDB", defaults.getPathStateRoot().getEngine());
+    assertEquals(1, defaults.getPathStateRoot().getFormatVersion());
+    assertEquals(128, defaults.getPathStateRoot().getReversibleLayerLimit());
+    assertEquals(2147483648L, defaults.getPathStateRoot().getReversibleLayerBytes());
+    assertEquals(268435456L, defaults.getPathStateRoot().getWriteBufferBytes());
+    assertEquals(268435456L, defaults.getPathStateRoot().getNodeCacheBytes());
+    assertEquals(4, defaults.getPathStateRoot().getParticipantThreads());
+    assertEquals(8, defaults.getPathStateRoot().getBranchThreads());
+    assertFalse(defaults.getPathStateRoot().isRebuildFromGenesis());
+    assertTrue(defaults.getPathStateRoot().isVerifyEveryBlock());
+    assertFalse(defaults.getPathStateRoot().isVolatileSnapshotBenchmark());
+    assertFalse(defaults.getPathStateRoot().isAsyncPrepareBenchmark());
+
+    StorageConfig configured = StorageConfig.fromConfig(withRef(
+        "storage.pathStateRoot { enabled = true, engine = leveldb, mode = shadow, "
+            + "directory = root-test, "
+            + "formatVersion = 1, reversibleLayerLimit = 8, reversibleLayerBytes = 4096, "
+            + "writeBufferBytes = 1024, nodeCacheBytes = 2048, participantThreads = 2, "
+            + "branchThreads = 3, rebuildFromGenesis = false, "
+            + "verifyEveryBlock = true, volatileSnapshotBenchmark = true, "
+            + "asyncPrepareBenchmark = true }"));
+    assertTrue(configured.getPathStateRoot().isEnabled());
+    assertEquals("root-test", configured.getPathStateRoot().getDirectory());
+    assertEquals("LEVELDB", configured.getPathStateRoot().getEngine());
+    assertEquals(8, configured.getPathStateRoot().getReversibleLayerLimit());
+    assertEquals(4096L, configured.getPathStateRoot().getReversibleLayerBytes());
+    assertEquals(1024L, configured.getPathStateRoot().getWriteBufferBytes());
+    assertEquals(2048L, configured.getPathStateRoot().getNodeCacheBytes());
+    assertEquals(2, configured.getPathStateRoot().getParticipantThreads());
+    assertEquals(3, configured.getPathStateRoot().getBranchThreads());
+    assertTrue(configured.getPathStateRoot().isVolatileSnapshotBenchmark());
+    assertTrue(configured.getPathStateRoot().isAsyncPrepareBenchmark());
+  }
+
+  @Test(expected = IllegalArgumentException.class)
+  public void testPathStateRootRejectsInvalidPrepareThreads() {
+    StorageConfig.fromConfig(withRef("storage.pathStateRoot.participantThreads = 0"));
+  }
+
+  @Test(expected = IllegalArgumentException.class)
+  public void testPathStateRootRejectsUnsupportedMode() {
+    StorageConfig.fromConfig(withRef("storage.pathStateRoot.mode = consensus"));
+  }
+
+  @Test(expected = IllegalArgumentException.class)
+  public void testRejectsUnsupportedAuxiliaryDatabaseEngine() {
+    StorageConfig.fromConfig(withRef("storage.stateArchive.servingIndexEngine = memory"));
   }
 
   @Test

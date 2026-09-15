@@ -91,20 +91,20 @@ public interface TronJsonRpc {
   @JsonRpcErrors({
       @JsonRpcError(exception = JsonRpcInvalidParamsException.class, code = -32602, data = "{}"),
   })
-  String getTrxBalance(String address, String blockNumOrTag) throws JsonRpcInvalidParamsException;
+  String getTrxBalance(String address, Object blockSelector) throws JsonRpcInvalidParamsException;
 
   @JsonRpcMethod("eth_getStorageAt")
   @JsonRpcErrors({
       @JsonRpcError(exception = JsonRpcInvalidParamsException.class, code = -32602, data = "{}"),
   })
-  String getStorageAt(String address, String storageIdx, String blockNumOrTag)
+  String getStorageAt(String address, String storageIdx, Object blockSelector)
       throws JsonRpcInvalidParamsException;
 
   @JsonRpcMethod("eth_getCode")
   @JsonRpcErrors({
       @JsonRpcError(exception = JsonRpcInvalidParamsException.class, code = -32602, data = "{}"),
   })
-  String getABIOfSmartContract(String contractAddress, String bnOrId)
+  String getABIOfSmartContract(String contractAddress, Object blockSelector)
       throws JsonRpcInvalidParamsException;
 
   @JsonRpcMethod("eth_coinbase")

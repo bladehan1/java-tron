@@ -27,6 +27,9 @@ public class StorageConfig {
   private BalanceConfig balance = new BalanceConfig();
   private CheckpointConfig checkpoint = new CheckpointConfig();
   private SnapshotConfig snapshot = new SnapshotConfig();
+  private StateArchiveConfig stateArchive = new StateArchiveConfig();
+  private CommonCheckpointConfig commonCheckpoint = new CommonCheckpointConfig();
+  private PathStateRootConfig pathStateRoot = new PathStateRootConfig();
   private TxCacheConfig txCache = new TxCacheConfig();
   // ConfigBeanFactory requires all bean fields present per item, so we parse manually.
   @Setter(lombok.AccessLevel.NONE)
@@ -143,6 +146,254 @@ public class StorageConfig {
 
   @Getter
   @Setter
+  public static class StateArchiveConfig {
+
+    private boolean enabled = false;
+    private String directory = "state-archive";
+    private long maxSegmentSize = 1073741824L;
+    private int queueCapacity = 256;
+    private String servingIndexEngine = "ROCKSDB";
+    private NativeDbConfig servingIndex = NativeDbConfig.large();
+    private StateArchiveHotStoreConfig hotStore = new StateArchiveHotStoreConfig();
+    private StateArchiveAppendFileConfig appendFile = new StateArchiveAppendFileConfig();
+
+    void postProcess() {
+      if (directory == null || directory.trim().isEmpty()) {
+        throw new IllegalArgumentException("stateArchive.directory must not be empty");
+      }
+      if (maxSegmentSize <= BlockHistoryLimits.MIN_SEGMENT_SIZE) {
+        throw new IllegalArgumentException(
+            "stateArchive.maxSegmentSize must be greater than 64 MiB");
+      }
+      if (queueCapacity <= 0 || queueCapacity > 65536) {
+        throw new IllegalArgumentException(
+            "stateArchive.queueCapacity must be in [1, 65536]");
+      }
+      servingIndexEngine = normalizeAuxiliaryEngine(servingIndexEngine,
+          "storage.stateArchive.servingIndexEngine");
+      servingIndex.validate("storage.stateArchive.servingIndex");
+      hotStore.postProcess();
+      appendFile.postProcess();
+    }
+  }
+
+  /** Independent, default-off five-lane append-file v3 prototype settings. */
+  @Getter
+  @Setter
+  public static class StateArchiveAppendFileConfig {
+
+    private boolean enabled = false;
+    private int formatVersion = 3;
+    private int appendBufferBytes = 2097152;
+    private int maxBlockFrameBytes = 67108864;
+    private long segmentTargetBytes = 2000000000L;
+    private int shardMaxSegments = 1024;
+
+    void postProcess() {
+      if (formatVersion != 3 || appendBufferBytes != 2097152
+          || maxBlockFrameBytes != 67108864 || shardMaxSegments != 1024) {
+        throw new IllegalArgumentException(
+            "stateArchive.appendFile v3 fixed format settings differ");
+      }
+      if (segmentTargetBytes <= 512) {
+        throw new IllegalArgumentException(
+            "stateArchive.appendFile.segmentTargetBytes must exceed the segment header");
+      }
+    }
+  }
+
+  /** Independent, default-off Hot DB limits and native database options. */
+  @Getter
+  @Setter
+  public static class StateArchiveHotStoreConfig {
+
+    private boolean enabled = false;
+    private String engine = "ROCKSDB";
+    private long maxBlocks = 10000L;
+    private long maxEncodedBytes = 2147483648L;
+    private int maxFrozenGenerations = 8;
+    private int yellowFrozenGenerations = 4;
+    private int redFrozenGenerations = 7;
+    private NativeDbConfig dbSettings = NativeDbConfig.large();
+
+    void postProcess() {
+      validate();
+    }
+
+    public void validate() {
+      engine = normalizeAuxiliaryEngine(engine, "storage.stateArchive.hotStore.engine");
+      if (maxBlocks <= 0 || maxEncodedBytes <= 0) {
+        throw new IllegalArgumentException(
+            "stateArchive.hotStore rotation limits must be positive");
+      }
+      if (maxFrozenGenerations <= 0 || yellowFrozenGenerations <= 0
+          || redFrozenGenerations <= yellowFrozenGenerations
+          || redFrozenGenerations > maxFrozenGenerations) {
+        throw new IllegalArgumentException(
+            "stateArchive.hotStore frozen watermarks must satisfy 0 < yellow < red <= max");
+      }
+      dbSettings.validate("storage.stateArchive.hotStore.dbSettings");
+    }
+  }
+
+  @Getter
+  @Setter
+  public static class CommonCheckpointConfig {
+
+    private boolean p66SnapshotEnabled = false;
+
+    private boolean enabled = false;
+    private String directory = "common-checkpoint";
+
+    void postProcess() {
+      if (directory == null || directory.trim().isEmpty()) {
+        throw new IllegalArgumentException("commonCheckpoint.directory must not be empty");
+      }
+    }
+  }
+
+  @Getter
+  @Setter
+  public static class PathStateRootConfig {
+
+    private boolean enabled = false;
+    private String engine = "ROCKSDB";
+    private String mode = "shadow";
+    private String directory = "path-state-root";
+    private int formatVersion = 1;
+    private int reversibleLayerLimit = 128;
+    private long reversibleLayerBytes = 2147483648L;
+    private long writeBufferBytes = 268435456L;
+    private long nodeCacheBytes = 268435456L;
+    private int participantThreads = 4;
+    private int branchThreads = 8;
+    private boolean rebuildFromGenesis = false;
+    private boolean verifyEveryBlock = true;
+    private boolean volatileSnapshotBenchmark = false;
+    private boolean asyncPrepareBenchmark = false;
+    private PathStateDbSettingsConfig dbSettings = new PathStateDbSettingsConfig();
+
+    void postProcess() {
+      engine = normalizeAuxiliaryEngine(engine, "storage.pathStateRoot.engine");
+      if (!"shadow".equals(mode)) {
+        throw new IllegalArgumentException("pathStateRoot.mode must be shadow");
+      }
+      if (directory == null || directory.trim().isEmpty()) {
+        throw new IllegalArgumentException("pathStateRoot.directory must not be empty");
+      }
+      if (formatVersion != 1) {
+        throw new IllegalArgumentException("pathStateRoot.formatVersion must be 1");
+      }
+      if (reversibleLayerLimit <= 0 || reversibleLayerBytes <= 0 || writeBufferBytes <= 0
+          || nodeCacheBytes <= 0) {
+        throw new IllegalArgumentException("pathStateRoot limits must be positive");
+      }
+      if (participantThreads <= 0 || participantThreads > 64
+          || branchThreads <= 0 || branchThreads > 64) {
+        throw new IllegalArgumentException(
+            "pathStateRoot prepare threads must be in [1, 64]");
+      }
+      if (rebuildFromGenesis) {
+        throw new IllegalArgumentException("pathStateRoot.rebuildFromGenesis is not supported");
+      }
+      if (!verifyEveryBlock) {
+        throw new IllegalArgumentException("pathStateRoot.verifyEveryBlock must remain enabled");
+      }
+      if (asyncPrepareBenchmark && !volatileSnapshotBenchmark) {
+        throw new IllegalArgumentException(
+            "pathStateRoot.asyncPrepareBenchmark requires volatileSnapshotBenchmark");
+      }
+      dbSettings.validate();
+    }
+  }
+
+  private static String normalizeAuxiliaryEngine(String engine, String path) {
+    if (engine == null) {
+      throw new IllegalArgumentException(path + " must be LEVELDB or ROCKSDB");
+    }
+    String normalized = engine.trim().toUpperCase(java.util.Locale.ROOT);
+    if (!"LEVELDB".equals(normalized) && !"ROCKSDB".equals(normalized)) {
+      throw new IllegalArgumentException(path + " must be LEVELDB or ROCKSDB");
+    }
+    return normalized;
+  }
+
+  /** Engine-neutral native options for one Archive/PathState resource tier. */
+  @Getter
+  @Setter
+  public static class NativeDbConfig {
+
+    private int blockSize = 4 * 1024;
+    private int writeBufferSize = 16 * 1024 * 1024;
+    private long cacheSize = 32L * 1024 * 1024;
+    private int maxOpenFiles = 100;
+    private long targetFileSizeBase = 16L * 1024 * 1024;
+    private long maxBytesForLevelBase = 64L * 1024 * 1024;
+    private int bloomBitsPerKey = 10;
+    private int maxWriteBufferNumber = 2;
+    private int levelNumber = 7;
+    private double maxBytesForLevelMultiplier = 10.0d;
+    private int level0FileNumCompactionTrigger = 4;
+    private int level0SlowdownWritesTrigger = 20;
+    private int level0StopWritesTrigger = 36;
+    private int backgroundFlushes = 1;
+    private int backgroundCompactions = 1;
+
+    public static NativeDbConfig small() {
+      return new NativeDbConfig();
+    }
+
+    public static NativeDbConfig large() {
+      NativeDbConfig config = new NativeDbConfig();
+      config.writeBufferSize = 64 * 1024 * 1024;
+      config.targetFileSizeBase = 64L * 1024 * 1024;
+      config.maxBytesForLevelBase = 256L * 1024 * 1024;
+      return config;
+    }
+
+    public static NativeDbConfig giant() {
+      NativeDbConfig config = large();
+      config.cacheSize = 64L * 1024 * 1024;
+      config.targetFileSizeBase = 128L * 1024 * 1024;
+      config.maxBytesForLevelBase = 512L * 1024 * 1024;
+      return config;
+    }
+
+    void validate(String path) {
+      if (blockSize <= 0 || writeBufferSize <= 0 || cacheSize <= 0 || maxOpenFiles <= 0
+          || targetFileSizeBase <= 0 || maxBytesForLevelBase <= 0
+          || bloomBitsPerKey <= 0 || maxWriteBufferNumber <= 0 || levelNumber <= 0
+          || maxBytesForLevelMultiplier <= 0 || level0FileNumCompactionTrigger <= 0
+          || level0SlowdownWritesTrigger < level0FileNumCompactionTrigger
+          || level0StopWritesTrigger < level0SlowdownWritesTrigger
+          || backgroundFlushes <= 0 || backgroundCompactions <= 0) {
+        throw new IllegalArgumentException(path + " native database options are invalid");
+      }
+    }
+  }
+
+  /** Fixed small/large/giant PathState profile catalog. */
+  @Getter
+  @Setter
+  public static class PathStateDbSettingsConfig {
+
+    private NativeDbConfig small = NativeDbConfig.small();
+    private NativeDbConfig large = NativeDbConfig.large();
+    private NativeDbConfig giant = NativeDbConfig.giant();
+
+    void validate() {
+      small.validate("storage.pathStateRoot.dbSettings.small");
+      large.validate("storage.pathStateRoot.dbSettings.large");
+      giant.validate("storage.pathStateRoot.dbSettings.giant");
+    }
+  }
+
+  private static final class BlockHistoryLimits {
+    private static final long MIN_SEGMENT_SIZE = 64L * 1024 * 1024;
+  }
+
+  @Getter
+  @Setter
   public static class TxCacheConfig {
 
     private int estimatedTransactions = 1000;
@@ -184,6 +435,35 @@ public class StorageConfig {
 
     sc.dbSettings.postProcess();
     sc.snapshot.postProcess();
+    sc.stateArchive.postProcess();
+    sc.commonCheckpoint.postProcess();
+    if (sc.commonCheckpoint.p66SnapshotEnabled && !sc.commonCheckpoint.enabled) {
+      throw new IllegalArgumentException("p66SnapshotEnabled requires commonCheckpoint.enabled");
+    }
+    sc.pathStateRoot.postProcess();
+    if (sc.commonCheckpoint.enabled
+        && (!sc.stateArchive.enabled || !sc.pathStateRoot.enabled)) {
+      throw new IllegalArgumentException(
+          "commonCheckpoint.enabled requires stateArchive.enabled and pathStateRoot.enabled");
+    }
+    if (sc.stateArchive.hotStore.enabled && !sc.commonCheckpoint.enabled) {
+      throw new IllegalArgumentException(
+          "stateArchive.hotStore.enabled requires commonCheckpoint.enabled");
+    }
+    if (sc.stateArchive.appendFile.enabled && !sc.commonCheckpoint.enabled) {
+      throw new IllegalArgumentException(
+          "stateArchive.appendFile.enabled requires commonCheckpoint.enabled");
+    }
+    if (sc.stateArchive.appendFile.enabled && sc.stateArchive.hotStore.enabled) {
+      throw new IllegalArgumentException(
+          "stateArchive.appendFile.enabled is mutually exclusive with hotStore.enabled");
+    }
+    if (sc.commonCheckpoint.enabled
+        && (sc.pathStateRoot.volatileSnapshotBenchmark
+        || sc.pathStateRoot.asyncPrepareBenchmark)) {
+      throw new IllegalArgumentException(
+          "commonCheckpoint.enabled is mutually exclusive with PathState benchmark modes");
+    }
     sc.txCache.postProcess();
     return sc;
   }

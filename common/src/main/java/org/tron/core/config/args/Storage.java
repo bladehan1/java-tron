@@ -85,6 +85,116 @@ public class Storage {
   @Setter
   private boolean checkpointSync;
 
+  @Getter
+  @Setter
+  private boolean stateArchiveEnabled;
+
+  @Getter
+  @Setter
+  private String stateArchiveDirectory;
+
+  @Getter
+  @Setter
+  private long stateArchiveMaxSegmentSize;
+
+  @Getter
+  @Setter
+  private int stateArchiveQueueCapacity;
+
+  @Getter
+  @Setter
+  private String stateArchiveServingIndexEngine;
+
+  @Getter
+  @Setter
+  private StorageConfig.NativeDbConfig stateArchiveServingIndexDbSettings;
+
+  @Getter
+  @Setter
+  private StorageConfig.StateArchiveHotStoreConfig stateArchiveHotStoreSettings;
+
+  @Getter
+  @Setter
+  private StorageConfig.StateArchiveAppendFileConfig stateArchiveAppendFileSettings;
+
+  @Getter
+  @Setter
+  private boolean commonCheckpointEnabled;
+
+  @Getter
+  @Setter
+  private boolean p66SnapshotEnabled;
+
+  @Getter
+  @Setter
+  private String commonCheckpointDirectory;
+
+  @Getter
+  @Setter
+  private boolean pathStateRootEnabled;
+
+  @Getter
+  @Setter
+  private String pathStateRootMode;
+
+  @Getter
+  @Setter
+  private String pathStateRootDirectory;
+
+  @Getter
+  @Setter
+  private String pathStateRootEngine;
+
+  @Getter
+  @Setter
+  private int pathStateRootFormatVersion;
+
+  @Getter
+  @Setter
+  private int pathStateRootReversibleLayerLimit;
+
+  @Getter
+  @Setter
+  private long pathStateRootReversibleLayerBytes;
+
+  @Getter
+  @Setter
+  private long pathStateRootWriteBufferBytes;
+
+  @Getter
+  @Setter
+  private long pathStateRootNodeCacheBytes;
+
+  @Getter
+  @Setter
+  private int pathStateRootParticipantThreads;
+
+  @Getter
+  @Setter
+  private int pathStateRootBranchThreads;
+
+  @Getter
+  @Setter
+  private boolean pathStateRootRebuildFromGenesis;
+
+  @Getter
+  @Setter
+  private boolean pathStateRootVerifyEveryBlock;
+
+  /** Benchmark-only: advance the path-state head in memory and persist no per-block state. */
+  @Getter
+  @Setter
+  private boolean pathStateRootVolatileSnapshotBenchmark;
+
+  /** Benchmark-only: compute ordered PathState deltas on a bounded background worker. */
+  @Getter
+  @Setter
+  private boolean pathStateRootAsyncPrepareBenchmark;
+
+  @Getter
+  @Setter
+  private StorageConfig.PathStateDbSettingsConfig pathStateRootDbSettings;
+
   private Options defaultDbOptions;
 
   @Getter

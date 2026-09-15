@@ -1,0 +1,529 @@
+package org.tron.core.db2.stateroot;
+
+import static org.fusesource.leveldbjni.JniDBFactory.factory;
+
+import java.io.Closeable;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.LinkOption;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Objects;
+import org.iq80.leveldb.DB;
+import org.iq80.leveldb.WriteOptions;
+import org.rocksdb.BlockBasedTableConfig;
+import org.rocksdb.BloomFilter;
+import org.rocksdb.ChecksumType;
+import org.rocksdb.CompressionType;
+import org.rocksdb.LRUCache;
+import org.rocksdb.RocksDBException;
+import org.rocksdb.Statistics;
+import org.rocksdb.StatsLevel;
+import org.rocksdb.TickerType;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.tron.common.math.StrictMathWrapper;
+import org.tron.core.config.args.StorageConfig.NativeDbConfig;
+import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
+
+/** Package-owned LevelDB/RocksDB key/value engine shared by namespaced path-node views. */
+final class PathStateNativeNodeStore implements Closeable {
+
+  private static final Logger logger = LoggerFactory.getLogger("DB");
+
+  static {
+    org.rocksdb.RocksDB.loadLibrary();
+  }
+
+  private final Path directory;
+  private final Engine engine;
+  private final String storageProfile;
+  private final Delegate delegate;
+  private long writeBatchCalls;
+  private long writeBatchMutations;
+  private long syncedWriteBatchCalls;
+  private long unsyncedWriteBatchCalls;
+  private volatile boolean closed;
+
+  private PathStateNativeNodeStore(Path directory, Engine engine, String storageProfile,
+      Delegate delegate) {
+    this.directory = directory;
+    this.engine = engine;
+    this.storageProfile = storageProfile;
+    this.delegate = delegate;
+  }
+
+  /** Opens one independent node database; callers choose the WAL sync boundary per batch. */
+  static PathStateNativeNodeStore open(Path directory, Engine engine) throws IOException {
+    return open(directory, engine, "small", NativeDbConfig.small());
+  }
+
+  /** Opens one independent database with an explicit validated resource profile. */
+  static PathStateNativeNodeStore open(Path directory, Engine engine, String storageProfile,
+      NativeDbConfig config) throws IOException {
+    return open(directory, engine, storageProfile, config, -1);
+  }
+
+  /** Cache sharding is a runtime choice, never part of the persisted root or store format. */
+  static PathStateNativeNodeStore open(Path directory, Engine engine, String storageProfile,
+      NativeDbConfig config, int cacheShardBits) throws IOException {
+    return open(directory, engine, storageProfile, config, cacheShardBits, false);
+  }
+
+  static PathStateNativeNodeStore open(Path directory, Engine engine, String storageProfile,
+      NativeDbConfig config, int cacheShardBits, boolean readStatistics) throws IOException {
+    return open(directory, engine, storageProfile, config, cacheShardBits, readStatistics,
+        config.getCacheSize());
+  }
+
+  static PathStateNativeNodeStore open(Path directory, Engine engine, String storageProfile,
+      NativeDbConfig config, int cacheShardBits, boolean readStatistics, long cacheBytes)
+      throws IOException {
+    if (cacheBytes <= 0) {
+      throw new IllegalArgumentException("native cache size must be positive");
+    }
+    Path path = Objects.requireNonNull(directory, "directory").toAbsolutePath().normalize();
+    Engine selected = Objects.requireNonNull(engine, "engine");
+    String profile = Objects.requireNonNull(storageProfile, "storageProfile");
+    NativeDbConfig settings = Objects.requireNonNull(config, "config");
+    if (Files.isSymbolicLink(path)) {
+      throw new IOException("path-state node database must not be a symbolic link: " + path);
+    }
+    Files.createDirectories(path);
+    if (!Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS)) {
+      throw new IOException("path-state node database is not a directory: " + path);
+    }
+    Delegate opened = selected == Engine.LEVELDB ? new LevelDelegate(path, settings)
+        : new RocksDelegate(path, settings, cacheShardBits, readStatistics, cacheBytes);
+    logger.info("Path-state database opened: directory={}, engine={}, profile={}, blockBytes={}, "
+            + "writeBufferBytes={}, cacheBytes={}, maxOpenFiles={}, requestedCacheShardBits={}, readStatistics={}",
+        path, selected, profile,
+        settings.getBlockSize(), settings.getWriteBufferSize(),
+        selected == Engine.ROCKSDB ? cacheBytes : settings.getCacheSize(),
+        settings.getMaxOpenFiles(), cacheShardBits, selected == Engine.ROCKSDB && readStatistics);
+    return new PathStateNativeNodeStore(path, selected, profile, opened);
+  }
+
+  /** Database-wide counters, including flat/metadata reads and other concurrent readers. */
+  Map<String, Long> readStatistics() {
+    requireOpen();
+    return delegate instanceof RocksDelegate ? ((RocksDelegate) delegate).readStatistics() : null;
+  }
+
+  Map<String, Long> readPerfStatistics() {
+    requireOpen();
+    return delegate instanceof RocksDelegate && ((RocksDelegate) delegate).readPerf != null
+        ? ((RocksDelegate) delegate).readPerf.snapshot() : null;
+  }
+
+  byte[] get(byte[] key) {
+    requireOpen();
+    byte[] ownedKey = nonEmpty(key, "key");
+    byte[] value = delegate.get(ownedKey);
+    return value == null ? null : Arrays.copyOf(value, value.length);
+  }
+
+  synchronized void put(byte[] key, byte[] value) {
+    writeBatch(Collections.singletonList(BatchMutation.put(key, value)));
+  }
+
+  synchronized void delete(byte[] key) {
+    writeBatch(Collections.singletonList(BatchMutation.delete(key)));
+  }
+
+  synchronized void writeBatch(List<BatchMutation> mutations) {
+    writeBatch(mutations, true);
+  }
+
+  synchronized void writeBatchUnsynced(List<BatchMutation> mutations) {
+    writeBatch(mutations, false);
+  }
+
+  private void writeBatch(List<BatchMutation> mutations, boolean sync) {
+    requireOpen();
+    List<BatchMutation> supplied = Objects.requireNonNull(mutations, "mutations");
+    if (supplied.isEmpty()) {
+      throw new IllegalArgumentException("path-state native batch must not be empty");
+    }
+    for (BatchMutation mutation : supplied) {
+      Objects.requireNonNull(mutation, "mutation");
+    }
+    delegate.writeBatch(supplied, sync);
+    writeBatchCalls = StrictMathWrapper.addExact(writeBatchCalls, 1L);
+    writeBatchMutations = StrictMathWrapper.addExact(writeBatchMutations, supplied.size());
+    if (sync) {
+      syncedWriteBatchCalls = StrictMathWrapper.addExact(syncedWriteBatchCalls, 1L);
+    } else {
+      unsyncedWriteBatchCalls = StrictMathWrapper.addExact(unsyncedWriteBatchCalls, 1L);
+    }
+  }
+
+  synchronized long getWriteBatchCalls() {
+    return writeBatchCalls;
+  }
+
+  synchronized long getWriteBatchMutations() {
+    return writeBatchMutations;
+  }
+
+  synchronized long getSyncedWriteBatchCalls() {
+    return syncedWriteBatchCalls;
+  }
+
+  synchronized long getUnsyncedWriteBatchCalls() {
+    return unsyncedWriteBatchCalls;
+  }
+
+  synchronized List<KeyValue> scanPrefix(byte[] prefix) throws IOException {
+    List<KeyValue> entries = new ArrayList<>();
+    scanPrefix(prefix, entries::add);
+    return entries;
+  }
+
+  synchronized List<KeyValue> scanAll() throws IOException {
+    List<KeyValue> entries = new ArrayList<>();
+    scanAll(entries::add);
+    return entries;
+  }
+
+  synchronized void scanPrefix(byte[] prefix, EntryConsumer consumer) throws IOException {
+    requireOpen();
+    delegate.scanPrefix(nonEmpty(prefix, "prefix"),
+        Objects.requireNonNull(consumer, "consumer"));
+  }
+
+  synchronized void scanAll(EntryConsumer consumer) throws IOException {
+    requireOpen();
+    delegate.scanAll(Objects.requireNonNull(consumer, "consumer"));
+  }
+
+  Path getDirectory() {
+    return directory;
+  }
+
+  Engine getEngine() {
+    return engine;
+  }
+
+  String getStorageProfile() {
+    return storageProfile;
+  }
+
+  @Override
+  public synchronized void close() throws IOException {
+    if (!closed) {
+      closed = true;
+      delegate.close();
+    }
+  }
+
+  private void requireOpen() {
+    if (closed) {
+      throw new IllegalStateException("path-state node database is closed: " + directory);
+    }
+  }
+
+  private static byte[] nonEmpty(byte[] value, String name) {
+    byte[] copy = Arrays.copyOf(Objects.requireNonNull(value, name), value.length);
+    if (copy.length == 0) {
+      throw new IllegalArgumentException(name + " must not be empty");
+    }
+    return copy;
+  }
+
+  private interface Delegate extends Closeable {
+
+    byte[] get(byte[] key);
+
+    void writeBatch(List<BatchMutation> mutations, boolean sync);
+
+    void scanPrefix(byte[] prefix, EntryConsumer consumer) throws IOException;
+
+    void scanAll(EntryConsumer consumer) throws IOException;
+  }
+
+  private static final class LevelDelegate implements Delegate {
+
+    private final org.iq80.leveldb.Options options;
+    private final WriteOptions syncWrites = new WriteOptions().sync(true);
+    private final WriteOptions unsyncedWrites = new WriteOptions().sync(false);
+    private final DB database;
+
+    private LevelDelegate(Path directory, NativeDbConfig config) throws IOException {
+      options = new org.iq80.leveldb.Options()
+          .createIfMissing(true)
+          .paranoidChecks(true)
+          .verifyChecksums(true)
+          .compressionType(org.iq80.leveldb.CompressionType.SNAPPY)
+          .blockSize(config.getBlockSize())
+          .writeBufferSize(config.getWriteBufferSize())
+          .cacheSize(config.getCacheSize())
+          .maxOpenFiles(config.getMaxOpenFiles());
+      database = factory.open(directory.toFile(), options);
+    }
+
+    @Override
+    public byte[] get(byte[] key) {
+      return database.get(key);
+    }
+
+    @Override
+    public void writeBatch(List<BatchMutation> mutations, boolean sync) {
+      try (org.iq80.leveldb.WriteBatch batch = database.createWriteBatch()) {
+        for (BatchMutation mutation : mutations) {
+          if (mutation.value == null) {
+            batch.delete(mutation.key);
+          } else {
+            batch.put(mutation.key, mutation.value);
+          }
+        }
+        database.write(batch, sync ? syncWrites : unsyncedWrites);
+      } catch (IOException failure) {
+        throw new IllegalStateException("failed to apply path-state LevelDB node batch", failure);
+      }
+    }
+
+    @Override
+    public void scanPrefix(byte[] prefix, EntryConsumer consumer) throws IOException {
+      try (org.iq80.leveldb.DBIterator iterator = database.iterator()) {
+        iterator.seek(prefix);
+        while (iterator.hasNext()) {
+          Map.Entry<byte[], byte[]> entry = iterator.next();
+          if (!startsWith(entry.getKey(), prefix)) {
+            break;
+          }
+          consumer.accept(new KeyValue(entry.getKey(), entry.getValue()));
+        }
+      }
+    }
+
+    @Override
+    public void scanAll(EntryConsumer consumer) throws IOException {
+      try (org.iq80.leveldb.DBIterator iterator = database.iterator()) {
+        iterator.seekToFirst();
+        while (iterator.hasNext()) {
+          Map.Entry<byte[], byte[]> entry = iterator.next();
+          consumer.accept(new KeyValue(entry.getKey(), entry.getValue()));
+        }
+      }
+    }
+
+    @Override
+    public void close() throws IOException {
+      database.close();
+    }
+  }
+
+  private static final class RocksDelegate implements Delegate {
+
+    private final Statistics statistics;
+    private final PathStateNativeGetPerf readPerf;
+    private final LRUCache blockCache;
+    private final BloomFilter bloomFilter;
+    private final org.rocksdb.Options options;
+    private final org.rocksdb.WriteOptions syncWrites;
+    private final org.rocksdb.WriteOptions unsyncedWrites;
+    private final org.rocksdb.RocksDB database;
+
+    private RocksDelegate(Path directory, NativeDbConfig config, int cacheShardBits,
+        boolean readStatistics, long cacheBytes)
+        throws IOException {
+      readPerf = readStatistics && Boolean.getBoolean(PathStateNativeGetPerf.PROPERTY)
+          ? new PathStateNativeGetPerf() : null;
+      syncWrites = new org.rocksdb.WriteOptions().setSync(true);
+      unsyncedWrites = new org.rocksdb.WriteOptions().setSync(false);
+      // Preserve the existing auto-sharded constructor unless the caller selected a measured
+      // Store/budget combination. In particular, do not extrapolate 64MiB results to small DBs.
+      blockCache = cacheShardBits < 0 ? new LRUCache(cacheBytes)
+          : new LRUCache(cacheBytes, cacheShardBits, false);
+      bloomFilter = new BloomFilter(config.getBloomBitsPerKey(), false);
+      BlockBasedTableConfig table = new BlockBasedTableConfig()
+          .setBlockSize(config.getBlockSize())
+          .setChecksumType(ChecksumType.kCRC32c)
+          .setBlockCache(blockCache)
+          .setCacheIndexAndFilterBlocks(true)
+          .setPinL0FilterAndIndexBlocksInCache(false)
+          .setWholeKeyFiltering(true)
+          .setFilter(bloomFilter);
+      options = new org.rocksdb.Options()
+          .setCreateIfMissing(true)
+          .setParanoidChecks(true)
+          .setCompressionType(CompressionType.SNAPPY_COMPRESSION)
+          .setWriteBufferSize(config.getWriteBufferSize())
+          .setMaxWriteBufferNumber(config.getMaxWriteBufferNumber())
+          .setMinWriteBufferNumberToMerge(1)
+          .setMaxOpenFiles(config.getMaxOpenFiles())
+          .setNumLevels(config.getLevelNumber())
+          .setLevelCompactionDynamicLevelBytes(true)
+          .setLevel0FileNumCompactionTrigger(config.getLevel0FileNumCompactionTrigger())
+          .setLevel0SlowdownWritesTrigger(config.getLevel0SlowdownWritesTrigger())
+          .setLevel0StopWritesTrigger(config.getLevel0StopWritesTrigger())
+          .setMaxBackgroundCompactions(config.getBackgroundCompactions())
+          .setMaxBackgroundFlushes(config.getBackgroundFlushes())
+          .setTargetFileSizeBase(config.getTargetFileSizeBase())
+          .setMaxBytesForLevelBase(config.getMaxBytesForLevelBase())
+          .setMaxBytesForLevelMultiplier(config.getMaxBytesForLevelMultiplier())
+          .setTableFormatConfig(table);
+      statistics = readStatistics ? new Statistics() : null;
+      if (statistics != null) {
+        statistics.setStatsLevel(StatsLevel.EXCEPT_DETAILED_TIMERS);
+        options.setStatistics(statistics);
+      }
+      try {
+        database = org.rocksdb.RocksDB.open(options, directory.toString());
+      } catch (RocksDBException failure) {
+        unsyncedWrites.close();
+        syncWrites.close();
+        options.close();
+        bloomFilter.close();
+        blockCache.close();
+        if (statistics != null) {
+          statistics.close();
+        }
+        throw new IOException("failed to open path-state RocksDB node database", failure);
+      }
+    }
+
+    private Map<String, Long> readStatistics() {
+      if (statistics == null) {
+        return null;
+      }
+      Map<String, Long> result = new LinkedHashMap<>();
+      for (TickerType ticker : READ_TICKERS) {
+        result.put(ticker.name().toLowerCase(Locale.ROOT), statistics.getTickerCount(ticker));
+      }
+      return result;
+    }
+
+    private static final TickerType[] READ_TICKERS = {
+        TickerType.BLOCK_CACHE_FILTER_HIT, TickerType.BLOCK_CACHE_FILTER_MISS,
+        TickerType.BLOCK_CACHE_FILTER_BYTES_INSERT,
+        TickerType.BLOCK_CACHE_INDEX_HIT, TickerType.BLOCK_CACHE_INDEX_MISS,
+        TickerType.BLOCK_CACHE_INDEX_BYTES_INSERT,
+        TickerType.BLOCK_CACHE_DATA_HIT, TickerType.BLOCK_CACHE_DATA_MISS,
+        TickerType.BLOCK_CACHE_DATA_BYTES_INSERT,
+        TickerType.BLOOM_FILTER_USEFUL, TickerType.BYTES_READ
+    };
+
+    @Override
+    public byte[] get(byte[] key) {
+      try {
+        return readPerf == null ? database.get(key) : readPerf.get(database, key);
+      } catch (RocksDBException failure) {
+        throw new IllegalStateException("failed to read path-state RocksDB node", failure);
+      }
+    }
+
+    @Override
+    public void writeBatch(List<BatchMutation> mutations, boolean sync) {
+      try (org.rocksdb.WriteBatch batch = new org.rocksdb.WriteBatch()) {
+        for (BatchMutation mutation : mutations) {
+          if (mutation.value == null) {
+            batch.delete(mutation.key);
+          } else {
+            batch.put(mutation.key, mutation.value);
+          }
+        }
+        database.write(sync ? syncWrites : unsyncedWrites, batch);
+      } catch (RocksDBException failure) {
+        throw new IllegalStateException("failed to apply path-state RocksDB node batch", failure);
+      }
+    }
+
+    @Override
+    public void scanPrefix(byte[] prefix, EntryConsumer consumer) throws IOException {
+      try (org.rocksdb.RocksIterator iterator = database.newIterator()) {
+        iterator.seek(prefix);
+        while (iterator.isValid() && startsWith(iterator.key(), prefix)) {
+          consumer.accept(new KeyValue(iterator.key(), iterator.value()));
+          iterator.next();
+        }
+        iterator.status();
+      } catch (RocksDBException failure) {
+        throw new IllegalStateException("failed to scan path-state RocksDB nodes", failure);
+      }
+    }
+
+    @Override
+    public void scanAll(EntryConsumer consumer) throws IOException {
+      try (org.rocksdb.RocksIterator iterator = database.newIterator()) {
+        iterator.seekToFirst();
+        while (iterator.isValid()) {
+          consumer.accept(new KeyValue(iterator.key(), iterator.value()));
+          iterator.next();
+        }
+        iterator.status();
+      } catch (RocksDBException failure) {
+        throw new IllegalStateException("failed to scan all path-state RocksDB nodes", failure);
+      }
+    }
+
+    @Override
+    public void close() {
+      database.close();
+      unsyncedWrites.close();
+      syncWrites.close();
+      options.close();
+      bloomFilter.close();
+      blockCache.close();
+      if (statistics != null) {
+        statistics.close();
+      }
+    }
+  }
+
+  static final class BatchMutation {
+
+    private final byte[] key;
+    private final byte[] value;
+
+    private BatchMutation(byte[] key, byte[] value) {
+      this.key = nonEmpty(key, "key");
+      this.value = value == null ? null : nonEmpty(value, "value");
+    }
+
+    static BatchMutation put(byte[] key, byte[] value) {
+      return new BatchMutation(key, Objects.requireNonNull(value, "value"));
+    }
+
+    static BatchMutation delete(byte[] key) {
+      return new BatchMutation(key, null);
+    }
+  }
+
+  static final class KeyValue {
+
+    private final byte[] key;
+    private final byte[] value;
+
+    private KeyValue(byte[] key, byte[] value) {
+      this.key = nonEmpty(key, "key");
+      this.value = nonEmpty(value, "value");
+    }
+
+    byte[] getKey() {
+      return Arrays.copyOf(key, key.length);
+    }
+
+    byte[] getValue() {
+      return Arrays.copyOf(value, value.length);
+    }
+  }
+
+  @FunctionalInterface
+  interface EntryConsumer {
+
+    void accept(KeyValue entry) throws IOException;
+  }
+
+  private static boolean startsWith(byte[] value, byte[] prefix) {
+    return value.length >= prefix.length
+        && Arrays.equals(Arrays.copyOf(value, prefix.length), prefix);
+  }
+}
