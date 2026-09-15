@@ -378,10 +378,22 @@ public class StateArchiveAppendCheckpointMaterializerV3Test {
                   }
                 }));
       }
-      try (StateArchiveAppendCheckpointMaterializerV3 recovered = materializer(
+      // No SAP3 proof was ever published: the normal open now fails closed instead of
+      // scanning history, so the torn rotation is repaired by the explicit recovery scan.
+      assertThrows(java.io.IOException.class,
+          () -> materializer(root, format, baseline, 1_500));
+      try (StateArchiveFiveLaneSegmentWriterV3 recovered =
+          StateArchiveFiveLaneSegmentWriterV3.recover(root, baseline,
+              StateArchiveFileFormatV3.COMPRESSION_NONE, 1_500, 1)) {
+        assertEquals(1, recovered.getAppendHead().getBlockNumber());
+        recovered.appendForCheckpoint(second, 2, target.getPayloadDigest());
+        StateArchiveFiveLaneDurabilityProofV3.publish(root,
+            recovered.sync(2, point(second), target.getPayloadDigest()));
+      }
+      try (StateArchiveAppendCheckpointMaterializerV3 reopened = materializer(
           root, format, baseline, 1_500)) {
-        recovered.prepare(capture);
-        assertEquals(Status.MATERIALIZED, recovered.inspect(target));
+        reopened.prepare(capture);
+        assertEquals(Status.MATERIALIZED, reopened.inspect(target));
         assertEquals(6, StateArchiveFiveLaneDurabilityProofV3.decode(Files.readAllBytes(
             root.resolve(StateArchiveFiveLaneDurabilityProofV3.FILE_NAME)))
             .getFileTails().size());
@@ -413,10 +425,21 @@ public class StateArchiveAppendCheckpointMaterializerV3Test {
                   }
                 }));
       }
-      try (StateArchiveAppendCheckpointMaterializerV3 recovered = materializer(
+      // No SAP3 proof was ever published: the normal open fails closed; the retained markers
+      // still let the explicit recovery scan re-establish the exact checkpoint boundary.
+      assertThrows(java.io.IOException.class,
+          () -> materializer(root, format, baseline, 10_000));
+      try (StateArchiveFiveLaneSegmentWriterV3 recovered =
+          StateArchiveFiveLaneSegmentWriterV3.recover(root, baseline,
+              StateArchiveFileFormatV3.COMPRESSION_NONE, 10_000, 1)) {
+        assertEquals(1, recovered.getAppendHead().getBlockNumber());
+        StateArchiveFiveLaneDurabilityProofV3.publish(root,
+            recovered.sync(1, point(bundle), target.getPayloadDigest()));
+      }
+      try (StateArchiveAppendCheckpointMaterializerV3 reopened = materializer(
           root, format, baseline, 10_000)) {
-        recovered.prepare(capture);
-        assertEquals(Status.MATERIALIZED, recovered.inspect(target));
+        reopened.prepare(capture);
+        assertEquals(Status.MATERIALIZED, reopened.inspect(target));
       }
     }
   }

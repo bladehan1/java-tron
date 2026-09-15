@@ -69,7 +69,8 @@ public class StateArchiveFiveLaneDurabilityProcessTest {
             StateArchiveFileFormatV3.COMPRESSION_NONE, 10_000);
     writer.append(first);
     writer.append(second);
-    writer.sync(1, point(second), COMMON_TARGET);
+    StateArchiveFiveLaneDurabilityProofV3.publish(root,
+        writer.sync(1, point(second), COMMON_TARGET));
     Runtime.getRuntime().halt(HALT_CODE);
   }
 

@@ -42,6 +42,8 @@ public class StateArchiveRotationKillProcessTest {
   private static final int HALT_CODE = 92;
   private static final int CHILD_FAILURE_CODE = 3;
   private static final long ROTATION_TARGET_BYTES = 10_000L;
+  private static final long SEAL_FRAME_BYTES = StateArchiveFileFormatV3.SEAL_HEADER_LENGTH
+      + StateArchiveFileFormatV3.FRAME_TRAILER_LENGTH;
   private static final int BLOCK_LIMIT = 400;
   private static final byte[] BASELINE = hash(20);
   private static final byte[] COMMON_TARGET = hash(90);
@@ -86,6 +88,9 @@ public class StateArchiveRotationKillProcessTest {
       assertEquals(identity.lastSyncSequence, proof.getTarget().getBlockNumber());
       assertEquals(5, proof.getFileTails().size());
       reopened.verifyDurabilityProof(proof);
+      // The fast reopen trusts sealed history: only the terminal seal frame is read.
+      assertEquals(identity.sealedCount * SEAL_FRAME_BYTES,
+          reopened.getReopenSealedDataReadBytes());
     }
   }
 
@@ -100,6 +105,8 @@ public class StateArchiveRotationKillProcessTest {
       assertNotNull(proof);
       assertEquals(identity.lastSyncSequence, proof.getCheckpointSequence());
       reopened.verifyDurabilityProof(proof);
+      assertEquals(identity.sealedCount * SEAL_FRAME_BYTES,
+          reopened.getReopenSealedDataReadBytes());
     }
     assertEquals("second reopen must not rewrite any archive file", before, fileListing(root));
   }
@@ -158,7 +165,8 @@ public class StateArchiveRotationKillProcessTest {
         // The fifth lane just sealed inside append; halting now lands between seal and marker,
         // or right after the post-rotation marker was forced into the fresh segments.
         if (syncBeforeHalt) {
-          writer.sync(block, point(bundle), COMMON_TARGET);
+          StateArchiveFiveLaneDurabilityProofV3.publish(root,
+              writer.sync(block, point(bundle), COMMON_TARGET));
           lastSyncSequence = block;
         } else {
           lastSyncSequence = block - 1;
@@ -166,7 +174,8 @@ public class StateArchiveRotationKillProcessTest {
         Identity.capture(writer, lastSyncSequence).store(root.resolve(IDENTITY_FILE));
         Runtime.getRuntime().halt(HALT_CODE);
       }
-      writer.sync(block, point(bundle), COMMON_TARGET);
+      StateArchiveFiveLaneDurabilityProofV3.publish(root,
+          writer.sync(block, point(bundle), COMMON_TARGET));
       lastSyncSequence = block;
     }
     System.exit(CHILD_FAILURE_CODE);
