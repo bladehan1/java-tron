@@ -78,11 +78,12 @@ public final class StateArchiveAppendCheckpointMaterializerV3
       ArchiveDurabilityProof proof = StateArchiveFiveLaneDurabilityProofV3.decode(
           Files.readAllBytes(proofFile));
       if (matches(proof, target)) {
-        // An exactly matching published proof lets normal startup use fast reopen. The
-        // recover/full-scan path remains for actual recovery intents or requests, such as
-        // pending Common WAL or explicit repair.
-        return new StateArchiveFiveLaneSegmentWriterV3(directory, baselineHistoryDigest,
-            compressionId, rotationTargetBytes);
+        // The authorized conservative recovery path scans and trims to the exact published
+        // identity. It deliberately discards an uncheckpointed tail, which Common can replay.
+        // A newer prepared proof may belong to pending Common WAL and must retain the redo path.
+        return StateArchiveFiveLaneSegmentWriterV3.recover(directory, baselineHistoryDigest,
+            compressionId, rotationTargetBytes, proof.getTarget(), proof.getTarget(),
+            StateArchiveFiveLaneSegmentWriterV3.RecoveryFaultHook.NONE);
       }
     }
     return new StateArchiveFiveLaneSegmentWriterV3(directory, baselineHistoryDigest,

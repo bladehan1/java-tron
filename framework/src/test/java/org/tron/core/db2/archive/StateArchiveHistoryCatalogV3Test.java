@@ -47,15 +47,19 @@ public class StateArchiveHistoryCatalogV3Test {
     byte[] baseline = hash(90);
     StateArchiveFiveLaneBlockCodecV3 codec = new StateArchiveFiveLaneBlockCodecV3();
     byte[] previous = baseline;
+    EncodedBundle last = null;
     try (StateArchiveFiveLaneSegmentWriterV3 writer =
         new StateArchiveFiveLaneSegmentWriterV3(root, baseline,
             StateArchiveFileFormatV3.COMPRESSION_NONE, 1_500)) {
       for (int block = 1; block <= 5; block++) {
         EncodedBundle bundle = codec.encode(diff(block, block == 1 ? 0 : block - 1, 1_400),
             previous, StateArchiveFileFormatV3.COMPRESSION_NONE);
-        writer.append(bundle);
+        writer.appendForCheckpoint(bundle, 5, hash(95));
         previous = bundle.getResultHistoryDigest();
+        last = bundle;
       }
+      StateArchiveFiveLaneDurabilityProofV3.publish(root,
+          writer.sync(5, point(last), hash(95)));
     }
     assertEquals(EXPECTED_RETAINED_GENERATIONS, generationFileCount(root));
 
@@ -100,6 +104,13 @@ public class StateArchiveHistoryCatalogV3Test {
         hash(blockNumber), hash(parent), blockNumber * 3_000L),
         Collections.singletonList(new DbGroup(StateArchiveFileFormatV3.dbName(1),
             Collections.singletonList(new Entry(new byte[]{1}, OldValue.present(value))))));
+  }
+
+  private static StateArchiveFiveLaneRecoveryIntentV3.RecoveryPoint point(EncodedBundle bundle) {
+    BlockSnapshotMeta meta = bundle.getDiff().getMeta();
+    return new StateArchiveFiveLaneRecoveryIntentV3.RecoveryPoint(meta.getEpoch(),
+        meta.getBlockNumber(), meta.getTimestamp(), meta.getBlockHash(), meta.getParentHash(),
+        bundle.getResultHistoryDigest());
   }
 
   private static byte[] hash(int suffix) {

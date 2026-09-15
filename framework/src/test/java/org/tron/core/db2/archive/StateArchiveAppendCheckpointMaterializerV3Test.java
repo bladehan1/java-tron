@@ -136,7 +136,7 @@ public class StateArchiveAppendCheckpointMaterializerV3Test {
   }
 
   @Test
-  public void finalizedAppendDefersUnmarkedRotationAndReopensBeforeCommonPrepare()
+  public void conservativelyRecoversFullTailThenPublishesShortCheckpointAndReplays()
       throws Exception {
     Path root = temporaryFolder.newFolder("early-finalized").toPath();
     byte[] format = hash(72);
@@ -146,32 +146,49 @@ public class StateArchiveAppendCheckpointMaterializerV3Test {
         root, format, baseline, 1500)) {
       List<BlockReverseDiff> first = Collections.singletonList(diff(1, 0));
       StateArchiveHotBatchDescriptor initial = archive.planCheckpoint(first);
-      CommonCheckpointTarget published = archive.prepare(CommonCheckpointCapture.create(
-          payload(format, first, initial), first, initial));
-      archive.publish(published);
-      archive.appendFinalized(diffs.subList(0, 1));
-      archive.appendFinalized(diffs);
-      archive.appendFinalized(diffs);
-      assertEquals(published, archive.loadPublishedTargetIfPresent().get());
+      CommonCheckpointPayload initialPayload = payload(format, first, initial);
+      CommonCheckpointCapture initialCapture = CommonCheckpointCapture.create(initialPayload,
+          first, initial);
+      archive.prepare(initialCapture);
+      try (CommonCheckpointRedoCoordinator coordinator = new CommonCheckpointRedoCoordinator(
+          new CommonCheckpointFile(root.resolve("wal-initial")),
+          new FakeMaterializer(Authority.CHAINBASE), new FakeMaterializer(Authority.PATH_STATE),
+          archive)) {
+        assertEquals(CommonCheckpointRedoCoordinator.RecoveryAction.COMPLETED_REDO,
+            coordinator.apply(initialPayload));
+        archive.appendFinalized(diffs.subList(0, 1));
+        archive.appendFinalized(diffs);
+        archive.appendFinalized(diffs);
+      }
     }
-    // Simulates a failure after finalized body append but before PathState/Common persistence.
-    // Fast reopen restores the valid uncheckpointed tail, so replaying the complete range is a
-    // no-op and binds it to the existing Common protocol.
+    // Conservative recovery scans and trims the uncheckpointed N+1/N+2 tail back to published N.
     try (StateArchiveAppendCheckpointMaterializerV3 archive = materializer(
         root, format, baseline, 1500)) {
-      archive.appendFinalized(diffs);
-      archive.appendFinalized(diffs);
-      StateArchiveHotBatchDescriptor descriptor = archive.planCheckpoint(diffs);
-      CommonCheckpointPayload payload = payload(format, diffs, descriptor);
+      assertEquals(1, archive.appendWriter().getAppendHead().getBlockNumber());
+      List<BlockReverseDiff> shortPrefix = diffs.subList(0, 1);
+      archive.appendFinalized(shortPrefix);
+      StateArchiveHotBatchDescriptor descriptor = archive.planCheckpoint(shortPrefix);
+      CommonCheckpointPayload payload = payload(format, shortPrefix, descriptor);
       CommonCheckpointTarget target = CommonCheckpointTarget.from(payload);
-      archive.prepare(CommonCheckpointCapture.create(payload, diffs, descriptor));
-      assertEquals(Status.MATERIALIZED, archive.inspect(target));
-      StateArchiveFiveLaneSegmentWriterV3.ArchiveDurabilityProof proof =
-          StateArchiveFiveLaneDurabilityProofV3.decode(Files.readAllBytes(
-              root.resolve(StateArchiveFiveLaneDurabilityProofV3.FILE_NAME)));
-      assertEquals(5, proof.getFileTails().size());
-      archive.publish(target);
-      assertEquals(Status.PUBLISHED, archive.inspect(target));
+      archive.prepare(CommonCheckpointCapture.create(payload, shortPrefix, descriptor));
+      try (CommonCheckpointRedoCoordinator coordinator = new CommonCheckpointRedoCoordinator(
+          new CommonCheckpointFile(root.resolve("wal-short")),
+          new FakeMaterializer(Authority.CHAINBASE), new FakeMaterializer(Authority.PATH_STATE),
+          archive)) {
+        assertEquals(CommonCheckpointRedoCoordinator.RecoveryAction.COMPLETED_REDO,
+            coordinator.apply(payload));
+        assertEquals(Status.PUBLISHED, archive.inspect(target));
+      }
+    }
+    // The short published checkpoint survives another reopen; repeated prefix/full retries do
+    // not append N+1 twice and may advance the newly rebuilt tail to N+2.
+    try (StateArchiveAppendCheckpointMaterializerV3 reopened = materializer(
+        root, format, baseline, 1_500)) {
+      assertEquals(2, reopened.appendWriter().getAppendHead().getBlockNumber());
+      reopened.appendFinalized(diffs.subList(0, 1));
+      reopened.appendFinalized(diffs);
+      reopened.appendFinalized(diffs);
+      assertEquals(3, reopened.appendWriter().getAppendHead().getBlockNumber());
     }
   }
 
@@ -217,7 +234,7 @@ public class StateArchiveAppendCheckpointMaterializerV3Test {
   }
 
   @Test
-  public void publishedProofReopensWithoutScanningSealedHistory() throws Exception {
+  public void publishedProofReopensWithConservativeRecovery() throws Exception {
     Path root = temporaryFolder.newFolder("append-materializer-fast-reopen").toPath();
     byte[] format = hash(77);
     byte[] baseline = hash(87);
@@ -237,10 +254,7 @@ public class StateArchiveAppendCheckpointMaterializerV3Test {
       StateArchiveFiveLaneSegmentWriterV3 writer = reopened.appendWriter();
       assertEquals(2, writer.getAppendHead().getBlockNumber());
       assertTrue(writer.getSealedSegments().size() > 0);
-      long sealFrameBytes = StateArchiveFileFormatV3.SEAL_HEADER_LENGTH
-          + StateArchiveFileFormatV3.FRAME_TRAILER_LENGTH;
-      assertEquals(writer.getSealedSegments().size() * sealFrameBytes,
-          writer.getReopenSealedDataReadBytes());
+      // Materializer startup now deliberately uses recovery and may scan sealed segment data.
       assertEquals(Status.PUBLISHED, reopened.inspect(target));
     }
   }
