@@ -23,6 +23,8 @@ import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.tron.core.db2.archive.BlockReverseDiff.DbGroup;
 import org.tron.core.db2.archive.BlockReverseDiff.Entry;
+import org.tron.core.db2.archive.StateArchiveFiveLaneSegmentWriterV3.ArchiveDurabilityProof;
+import org.tron.core.db2.archive.StateArchiveFiveLaneSegmentWriterV3.RecoveryStage;
 import org.tron.core.db2.archive.StateArchiveFiveLaneSegmentWriterV3.SyncStage;
 import org.tron.core.db2.core.Chainbase;
 import org.tron.core.db2.core.CommonCheckpointCapture;
@@ -155,16 +157,17 @@ public class StateArchiveAppendCheckpointMaterializerV3Test {
       assertEquals(published, archive.loadPublishedTargetIfPresent().get());
     }
     // Simulates a failure after finalized body append but before PathState/Common persistence.
-    // Fast reopen restores the valid uncheckpointed tail, so replaying the complete range is a
-    // no-op and binds it to the existing Common protocol.
+    // Published Common remains authoritative: startup trims Catalog and all five lanes back to N
+    // with proof-bounded I/O, then the short N+1 checkpoint can be replayed normally.
     try (StateArchiveAppendCheckpointMaterializerV3 archive = materializer(
         root, format, baseline, 1500)) {
-      archive.appendFinalized(diffs);
-      archive.appendFinalized(diffs);
-      StateArchiveHotBatchDescriptor descriptor = archive.planCheckpoint(diffs);
-      CommonCheckpointPayload payload = payload(format, diffs, descriptor);
+      assertEquals(1, archive.appendWriter().getAppendHead().getBlockNumber());
+      List<BlockReverseDiff> shortPrefix = diffs.subList(0, 1);
+      archive.appendFinalized(shortPrefix);
+      StateArchiveHotBatchDescriptor descriptor = archive.planCheckpoint(shortPrefix);
+      CommonCheckpointPayload payload = payload(format, shortPrefix, descriptor);
       CommonCheckpointTarget target = CommonCheckpointTarget.from(payload);
-      archive.prepare(CommonCheckpointCapture.create(payload, diffs, descriptor));
+      archive.prepare(CommonCheckpointCapture.create(payload, shortPrefix, descriptor));
       assertEquals(Status.MATERIALIZED, archive.inspect(target));
       StateArchiveFiveLaneSegmentWriterV3.ArchiveDurabilityProof proof =
           StateArchiveFiveLaneDurabilityProofV3.decode(Files.readAllBytes(
@@ -173,6 +176,110 @@ public class StateArchiveAppendCheckpointMaterializerV3Test {
       archive.publish(target);
       assertEquals(Status.PUBLISHED, archive.inspect(target));
     }
+    try (StateArchiveAppendCheckpointMaterializerV3 reopened = materializer(
+        root, format, baseline, 1500)) {
+      assertEquals(2, reopened.appendWriter().getAppendHead().getBlockNumber());
+      reopened.appendFinalized(diffs.subList(0, 1));
+      reopened.appendFinalized(diffs);
+      reopened.appendFinalized(diffs);
+      assertEquals(3, reopened.appendWriter().getAppendHead().getBlockNumber());
+    }
+  }
+
+  @Test
+  public void publishedCheckpointRollbackResumesAtEveryDurableBoundary() throws Exception {
+    for (RecoveryStage stage : RecoveryStage.values()) {
+      Path root = temporaryFolder.newFolder("published-rollback-" + stage).toPath();
+      byte[] format = hash(73);
+      byte[] baseline = hash(83);
+      try (StateArchiveAppendCheckpointMaterializerV3 archive = materializer(
+          root, format, baseline, 1500)) {
+        List<BlockReverseDiff> first = Collections.singletonList(diff(1, 0));
+        StateArchiveHotBatchDescriptor descriptor = archive.planCheckpoint(first);
+        CommonCheckpointTarget target = archive.prepare(CommonCheckpointCapture.create(
+            payload(format, first, descriptor), first, descriptor));
+        archive.publish(target);
+        archive.appendFinalized(Collections.singletonList(diff(2, 1400)));
+        assertEquals(2, archive.appendWriter().getAppendHead().getBlockNumber());
+      }
+      ArchiveDurabilityProof proof = StateArchiveFiveLaneDurabilityProofV3.decode(
+          Files.readAllBytes(root.resolve(StateArchiveFiveLaneDurabilityProofV3.FILE_NAME)));
+      StateArchiveFiveLaneSegmentWriterV3.RecoveryFaultHook fault = (actual, laneId) -> {
+        if (actual == stage) {
+          throw new java.io.IOException("injected published rollback fault at " + stage);
+        }
+      };
+      assertThrows(java.io.IOException.class,
+          () -> StateArchiveFiveLaneSegmentWriterV3.openAtPublishedCheckpoint(root, baseline,
+              StateArchiveFileFormatV3.COMPRESSION_NONE, 1500, proof, fault));
+
+      Path intent = root.resolve(StateArchiveFiveLaneRecoveryIntentV3.FILE_NAME);
+      if (Files.isRegularFile(intent)) {
+        StateArchiveFiveLaneRecoveryIntentV3.Intent persisted =
+            StateArchiveFiveLaneRecoveryIntentV3.decode(Files.readAllBytes(intent));
+        assertTrue(persisted.getCatalogBinding() != null);
+        if (stage == RecoveryStage.INTENT_PUBLISHED) {
+          // Compatibility fixture for an intent published before Catalog binding existed.
+          Files.write(intent, StateArchiveFiveLaneRecoveryIntentV3.encode(
+              new StateArchiveFiveLaneRecoveryIntentV3.Intent(
+                  persisted.getBaselineHistoryDigest(), persisted.getAuthorizedCeiling(),
+                  persisted.getCommonCommitted(), persisted.getTarget(), persisted.getLanes())));
+        }
+      }
+      try (StateArchiveFiveLaneSegmentWriterV3 recovered =
+          StateArchiveFiveLaneSegmentWriterV3.openAtPublishedCheckpoint(root, baseline,
+              StateArchiveFileFormatV3.COMPRESSION_NONE, 1500, proof)) {
+        assertEquals(1, recovered.getAppendHead().getBlockNumber());
+        assertEquals(recovered.getSealedSegments().size()
+                * (StateArchiveFileFormatV3.SEAL_HEADER_LENGTH
+                    + StateArchiveFileFormatV3.FRAME_TRAILER_LENGTH),
+            recovered.getReopenSealedDataReadBytes());
+      }
+      try (StateArchiveFiveLaneSegmentWriterV3 second =
+          StateArchiveFiveLaneSegmentWriterV3.openAtPublishedCheckpoint(root, baseline,
+              StateArchiveFileFormatV3.COMPRESSION_NONE, 1500, proof)) {
+        assertEquals(1, second.getAppendHead().getBlockNumber());
+      }
+      assertFalse(Files.exists(intent));
+      StateArchiveHistoryCatalogV3.Generation generation =
+          StateArchiveHistoryCatalogV3.openOrEmpty(root).selected();
+      assertTrue(generation.getTerminals().stream().allMatch(terminal ->
+          terminal.getKind() == StateArchiveHistoryCatalogV3.TerminalKind.SEALED
+              ? terminal.getSealed().getLastBlock() == 1
+              : terminal.getCurrent().getCurrentLastBlock() == 1));
+    }
+  }
+
+  @Test
+  public void publishedCheckpointRejectsOneSidedSealedSuccessor() throws Exception {
+    Path root = temporaryFolder.newFolder("published-partial-successor").toPath();
+    byte[] format = hash(74);
+    byte[] baseline = hash(84);
+    try (StateArchiveAppendCheckpointMaterializerV3 archive = materializer(
+        root, format, baseline, 1500)) {
+      List<BlockReverseDiff> first = Collections.singletonList(diff(1, 1400));
+      StateArchiveHotBatchDescriptor descriptor = archive.planCheckpoint(first);
+      CommonCheckpointTarget target = archive.prepare(CommonCheckpointCapture.create(
+          payload(format, first, descriptor), first, descriptor));
+      archive.publish(target);
+      archive.appendFinalized(Collections.singletonList(diff(2, 1400)));
+    }
+    try (StateArchiveAppendCheckpointMaterializerV3 ignored = materializer(
+        root, format, baseline, 1500)) {
+      // Recovery commits mixed sealed/current terminals at the published height.
+    }
+    StateArchiveHistoryCatalogV3.Terminal sealed =
+        StateArchiveHistoryCatalogV3.openOrEmpty(root).selected().getTerminals().stream()
+            .filter(terminal -> terminal.getKind()
+                == StateArchiveHistoryCatalogV3.TerminalKind.SEALED)
+            .findFirst().get();
+    long sequence = sealed.getSealed().getSegmentSeq() + 1;
+    Path data = root.resolve("segments").resolve(String.format("shard-%06d",
+        sequence / StateArchiveFileFormatV3.SHARD_MAX_SEGMENTS)).resolve(String.format(
+        "lane-%04d-seg-%020d.dat", sealed.getLaneId(), sequence));
+    Files.write(data, new byte[]{1});
+    assertThrows(java.io.IOException.class,
+        () -> materializer(root, format, baseline, 1500));
   }
 
   @Test

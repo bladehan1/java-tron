@@ -26,6 +26,11 @@ import org.tron.core.db2.archive.StateArchiveSegmentFormatV3.SealedSegment;
 /** Atomic structural catalog for the five-lane append-file history. */
 final class StateArchiveHistoryCatalogV3 {
 
+  @FunctionalInterface
+  interface DirectorySync {
+    void sync(Path directory) throws IOException;
+  }
+
   static final String DIRECTORY = "catalog";
   static final String CURRENT = "CURRENT";
   private static final String GENERATIONS = "generations";
@@ -38,20 +43,33 @@ final class StateArchiveHistoryCatalogV3 {
   private static final int TRAILER_LENGTH = 48;
   private static final int CURRENT_LENGTH = 96;
   private static final int MAX_RETAINED_GENERATIONS = 3;
+  static final int PER_LANE_TERMINALS = 1;
+  static final int TERMINAL_AWARE_FLAG = PER_LANE_TERMINALS;
+  private static final int KNOWN_GENERATION_FLAGS = PER_LANE_TERMINALS;
+  private static final int SEALED_TERMINAL_FLAG = 1;
 
   private final Path root;
   private final Path generations;
+  private final DirectorySync directorySync;
   private final NavigableMap<Long, Path> generationFiles = new TreeMap<>();
   private Generation selected;
 
-  private StateArchiveHistoryCatalogV3(Path archiveRoot, Generation selected) {
+  private StateArchiveHistoryCatalogV3(Path archiveRoot, Generation selected,
+      DirectorySync directorySync) {
     root = archiveRoot.resolve(DIRECTORY);
     generations = root.resolve(GENERATIONS);
+    this.directorySync = Objects.requireNonNull(directorySync, "directorySync");
     this.selected = selected;
   }
 
   static StateArchiveHistoryCatalogV3 openOrEmpty(Path archiveRoot) throws IOException {
-    StateArchiveHistoryCatalogV3 catalog = new StateArchiveHistoryCatalogV3(archiveRoot, null);
+    return openOrEmpty(archiveRoot, StateArchiveHistoryCatalogV3::syncDirectory);
+  }
+
+  static StateArchiveHistoryCatalogV3 openOrEmpty(Path archiveRoot,
+      DirectorySync directorySync) throws IOException {
+    StateArchiveHistoryCatalogV3 catalog = new StateArchiveHistoryCatalogV3(archiveRoot, null,
+        directorySync);
     catalog.discoverGenerationFiles();
     Path root = catalog.root;
     Path current = root.resolve(CURRENT);
@@ -86,40 +104,85 @@ final class StateArchiveHistoryCatalogV3 {
 
   void publish(long segmentTargetBytes, List<CurrentSegment> current,
       List<SealedSegment> sealed) throws IOException {
+    publish(segmentTargetBytes, current, sealed, null);
+  }
+
+  void publish(long segmentTargetBytes, List<CurrentSegment> current,
+      List<SealedSegment> sealed, List<Terminal> terminals) throws IOException {
+    PreparedGeneration prepared = prepare(segmentTargetBytes, current, sealed, terminals);
+    publishPrepared(selected, prepared);
+  }
+
+  PreparedGeneration prepare(long segmentTargetBytes, List<CurrentSegment> current,
+      List<SealedSegment> sealed, List<Terminal> terminals) throws IOException {
     long generation = selected == null ? 0 : selected.generation + 1;
     byte[] previous = selected == null ? new byte[32] : selected.digest;
-    Generation replacement = new Generation(generation, previous, segmentTargetBytes,
-        current, sealed, null);
+    Generation replacement = terminals == null
+        ? new Generation(generation, previous, segmentTargetBytes, current, sealed, null)
+        : new Generation(generation, previous, segmentTargetBytes, current, sealed, terminals,
+            TERMINAL_AWARE_FLAG, null);
     byte[] encoded = encodeGeneration(replacement);
     Generation verified = decodeGeneration(encoded);
+    return new PreparedGeneration(selected, verified, encoded);
+  }
+
+  PreparedGeneration prepare(long segmentTargetBytes, List<CurrentSegment> current,
+      List<SealedSegment> sealed) throws IOException {
+    return prepare(segmentTargetBytes, current, sealed, null);
+  }
+
+  void publishPrepared(Generation expectedSource, PreparedGeneration prepared) throws IOException {
+    Objects.requireNonNull(prepared, "prepared");
+    requireSource(expectedSource, selected);
+    requireSource(expectedSource, prepared.source);
+    long expectedGeneration = expectedSource == null ? 0 : expectedSource.generation + 1;
+    if (prepared.generation.generation != expectedGeneration
+        || !Arrays.equals(prepared.generation.previousDigest,
+            expectedSource == null ? new byte[32] : expectedSource.digest)) {
+      throw new IOException("State Archive Catalog prepared source mismatch");
+    }
     Files.createDirectories(generations);
-    Path temporary = generations.resolve(fileName(generation) + ".tmp");
-    Path target = generations.resolve(fileName(generation));
-    writeForced(temporary, encoded);
+    Path temporary = generations.resolve(fileName(prepared.generation.generation) + ".tmp");
+    Path target = generations.resolve(fileName(prepared.generation.generation));
     if (Files.isRegularFile(target)) {
       Generation orphan = decodeGeneration(Files.readAllBytes(target));
-      if (!Arrays.equals(orphan.digest, verified.digest)) {
+      if (!Arrays.equals(orphan.digest, prepared.generation.digest)) {
         throw new IOException("State Archive Catalog orphan generation identity differs");
       }
-      Files.delete(temporary);
+      Files.deleteIfExists(temporary);
+      directorySync.sync(generations);
     } else {
+      writeForced(temporary, prepared.encoded);
       atomicMove(temporary, target);
-      syncDirectory(generations);
+      directorySync.sync(generations);
     }
-    generationFiles.put(generation, target);
-    byte[] currentBytes = encodeCurrent(generation, verified.digest);
+    generationFiles.put(prepared.generation.generation, target);
+    byte[] currentBytes = encodeCurrent(prepared.generation.generation,
+        prepared.generation.digest);
     Path currentTemporary = root.resolve(CURRENT + ".tmp");
     writeForced(currentTemporary, currentBytes);
     atomicMove(currentTemporary, root.resolve(CURRENT));
-    syncDirectory(root);
-    long oldestRetained = verified.generation - MAX_RETAINED_GENERATIONS;
+    directorySync.sync(root);
+    selected = prepared.generation;
+    long oldestRetained = selected.generation - MAX_RETAINED_GENERATIONS;
     for (Map.Entry<Long, Path> entry : new ArrayList<>(
         generationFiles.headMap(oldestRetained, true).entrySet())) {
       Files.deleteIfExists(entry.getValue());
       generationFiles.remove(entry.getKey());
     }
-    syncDirectory(generations);
-    selected = verified;
+    directorySync.sync(generations);
+  }
+
+  private void requireSource(Generation expectedSource, Generation preparedSource) {
+    if (expectedSource == null || preparedSource == null) {
+      if (expectedSource != preparedSource) {
+        throw new IllegalArgumentException("State Archive Catalog source identity mismatch");
+      }
+      return;
+    }
+    if (!expectedSource.sameSnapshot(preparedSource)) {
+      throw new IllegalArgumentException("State Archive Catalog source identity mismatch");
+    }
   }
 
   private void discoverGenerationFiles() throws IOException {
@@ -151,18 +214,18 @@ final class StateArchiveHistoryCatalogV3 {
   private static byte[] encodeGeneration(Generation generation) {
     generation.validate();
     int totalLength = StrictMathWrapper.addExact(HEADER_LENGTH + TRAILER_LENGTH,
-        StrictMathWrapper.addExact(generation.current.size() * CURRENT_RECORD_LENGTH,
+        StrictMathWrapper.addExact(generation.terminals.size() * CURRENT_RECORD_LENGTH,
             generation.sealed.size() * StateArchiveFileFormatV3.SEGMENT_MAP_ENTRY_LENGTH));
     ByteBuffer bytes = ByteBuffer.allocate(totalLength);
     bytes.putInt(GENERATION_MAGIC);
     bytes.putShort(StateArchiveFileFormatV3.MAJOR_VERSION);
     bytes.putShort(StateArchiveFileFormatV3.MINOR_VERSION);
     bytes.putInt(HEADER_LENGTH);
-    bytes.putInt(0);
+    bytes.putInt(generation.flags);
     bytes.putLong(totalLength);
     bytes.putLong(generation.generation);
     bytes.putLong(generation.segmentTargetBytes);
-    bytes.putInt(generation.current.size());
+    bytes.putInt(generation.terminals.size());
     bytes.putInt(generation.sealed.size());
     bytes.putInt(CURRENT_RECORD_LENGTH);
     bytes.putInt(StateArchiveFileFormatV3.SEGMENT_MAP_ENTRY_LENGTH);
@@ -171,8 +234,8 @@ final class StateArchiveHistoryCatalogV3 {
     bytes.put(StateArchiveFileFormatV3.fiveLaneDescriptorDigest());
     bytes.put(laneSetDigest());
     bytes.put(new byte[72]);
-    for (CurrentSegment segment : generation.current) {
-      bytes.put(encodeCurrentRecord(segment));
+    for (Terminal terminal : generation.terminals) {
+      bytes.put(encodeTerminalRecord(terminal, generation.isTerminalAware()));
     }
     for (SealedSegment segment : generation.sealed) {
       bytes.put(StateArchiveSegmentFormatV3.encodeSealedMapRecord(segment));
@@ -200,7 +263,9 @@ final class StateArchiveHistoryCatalogV3 {
       require(bytes.getShort() == StateArchiveFileFormatV3.MINOR_VERSION,
           "Catalog generation minor version mismatch");
       require(bytes.getInt() == HEADER_LENGTH, "Catalog generation header length mismatch");
-      require(bytes.getInt() == 0, "Catalog generation flags mismatch");
+      int flags = bytes.getInt();
+      require((flags & ~KNOWN_GENERATION_FLAGS) == 0,
+          "Catalog generation flags mismatch");
       require(bytes.getLong() == encoded.length, "Catalog generation length mismatch");
       long generation = bytes.getLong();
       long segmentTargetBytes = bytes.getLong();
@@ -226,9 +291,10 @@ final class StateArchiveHistoryCatalogV3 {
           + (long) currentCount * CURRENT_RECORD_LENGTH
           + (long) sealedCount * StateArchiveFileFormatV3.SEGMENT_MAP_ENTRY_LENGTH;
       require(expectedLength == encoded.length, "Catalog generation record count mismatch");
-      List<CurrentSegment> current = new ArrayList<>();
+      List<TerminalRecord> terminalRecords = new ArrayList<>();
       for (int index = 0; index < currentCount; index++) {
-        current.add(decodeCurrentRecord(read(bytes, CURRENT_RECORD_LENGTH)));
+        terminalRecords.add(decodeTerminalRecord(read(bytes, CURRENT_RECORD_LENGTH),
+            (flags & TERMINAL_AWARE_FLAG) != 0));
       }
       List<SealedSegment> sealed = new ArrayList<>();
       for (int index = 0; index < sealedCount; index++) {
@@ -245,7 +311,16 @@ final class StateArchiveHistoryCatalogV3 {
           "Catalog generation checksum mismatch");
       require(bytes.getInt() == GENERATION_TRAILER_MAGIC,
           "Catalog generation trailer mismatch");
-      return new Generation(generation, previous, segmentTargetBytes, current, sealed, digest);
+      List<CurrentSegment> current = new ArrayList<>();
+      for (TerminalRecord record : terminalRecords) {
+        if (record.kind == TerminalKind.CURRENT) {
+          current.add(record.current);
+        }
+      }
+      List<Terminal> terminals = (flags & TERMINAL_AWARE_FLAG) == 0
+          ? currentTerminals(current) : resolveTerminals(terminalRecords, sealed);
+      return new Generation(generation, previous, segmentTargetBytes, current, sealed, terminals,
+          flags, digest);
     } catch (IllegalArgumentException invalid) {
       throw new IOException("State Archive Catalog generation is corrupt", invalid);
     }
@@ -261,18 +336,65 @@ final class StateArchiveHistoryCatalogV3 {
         .put(parentDigest(segment.getLaneId(), segment.getSegmentSeq())).array();
   }
 
-  private static CurrentSegment decodeCurrentRecord(byte[] encoded) {
+  private static byte[] encodeTerminalRecord(Terminal terminal, boolean terminalAware) {
+    if (terminal.kind == TerminalKind.CURRENT) {
+      return encodeCurrentRecord(terminal.current);
+    }
+    require(terminalAware, "Catalog sealed terminal requires terminal-aware flags");
+    return ByteBuffer.allocate(CURRENT_RECORD_LENGTH)
+        .putShort((short) terminal.laneId)
+        .putShort(StateArchiveFileFormatV3.laneKind(terminal.laneId))
+        .putInt(SEALED_TERMINAL_FLAG).putLong(terminal.sealed.getSegmentSeq())
+        .put(new byte[96]).array();
+  }
+
+  private static TerminalRecord decodeTerminalRecord(byte[] encoded, boolean terminalAware) {
     ByteBuffer bytes = ByteBuffer.wrap(encoded);
     int laneId = Short.toUnsignedInt(bytes.getShort());
     require(bytes.getShort() == StateArchiveFileFormatV3.laneKind(laneId),
         "Catalog current lane kind mismatch");
-    require(bytes.getInt() == 0, "Catalog current flags mismatch");
+    int flags = bytes.getInt();
+    require(flags == 0 || flags == SEALED_TERMINAL_FLAG,
+        "Catalog current flags mismatch");
+    if (flags == SEALED_TERMINAL_FLAG) {
+      require(terminalAware, "Catalog sealed terminal requires terminal-aware flags");
+      long sequence = bytes.getLong();
+      require(sequence >= 0, "Catalog sealed terminal sequence is invalid");
+      requireZero(bytes, 96);
+      return TerminalRecord.sealed(laneId, sequence);
+    }
     long sequence = bytes.getLong();
     CurrentSegment current = new CurrentSegment(laneId, sequence, bytes.getLong(),
         bytes.getLong(), bytes.getLong(), bytes.getLong(), read(bytes, 32));
     require(Arrays.equals(read(bytes, 32), parentDigest(laneId, sequence)),
         "Catalog current parent digest mismatch");
-    return current;
+    return TerminalRecord.current(current);
+  }
+
+  private static List<Terminal> resolveTerminals(List<TerminalRecord> records,
+      List<SealedSegment> sealed) {
+    List<Terminal> terminals = new ArrayList<>();
+    for (TerminalRecord record : records) {
+      if (record.kind == TerminalKind.CURRENT) {
+        terminals.add(Terminal.current(record.current));
+        continue;
+      }
+      SealedSegment finalSegment = finalSealed(sealed, record.laneId);
+      require(finalSegment != null && finalSegment.getSegmentSeq() == record.segmentSeq,
+          "Catalog sealed terminal is not the final sealed segment");
+      terminals.add(Terminal.sealed(finalSegment));
+    }
+    return terminals;
+  }
+
+  private static SealedSegment finalSealed(List<SealedSegment> sealed, int laneId) {
+    SealedSegment result = null;
+    for (SealedSegment segment : sealed) {
+      if (segment.getLaneId() == laneId) {
+        result = segment;
+      }
+    }
+    return result;
   }
 
   private static byte[] parentDigest(int laneId, long sequence) {
@@ -374,37 +496,183 @@ final class StateArchiveHistoryCatalogV3 {
     return String.format("catalog-%020d.bin", generation);
   }
 
+  static final class PreparedGeneration {
+    private final Generation source;
+    private final Generation generation;
+    private final byte[] encoded;
+
+    private PreparedGeneration(Generation source, Generation generation, byte[] encoded) {
+      this.source = source;
+      this.generation = generation;
+      this.encoded = Arrays.copyOf(encoded, encoded.length);
+    }
+
+    long getGeneration() {
+      return generation.generation;
+    }
+
+    byte[] getDigest() {
+      return generation.getDigest();
+    }
+
+    byte[] getEncoded() {
+      return Arrays.copyOf(encoded, encoded.length);
+    }
+
+    Generation getSource() {
+      return source;
+    }
+
+    Generation getGenerationSnapshot() {
+      return generation;
+    }
+  }
+
+  enum TerminalKind {
+    CURRENT,
+    SEALED
+  }
+
+  static final class Terminal {
+    private final int laneId;
+    private final TerminalKind kind;
+    private final CurrentSegment current;
+    private final SealedSegment sealed;
+
+    private Terminal(int laneId, TerminalKind kind, CurrentSegment current,
+        SealedSegment sealed) {
+      this.laneId = laneId;
+      this.kind = kind;
+      this.current = current;
+      this.sealed = sealed;
+    }
+
+    static Terminal current(CurrentSegment segment) {
+      return new Terminal(segment.getLaneId(), TerminalKind.CURRENT,
+          Objects.requireNonNull(segment), null);
+    }
+
+    static Terminal sealed(SealedSegment segment) {
+      return new Terminal(segment.getLaneId(), TerminalKind.SEALED, null,
+          Objects.requireNonNull(segment));
+    }
+
+    int getLaneId() {
+      return laneId;
+    }
+
+    TerminalKind getKind() {
+      return kind;
+    }
+
+    CurrentSegment getCurrent() {
+      return current;
+    }
+
+    SealedSegment getSealed() {
+      return sealed;
+    }
+  }
+
+  private static final class TerminalRecord {
+    private final int laneId;
+    private final TerminalKind kind;
+    private final long segmentSeq;
+    private final CurrentSegment current;
+
+    private TerminalRecord(int laneId, TerminalKind kind, long segmentSeq,
+        CurrentSegment current) {
+      this.laneId = laneId;
+      this.kind = kind;
+      this.segmentSeq = segmentSeq;
+      this.current = current;
+    }
+
+    private static TerminalRecord current(CurrentSegment segment) {
+      return new TerminalRecord(segment.getLaneId(), TerminalKind.CURRENT,
+          segment.getSegmentSeq(), segment);
+    }
+
+    private static TerminalRecord sealed(int laneId, long segmentSeq) {
+      return new TerminalRecord(laneId, TerminalKind.SEALED, segmentSeq, null);
+    }
+  }
+
   static final class Generation {
     private final long generation;
     private final byte[] previousDigest;
     private final long segmentTargetBytes;
     private final List<CurrentSegment> current;
     private final List<SealedSegment> sealed;
+    private final List<Terminal> terminals;
+    private final int flags;
     private final byte[] digest;
 
     private Generation(long generation, byte[] previousDigest, long segmentTargetBytes,
         List<CurrentSegment> current, List<SealedSegment> sealed, byte[] digest) {
+      this(generation, previousDigest, segmentTargetBytes, current, sealed,
+          currentTerminals(current), 0, digest);
+    }
+
+    private Generation(long generation, byte[] previousDigest, long segmentTargetBytes,
+        List<CurrentSegment> current, List<SealedSegment> sealed, List<Terminal> terminals,
+        int flags, byte[] digest) {
       this.generation = generation;
       this.previousDigest = Arrays.copyOf(Objects.requireNonNull(previousDigest), 32);
       this.segmentTargetBytes = segmentTargetBytes;
       this.current = sortedCurrent(current);
       this.sealed = sortedSealed(sealed);
+      this.terminals = sortedTerminals(terminals);
+      this.flags = flags;
       this.digest = digest == null ? null : Arrays.copyOf(digest, digest.length);
       validate();
     }
 
+    private boolean isTerminalAware() {
+      return (flags & TERMINAL_AWARE_FLAG) != 0;
+    }
+
     private void validate() {
+      require((flags & ~KNOWN_GENERATION_FLAGS) == 0,
+          "Catalog generation flags mismatch");
       require(previousDigest.length == 32 && (digest == null || digest.length == 32),
           "Catalog digest length mismatch");
       int[] expected = StateArchiveFileFormatV3.fiveLaneIds();
-      require(current.isEmpty() || current.size() == expected.length,
-          "Catalog must contain zero or five current lanes");
-      require(!current.isEmpty() || sealed.isEmpty(),
-          "Catalog cannot omit current lanes after sealed history");
-      for (int index = 0; index < expected.length; index++) {
-        require(current.isEmpty() || current.get(index).getLaneId() == expected[index],
-            "Catalog current lane set mismatch");
+      if (!isTerminalAware()) {
+        require(current.isEmpty() || current.size() == expected.length,
+            "Catalog must contain zero or five current lanes");
+        require(!current.isEmpty() || sealed.isEmpty(),
+            "Catalog cannot omit current lanes after sealed history");
+        for (int index = 0; index < expected.length; index++) {
+          require(current.isEmpty() || current.get(index).getLaneId() == expected[index],
+              "Catalog current lane set mismatch");
+        }
+        validateLegacyTerminals();
+      } else {
+        require(terminals.isEmpty()
+                || terminals.size() == StateArchiveFileFormatV3.fiveLaneIds().length,
+            "Catalog terminal set must be empty or complete");
+        require(current.size() <= expected.length,
+            "Catalog current terminal count is invalid");
+        int previousCurrentLane = -1;
+        for (CurrentSegment segment : current) {
+          require(segment.getLaneId() != previousCurrentLane,
+              "Catalog current lane is duplicated");
+          previousCurrentLane = segment.getLaneId();
+        }
       }
+      validateSealedSequence();
+      validateCurrentSequence();
+      if (isTerminalAware() && (!current.isEmpty() || !sealed.isEmpty())) {
+        require(terminals.size() == expected.length,
+            "Catalog non-empty terminal set is incomplete");
+      }
+      if (isTerminalAware()) {
+        validateTerminals();
+      }
+    }
+
+    private void validateSealedSequence() {
       int previousLane = -1;
       long previousSequence = -1;
       long previousLast = -1;
@@ -423,22 +691,89 @@ final class StateArchiveHistoryCatalogV3 {
         previousSequence = segment.getSegmentSeq();
         previousLast = segment.getLastBlock();
       }
+    }
+
+    private void validateCurrentSequence() {
       for (CurrentSegment segment : current) {
-        long lastSequence = -1;
-        long lastBlock = -1;
-        for (SealedSegment sealedSegment : sealed) {
-          if (sealedSegment.getLaneId() == segment.getLaneId()) {
-            lastSequence = sealedSegment.getSegmentSeq();
-            lastBlock = sealedSegment.getLastBlock();
-          }
-        }
+        SealedSegment last = finalSealed(sealed, segment.getLaneId());
+        long lastSequence = last == null ? -1 : last.getSegmentSeq();
         require(segment.getSegmentSeq() == lastSequence + 1,
             "Catalog current sequence does not follow sealed segments");
-        if (lastBlock >= 0) {
-          require(segment.getFirstBlock() == lastBlock + 1,
+        if (last != null) {
+          require(segment.getFirstBlock() == last.getLastBlock() + 1,
               "Catalog current block range does not follow sealed segments");
         }
       }
+    }
+
+    private void validateTerminals() {
+      int previousLane = -1;
+      int currentTerminalCount = 0;
+      long logicalHead = -1;
+      for (Terminal terminal : terminals) {
+        require(terminal.laneId != previousLane,
+            "Catalog terminal lane is duplicated");
+        previousLane = terminal.laneId;
+        if (terminal.kind == TerminalKind.CURRENT) {
+          currentTerminalCount++;
+          CurrentSegment same = findCurrent(terminal.laneId);
+          require(same != null && Arrays.equals(encodeCurrentRecord(same),
+              encodeCurrentRecord(terminal.current)),
+              "Catalog current terminal mismatch");
+          requireLogicalHead(terminal.current.getCurrentLastBlock(), logicalHead);
+          logicalHead = terminal.current.getCurrentLastBlock();
+        } else {
+          SealedSegment finalSegment = finalSealed(sealed, terminal.laneId);
+          require(finalSegment != null && Arrays.equals(
+              StateArchiveSegmentFormatV3.encodeSealedMapRecord(finalSegment),
+              StateArchiveSegmentFormatV3.encodeSealedMapRecord(terminal.sealed)),
+              "Catalog sealed terminal mismatch");
+          requireLogicalHead(terminal.sealed.getLastBlock(), logicalHead);
+          logicalHead = terminal.sealed.getLastBlock();
+        }
+      }
+      require(currentTerminalCount == current.size(),
+          "Catalog current terminal projection is not bijective");
+      for (CurrentSegment segment : current) {
+        Terminal terminal = findTerminal(segment.getLaneId());
+        require(terminal != null && terminal.kind == TerminalKind.CURRENT,
+            "Catalog current segment is not terminal");
+      }
+    }
+
+    private static void requireLogicalHead(long head, long expected) {
+      require(expected < 0 || head == expected,
+          "Catalog terminal logical heads do not agree");
+    }
+
+    private void validateLegacyTerminals() {
+      List<Terminal> expected = currentTerminals(current);
+      require(terminals.size() == expected.size(), "Catalog legacy terminals mismatch");
+      for (int index = 0; index < expected.size(); index++) {
+        require(terminals.get(index).kind == TerminalKind.CURRENT
+                && terminals.get(index).laneId == expected.get(index).laneId
+                && Arrays.equals(encodeCurrentRecord(terminals.get(index).current),
+                    encodeCurrentRecord(expected.get(index).current)),
+            "Catalog legacy terminals mismatch");
+      }
+    }
+
+    private CurrentSegment findCurrent(int laneId) {
+      for (CurrentSegment segment : current) {
+        if (segment.getLaneId() == laneId) {
+          return segment;
+        }
+      }
+      return null;
+    }
+
+    private Terminal findTerminal(int laneId) {
+      for (Terminal terminal : terminals) {
+        if (terminal.laneId == laneId) {
+          return terminal;
+        }
+      }
+      return null;
     }
 
     long getGeneration() {
@@ -453,14 +788,44 @@ final class StateArchiveHistoryCatalogV3 {
       return sealed;
     }
 
+    List<Terminal> getTerminals() {
+      return terminals;
+    }
+
+    Terminal terminalForLane(int laneId) {
+      Terminal terminal = findTerminal(laneId);
+      if (terminal == null) {
+        throw new IllegalArgumentException("Catalog terminal lane is missing");
+      }
+      return terminal;
+    }
+
+    boolean sameSnapshot(Generation other) {
+      return other != null && digest != null && Arrays.equals(digest, other.digest);
+    }
+
     byte[] getDigest() {
-      return Arrays.copyOf(digest, digest.length);
+      return digest == null ? null : Arrays.copyOf(digest, digest.length);
     }
   }
 
   private static List<CurrentSegment> sortedCurrent(List<CurrentSegment> input) {
     List<CurrentSegment> copy = new ArrayList<>(Objects.requireNonNull(input));
     copy.sort(Comparator.comparingInt(CurrentSegment::getLaneId));
+    return Collections.unmodifiableList(copy);
+  }
+
+  private static List<Terminal> currentTerminals(List<CurrentSegment> current) {
+    List<Terminal> terminals = new ArrayList<>();
+    for (CurrentSegment segment : current) {
+      terminals.add(Terminal.current(segment));
+    }
+    return sortedTerminals(terminals);
+  }
+
+  private static List<Terminal> sortedTerminals(List<Terminal> input) {
+    List<Terminal> copy = new ArrayList<>(Objects.requireNonNull(input));
+    copy.sort(Comparator.comparingInt(Terminal::getLaneId));
     return Collections.unmodifiableList(copy);
   }
 

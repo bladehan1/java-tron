@@ -78,11 +78,10 @@ public final class StateArchiveAppendCheckpointMaterializerV3
       ArchiveDurabilityProof proof = StateArchiveFiveLaneDurabilityProofV3.decode(
           Files.readAllBytes(proofFile));
       if (matches(proof, target)) {
-        // An exactly matching published proof lets normal startup use fast reopen. The
-        // recover/full-scan path remains for actual recovery intents or requests, such as
-        // pending Common WAL or explicit repair.
-        return new StateArchiveFiveLaneSegmentWriterV3(directory, baselineHistoryDigest,
-            compressionId, rotationTargetBytes);
+        // Common is the commit authority. Catalog/physical tails ahead of its exact SAP3 proof
+        // are rolled back with proof-bounded I/O before normal fast reopen.
+        return StateArchiveFiveLaneSegmentWriterV3.openAtPublishedCheckpoint(directory,
+            baselineHistoryDigest, compressionId, rotationTargetBytes, proof);
       }
     }
     return new StateArchiveFiveLaneSegmentWriterV3(directory, baselineHistoryDigest,
