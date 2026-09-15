@@ -2,14 +2,17 @@ package org.tron.core.db2.archive;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
+import static org.junit.Assert.assertTrue;
 
 import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.List;
 import org.bouncycastle.util.encoders.Hex;
 import org.junit.Test;
+import org.tron.core.db2.archive.StateArchiveFiveLaneRecoveryIntentV3.CatalogBinding;
 import org.tron.core.db2.archive.StateArchiveFiveLaneRecoveryIntentV3.Intent;
 import org.tron.core.db2.archive.StateArchiveFiveLaneRecoveryIntentV3.LaneTarget;
 import org.tron.core.db2.archive.StateArchiveFiveLaneRecoveryIntentV3.RecoveryPoint;
@@ -101,6 +104,50 @@ public class StateArchiveFiveLaneRecoveryIntentV3Test {
     assertNull(decoded.getTarget());
     assertEquals(StateArchiveFiveLaneRecoveryIntentV3.SOURCE_PAIR_MISSING,
         decoded.getLanes().get(1).getActionFlags());
+  }
+
+  @Test
+  public void roundTripsOptionalCatalogBindingAndKeepsLegacyIntentUnbound() {
+    CatalogBinding binding = new CatalogBinding(17, hash(117), 18, hash(118));
+    Intent bound = new Intent(hash(90), point(12), point(10), point(11), lanes(), binding);
+    byte[] encoded = StateArchiveFiveLaneRecoveryIntentV3.encode(bound);
+    assertEquals(StateArchiveFiveLaneRecoveryIntentV3.CATALOG_BINDING_PRESENT,
+        Short.toUnsignedInt(ByteBuffer.wrap(encoded).getShort(26)) & 4);
+    assertEquals(17, ByteBuffer.wrap(encoded).getLong(520));
+    assertEquals(18, ByteBuffer.wrap(encoded).getLong(560));
+
+    CatalogBinding decodedBinding = StateArchiveFiveLaneRecoveryIntentV3.decode(encoded)
+        .getCatalogBinding();
+    assertEquals(17, decodedBinding.getSourceGeneration());
+    assertEquals(18, decodedBinding.getTargetGeneration());
+    assertTrue(decodedBinding.matchesSource(17, hash(117)));
+    assertTrue(decodedBinding.matchesTarget(18, hash(118)));
+    assertFalse(decodedBinding.matchesTarget(19, hash(118)));
+
+    assertNull(StateArchiveFiveLaneRecoveryIntentV3.decode(
+        StateArchiveFiveLaneRecoveryIntentV3.encode(intent())).getCatalogBinding());
+  }
+
+  @Test
+  public void rejectsUnknownCatalogIntentFlagsAndBindingCorruption() {
+    byte[] legacy = StateArchiveFiveLaneRecoveryIntentV3.encode(intent());
+    byte[] unknownFlags = legacy.clone();
+    ByteBuffer.wrap(unknownFlags).putShort(26, (short) (1 << 8));
+    assertThrows(IllegalArgumentException.class,
+        () -> StateArchiveFiveLaneRecoveryIntentV3.decode(unknownFlags));
+
+    CatalogBinding binding = new CatalogBinding(17, hash(117), 18, hash(118));
+    byte[] encoded = StateArchiveFiveLaneRecoveryIntentV3.encode(
+        new Intent(hash(90), point(12), point(10), point(11), lanes(), binding));
+    encoded[560] ^= 1;
+    assertThrows(IllegalArgumentException.class,
+        () -> StateArchiveFiveLaneRecoveryIntentV3.decode(encoded));
+    assertThrows(IllegalArgumentException.class,
+        () -> new CatalogBinding(-1, hash(117), 18, hash(118)));
+    assertThrows(IllegalArgumentException.class,
+        () -> new CatalogBinding(17, hash(117), 17, hash(118)));
+    assertThrows(IllegalArgumentException.class,
+        () -> new CatalogBinding(17, hash(117), 19, hash(118)));
   }
 
   private static Intent intent() {

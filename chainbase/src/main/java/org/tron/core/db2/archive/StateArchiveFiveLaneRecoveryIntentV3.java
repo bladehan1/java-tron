@@ -18,13 +18,15 @@ public final class StateArchiveFiveLaneRecoveryIntentV3 {
   public static final int INDEX_REPLACE = 1 << 2;
   public static final int ORIGINAL_INDEX_MISSING = 1 << 3;
   public static final int SOURCE_PAIR_MISSING = 1 << 4;
+  public static final int CATALOG_BINDING_PRESENT = 1 << 2;
   public static final long NO_TARGET_SEGMENT = -1L;
 
   private static final int KNOWN_FLAGS = DATA_TRUNCATE | DELETE_PAIR
       | INDEX_REPLACE | ORIGINAL_INDEX_MISSING | SOURCE_PAIR_MISSING;
   private static final int COMMON_POINT_PRESENT = 1;
   private static final int TARGET_POINT_PRESENT = 1 << 1;
-  private static final int KNOWN_HEADER_FLAGS = COMMON_POINT_PRESENT | TARGET_POINT_PRESENT;
+  private static final int KNOWN_HEADER_FLAGS = COMMON_POINT_PRESENT | TARGET_POINT_PRESENT
+      | CATALOG_BINDING_PRESENT;
   private static final int HEADER_DIGEST_OFFSET = 732;
   private static final int HEADER_CRC_OFFSET = 764;
   private static final int INTENT_DIGEST_OFFSET = 1_568;
@@ -62,7 +64,8 @@ public final class StateArchiveFiveLaneRecoveryIntentV3 {
     bytes.putLong(StateArchiveFileFormatV3.RECOVERY_INTENT_TOTAL_LENGTH);
     bytes.putShort(StateArchiveFileFormatV3.RECOVERY_INTENT_ACTION_SCHEMA_ID);
     int flags = (intent.commonCommitted == null ? 0 : COMMON_POINT_PRESENT)
-        | (intent.target == null ? 0 : TARGET_POINT_PRESENT);
+        | (intent.target == null ? 0 : TARGET_POINT_PRESENT)
+        | (intent.catalogBinding == null ? 0 : CATALOG_BINDING_PRESENT);
     bytes.putShort((short) flags);
     bytes.putInt(0);
     bytes.put(StateArchiveFileFormatV3.compositeFormatDigest());
@@ -72,7 +75,7 @@ public final class StateArchiveFiveLaneRecoveryIntentV3 {
     putPointOrZero(bytes, intent.commonCommitted);
     putPointOrZero(bytes, intent.target);
     bytes.put(recordsDigest);
-    bytes.put(new byte[212]);
+    putCatalogBindingOrZero(bytes, intent.catalogBinding);
     if (bytes.position() != HEADER_DIGEST_OFFSET) {
       throw new IllegalStateException("Invalid State Archive recovery intent header layout");
     }
@@ -128,7 +131,8 @@ public final class StateArchiveFiveLaneRecoveryIntentV3 {
     RecoveryPoint common = readPointOrZero(bytes, (flags & COMMON_POINT_PRESENT) != 0);
     RecoveryPoint target = readPointOrZero(bytes, (flags & TARGET_POINT_PRESENT) != 0);
     byte[] recordsDigest = getBytes(bytes, 32);
-    requireZero(bytes, 212, "intent header reserved bytes");
+    CatalogBinding catalogBinding = (flags & CATALOG_BINDING_PRESENT) != 0
+        ? readCatalogBinding(bytes) : readAbsentCatalogBinding(bytes);
     byte[] headerDigest = getBytes(bytes, 32);
     requireArray(headerDigest, StateArchiveFileFormatV3.sha256(
         StateArchiveFileFormatV3.RECOVERY_INTENT_HEADER_DOMAIN,
@@ -153,7 +157,7 @@ public final class StateArchiveFiveLaneRecoveryIntentV3 {
     }
     requireInt(bytes, StateArchiveFileFormatV3.RECOVERY_INTENT_TRAILER_MAGIC,
         "intent trailer magic");
-    return new Intent(baselineHistoryDigest, authorized, common, target, lanes,
+    return new Intent(baselineHistoryDigest, authorized, common, target, lanes, catalogBinding,
         headerDigest, recordsDigest, intentDigest);
   }
 
@@ -210,6 +214,30 @@ public final class StateArchiveFiveLaneRecoveryIntentV3 {
     } else {
       putPoint(bytes, point);
     }
+  }
+
+  private static void putCatalogBindingOrZero(ByteBuffer bytes, CatalogBinding binding) {
+    if (binding == null) {
+      bytes.put(new byte[212]);
+      return;
+    }
+    bytes.putLong(binding.sourceGeneration).put(binding.sourceDigest);
+    bytes.putLong(binding.targetGeneration).put(binding.targetDigest);
+    bytes.put(new byte[132]);
+  }
+
+  private static CatalogBinding readCatalogBinding(ByteBuffer bytes) {
+    long sourceGeneration = bytes.getLong();
+    byte[] sourceDigest = getBytes(bytes, 32);
+    long targetGeneration = bytes.getLong();
+    byte[] targetDigest = getBytes(bytes, 32);
+    requireZero(bytes, 132, "catalog binding reserved bytes");
+    return new CatalogBinding(sourceGeneration, sourceDigest, targetGeneration, targetDigest);
+  }
+
+  private static CatalogBinding readAbsentCatalogBinding(ByteBuffer bytes) {
+    requireZero(bytes, 212, "intent header reserved bytes");
+    return null;
   }
 
   private static RecoveryPoint readPoint(ByteBuffer bytes) {
@@ -295,6 +323,54 @@ public final class StateArchiveFiveLaneRecoveryIntentV3 {
 
   private static int crc32c(byte[] bytes, int offset, int length) {
     return Hashing.crc32c().hashBytes(bytes, offset, length).asInt();
+  }
+
+  public static final class CatalogBinding {
+    private final long sourceGeneration;
+    private final byte[] sourceDigest;
+    private final long targetGeneration;
+    private final byte[] targetDigest;
+
+    public CatalogBinding(long sourceGeneration, byte[] sourceDigest, long targetGeneration,
+        byte[] targetDigest) {
+      if (sourceGeneration < 0 || targetGeneration < 0) {
+        throw new IllegalArgumentException("Invalid State Archive catalog generation");
+      }
+      this.sourceGeneration = sourceGeneration;
+      this.sourceDigest = requireHash(sourceDigest, "source catalog digest");
+      this.targetGeneration = targetGeneration;
+      this.targetDigest = requireHash(targetDigest, "target catalog digest");
+      boolean noOp = sourceGeneration == targetGeneration
+          && Arrays.equals(this.sourceDigest, this.targetDigest);
+      if (!noOp && (sourceGeneration == Long.MAX_VALUE
+          || targetGeneration != sourceGeneration + 1)) {
+        throw new IllegalArgumentException("Invalid State Archive catalog transition");
+      }
+    }
+
+    public long getSourceGeneration() {
+      return sourceGeneration;
+    }
+
+    public byte[] getSourceDigest() {
+      return Arrays.copyOf(sourceDigest, sourceDigest.length);
+    }
+
+    public long getTargetGeneration() {
+      return targetGeneration;
+    }
+
+    public byte[] getTargetDigest() {
+      return Arrays.copyOf(targetDigest, targetDigest.length);
+    }
+
+    public boolean matchesSource(long generation, byte[] digest) {
+      return sourceGeneration == generation && Arrays.equals(sourceDigest, digest);
+    }
+
+    public boolean matchesTarget(long generation, byte[] digest) {
+      return targetGeneration == generation && Arrays.equals(targetDigest, digest);
+    }
   }
 
   public static final class RecoveryPoint {
@@ -472,6 +548,7 @@ public final class StateArchiveFiveLaneRecoveryIntentV3 {
     private final RecoveryPoint commonCommitted;
     private final RecoveryPoint target;
     private final List<LaneTarget> lanes;
+    private final CatalogBinding catalogBinding;
     private final byte[] headerDigest;
     private final byte[] recordsDigest;
     private final byte[] intentDigest;
@@ -479,12 +556,20 @@ public final class StateArchiveFiveLaneRecoveryIntentV3 {
     public Intent(byte[] baselineHistoryDigest, RecoveryPoint authorizedCeiling,
         RecoveryPoint commonCommitted, RecoveryPoint target, List<LaneTarget> lanes) {
       this(baselineHistoryDigest, authorizedCeiling, commonCommitted, target, lanes,
-          null, null, null);
+          null, null, null, null);
+    }
+
+    public Intent(byte[] baselineHistoryDigest, RecoveryPoint authorizedCeiling,
+        RecoveryPoint commonCommitted, RecoveryPoint target, List<LaneTarget> lanes,
+        CatalogBinding catalogBinding) {
+      this(baselineHistoryDigest, authorizedCeiling, commonCommitted, target, lanes,
+          catalogBinding, null, null, null);
     }
 
     private Intent(byte[] baselineHistoryDigest, RecoveryPoint authorizedCeiling,
         RecoveryPoint commonCommitted, RecoveryPoint target, List<LaneTarget> lanes,
-        byte[] headerDigest, byte[] recordsDigest, byte[] intentDigest) {
+        CatalogBinding catalogBinding, byte[] headerDigest, byte[] recordsDigest,
+        byte[] intentDigest) {
       this.baselineHistoryDigest = requireHash(baselineHistoryDigest,
           "intent baseline history digest");
       this.authorizedCeiling = Objects.requireNonNull(authorizedCeiling,
@@ -493,6 +578,7 @@ public final class StateArchiveFiveLaneRecoveryIntentV3 {
       this.target = target;
       this.lanes = Collections.unmodifiableList(new ArrayList<>(
           Objects.requireNonNull(lanes, "lanes")));
+      this.catalogBinding = catalogBinding;
       this.headerDigest = headerDigest == null ? null
           : requireHash(headerDigest, "intent header digest");
       this.recordsDigest = recordsDigest == null ? null
@@ -554,6 +640,10 @@ public final class StateArchiveFiveLaneRecoveryIntentV3 {
 
     public List<LaneTarget> getLanes() {
       return lanes;
+    }
+
+    public CatalogBinding getCatalogBinding() {
+      return catalogBinding;
     }
 
     public byte[] getHeaderDigest() {

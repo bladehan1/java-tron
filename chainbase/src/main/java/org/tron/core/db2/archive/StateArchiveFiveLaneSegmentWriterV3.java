@@ -26,10 +26,14 @@ import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.db2.archive.StateArchiveFiveLaneBlockCodecV3.DecodedBundle;
 import org.tron.core.db2.archive.StateArchiveFiveLaneBlockCodecV3.EncodedBundle;
 import org.tron.core.db2.archive.StateArchiveFiveLaneBlockCodecV3.EncodedLane;
+import org.tron.core.db2.archive.StateArchiveFiveLaneRecoveryIntentV3.CatalogBinding;
 import org.tron.core.db2.archive.StateArchiveFiveLaneRecoveryIntentV3.Intent;
 import org.tron.core.db2.archive.StateArchiveFiveLaneRecoveryIntentV3.LaneTarget;
 import org.tron.core.db2.archive.StateArchiveFiveLaneRecoveryIntentV3.RecoveryPoint;
 import org.tron.core.db2.archive.StateArchiveHistoryCatalogV3.Generation;
+import org.tron.core.db2.archive.StateArchiveHistoryCatalogV3.PreparedGeneration;
+import org.tron.core.db2.archive.StateArchiveHistoryCatalogV3.Terminal;
+import org.tron.core.db2.archive.StateArchiveHistoryCatalogV3.TerminalKind;
 import org.tron.core.db2.archive.StateArchiveSegmentFormatV3.BlockIndexEntry;
 import org.tron.core.db2.archive.StateArchiveSegmentFormatV3.BlockIndexHeader;
 import org.tron.core.db2.archive.StateArchiveSegmentFormatV3.CurrentSegment;
@@ -92,6 +96,20 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
         RecoveryFaultHook.NONE);
   }
 
+  static StateArchiveFiveLaneSegmentWriterV3 openAtPublishedCheckpoint(Path archiveRoot,
+      byte[] baselineHistoryDigest, short compressionId, long rotationTargetBytes,
+      ArchiveDurabilityProof publishedProof) throws IOException {
+    return openAtPublishedCheckpoint(archiveRoot, baselineHistoryDigest, compressionId,
+        rotationTargetBytes, publishedProof, RecoveryFaultHook.NONE);
+  }
+
+  static StateArchiveFiveLaneSegmentWriterV3 openAtPublishedCheckpoint(Path archiveRoot,
+      byte[] baselineHistoryDigest, short compressionId, long rotationTargetBytes,
+      ArchiveDurabilityProof publishedProof, RecoveryFaultHook faultHook) throws IOException {
+    return new StateArchiveFiveLaneSegmentWriterV3(archiveRoot, baselineHistoryDigest,
+        compressionId, rotationTargetBytes, null, faultHook, publishedProof);
+  }
+
   /** Repairs open tails under complete caller and Common identities. */
   public static StateArchiveFiveLaneSegmentWriterV3 recover(Path archiveRoot,
       byte[] baselineHistoryDigest, short compressionId,
@@ -136,6 +154,14 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
   private StateArchiveFiveLaneSegmentWriterV3(Path archiveRoot,
       byte[] baselineHistoryDigest, short compressionId, long rotationTargetBytes,
       RecoveryRequest recoveryRequest, RecoveryFaultHook faultHook) throws IOException {
+    this(archiveRoot, baselineHistoryDigest, compressionId, rotationTargetBytes,
+        recoveryRequest, faultHook, null);
+  }
+
+  private StateArchiveFiveLaneSegmentWriterV3(Path archiveRoot,
+      byte[] baselineHistoryDigest, short compressionId, long rotationTargetBytes,
+      RecoveryRequest recoveryRequest, RecoveryFaultHook faultHook,
+      ArchiveDurabilityProof publishedProof) throws IOException {
     Objects.requireNonNull(archiveRoot, "archiveRoot");
     this.baselineHistoryDigest = requireHash(baselineHistoryDigest,
         "baseline history digest");
@@ -158,6 +184,8 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
       recoverWithIntent(existingIntent, faultHook);
     } else if (recoveryRequest != null) {
       planAndRecover(recoveryRequest, faultHook);
+    } else if (publishedProof != null) {
+      recoverPublishedCheckpoint(publishedProof, faultHook);
     } else {
       discardUnpublishedTemporaryIntent();
       reopenFast();
@@ -177,8 +205,126 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
     activeRecoveryIntent = StateArchiveFiveLaneRecoveryIntentV3.decode(
         StateArchiveFiveLaneRecoveryIntentV3.encode(intent));
     recoveryFaultHook = Objects.requireNonNull(faultHook, "faultHook");
+    ArchiveDurabilityProof proof = loadPublishedRecoveryProof(activeRecoveryIntent);
+    if (proof != null) {
+      recoverBoundedToPublishedCheckpoint(activeRecoveryIntent, proof);
+      return;
+    }
+    CatalogBinding binding = activeRecoveryIntent.getCatalogBinding();
+    if (binding != null && catalog.isPublished()
+        && binding.matchesTarget(catalog.selected().getGeneration(),
+            catalog.selected().getDigest())) {
+      finishCommittedRecovery(activeRecoveryIntent);
+      return;
+    }
+    requireRecoverySource(activeRecoveryIntent);
     Long target = intent.getTarget() == null ? 0L : intent.getTarget().getBlockNumber();
     reopen(target);
+  }
+
+  private void recoverPublishedCheckpoint(ArchiveDurabilityProof proof,
+      RecoveryFaultHook faultHook) throws IOException {
+    discardUnpublishedTemporaryIntent();
+    recoveryFaultHook = Objects.requireNonNull(faultHook, "faultHook");
+    verifyDurabilityProof(proof);
+    List<LaneTarget> targets = publishedRecoveryTargets(proof);
+    if (targets.stream().noneMatch(StateArchiveFiveLaneSegmentWriterV3::mutates)) {
+      reopenFast();
+      requireSamePoint(recoveryPoint(appendHead, resultHistoryDigest), proof.getTarget(),
+          "published checkpoint");
+      return;
+    }
+    Intent intent = new Intent(baselineHistoryDigest, proof.getTarget(), proof.getTarget(),
+        proof.getTarget(), targets);
+    PreparedGeneration prepared = preparePublishedRecoveryCatalog(proof, intent);
+    intent = bindRecoveryCatalog(intent, prepared);
+    persistIntent(intent);
+    activeRecoveryIntent = loadIntent();
+    recoverBoundedToPublishedCheckpoint(activeRecoveryIntent, proof);
+  }
+
+  private ArchiveDurabilityProof loadPublishedRecoveryProof(Intent intent) throws IOException {
+    if (intent.getTarget() == null || intent.getCommonCommitted() == null) {
+      return null;
+    }
+    Path proofPath = archiveRoot.resolve(StateArchiveFiveLaneDurabilityProofV3.FILE_NAME);
+    if (!Files.isRegularFile(proofPath)) {
+      return null;
+    }
+    ArchiveDurabilityProof proof;
+    try {
+      proof = StateArchiveFiveLaneDurabilityProofV3.decode(Files.readAllBytes(proofPath));
+      requireSamePoint(proof.getTarget(), intent.getTarget(), "published recovery proof");
+      requireSamePoint(intent.getCommonCommitted(), intent.getTarget(),
+          "published recovery Common point");
+      verifyDurabilityProof(proof);
+    } catch (IllegalArgumentException mismatch) {
+      return null;
+    }
+    return proof;
+  }
+
+  private void recoverBoundedToPublishedCheckpoint(Intent original,
+      ArchiveDurabilityProof proof) throws IOException {
+    Intent intent = original;
+    CatalogBinding binding = intent.getCatalogBinding();
+    if (binding != null && catalog.isPublished()
+        && binding.matchesTarget(catalog.selected().getGeneration(),
+            catalog.selected().getDigest())) {
+      finishCommittedRecovery(intent);
+      return;
+    }
+    requireRecoverySource(intent);
+    PreparedGeneration prepared = preparePublishedRecoveryCatalog(proof, intent);
+    intent = bindRecoveryCatalog(intent, prepared);
+    if (original.getCatalogBinding() == null) {
+      persistIntent(intent);
+      intent = loadIntent();
+      activeRecoveryIntent = intent;
+    }
+    verifyPublishedRecoverySources(intent);
+    applyPublishedRecoveryTargets(intent);
+    catalog.publishPrepared(prepared.getSource(), prepared);
+    recoveryFaultHook.after(RecoveryStage.CATALOG_COMMITTED, -1);
+    lanes.clear();
+    sealedSegments.clear();
+    appendHead = null;
+    resultHistoryDigest = Arrays.copyOf(baselineHistoryDigest,
+        baselineHistoryDigest.length);
+    reopenFast();
+    verifyRecoveredIntent(intent);
+    recoveryFaultHook.after(RecoveryStage.TARGET_VERIFIED, -1);
+    clearIntent();
+    activeRecoveryIntent = null;
+  }
+
+  private void requireRecoverySource(Intent intent) throws IOException {
+    CatalogBinding binding = intent.getCatalogBinding();
+    if (binding == null) {
+      return;
+    }
+    if (!catalog.isPublished() || !binding.matchesSource(catalog.selected().getGeneration(),
+        catalog.selected().getDigest())) {
+      throw new IOException("State Archive recovery Catalog source identity differs");
+    }
+  }
+
+  private void finishCommittedRecovery(Intent intent) throws IOException {
+    try {
+      if (loadPublishedRecoveryProof(intent) != null) {
+        reopenFast();
+      } else {
+        // Generic explicit repair may commit its Catalog before any SAP3 proof exists.
+        reopen(null);
+      }
+      verifyRecoveredIntent(intent);
+      recoveryFaultHook.after(RecoveryStage.TARGET_VERIFIED, -1);
+      clearIntent();
+      activeRecoveryIntent = null;
+    } catch (IOException | RuntimeException failure) {
+      closeAfterFailure(failure);
+      throw failure;
+    }
   }
 
   private void requireNoLegacyIntent() {
@@ -962,6 +1108,7 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
     }
     if (recovering) {
       Intent intent = activeRecoveryIntent;
+      PreparedGeneration recoveryCatalog = null;
       if (intent == null && activeRecoveryRequest != null
           && !activeRecoveryRequest.prototype) {
         RecoveryPoint targetPoint = appendHead == null ? null
@@ -996,14 +1143,6 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
             activeRecoveryRequest.authorizedCeiling,
             activeRecoveryRequest.commonCommitted, targetPoint,
               laneTargets);
-          try {
-            persistIntent(intent);
-          } catch (IOException | RuntimeException failure) {
-            closeScannedAfterFailure(scannedSegments, failure);
-            throw failure;
-          }
-          intent = loadIntent();
-          activeRecoveryIntent = intent;
         }
       }
       if (intent != null) {
@@ -1014,6 +1153,19 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
           throw new IllegalArgumentException("State Archive recovery target is unavailable");
         }
         verifyIntentSources(intent, scannedSegments);
+        recoveryCatalog = prepareRecoveryCatalog(intent, scannedSegments, commonHead);
+        intent = bindRecoveryCatalog(intent, recoveryCatalog);
+        if (activeRecoveryIntent == null
+            || activeRecoveryIntent.getCatalogBinding() == null) {
+          try {
+            persistIntent(intent);
+          } catch (IOException | RuntimeException failure) {
+            closeScannedAfterFailure(scannedSegments, failure);
+            throw failure;
+          }
+          intent = loadIntent();
+          activeRecoveryIntent = intent;
+        }
       }
       for (ScannedSegment scanned : scannedSegments) {
         if (scanned.seal != null && scanned.lastBlock > commonHead) {
@@ -1040,13 +1192,15 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
       appendHead = null;
       resultHistoryDigest = Arrays.copyOf(baselineHistoryDigest,
           baselineHistoryDigest.length);
+      if (intent != null) {
+        catalog.publishPrepared(recoveryCatalog.getSource(), recoveryCatalog);
+        recoveryFaultHook.after(RecoveryStage.CATALOG_COMMITTED, -1);
+      }
       reopen(null);
       if (intent != null) {
         try {
           verifyRecoveredIntent(intent);
           recoveryFaultHook.after(RecoveryStage.TARGET_VERIFIED, -1);
-          structuralChanged = true;
-          publishCatalog();
           clearIntent();
           activeRecoveryIntent = null;
         } catch (IOException | RuntimeException failure) {
@@ -1079,7 +1233,7 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
       return;
     }
     Generation generation = catalog.selected();
-    if (generation.getSealed().isEmpty() && generation.getCurrent().isEmpty()) {
+    if (generation.getSealed().isEmpty() && generation.getTerminals().isEmpty()) {
       resultHistoryDigest = Arrays.copyOf(baselineHistoryDigest,
           baselineHistoryDigest.length);
       return;
@@ -1105,15 +1259,28 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
     RecoveryPoint target = proof.getTarget();
     Map<Long, Map<Integer, FrameReference>> tailBundles = new TreeMap<>();
     try {
-      for (CurrentSegment record : generation.getCurrent()) {
-        FileTailProof tail = finalTails.get(record.getLaneId());
-        if (tail == null || tail.getSegmentSeq() > record.getSegmentSeq()) {
+      for (Terminal terminal : generation.getTerminals()) {
+        FileTailProof tail = finalTails.get(terminal.getLaneId());
+        long terminalSequence = terminal.getKind() == TerminalKind.CURRENT
+            ? terminal.getCurrent().getSegmentSeq() : terminal.getSealed().getSegmentSeq();
+        if (tail == null || tail.getSegmentSeq() > terminalSequence) {
           throw new IOException(
-              "State Archive durability proof differs from Catalog current segments");
+              "State Archive durability proof differs from Catalog terminals");
         }
-        LaneState state = openFastLane(record, tail, proof, target,
-            sealedByLane.getOrDefault(record.getLaneId(), Collections.emptyMap()), tailBundles);
-        if (lanes.put(record.getLaneId(), state) != null) {
+        LaneState state;
+        if (terminal.getKind() == TerminalKind.CURRENT) {
+          CurrentSegment record = terminal.getCurrent();
+          state = openFastLane(record, tail, proof, target,
+              sealedByLane.getOrDefault(record.getLaneId(), Collections.emptyMap()), tailBundles);
+        } else {
+          if (terminal.getSealed().getLastBlock() != target.getBlockNumber()
+              || tail.getSegmentSeq() != terminal.getSealed().getSegmentSeq()) {
+            throw new IOException(
+                "State Archive sealed terminal differs from durability proof");
+          }
+          state = openFastSuccessor(terminal.getSealed(), tailBundles);
+        }
+        if (state != null && lanes.put(terminal.getLaneId(), state) != null) {
           throw new IOException("Multiple open State Archive lane segments");
         }
       }
@@ -1139,6 +1306,37 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
     lastDurabilityProof = proof;
     lastDurabilityProofRecovered = true;
     validateCatalogSelection();
+  }
+
+  private LaneState openFastSuccessor(SealedSegment terminal,
+      Map<Long, Map<Integer, FrameReference>> bundles) throws IOException {
+    long sequence = terminal.getSegmentSeq() + 1;
+    Path data = dataPath(terminal.getLaneId(), sequence);
+    Path index = indexPath(terminal.getLaneId(), sequence);
+    if (!Files.exists(data) && !Files.exists(index)) {
+      return null;
+    }
+    if (!Files.isRegularFile(data) || !Files.isRegularFile(index)) {
+      throw new IOException("State Archive partial successor pair is incomplete");
+    }
+    ScannedSegment scanned;
+    try {
+      scanned = scanSegment(data, new ParsedName(terminal.getLaneId(), sequence), bundles, false);
+    } catch (IllegalArgumentException invalid) {
+      throw new IOException("State Archive partial successor is not verifiable", invalid);
+    }
+    try {
+      if (scanned.seal != null || scanned.lastMarker != null
+          || scanned.firstBlock != terminal.getLastBlock() + 1
+          || !Arrays.equals(scanned.header.getPreviousSegmentDigest(),
+              previousChainDigest(terminal.getLaneId(), terminal.getSegmentSeq()))) {
+        throw new IOException("State Archive partial successor identity mismatch");
+      }
+      return scanned.openState();
+    } catch (IOException | RuntimeException failure) {
+      scanned.close();
+      throw failure;
+    }
   }
 
   private ArchiveDurabilityProof loadProofForFastReopen() throws IOException {
@@ -1701,6 +1899,377 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
     return targets;
   }
 
+  private PreparedGeneration prepareRecoveryCatalog(Intent intent,
+      List<ScannedSegment> scannedSegments, long commonHead) throws IOException {
+    if (!catalog.isPublished()) {
+      throw new IOException("State Archive recovery Catalog source is missing");
+    }
+    Map<Integer, LaneTarget> targets = intent.getLanes().stream().collect(
+        Collectors.toMap(LaneTarget::getLaneId, target -> target));
+    List<CurrentSegment> current = new ArrayList<>();
+    for (ScannedSegment scanned : scannedSegments) {
+      if (scanned.seal != null) {
+        continue;
+      }
+      LaneTarget target = targets.get(scanned.header.getLaneId());
+      if (target == null
+          || (target.getActionFlags() & StateArchiveFiveLaneRecoveryIntentV3.DELETE_PAIR) != 0) {
+        continue;
+      }
+      CurrentSegment projected = scanned.targetCurrent(commonHead);
+      if (projected.getSegmentSeq() != target.getTargetSegmentSeq()
+          || projected.getDataEndOffset() != target.getTargetDataEnd()) {
+        throw new IOException("State Archive recovery Catalog target differs from intent");
+      }
+      current.add(projected);
+    }
+    List<SealedSegment> sealed = new ArrayList<>(sealedSegments);
+    List<Terminal> terminals = recoveryTerminals(intent.getTarget(), current, sealed);
+    return catalog.prepare(rotationTargetBytes, current, sealed, terminals);
+  }
+
+  private List<Terminal> recoveryTerminals(RecoveryPoint target,
+      List<CurrentSegment> current, List<SealedSegment> sealed) throws IOException {
+    if (target == null) {
+      if (!current.isEmpty() || !sealed.isEmpty()) {
+        throw new IOException("State Archive baseline recovery retained Catalog history");
+      }
+      return Collections.emptyList();
+    }
+    List<Terminal> terminals = new ArrayList<>();
+    for (int laneId : StateArchiveFileFormatV3.fiveLaneIds()) {
+      CurrentSegment currentTerminal = current.stream()
+          .filter(segment -> segment.getLaneId() == laneId).findFirst().orElse(null);
+      if (currentTerminal != null) {
+        if (currentTerminal.getCurrentLastBlock() != target.getBlockNumber()) {
+          throw new IOException("State Archive recovery current terminal head differs");
+        }
+        terminals.add(Terminal.current(currentTerminal));
+        continue;
+      }
+      SealedSegment sealedTerminal = sealed.stream()
+          .filter(segment -> segment.getLaneId() == laneId)
+          .max(Comparator.comparingLong(SealedSegment::getSegmentSeq)).orElse(null);
+      if (sealedTerminal == null
+          || sealedTerminal.getLastBlock() != target.getBlockNumber()) {
+        throw new IOException("State Archive recovery sealed terminal head differs");
+      }
+      terminals.add(Terminal.sealed(sealedTerminal));
+    }
+    return terminals;
+  }
+
+  private List<LaneTarget> publishedRecoveryTargets(ArchiveDurabilityProof proof)
+      throws IOException {
+    if (!catalog.isPublished()) {
+      throw new IOException("State Archive published checkpoint Catalog is missing");
+    }
+    Map<Integer, FileTailProof> tails = finalProofTails(proof);
+    List<LaneTarget> targets = new ArrayList<>();
+    for (int laneId : StateArchiveFileFormatV3.fiveLaneIds()) {
+      Terminal terminal = catalog.selected().terminalForLane(laneId);
+      FileTailProof tail = tails.get(laneId);
+      if (tail == null) {
+        throw new IOException("State Archive published checkpoint lane proof is missing");
+      }
+      CurrentSegment sourceCurrent = terminal.getKind() == TerminalKind.CURRENT
+          ? terminal.getCurrent() : null;
+      boolean deleteSuccessor = sourceCurrent != null
+          && sourceCurrent.getSegmentSeq() == tail.getSegmentSeq() + 1;
+      if (terminal.getKind() == TerminalKind.SEALED) {
+        SealedSegment sealed = terminal.getSealed();
+        if (sealed.getSegmentSeq() != tail.getSegmentSeq()
+            || sealed.getLastBlock() != proof.getTarget().getBlockNumber()) {
+          throw new IOException("State Archive sealed terminal differs from checkpoint");
+        }
+        Path successorData = dataPath(laneId, tail.getSegmentSeq() + 1);
+        Path successorIndex = indexPath(laneId, tail.getSegmentSeq() + 1);
+        if (Files.exists(successorData) != Files.exists(successorIndex)) {
+          throw new IOException("State Archive partial successor pair is incomplete");
+        }
+        deleteSuccessor = Files.isRegularFile(successorData)
+            && Files.isRegularFile(successorIndex);
+      }
+      if (sourceCurrent != null && sourceCurrent.getSegmentSeq() != tail.getSegmentSeq()
+          && !deleteSuccessor) {
+        throw new IOException("State Archive Catalog is not adjacent to published checkpoint");
+      }
+      long sourceSequence = deleteSuccessor ? tail.getSegmentSeq() + 1 : tail.getSegmentSeq();
+      Path dataPath = dataPath(laneId, sourceSequence);
+      Path indexPath = indexPath(laneId, sourceSequence);
+      if (!Files.isRegularFile(dataPath) || !Files.isRegularFile(indexPath)) {
+        if (deleteSuccessor && !Files.exists(dataPath) && !Files.exists(indexPath)) {
+          throw new IOException("State Archive published checkpoint successor disappeared");
+        }
+        throw new IOException("State Archive published checkpoint source pair is missing");
+      }
+      try (FileChannel data = FileChannel.open(dataPath, StandardOpenOption.READ);
+          FileChannel index = FileChannel.open(indexPath, StandardOpenOption.READ)) {
+        SegmentHeader header = StateArchiveSegmentFormatV3.decodeHeader(readExact(data, 0,
+            StateArchiveFileFormatV3.PART_HEADER_LENGTH));
+        if (header.getLaneId() != laneId || header.getSegmentSeq() != sourceSequence) {
+          throw new IOException("State Archive published checkpoint source identity differs");
+        }
+        long originalDataEnd = data.size();
+        long originalIndexEnd = index.size();
+        if (deleteSuccessor) {
+          targets.add(new LaneTarget(laneId,
+              StateArchiveFiveLaneRecoveryIntentV3.DELETE_PAIR, sourceSequence,
+              originalDataEnd, originalIndexEnd,
+              StateArchiveFiveLaneRecoveryIntentV3.NO_TARGET_SEGMENT, 0, 0,
+              header.getHeaderDigest(), new byte[32], new byte[32]));
+          continue;
+        }
+        if (terminal.getKind() == TerminalKind.SEALED) {
+          targets.add(new LaneTarget(laneId, 0, sourceSequence,
+              originalDataEnd, originalIndexEnd, sourceSequence, originalDataEnd,
+              originalIndexEnd, header.getHeaderDigest(),
+              digestFilePrefix(StateArchiveFileFormatV3.RECOVERY_DATA_PREFIX_DOMAIN,
+                  data, originalDataEnd),
+              digestFilePrefix(StateArchiveFileFormatV3.RECOVERY_INDEX_FILE_DOMAIN,
+                  index, originalIndexEnd)));
+          continue;
+        }
+        long firstBlock = terminalFirstBlockAtProof(terminal, tail);
+        long blockCount = proof.getTarget().getBlockNumber() - firstBlock + 1;
+        long targetIndexEnd = StateArchiveFileFormatV3.BLOCK_INDEX_HEADER_LENGTH
+            + StrictMathWrapper.multiplyExact(blockCount,
+                StateArchiveFileFormatV3.BLOCK_INDEX_ENTRY_LENGTH);
+        long targetDataEnd = tail.getMarkerEndOffset();
+        if (blockCount <= 0 || targetDataEnd > originalDataEnd
+            || targetIndexEnd > originalIndexEnd) {
+          throw new IOException("State Archive published checkpoint target is outside source");
+        }
+        validatePublishedIndexPrefix(index, header, firstBlock, blockCount, targetDataEnd);
+        int flags = targetDataEnd < originalDataEnd
+            ? StateArchiveFiveLaneRecoveryIntentV3.DATA_TRUNCATE : 0;
+        if (targetIndexEnd != originalIndexEnd) {
+          flags |= StateArchiveFiveLaneRecoveryIntentV3.INDEX_REPLACE;
+        }
+        targets.add(new LaneTarget(laneId, flags, sourceSequence,
+            originalDataEnd, originalIndexEnd, sourceSequence, targetDataEnd,
+            targetIndexEnd, header.getHeaderDigest(),
+            digestFilePrefix(StateArchiveFileFormatV3.RECOVERY_DATA_PREFIX_DOMAIN,
+                data, targetDataEnd),
+            digestFilePrefix(StateArchiveFileFormatV3.RECOVERY_INDEX_FILE_DOMAIN,
+                index, targetIndexEnd)));
+      }
+    }
+    return targets;
+  }
+
+  private PreparedGeneration preparePublishedRecoveryCatalog(ArchiveDurabilityProof proof,
+      Intent intent) throws IOException {
+    Map<Integer, FileTailProof> tails = finalProofTails(proof);
+    Map<Integer, LaneTarget> targets = intent.getLanes().stream().collect(
+        Collectors.toMap(LaneTarget::getLaneId, target -> target));
+    List<CurrentSegment> current = new ArrayList<>();
+    List<Terminal> terminals = new ArrayList<>();
+    for (int laneId : StateArchiveFileFormatV3.fiveLaneIds()) {
+      FileTailProof tail = tails.get(laneId);
+      LaneTarget target = targets.get(laneId);
+      SealedSegment sealed = catalog.selected().getSealed().stream()
+          .filter(segment -> segment.getLaneId() == laneId
+              && segment.getSegmentSeq() == tail.getSegmentSeq())
+          .findFirst().orElse(null);
+      if (sealed != null) {
+        if (sealed.getLastBlock() != proof.getTarget().getBlockNumber()) {
+          throw new IOException("State Archive published checkpoint sealed terminal differs");
+        }
+        terminals.add(Terminal.sealed(sealed));
+        continue;
+      }
+      Terminal source = catalog.selected().terminalForLane(laneId);
+      if (source.getKind() != TerminalKind.CURRENT
+          || source.getCurrent().getSegmentSeq() != tail.getSegmentSeq()
+          || target.getTargetSegmentSeq() != tail.getSegmentSeq()) {
+        throw new IOException("State Archive published checkpoint current terminal differs");
+      }
+      long count = proof.getTarget().getBlockNumber()
+          - source.getCurrent().getFirstBlock() + 1;
+      CurrentSegment projected = new CurrentSegment(laneId, tail.getSegmentSeq(),
+          source.getCurrent().getFirstBlock(), proof.getTarget().getBlockNumber(),
+          target.getTargetDataEnd(), count, source.getCurrent().getHeaderDigest());
+      current.add(projected);
+      terminals.add(Terminal.current(projected));
+    }
+    for (SealedSegment sealed : catalog.selected().getSealed()) {
+      FileTailProof tail = tails.get(sealed.getLaneId());
+      if (tail == null || sealed.getSegmentSeq() > tail.getSegmentSeq()) {
+        throw new IOException("State Archive Catalog has sealed history beyond checkpoint");
+      }
+    }
+    return catalog.prepare(rotationTargetBytes, current,
+        catalog.selected().getSealed(), terminals);
+  }
+
+  private static Map<Integer, FileTailProof> finalProofTails(ArchiveDurabilityProof proof) {
+    Map<Integer, FileTailProof> tails = new HashMap<>();
+    for (FileTailProof tail : proof.getFileTails()) {
+      FileTailProof previous = tails.get(tail.getLaneId());
+      if (previous == null || tail.getSegmentSeq() > previous.getSegmentSeq()
+          || tail.getSegmentSeq() == previous.getSegmentSeq()
+              && tail.getMarkerEndOffset() > previous.getMarkerEndOffset()) {
+        tails.put(tail.getLaneId(), tail);
+      }
+    }
+    return tails;
+  }
+
+  private long terminalFirstBlockAtProof(Terminal terminal, FileTailProof tail)
+      throws IOException {
+    if (terminal.getKind() == TerminalKind.CURRENT
+        && terminal.getCurrent().getSegmentSeq() == tail.getSegmentSeq()) {
+      return terminal.getCurrent().getFirstBlock();
+    }
+    SealedSegment sealed = catalog.selected().getSealed().stream()
+        .filter(segment -> segment.getLaneId() == tail.getLaneId()
+            && segment.getSegmentSeq() == tail.getSegmentSeq())
+        .findFirst().orElse(null);
+    if (sealed == null) {
+      throw new IOException("State Archive published checkpoint segment is not in Catalog");
+    }
+    return sealed.getFirstBlock();
+  }
+
+  private void validatePublishedIndexPrefix(FileChannel index, SegmentHeader header,
+      long firstBlock, long blockCount, long targetDataEnd) throws IOException {
+    BlockIndexHeader indexHeader = StateArchiveSegmentFormatV3.decodeBlockIndexHeader(
+        readExact(index, 0, StateArchiveFileFormatV3.BLOCK_INDEX_HEADER_LENGTH));
+    if (indexHeader.getLaneId() != header.getLaneId()
+        || indexHeader.getSegmentSeq() != header.getSegmentSeq()
+        || !Arrays.equals(indexHeader.getDataSegmentHeaderDigest(), header.getHeaderDigest())) {
+      throw new IOException("State Archive published checkpoint index identity differs");
+    }
+    for (long position = 0; position < blockCount; position++) {
+      BlockIndexEntry entry = StateArchiveSegmentFormatV3.decodeBlockIndexEntry(readExact(index,
+          StateArchiveFileFormatV3.BLOCK_INDEX_HEADER_LENGTH
+              + position * StateArchiveFileFormatV3.BLOCK_INDEX_ENTRY_LENGTH,
+          StateArchiveFileFormatV3.BLOCK_INDEX_ENTRY_LENGTH));
+      if (entry.getBlockNumber() != firstBlock + position
+          || entry.getFrameOffset() > targetDataEnd - entry.getFrameLength()) {
+        throw new IOException("State Archive published checkpoint index prefix differs");
+      }
+    }
+  }
+
+  private void verifyPublishedRecoverySources(Intent intent) throws IOException {
+    for (LaneTarget target : intent.getLanes()) {
+      Path dataPath = dataPath(target.getLaneId(), target.getSourceSegmentSeq());
+      Path indexPath = indexPath(target.getLaneId(), target.getSourceSegmentSeq());
+      boolean deleting = (target.getActionFlags()
+          & StateArchiveFiveLaneRecoveryIntentV3.DELETE_PAIR) != 0;
+      if (deleting && !Files.exists(dataPath) && !Files.exists(indexPath)) {
+        continue;
+      }
+      if (deleting && Files.isRegularFile(dataPath) && !Files.exists(indexPath)) {
+        try (FileChannel data = FileChannel.open(dataPath, StandardOpenOption.READ)) {
+          SegmentHeader header = StateArchiveSegmentFormatV3.decodeHeader(readExact(data, 0,
+              StateArchiveFileFormatV3.PART_HEADER_LENGTH));
+          if (data.size() != target.getOriginalDataEnd()
+              || !Arrays.equals(header.getHeaderDigest(),
+                  target.getSourceSegmentHeaderDigest())) {
+            throw new IOException("State Archive published recovery delete source drifted");
+          }
+        }
+        continue;
+      }
+      if (!Files.isRegularFile(dataPath) || !Files.isRegularFile(indexPath)) {
+        throw new IOException("State Archive published recovery source pair is incomplete");
+      }
+      try (FileChannel data = FileChannel.open(dataPath, StandardOpenOption.READ);
+          FileChannel index = FileChannel.open(indexPath, StandardOpenOption.READ)) {
+        SegmentHeader header = StateArchiveSegmentFormatV3.decodeHeader(readExact(data, 0,
+            StateArchiveFileFormatV3.PART_HEADER_LENGTH));
+        long dataSize = data.size();
+        long indexSize = index.size();
+        boolean sizesMatch = (dataSize == target.getOriginalDataEnd()
+            || !deleting && dataSize == target.getTargetDataEnd())
+            && (indexSize == target.getOriginalIndexEnd()
+                || !deleting && indexSize == target.getTargetIndexEnd());
+        if (!sizesMatch || !Arrays.equals(header.getHeaderDigest(),
+            target.getSourceSegmentHeaderDigest())) {
+          throw new IOException("State Archive published recovery source drifted");
+        }
+        if (!deleting && (!Arrays.equals(digestFilePrefix(
+            StateArchiveFileFormatV3.RECOVERY_DATA_PREFIX_DOMAIN, data,
+            target.getTargetDataEnd()), target.getTargetDataPrefixDigest())
+            || !Arrays.equals(digestFilePrefix(
+                StateArchiveFileFormatV3.RECOVERY_INDEX_FILE_DOMAIN, index,
+                target.getTargetIndexEnd()), target.getTargetIndexFileDigest()))) {
+          throw new IOException("State Archive published recovery target prefix drifted");
+        }
+      }
+    }
+  }
+
+  private void applyPublishedRecoveryTargets(Intent intent) throws IOException {
+    for (LaneTarget target : intent.getLanes()) {
+      Path dataPath = dataPath(target.getLaneId(), target.getSourceSegmentSeq());
+      Path indexPath = indexPath(target.getLaneId(), target.getSourceSegmentSeq());
+      if ((target.getActionFlags() & StateArchiveFiveLaneRecoveryIntentV3.DELETE_PAIR) != 0) {
+        if (Files.exists(manifestPath(target.getLaneId(), target.getSourceSegmentSeq()))) {
+          throw new IOException("State Archive recovery successor unexpectedly has a manifest");
+        }
+        Files.deleteIfExists(indexPath);
+        recoveryFaultHook.after(RecoveryStage.LANE_INDEX_APPLIED, target.getLaneId());
+        Files.deleteIfExists(dataPath);
+        syncDirectory(dataPath.getParent());
+        recoveryFaultHook.after(RecoveryStage.LANE_DATA_APPLIED, target.getLaneId());
+        continue;
+      }
+      try (FileChannel data = FileChannel.open(dataPath,
+          StandardOpenOption.READ, StandardOpenOption.WRITE)) {
+        if (data.size() != target.getTargetDataEnd()) {
+          data.truncate(target.getTargetDataEnd());
+          data.force(false);
+          recoveryFaultHook.after(RecoveryStage.LANE_DATA_APPLIED, target.getLaneId());
+        }
+      }
+      byte[] targetIndex;
+      try (FileChannel index = FileChannel.open(indexPath, StandardOpenOption.READ)) {
+        targetIndex = readExact(index, 0, StrictMathWrapper.toIntExact(
+            target.getTargetIndexEnd()));
+      }
+      if (!Arrays.equals(StateArchiveFiveLaneRecoveryIntentV3.indexFileDigest(targetIndex),
+          target.getTargetIndexFileDigest())) {
+        throw new IOException("State Archive recovery index target differs");
+      }
+      if (Files.size(indexPath) != target.getTargetIndexEnd()) {
+        Path temporary = indexPath.resolveSibling(indexPath.getFileName() + ".recovery.tmp");
+        try (FileChannel replacement = FileChannel.open(temporary, StandardOpenOption.CREATE,
+            StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE)) {
+          writeFully(replacement, ByteBuffer.wrap(targetIndex));
+          replacement.force(true);
+        }
+        try {
+          Files.move(temporary, indexPath, StandardCopyOption.ATOMIC_MOVE,
+              StandardCopyOption.REPLACE_EXISTING);
+        } catch (AtomicMoveNotSupportedException unsupported) {
+          throw new IOException("State Archive index recovery requires atomic move", unsupported);
+        }
+        syncDirectory(indexPath.getParent());
+        recoveryFaultHook.after(RecoveryStage.LANE_INDEX_APPLIED, target.getLaneId());
+      }
+    }
+  }
+
+  private Intent bindRecoveryCatalog(Intent intent, PreparedGeneration prepared)
+      throws IOException {
+    CatalogBinding expected = new CatalogBinding(prepared.getSource().getGeneration(),
+        prepared.getSource().getDigest(), prepared.getGeneration(), prepared.getDigest());
+    CatalogBinding actual = intent.getCatalogBinding();
+    if (actual != null) {
+      if (!actual.matchesSource(expected.getSourceGeneration(), expected.getSourceDigest())
+          || !actual.matchesTarget(expected.getTargetGeneration(), expected.getTargetDigest())) {
+        throw new IOException("State Archive recovery Catalog binding differs");
+      }
+      return intent;
+    }
+    return new Intent(intent.getBaselineHistoryDigest(), intent.getAuthorizedCeiling(),
+        intent.getCommonCommitted(), intent.getTarget(), intent.getLanes(), expected);
+  }
+
   private static LaneTarget missingLaneTarget(int laneId) {
     byte[] zero = new byte[StateArchiveFileFormatV3.HASH_LENGTH];
     return new LaneTarget(laneId, StateArchiveFiveLaneRecoveryIntentV3.SOURCE_PAIR_MISSING,
@@ -2105,6 +2674,16 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
           selected.add(successor);
         }
       }
+      for (Terminal terminal : catalog.selected().getTerminals()) {
+        if (terminal.getKind() != TerminalKind.SEALED) {
+          continue;
+        }
+        Path successor = dataPath(terminal.getLaneId(),
+            terminal.getSealed().getSegmentSeq() + 1);
+        if (Files.isRegularFile(successor)) {
+          selected.add(successor);
+        }
+      }
       for (Path path : selected) {
         if (!Files.isRegularFile(path)) {
           if (!recovering) {
@@ -2132,8 +2711,33 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
 
   private void publishCatalog() throws IOException {
     servingSegments = null;
-    catalog.publish(rotationTargetBytes, getCurrentSegments(), getSealedSegments());
+    catalog.publish(rotationTargetBytes, getCurrentSegments(), getSealedSegments(),
+        catalogTerminals());
     structuralChanged = false;
+  }
+
+  private List<Terminal> catalogTerminals() throws IOException {
+    List<CurrentSegment> current = getCurrentSegments();
+    if (current.isEmpty() && sealedSegments.isEmpty()) {
+      return Collections.emptyList();
+    }
+    List<Terminal> terminals = new ArrayList<>();
+    for (int laneId : StateArchiveFileFormatV3.fiveLaneIds()) {
+      CurrentSegment currentTerminal = current.stream()
+          .filter(segment -> segment.getLaneId() == laneId).findFirst().orElse(null);
+      if (currentTerminal != null) {
+        terminals.add(Terminal.current(currentTerminal));
+        continue;
+      }
+      SealedSegment sealedTerminal = sealedSegments.stream()
+          .filter(segment -> segment.getLaneId() == laneId)
+          .max(Comparator.comparingLong(SealedSegment::getSegmentSeq)).orElse(null);
+      if (sealedTerminal == null) {
+        throw new IOException("State Archive Catalog terminal lane is missing");
+      }
+      terminals.add(Terminal.sealed(sealedTerminal));
+    }
+    return terminals;
   }
 
   private boolean isCatalogSelectedCurrent(ParsedName name) {
@@ -2192,9 +2796,50 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
         throw new IOException("State Archive Catalog rotation successor is discontinuous");
       }
     }
-    if (actualCurrent.size() == StateArchiveFileFormatV3.fiveLaneIds().length
-        && sealedSegments.size() > expectedSealed.size()) {
-      structuralChanged = true;
+    for (Terminal terminal : catalog.selected().getTerminals()) {
+      if (terminal.getKind() != TerminalKind.SEALED) {
+        continue;
+      }
+      SealedSegment expected = terminal.getSealed();
+      SealedSegment actual = actualSealed.getOrDefault(expected.getLaneId(),
+          Collections.emptyMap()).get(expected.getSegmentSeq());
+      if (actual == null || !Arrays.equals(StateArchiveSegmentFormatV3.encodeSealedMapRecord(
+          expected), StateArchiveSegmentFormatV3.encodeSealedMapRecord(actual))) {
+        throw new IOException("State Archive Catalog sealed terminal identity mismatch");
+      }
+      CurrentSegment successor = actualCurrent.stream().filter(candidate ->
+          candidate.getLaneId() == expected.getLaneId()
+              && candidate.getSegmentSeq() == expected.getSegmentSeq() + 1)
+          .findFirst().orElse(null);
+      if (successor != null && successor.getFirstBlock() != expected.getLastBlock() + 1) {
+        throw new IOException("State Archive Catalog sealed terminal successor is discontinuous");
+      }
+    }
+    for (CurrentSegment actual : actualCurrent) {
+      Terminal expected = catalog.selected().terminalForLane(actual.getLaneId());
+      long expectedSequence = expected.getKind() == TerminalKind.CURRENT
+          ? expected.getCurrent().getSegmentSeq() : expected.getSealed().getSegmentSeq() + 1;
+      long alternateSequence = expected.getKind() == TerminalKind.CURRENT
+          ? expectedSequence + 1 : expectedSequence;
+      if (actual.getSegmentSeq() != expectedSequence
+          && actual.getSegmentSeq() != alternateSequence) {
+        throw new IOException("State Archive Catalog current projection is unexpected");
+      }
+    }
+    boolean currentChanged = actualCurrent.size() != expectedCurrent.size();
+    if (!currentChanged) {
+      for (CurrentSegment actual : actualCurrent) {
+        currentChanged = expectedCurrent.stream().noneMatch(expected ->
+            expected.getLaneId() == actual.getLaneId()
+                && expected.getSegmentSeq() == actual.getSegmentSeq());
+        if (currentChanged) {
+          break;
+        }
+      }
+    }
+    structuralChanged |= currentChanged || sealedSegments.size() > expectedSealed.size();
+    if (structuralChanged
+        && catalogTerminals().size() == StateArchiveFileFormatV3.fiveLaneIds().length) {
       publishCatalog();
     }
   }
@@ -2448,6 +3093,7 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
     INTENT_PUBLISHED,
     LANE_DATA_APPLIED,
     LANE_INDEX_APPLIED,
+    CATALOG_COMMITTED,
     TARGET_VERIFIED,
     INTENT_DELETED
   }
@@ -2958,6 +3604,17 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
         }
       }
       return end;
+    }
+
+    private CurrentSegment targetCurrent(long commonHead) {
+      int keepCount = retainedCount(commonHead);
+      if (keepCount == 0) {
+        throw new IllegalArgumentException("State Archive recovery current target is empty");
+      }
+      long lastBlock = expectedIndex.get(keepCount - 1).getBlockNumber();
+      return new CurrentSegment(header.getLaneId(), header.getSegmentSeq(), firstBlock,
+          lastBlock, retainedDataEnd(keepCount, commonHead), keepCount,
+          header.getHeaderDigest());
     }
 
     private void repairTo(long commonHead, RecoveryFaultHook faultHook) throws IOException {
