@@ -150,6 +150,23 @@ public class StateArchiveFiveLaneRecoveryIntentV3Test {
         () -> new CatalogBinding(17, hash(117), 19, hash(118)));
   }
 
+  @Test
+  public void catalogOnlyTransitionRequiresExactBinding() {
+    List<LaneTarget> lanes = new java.util.ArrayList<>();
+    for (int laneId : StateArchiveFileFormatV3.fiveLaneIds()) {
+      lanes.add(new LaneTarget(laneId, 0, 1, 800, 160,
+          1, 800, 160, hash(laneId + 1), hash(laneId + 2), hash(laneId + 3)));
+    }
+    assertThrows(IllegalArgumentException.class,
+        () -> new Intent(hash(90), point(12), point(12), point(12), lanes));
+    CatalogBinding binding = new CatalogBinding(17, hash(117), 18, hash(118));
+    Intent decoded = StateArchiveFiveLaneRecoveryIntentV3.decode(
+        StateArchiveFiveLaneRecoveryIntentV3.encode(
+            new Intent(hash(90), point(12), point(12), point(12), lanes, binding)));
+    assertEquals(17, decoded.getCatalogBinding().getSourceGeneration());
+    assertTrue(decoded.getLanes().stream().noneMatch(lane -> lane.getActionFlags() != 0));
+  }
+
   private static Intent intent() {
     return new Intent(hash(90), point(12), point(10), point(11), lanes());
   }

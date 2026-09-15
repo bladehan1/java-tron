@@ -617,7 +617,7 @@ public final class StateArchiveFiveLaneRecoveryIntentV3 {
         }
         mutation |= (lane.actionFlags & (DATA_TRUNCATE | DELETE_PAIR | INDEX_REPLACE)) != 0;
       }
-      if (!mutation) {
+      if (!mutation && catalogBinding == null) {
         throw new IllegalArgumentException("State Archive recovery intent has no mutation");
       }
     }

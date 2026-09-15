@@ -283,6 +283,47 @@ public class StateArchiveAppendCheckpointMaterializerV3Test {
   }
 
   @Test
+  public void publishedCheckpointAdvancesLaggingCatalogWithoutRewritingLanes()
+      throws Exception {
+    Path root = temporaryFolder.newFolder("published-catalog-only").toPath();
+    byte[] format = hash(75);
+    byte[] baseline = hash(85);
+    List<BlockReverseDiff> first = Collections.singletonList(diff(1, 0));
+    List<BlockReverseDiff> second = Collections.singletonList(diff(2, 0));
+    try (StateArchiveAppendCheckpointMaterializerV3 archive = materializer(
+        root, format, baseline, 10_000)) {
+      StateArchiveHotBatchDescriptor firstDescriptor = archive.planCheckpoint(first);
+      CommonCheckpointTarget firstTarget = archive.prepare(CommonCheckpointCapture.create(
+          payload(format, first, firstDescriptor), first, firstDescriptor));
+      archive.publish(firstTarget);
+      StateArchiveHotBatchDescriptor secondDescriptor = archive.planCheckpoint(second);
+      CommonCheckpointTarget secondTarget = archive.prepare(CommonCheckpointCapture.create(
+          payload(format, second, secondDescriptor), second, secondDescriptor));
+      archive.publish(secondTarget);
+    }
+    StateArchiveHistoryCatalogV3.Generation lagging =
+        StateArchiveHistoryCatalogV3.openOrEmpty(root).selected();
+    assertTrue(lagging.getTerminals().stream().allMatch(terminal ->
+        terminal.getCurrent().getCurrentLastBlock() == 1));
+    long generation = lagging.getGeneration();
+    try (StateArchiveAppendCheckpointMaterializerV3 reopened = materializer(
+        root, format, baseline, 10_000)) {
+      assertEquals(2, reopened.appendWriter().getAppendHead().getBlockNumber());
+    }
+    StateArchiveHistoryCatalogV3.Generation aligned =
+        StateArchiveHistoryCatalogV3.openOrEmpty(root).selected();
+    assertEquals(generation + 1, aligned.getGeneration());
+    assertTrue(aligned.getTerminals().stream().allMatch(terminal ->
+        terminal.getCurrent().getCurrentLastBlock() == 2));
+    try (StateArchiveAppendCheckpointMaterializerV3 secondReopen = materializer(
+        root, format, baseline, 10_000)) {
+      assertEquals(2, secondReopen.appendWriter().getAppendHead().getBlockNumber());
+    }
+    assertEquals(aligned.getGeneration(),
+        StateArchiveHistoryCatalogV3.openOrEmpty(root).selected().getGeneration());
+  }
+
+  @Test
   public void preparesBeforeWalPublishesAndReopensExactTarget() throws Exception {
     Path root = temporaryFolder.newFolder("append-materializer").toPath();
     byte[] format = hash(70);
