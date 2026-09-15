@@ -14,7 +14,11 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
+import java.util.NavigableMap;
 import java.util.Objects;
+import java.util.TreeMap;
+import java.util.stream.Stream;
 import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.db2.archive.StateArchiveSegmentFormatV3.CurrentSegment;
 import org.tron.core.db2.archive.StateArchiveSegmentFormatV3.SealedSegment;
@@ -33,9 +37,11 @@ final class StateArchiveHistoryCatalogV3 {
   private static final int CURRENT_RECORD_LENGTH = 112;
   private static final int TRAILER_LENGTH = 48;
   private static final int CURRENT_LENGTH = 96;
+  private static final int MAX_RETAINED_GENERATIONS = 3;
 
   private final Path root;
   private final Path generations;
+  private final NavigableMap<Long, Path> generationFiles = new TreeMap<>();
   private Generation selected;
 
   private StateArchiveHistoryCatalogV3(Path archiveRoot, Generation selected) {
@@ -45,10 +51,12 @@ final class StateArchiveHistoryCatalogV3 {
   }
 
   static StateArchiveHistoryCatalogV3 openOrEmpty(Path archiveRoot) throws IOException {
-    Path root = archiveRoot.resolve(DIRECTORY);
+    StateArchiveHistoryCatalogV3 catalog = new StateArchiveHistoryCatalogV3(archiveRoot, null);
+    catalog.discoverGenerationFiles();
+    Path root = catalog.root;
     Path current = root.resolve(CURRENT);
     if (!Files.exists(current)) {
-      return new StateArchiveHistoryCatalogV3(archiveRoot, null);
+      return catalog;
     }
     CurrentPointer pointer = decodeCurrent(Files.readAllBytes(current));
     Path generationPath = root.resolve(GENERATIONS).resolve(fileName(pointer.generation));
@@ -61,7 +69,8 @@ final class StateArchiveHistoryCatalogV3 {
         || !Arrays.equals(generation.digest, pointer.digest)) {
       throw new IOException("State Archive Catalog CURRENT identity mismatch");
     }
-    return new StateArchiveHistoryCatalogV3(archiveRoot, generation);
+    catalog.selected = generation;
+    return catalog;
   }
 
   boolean isPublished() {
@@ -97,12 +106,46 @@ final class StateArchiveHistoryCatalogV3 {
       atomicMove(temporary, target);
       syncDirectory(generations);
     }
+    generationFiles.put(generation, target);
     byte[] currentBytes = encodeCurrent(generation, verified.digest);
     Path currentTemporary = root.resolve(CURRENT + ".tmp");
     writeForced(currentTemporary, currentBytes);
     atomicMove(currentTemporary, root.resolve(CURRENT));
     syncDirectory(root);
+    long oldestRetained = verified.generation - MAX_RETAINED_GENERATIONS;
+    for (Map.Entry<Long, Path> entry : new ArrayList<>(
+        generationFiles.headMap(oldestRetained, true).entrySet())) {
+      Files.deleteIfExists(entry.getValue());
+      generationFiles.remove(entry.getKey());
+    }
+    syncDirectory(generations);
     selected = verified;
+  }
+
+  private void discoverGenerationFiles() throws IOException {
+    if (!Files.isDirectory(generations)) {
+      return;
+    }
+    try (Stream<Path> paths = Files.list(generations)) {
+      paths.filter(Files::isRegularFile).forEach(path -> {
+        Long generation = parseGenerationFileName(path.getFileName().toString());
+        if (generation != null) {
+          generationFiles.put(generation, path);
+        }
+      });
+    }
+  }
+
+  private static Long parseGenerationFileName(String name) {
+    if (!name.startsWith("catalog-") || !name.endsWith(".bin")) {
+      return null;
+    }
+    String number = name.substring("catalog-".length(), name.length() - ".bin".length());
+    try {
+      return number.isEmpty() ? null : Long.parseLong(number);
+    } catch (NumberFormatException invalid) {
+      return null;
+    }
   }
 
   private static byte[] encodeGeneration(Generation generation) {
