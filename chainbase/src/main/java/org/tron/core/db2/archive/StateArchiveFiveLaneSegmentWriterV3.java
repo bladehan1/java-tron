@@ -190,6 +190,12 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
       discardUnpublishedTemporaryIntent();
       reopenFast();
     }
+    try {
+      catalog.pruneRetainedGenerations();
+    } catch (IOException | RuntimeException failure) {
+      closeAfterFailure(failure);
+      throw failure;
+    }
   }
 
   private void planAndRecover(RecoveryRequest request, RecoveryFaultHook faultHook)
