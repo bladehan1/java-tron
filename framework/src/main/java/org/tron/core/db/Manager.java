@@ -128,6 +128,9 @@ import org.tron.core.db2.archive.BlockSnapshotMeta;
 import org.tron.core.db2.archive.HistoricalAccountAssetBalanceResolver;
 import org.tron.core.db2.archive.HistoricalAccountAssetPrefixResolver;
 import org.tron.core.db2.archive.HistoricalAccountBalanceReader;
+import org.tron.core.db2.archive.HistoricalQueryAdmission;
+import org.tron.core.db2.archive.HistoricalQueryException;
+import org.tron.core.db2.archive.HistoricalQueryException.Reason;
 import org.tron.core.db2.archive.HistoricalQuerySession;
 import org.tron.core.db2.archive.LatestStateGenerationAdapter;
 import org.tron.core.db2.archive.LatestStateGenerationCoordinatorFactory;
@@ -1477,6 +1480,8 @@ public class Manager {
     return stateArchiveRuntime != null || commonCheckpointRuntime != null;
   }
 
+  private final HistoricalQueryAdmission historicalQueryAdmission = new HistoricalQueryAdmission();
+
   /** Opens one canonical request-owned exact-27 historical query view. */
   public HistoricalQuerySession openArchiveHistoricalQuery(long blockNumber,
       byte[] expectedBlockHash) throws ItemNotFoundException, BadItemException {
@@ -1484,40 +1489,67 @@ public class Manager {
     if (expectedBlockHash.length != 32) {
       throw new IllegalArgumentException("expectedBlockHash must be exactly 32 bytes");
     }
-    StateArchiveRuntimeOwner runtime = stateArchiveRuntime;
-    CommonCheckpointRuntimeAttachment common = commonCheckpointRuntime;
-    if (runtime == null && common == null) {
-      throw new IllegalStateException("Experimental state archive is disabled");
-    }
-
-    BlockCapsule beforePin = chainBaseManager.getBlockByNum(blockNumber);
-    byte[] canonicalHash = beforePin.getBlockId().getBytes();
-    if (!Arrays.equals(expectedBlockHash, canonicalHash)) {
-      throw new IllegalArgumentException("Historical block number and hash do not match");
-    }
-
-    HistoricalQuerySession session;
+    HistoricalQuerySession.Limits limits = HistoricalQuerySession.Limits.defaults();
+    HistoricalQueryAdmission.Request request = historicalQueryAdmission.acquire(
+        CommonParameter.getInstance().getMaxHttpConnectNumber(), limits.getTimeoutMillis());
+    HistoricalQuerySession session = null;
+    boolean transferred = false;
+    Throwable openFailure = null;
     try {
+      StateArchiveRuntimeOwner runtime = stateArchiveRuntime;
+      CommonCheckpointRuntimeAttachment common = commonCheckpointRuntime;
+      if (runtime == null && common == null) {
+        throw new HistoricalQueryException(Reason.UNAVAILABLE,
+            "Experimental state archive is disabled");
+      }
+      request.getControl().checkActive();
+      byte[] canonicalHash = chainBaseManager.getBlockByNum(blockNumber).getBlockId().getBytes();
+      if (!Arrays.equals(expectedBlockHash, canonicalHash)) {
+        throw new HistoricalQueryException(Reason.NON_CANONICAL,
+            "Historical block number and hash do not match");
+      }
       session = common == null
-          ? HistoricalQuerySession.open(runtime.pinHistoricalState(blockNumber), canonicalHash)
-          : HistoricalQuerySession.open(common.pinPoint(blockNumber), canonicalHash);
-    } catch (java.io.IOException failure) {
-      throw new org.tron.core.db2.archive.ArchivePersistenceException(
-          "Failed to open request-owned historical query session", failure);
-    }
-
-    try {
-      BlockCapsule afterPin = chainBaseManager.getBlockByNum(blockNumber);
-      if (!Arrays.equals(canonicalHash, afterPin.getBlockId().getBytes())) {
-        session.close();
-        throw new org.tron.core.db2.archive.ArchivePersistenceException(
+          ? HistoricalQuerySession.open(runtime.pinHistoricalState(blockNumber), canonicalHash,
+              limits, request.getControl(), request::close)
+          : HistoricalQuerySession.open(common.pinPoint(blockNumber, request.getControl()),
+              canonicalHash, limits, request.getControl(), request::close);
+      byte[] afterHash = chainBaseManager.getBlockByNum(blockNumber).getBlockId().getBytes();
+      if (!Arrays.equals(canonicalHash, afterHash)) {
+        throw new HistoricalQueryException(Reason.NON_CANONICAL,
             "Canonical historical block changed while opening query session");
       }
       session.requirePinnedIdentity();
+      session.checkActive();
+      transferred = true;
       return session;
+    } catch (java.io.IOException failure) {
+      openFailure = failure;
+      throw new HistoricalQueryException(Reason.UNAVAILABLE,
+          "Failed to open request-owned historical query session", failure);
     } catch (ItemNotFoundException | BadItemException | RuntimeException failure) {
-      session.close();
+      openFailure = failure;
+      if (failure instanceof RuntimeException && !(failure instanceof HistoricalQueryException)) {
+        throw new HistoricalQueryException(Reason.UNAVAILABLE,
+            "Historical query view is not available", failure);
+      }
       throw failure;
+    } finally {
+      if (!transferred) {
+        try {
+          if (session != null) {
+            try {
+              session.close();
+            } catch (RuntimeException closeFailure) {
+              if (openFailure == null) {
+                throw closeFailure;
+              }
+              openFailure.addSuppressed(closeFailure);
+            }
+          }
+        } finally {
+          request.close();
+        }
+      }
     }
   }
 
@@ -3843,6 +3875,7 @@ public class Manager {
   }
 
   public void close() {
+    historicalQueryAdmission.stop();
     stopRePushThread();
     stopRePushTriggerThread();
     EventPluginLoader.getInstance().stopPlugin();

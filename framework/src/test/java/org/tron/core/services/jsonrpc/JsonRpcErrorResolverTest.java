@@ -10,6 +10,7 @@ import java.util.ArrayList;
 import java.util.List;
 import org.junit.Assert;
 import org.junit.Test;
+import org.tron.core.db2.archive.HistoricalQueryException;
 import org.tron.core.exception.jsonrpc.JsonRpcException;
 import org.tron.core.exception.jsonrpc.JsonRpcInternalException;
 import org.tron.core.exception.jsonrpc.JsonRpcInvalidParamsException;
@@ -72,4 +73,24 @@ public class JsonRpcErrorResolverTest {
 
   }
 
-} 
+  @Test
+  public void testHistoricalErrorProjectionKeepsPrototypeWireShape() throws Exception {
+    Method method = this.getClass().getMethod("dummyMethod");
+    List<JsonNode> arguments = new ArrayList<>();
+
+    JsonError unavailable = resolver.resolveError(HistoricalRpcException.from(
+        new HistoricalQueryException(HistoricalQueryException.Reason.UNAVAILABLE,
+            "historical state unavailable")), method, arguments);
+    Assert.assertEquals(-32602, unavailable.code);
+    Assert.assertEquals("historical state unavailable", unavailable.message);
+    Assert.assertEquals("{}", unavailable.data);
+
+    JsonError deadline = resolver.resolveError(HistoricalRpcException.from(
+        new HistoricalQueryException(HistoricalQueryException.Reason.DEADLINE,
+            "Historical request deadline exceeded")), method, arguments);
+    Assert.assertEquals(-32000, deadline.code);
+    Assert.assertEquals("Historical request deadline exceeded", deadline.message);
+    Assert.assertEquals("{}", deadline.data);
+  }
+
+}

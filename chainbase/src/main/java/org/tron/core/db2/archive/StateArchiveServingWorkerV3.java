@@ -129,6 +129,19 @@ final class StateArchiveServingWorkerV3 implements AutoCloseable {
     return failure;
   }
 
+  /** Pins only after the background owner has handed the single DB to live dispatch. */
+  PersistentServingKeyIndexGeneration pinIndexed(long baseline) throws IOException {
+    synchronized (dispatch) {
+      synchronized (this) {
+        requireHealthy();
+        if (!live || coordinator == null) {
+          throw new IOException("Serving historical queries are unavailable during catch-up");
+        }
+        return coordinator.pinIndexed(baseline);
+      }
+    }
+  }
+
   private void await(CommonCheckpointTarget target, boolean requireLive) throws IOException {
     while (!target.equals(completed) || requireLive && !live) {
       requireHealthy();

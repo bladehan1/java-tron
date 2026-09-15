@@ -25,6 +25,8 @@ import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.tron.core.db2.archive.BlockReverseDiff;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
+import org.tron.core.db2.archive.HistoricalQueryControl;
+import org.tron.core.db2.archive.HistoricalQueryException;
 import org.tron.core.db2.core.CommonCheckpointMaterializer.Authority;
 import org.tron.core.db2.core.CommonCheckpointMaterializer.Status;
 import org.tron.core.db2.core.CommonCheckpointRedoCoordinator.RecoveryAction;
@@ -269,6 +271,50 @@ public class CommonCheckpointRedoCoordinatorTest {
       assertEquals(RecoveryAction.COMPLETED_REDO, checkpoint.get(5, TimeUnit.SECONDS));
     } finally {
       executor.shutdownNow();
+    }
+  }
+
+  @Test
+  public void controlledReadExpiresWhileCheckpointHoldsWriteGate() throws Exception {
+    Fixture fixture = fixture("runtime-owner-controlled-read", null);
+    CommonCheckpointRuntimeOwner owner = new CommonCheckpointRuntimeOwner(fixture.coordinator);
+    assertEquals(RecoveryAction.NO_CHECKPOINT, owner.recoverBeforeServing());
+
+    CountDownLatch writeGateHeld = new CountDownLatch(1);
+    CountDownLatch releaseCheckpoint = new CountDownLatch(1);
+    ExecutorService executor = Executors.newFixedThreadPool(2);
+    Future<RecoveryAction> checkpoint = executor.submit(() -> owner.apply(fixture.payload, () -> {
+      writeGateHeld.countDown();
+      try {
+        if (!releaseCheckpoint.await(5, TimeUnit.SECONDS)) {
+          throw new IOException("checkpoint test release timed out");
+        }
+      } catch (InterruptedException failure) {
+        Thread.currentThread().interrupt();
+        throw new IOException("checkpoint test interrupted", failure);
+      }
+    }));
+    try {
+      assertTrue(writeGateHeld.await(5, TimeUnit.SECONDS));
+      Future<HistoricalQueryException> query = executor.submit(() -> {
+        HistoricalQueryControl control = new HistoricalQueryControl(20);
+        try (CommonCheckpointRuntimeOwner.ReadLease ignored =
+                 owner.acquireReadLease(control)) {
+          return null;
+        } catch (HistoricalQueryException failure) {
+          return failure;
+        }
+      });
+      HistoricalQueryException failure = query.get(5, TimeUnit.SECONDS);
+      assertEquals(HistoricalQueryException.Reason.DEADLINE, failure.getReason());
+    } finally {
+      releaseCheckpoint.countDown();
+    }
+    try {
+      assertEquals(RecoveryAction.COMPLETED_REDO, checkpoint.get(5, TimeUnit.SECONDS));
+    } finally {
+      executor.shutdownNow();
+      owner.close();
     }
   }
 

@@ -21,5 +21,8 @@ interface RepositoryStateSource {
 
   StorageRowCapsule getStorageRow(byte[] physicalKey);
 
+  default void checkActive() {
+  }
+
   boolean isReadOnly();
 }

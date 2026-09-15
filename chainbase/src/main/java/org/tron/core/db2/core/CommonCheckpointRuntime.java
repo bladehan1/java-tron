@@ -7,6 +7,8 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
 import java.util.function.LongSupplier;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.db2.archive.ArchiveStoreScope;
 import org.tron.core.db2.archive.BlockReverseDiff;
@@ -16,8 +18,6 @@ import org.tron.core.db2.archive.StateArchiveCheckpointPlanner;
 import org.tron.core.db2.archive.StateArchiveCheckpointReadSnapshot;
 import org.tron.core.db2.archive.StateArchiveHotCheckpointMaterializer;
 import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /** Isolated composition boundary for the next-format common-checkpoint runtime. */
 public final class CommonCheckpointRuntime implements AutoCloseable {
@@ -36,9 +36,10 @@ public final class CommonCheckpointRuntime implements AutoCloseable {
   private final CommonCheckpointMaterializedStore materializedStore;
   private final LongSupplier nanoTime;
   private final TimingSink timingSink;
-  private final CommonCheckpointPayloadFactory payloadFactory = new CommonCheckpointPayloadFactory();
+  private final CommonCheckpointPayloadFactory payloadFactory =
+      new CommonCheckpointPayloadFactory();
   private final CommonCheckpointSnapshotRebaser rebaser = new CommonCheckpointSnapshotRebaser();
-  private CommonCheckpointTarget publishedTarget;
+  private volatile CommonCheckpointTarget publishedTarget;
 
   public CommonCheckpointRuntime(CommonCheckpointRuntimeOwner owner, List<Chainbase> databases,
       Path archiveDirectory, byte[] formatIdentity, Engine engine,
@@ -217,9 +218,9 @@ public final class CommonCheckpointRuntime implements AutoCloseable {
         long pathStateApplyStart = nanoTime.getAsLong();
         pathStatePlan.apply();
         timing.pathStateRebaseApplyUs = elapsedUs(pathStateApplyStart);
+        publishedTarget = target;
       });
       timing.ownerApplyUs = elapsedUs(ownerApplyStart);
-      publishedTarget = target;
       timing.totalUs = elapsedUs(totalStart);
       emitTiming(timing);
       return target;
@@ -278,17 +279,43 @@ public final class CommonCheckpointRuntime implements AutoCloseable {
   }
 
   /** Pins one point-only historical request under the same publication gate. */
-  public synchronized StateArchiveCheckpointReadSnapshot pinPoint(long targetBlock)
-      throws IOException {
-    if (archivePlanner != null) {
-      throw new IOException("Hot Archive runtime point reads are not integrated");
+  public StateArchiveCheckpointReadSnapshot pinPoint(long targetBlock) throws IOException {
+    return pinPoint(targetBlock, null);
+  }
+
+  public StateArchiveCheckpointReadSnapshot pinPoint(long targetBlock,
+      org.tron.core.db2.archive.HistoricalQueryControl control) throws IOException {
+    try (CommonCheckpointRuntimeOwner.ReadLease ignored = owner.acquireReadLease(control)) {
+      StateArchiveCheckpointReadSnapshot snapshot;
+      if (archivePlanner != null
+          && !(archivePlanner instanceof StateArchiveAppendCheckpointMaterializerV3)) {
+        throw new IOException("Hot Archive runtime point reads are not integrated");
+      }
+      CommonCheckpointTarget target = publishedTarget;
+      if (target == null) {
+        throw new IOException("State Archive has no published common-checkpoint target");
+      }
+      if (archivePlanner instanceof StateArchiveAppendCheckpointMaterializerV3) {
+        snapshot = StateArchiveCheckpointReadSnapshot.pinAppend(targetBlock, owner,
+            (StateArchiveAppendCheckpointMaterializerV3) archivePlanner, target, latestFactory);
+      } else {
+        snapshot = StateArchiveCheckpointReadSnapshot.pin(targetBlock, owner, archiveDirectory,
+            target, engine, latestFactory);
+      }
+      try {
+        if (control != null) {
+          control.checkActive();
+        }
+        return snapshot;
+      } catch (RuntimeException failure) {
+        try {
+          snapshot.close();
+        } catch (Exception closeFailure) {
+          failure.addSuppressed(closeFailure);
+        }
+        throw failure;
+      }
     }
-    CommonCheckpointTarget target = publishedTarget;
-    if (target == null) {
-      throw new IOException("State Archive has no published common-checkpoint target");
-    }
-    return StateArchiveCheckpointReadSnapshot.pin(targetBlock, owner, archiveDirectory,
-        target, engine, latestFactory);
   }
 
   public CommonCheckpointRuntimeOwner.State getState() {

@@ -3192,8 +3192,14 @@ public class Wallet {
         ? new VMActuator(true) : new VMActuator(true, HistoricalRepositoryProvider.INSTANCE);
 
     try {
+      if (session != null) {
+        session.checkActive();
+      }
       vmActuator.validate(context);
       vmActuator.execute(context);
+      if (session != null) {
+        session.checkActive();
+      }
     } finally {
       // constant call runs on a pooled RPC worker; drop its thread-local VM config view so it
       // can never leak into a later (block/broadcast) execution on the same thread.

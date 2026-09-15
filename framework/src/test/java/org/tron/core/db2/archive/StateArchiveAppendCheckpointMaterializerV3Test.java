@@ -1,10 +1,15 @@
 package org.tron.core.db2.archive;
 
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.nio.file.Files;
@@ -19,6 +24,7 @@ import org.junit.rules.TemporaryFolder;
 import org.tron.core.db2.archive.BlockReverseDiff.DbGroup;
 import org.tron.core.db2.archive.BlockReverseDiff.Entry;
 import org.tron.core.db2.archive.StateArchiveFiveLaneSegmentWriterV3.SyncStage;
+import org.tron.core.db2.core.Chainbase;
 import org.tron.core.db2.core.CommonCheckpointCapture;
 import org.tron.core.db2.core.CommonCheckpointFile;
 import org.tron.core.db2.core.CommonCheckpointMaterializer;
@@ -26,6 +32,8 @@ import org.tron.core.db2.core.CommonCheckpointMaterializer.Authority;
 import org.tron.core.db2.core.CommonCheckpointMaterializer.Status;
 import org.tron.core.db2.core.CommonCheckpointPayload;
 import org.tron.core.db2.core.CommonCheckpointRedoCoordinator;
+import org.tron.core.db2.core.CommonCheckpointRuntime;
+import org.tron.core.db2.core.CommonCheckpointRuntimeOwner;
 import org.tron.core.db2.core.CommonCheckpointTarget;
 import org.tron.core.db2.stateroot.PathStateFlushTarget;
 import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
@@ -34,6 +42,98 @@ public class StateArchiveAppendCheckpointMaterializerV3Test {
 
   @Rule
   public final TemporaryFolder temporaryFolder = new TemporaryFolder();
+
+  @Test(timeout = 15000)
+  public void runtimePinsAppendHistoryWithValuesDifferentFromLatest() throws Exception {
+    for (Engine engine : Engine.values()) {
+      Path root = temporaryFolder.newFolder("point-" + engine).toPath();
+      byte[] format = hash(76);
+      StateArchiveAppendCheckpointMaterializerV3 archive =
+          new StateArchiveAppendCheckpointMaterializerV3(root.resolve("history"), format,
+              engine, hash(86), StateArchiveFileFormatV3.COMPRESSION_NONE, 1500);
+      List<BlockReverseDiff> diffs = Arrays.asList(
+          new BlockReverseDiff(diff(11, 0).getMeta(), Collections.singletonList(
+              new DbGroup("code", Arrays.asList(
+                  new Entry(new byte[]{1}, OldValue.present(new byte[]{11})),
+                  new Entry(new byte[]{2}, OldValue.absent()))))),
+          new BlockReverseDiff(diff(12, 0).getMeta(), Collections.singletonList(
+              new DbGroup("code", Arrays.asList(
+                  new Entry(new byte[]{1}, OldValue.present(new byte[]{12})),
+                  new Entry(new byte[]{3}, OldValue.present(new byte[0])))))));
+      StateArchiveHotBatchDescriptor descriptor = archive.planCheckpoint(diffs);
+      CommonCheckpointPayload payload = payload(format, diffs, descriptor);
+      CommonCheckpointTarget target = archive.prepare(
+          CommonCheckpointCapture.create(payload, diffs, descriptor));
+      archive.publish(target);
+      FakeMaterializer chainbase = new FakeMaterializer(Authority.CHAINBASE);
+      FakeMaterializer pathState = new FakeMaterializer(Authority.PATH_STATE);
+      chainbase.publish(target);
+      pathState.publish(target);
+      CommonCheckpointRuntimeOwner owner = new CommonCheckpointRuntimeOwner(
+          new CommonCheckpointRedoCoordinator(new CommonCheckpointFile(root.resolve("wal")),
+              chainbase, pathState, archive));
+      ArchiveReadSnapshot.PinnedLatestState latest =
+          mock(ArchiveReadSnapshot.PinnedLatestState.class);
+      when(latest.getBlockNumber()).thenReturn(12L);
+      when(latest.getBlockHash()).thenReturn(hash(12));
+      when(latest.get(anyString(), any(byte[].class)))
+          .thenReturn(OldValue.present(new byte[]{99}));
+      try (CommonCheckpointRuntime runtime = new CommonCheckpointRuntime(owner,
+          Collections.singletonList(mock(Chainbase.class)), root.resolve("history"), format,
+          engine, (number, blockHash) -> latest, ignored -> () -> { }, archive)) {
+        runtime.recoverBeforeServing();
+        assertThrows(java.io.IOException.class, () -> runtime.pinPoint(10));
+        archive.completeServingInitialSync(target);
+        assertEquals(10, archive.servingIndexStatus().getIndexedFrom());
+        assertThrows(IllegalArgumentException.class, () -> runtime.pinPoint(9));
+        assertThrows(IllegalArgumentException.class, () -> runtime.pinPoint(13));
+        try (HistoricalQuerySession session = HistoricalQuerySession.open(runtime.pinPoint(10),
+            hash(10))) {
+          assertEquals(12, session.getPinnedBlock());
+          assertArrayEquals(new byte[]{11}, session.getCode(new byte[]{1}).get());
+          assertFalse(session.getCode(new byte[]{2}).isPresent());
+          assertArrayEquals(new byte[0], session.getCode(new byte[]{3}).get());
+          verify(latest, never()).get(anyString(), any(byte[].class));
+          assertArrayEquals(new byte[]{99}, session.getCode(new byte[]{4}).get());
+          // A finalized but not Common-published tail must not change this request's baseline.
+          archive.appendFinalized(Collections.singletonList(diff(13, 1400)));
+          assertArrayEquals(new byte[]{11}, session.getCode(new byte[]{1}).get());
+          session.requirePinnedIdentity();
+        }
+        verify(latest).close();
+        try (HistoricalQuerySession session = HistoricalQuerySession.open(runtime.pinPoint(11),
+            hash(11))) {
+          assertArrayEquals(new byte[]{12}, session.getCode(new byte[]{1}).get());
+        }
+        try (HistoricalQuerySession session = HistoricalQuerySession.open(runtime.pinPoint(12),
+            hash(12))) {
+          assertArrayEquals(new byte[]{99}, session.getCode(new byte[]{1}).get());
+        }
+        org.mockito.Mockito.clearInvocations(latest);
+        when(latest.getBlockHash()).thenReturn(hash(13));
+        org.mockito.Mockito.doThrow(new IllegalStateException("latest close failure"))
+            .when(latest).close();
+        IllegalArgumentException mismatch = assertThrows(IllegalArgumentException.class,
+            () -> runtime.pinPoint(10));
+        assertEquals(1, mismatch.getSuppressed().length);
+        verify(latest).close();
+        org.mockito.Mockito.doNothing().when(latest).close();
+        when(latest.getBlockHash()).thenReturn(hash(12));
+        org.mockito.Mockito.clearInvocations(latest);
+        try (StateArchiveCheckpointReadSnapshot snapshot = runtime.pinPoint(10)) {
+          try (java.util.stream.Stream<Path> files = Files.walk(root.resolve("history/segments"))) {
+            for (Path file : (Iterable<Path>) files.filter(
+                path -> path.toString().endsWith(".dat"))::iterator) {
+              Files.newByteChannel(file, java.nio.file.StandardOpenOption.WRITE,
+                  java.nio.file.StandardOpenOption.TRUNCATE_EXISTING).close();
+            }
+          }
+          assertThrows(java.io.IOException.class, () -> snapshot.get("code", new byte[]{1}));
+          verify(latest, never()).get(anyString(), any(byte[].class));
+        }
+      }
+    }
+  }
 
   @Test
   public void finalizedAppendDefersUnmarkedRotationAndReopensBeforeCommonPrepare()
@@ -240,6 +340,8 @@ public class StateArchiveAppendCheckpointMaterializerV3Test {
           secondPayload, Collections.singletonList(second), secondDescriptor));
       assertEquals(Status.MATERIALIZED, archive.inspect(secondTarget));
       archive.publish(secondTarget);
+      // t <= I is insufficient: the Chainbase baseline B=2 is ahead of durable I=1.
+      assertThrows(java.io.IOException.class, () -> archive.pinHistory(secondTarget));
       archive.afterCommit(secondTarget);
       assertEquals(Status.PUBLISHED, archive.inspect(secondTarget));
       assertEquals(2, archive.servingIndexStatus().getIndexedThrough());
