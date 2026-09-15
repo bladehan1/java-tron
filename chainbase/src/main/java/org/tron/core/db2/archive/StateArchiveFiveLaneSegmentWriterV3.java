@@ -228,16 +228,18 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
     recoveryFaultHook = Objects.requireNonNull(faultHook, "faultHook");
     verifyDurabilityProof(proof);
     List<LaneTarget> targets = publishedRecoveryTargets(proof);
-    if (targets.stream().noneMatch(StateArchiveFiveLaneSegmentWriterV3::mutates)) {
+    if (targets.stream().noneMatch(StateArchiveFiveLaneSegmentWriterV3::mutates)
+        && catalogMatchesPublishedCheckpoint(proof, targets)) {
       reopenFast();
       requireSamePoint(recoveryPoint(appendHead, resultHistoryDigest), proof.getTarget(),
           "published checkpoint");
       return;
     }
+    PreparedGeneration prepared = preparePublishedRecoveryCatalog(proof, targets);
+    CatalogBinding binding = new CatalogBinding(prepared.getSource().getGeneration(),
+        prepared.getSource().getDigest(), prepared.getGeneration(), prepared.getDigest());
     Intent intent = new Intent(baselineHistoryDigest, proof.getTarget(), proof.getTarget(),
-        proof.getTarget(), targets);
-    PreparedGeneration prepared = preparePublishedRecoveryCatalog(proof, intent);
-    intent = bindRecoveryCatalog(intent, prepared);
+        proof.getTarget(), targets, binding);
     persistIntent(intent);
     activeRecoveryIntent = loadIntent();
     recoverBoundedToPublishedCheckpoint(activeRecoveryIntent, proof);
@@ -275,7 +277,7 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
       return;
     }
     requireRecoverySource(intent);
-    PreparedGeneration prepared = preparePublishedRecoveryCatalog(proof, intent);
+    PreparedGeneration prepared = preparePublishedRecoveryCatalog(proof, intent.getLanes());
     intent = bindRecoveryCatalog(intent, prepared);
     if (original.getCatalogBinding() == null) {
       persistIntent(intent);
@@ -2059,9 +2061,9 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
   }
 
   private PreparedGeneration preparePublishedRecoveryCatalog(ArchiveDurabilityProof proof,
-      Intent intent) throws IOException {
+      List<LaneTarget> laneTargets) throws IOException {
     Map<Integer, FileTailProof> tails = finalProofTails(proof);
-    Map<Integer, LaneTarget> targets = intent.getLanes().stream().collect(
+    Map<Integer, LaneTarget> targets = laneTargets.stream().collect(
         Collectors.toMap(LaneTarget::getLaneId, target -> target));
     List<CurrentSegment> current = new ArrayList<>();
     List<Terminal> terminals = new ArrayList<>();
@@ -2101,6 +2103,37 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
     }
     return catalog.prepare(rotationTargetBytes, current,
         catalog.selected().getSealed(), terminals);
+  }
+
+  private boolean catalogMatchesPublishedCheckpoint(ArchiveDurabilityProof proof,
+      List<LaneTarget> laneTargets) {
+    Map<Integer, FileTailProof> tails = finalProofTails(proof);
+    Map<Integer, LaneTarget> targets = laneTargets.stream().collect(
+        Collectors.toMap(LaneTarget::getLaneId, target -> target));
+    for (int laneId : StateArchiveFileFormatV3.fiveLaneIds()) {
+      Terminal terminal = catalog.selected().terminalForLane(laneId);
+      FileTailProof tail = tails.get(laneId);
+      LaneTarget target = targets.get(laneId);
+      if (tail == null || target == null) {
+        return false;
+      }
+      if (terminal.getKind() == TerminalKind.SEALED) {
+        if (terminal.getSealed().getSegmentSeq() != tail.getSegmentSeq()
+            || terminal.getSealed().getLastBlock() != proof.getTarget().getBlockNumber()) {
+          return false;
+        }
+      } else {
+        CurrentSegment current = terminal.getCurrent();
+        long count = proof.getTarget().getBlockNumber() - current.getFirstBlock() + 1;
+        if (current.getSegmentSeq() != tail.getSegmentSeq()
+            || current.getCurrentLastBlock() != proof.getTarget().getBlockNumber()
+            || current.getDataEndOffset() != target.getTargetDataEnd()
+            || current.getBlockFrameCount() != count) {
+          return false;
+        }
+      }
+    }
+    return true;
   }
 
   private static Map<Integer, FileTailProof> finalProofTails(ArchiveDurabilityProof proof) {
