@@ -29,6 +29,7 @@ import org.tron.core.db2.archive.StateArchiveFiveLaneBlockCodecV3.EncodedLane;
 import org.tron.core.db2.archive.StateArchiveFiveLaneRecoveryIntentV3.Intent;
 import org.tron.core.db2.archive.StateArchiveFiveLaneRecoveryIntentV3.LaneTarget;
 import org.tron.core.db2.archive.StateArchiveFiveLaneRecoveryIntentV3.RecoveryPoint;
+import org.tron.core.db2.archive.StateArchiveHistoryCatalogV3.Generation;
 import org.tron.core.db2.archive.StateArchiveSegmentFormatV3.BlockIndexEntry;
 import org.tron.core.db2.archive.StateArchiveSegmentFormatV3.BlockIndexHeader;
 import org.tron.core.db2.archive.StateArchiveSegmentFormatV3.CurrentSegment;
@@ -77,6 +78,7 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
   private Map<Integer, NavigableMap<Long, SealedSegment>> servingSegments;
   private long servingReadFrames;
   private long servingReadBytes;
+  private long reopenSealedDataReadBytes;
 
   public StateArchiveFiveLaneSegmentWriterV3(Path archiveRoot,
       byte[] baselineHistoryDigest, short compressionId) throws IOException {
@@ -158,7 +160,7 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
       planAndRecover(recoveryRequest, faultHook);
     } else {
       discardUnpublishedTemporaryIntent();
-      reopen(null);
+      reopenFast();
     }
   }
 
@@ -453,6 +455,11 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
 
   synchronized long getServingReadBytes() {
     return servingReadBytes;
+  }
+
+  /** Bytes read from sealed segment data files by the proof-boundary fast reopen. */
+  synchronized long getReopenSealedDataReadBytes() {
+    return reopenSealedDataReadBytes;
   }
 
   private void readIndexedRange(int laneId, long sequence, long segmentFirst,
@@ -841,45 +848,46 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
   }
 
   private void seal(LaneState state) throws IOException {
-    if (state.markedBlockFrameCount != state.blockFrameCount) {
+    LaneState complete = requireCompleteStats(state);
+    if (complete.markedBlockFrameCount != complete.blockFrameCount) {
       rotationWithUnsyncedData = true;
     }
-    byte[] contentDigest = state.contentDigest.digest();
+    byte[] contentDigest = complete.contentDigest.digest();
     int sealLength = StateArchiveFileFormatV3.SEAL_HEADER_LENGTH
         + StateArchiveFileFormatV3.FRAME_TRAILER_LENGTH;
-    SegmentSeal seal = new SegmentSeal(state.laneId, state.segmentSeq,
-        state.firstBlock, state.lastBlock, state.blockFrameCount, state.entryCount,
-        state.logicalPayloadBytes, state.encodedBlockFrameBytes, state.dataEndOffset,
-        state.dataEndOffset + sealLength, state.firstFrameDigest,
-        state.lastFrameDigest, state.startHistoryDigest, state.endHistoryDigest,
+    SegmentSeal seal = new SegmentSeal(complete.laneId, complete.segmentSeq,
+        complete.firstBlock, complete.lastBlock, complete.blockFrameCount, complete.entryCount,
+        complete.logicalPayloadBytes, complete.encodedBlockFrameBytes, complete.dataEndOffset,
+        complete.dataEndOffset + sealLength, complete.firstFrameDigest,
+        complete.lastFrameDigest, complete.startHistoryDigest, complete.endHistoryDigest,
         contentDigest);
     byte[] encodedSeal = StateArchiveSegmentFormatV3.encodeSeal(seal);
     SegmentSeal decodedSeal = StateArchiveSegmentFormatV3.decodeSeal(encodedSeal);
-    state.data.position(state.dataEndOffset);
-    writeFully(state.data, ByteBuffer.wrap(encodedSeal));
-    state.data.force(false);
-    state.index.force(false);
-    if (state.index.size() != StateArchiveFileFormatV3.BLOCK_INDEX_HEADER_LENGTH
-        + state.blockFrameCount * StateArchiveFileFormatV3.BLOCK_INDEX_ENTRY_LENGTH) {
+    complete.data.position(complete.dataEndOffset);
+    writeFully(complete.data, ByteBuffer.wrap(encodedSeal));
+    complete.data.force(false);
+    complete.index.force(false);
+    if (complete.index.size() != StateArchiveFileFormatV3.BLOCK_INDEX_HEADER_LENGTH
+        + complete.blockFrameCount * StateArchiveFileFormatV3.BLOCK_INDEX_ENTRY_LENGTH) {
       throw new IllegalStateException("State Archive sealed block index length mismatch");
     }
-    byte[] previousSegmentDigest = state.segmentSeq == 0
-        ? StateArchiveSegmentFormatV3.laneBaselineDigest(state.laneId)
-        : previousChainDigest(state.laneId, state.segmentSeq - 1);
-    SegmentManifest manifest = new SegmentManifest(state.laneId, state.segmentSeq,
-        state.firstBlock, state.lastBlock, state.blockFrameCount, state.entryCount,
-        state.logicalPayloadBytes, state.encodedBlockFrameBytes,
-        state.dataEndOffset + sealLength, state.index.size(), previousSegmentDigest,
-        state.endHistoryDigest);
+    byte[] previousSegmentDigest = complete.segmentSeq == 0
+        ? StateArchiveSegmentFormatV3.laneBaselineDigest(complete.laneId)
+        : previousChainDigest(complete.laneId, complete.segmentSeq - 1);
+    SegmentManifest manifest = new SegmentManifest(complete.laneId, complete.segmentSeq,
+        complete.firstBlock, complete.lastBlock, complete.blockFrameCount, complete.entryCount,
+        complete.logicalPayloadBytes, complete.encodedBlockFrameBytes,
+        complete.dataEndOffset + sealLength, complete.index.size(), previousSegmentDigest,
+        complete.endHistoryDigest);
     byte[] encodedManifest = StateArchiveSegmentFormatV3.encodeManifest(manifest);
     SegmentManifest decodedManifest = StateArchiveSegmentFormatV3.decodeManifest(encodedManifest);
-    publishManifest(state.laneId, state.segmentSeq, encodedManifest);
-    sealedSegments.add(new SealedSegment(state.laneId, state.segmentSeq,
-        state.firstBlock, state.lastBlock, state.blockFrameCount,
-        state.dataEndOffset + sealLength, state.index.size(), state.headerDigest,
+    publishManifest(complete.laneId, complete.segmentSeq, encodedManifest);
+    sealedSegments.add(new SealedSegment(complete.laneId, complete.segmentSeq,
+        complete.firstBlock, complete.lastBlock, complete.blockFrameCount,
+        complete.dataEndOffset + sealLength, complete.index.size(), complete.headerDigest,
         contentDigest, decodedSeal.getEncodedFrameDigest(), decodedManifest.getManifestDigest()));
-    state.close();
-    lanes.remove(state.laneId);
+    complete.close();
+    lanes.remove(complete.laneId);
     structuralChanged = true;
   }
 
@@ -1047,6 +1055,518 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
         }
       }
     }
+  }
+
+  /**
+   * Normal startup reopen: the Catalog and the persisted durability proof are the verified
+   * boundary. Sealed segments are trusted after O(1) checks; current segments resume from the
+   * proof marker and only the uncheckpointed tail is scanned. No fallback to the history scan:
+   * any mismatch fails closed with IOException.
+   */
+  private void reopenFast() throws IOException {
+    servingSegments = null;
+    if (!catalog.isPublished()) {
+      boolean anyData;
+      try (Stream<Path> paths = Files.walk(segmentRoot)) {
+        anyData = paths.anyMatch(path -> Files.isRegularFile(path)
+            && path.getFileName().toString().endsWith(".dat"));
+      }
+      if (anyData) {
+        throw new IOException("State Archive Catalog CURRENT is missing");
+      }
+      resultHistoryDigest = Arrays.copyOf(baselineHistoryDigest,
+          baselineHistoryDigest.length);
+      return;
+    }
+    Generation generation = catalog.selected();
+    if (generation.getSealed().isEmpty() && generation.getCurrent().isEmpty()) {
+      resultHistoryDigest = Arrays.copyOf(baselineHistoryDigest,
+          baselineHistoryDigest.length);
+      return;
+    }
+    ArchiveDurabilityProof proof = loadProofForFastReopen();
+    try {
+      verifyDurabilityProof(proof);
+    } catch (IllegalArgumentException mismatch) {
+      throw new IOException("State Archive durability proof does not match the archive",
+          mismatch);
+    }
+    Map<Integer, Map<Long, SealedSegment>> sealedByLane = new HashMap<>();
+    for (SealedSegment segment : generation.getSealed()) {
+      verifySealedSegmentFast(segment);
+      sealedSegments.add(segment);
+      sealedByLane.computeIfAbsent(segment.getLaneId(), ignored -> new HashMap<>())
+          .put(segment.getSegmentSeq(), segment);
+    }
+    Map<Integer, FileTailProof> finalTails = new HashMap<>();
+    for (FileTailProof tail : proof.getFileTails()) {
+      finalTails.put(tail.getLaneId(), tail);
+    }
+    RecoveryPoint target = proof.getTarget();
+    Map<Long, Map<Integer, FrameReference>> tailBundles = new TreeMap<>();
+    try {
+      for (CurrentSegment record : generation.getCurrent()) {
+        FileTailProof tail = finalTails.get(record.getLaneId());
+        if (tail == null || tail.getSegmentSeq() > record.getSegmentSeq()) {
+          throw new IOException(
+              "State Archive durability proof differs from Catalog current segments");
+        }
+        LaneState state = openFastLane(record, tail, proof, target,
+            sealedByLane.getOrDefault(record.getLaneId(), Collections.emptyMap()), tailBundles);
+        if (lanes.put(record.getLaneId(), state) != null) {
+          throw new IOException("Multiple open State Archive lane segments");
+        }
+      }
+      // Seed the append head with the exact proof target identity, then continue the
+      // resultHistoryDigest chain over the complete five-lane bundles found in the tails.
+      appendHead = new BlockSnapshotMeta(target.getEpoch(), target.getBlockNumber(),
+          target.getBlockHash(), target.getParentHash(), target.getTimestamp());
+      resultHistoryDigest = Arrays.copyOf(target.getResultHistoryDigest(),
+          target.getResultHistoryDigest().length);
+      rebuildBundleHead(tailBundles, null);
+    } catch (IllegalArgumentException invalid) {
+      closeAfterFailure(invalid);
+      throw new IOException("State Archive uncheckpointed tail is not verifiable", invalid);
+    } catch (IOException | RuntimeException failure) {
+      closeAfterFailure(failure);
+      throw failure;
+    }
+    for (LaneState state : lanes.values()) {
+      if (state.lastBlock == appendHead.getBlockNumber()) {
+        state.lastMeta = appendHead;
+      }
+    }
+    lastDurabilityProof = proof;
+    lastDurabilityProofRecovered = true;
+    validateCatalogSelection();
+  }
+
+  private ArchiveDurabilityProof loadProofForFastReopen() throws IOException {
+    Path proofPath = archiveRoot.resolve(StateArchiveFiveLaneDurabilityProofV3.FILE_NAME);
+    if (!Files.isRegularFile(proofPath)) {
+      throw new IOException("State Archive durability proof is missing");
+    }
+    try {
+      return StateArchiveFiveLaneDurabilityProofV3.decode(Files.readAllBytes(proofPath));
+    } catch (IllegalArgumentException corrupt) {
+      throw new IOException("State Archive durability proof is corrupt", corrupt);
+    }
+  }
+
+  /** O(1) trust checks for a Catalog-sealed segment: files, lengths, seal frame, manifest. */
+  private void verifySealedSegmentFast(SealedSegment segment) throws IOException {
+    Path data = dataPath(segment.getLaneId(), segment.getSegmentSeq());
+    Path index = indexPath(segment.getLaneId(), segment.getSegmentSeq());
+    Path manifest = manifestPath(segment.getLaneId(), segment.getSegmentSeq());
+    if (!Files.isRegularFile(data) || !Files.isRegularFile(index)) {
+      throw new IOException("State Archive Catalog selected segment is missing");
+    }
+    int sealLength = StateArchiveFileFormatV3.SEAL_HEADER_LENGTH
+        + StateArchiveFileFormatV3.FRAME_TRAILER_LENGTH;
+    try (FileChannel channel = FileChannel.open(data, StandardOpenOption.READ)) {
+      if (channel.size() != segment.getDataFileBytes()
+          || Files.size(index) != segment.getBlockIndexBytes()) {
+        throw new IOException("State Archive sealed segment length drift");
+      }
+      byte[] sealFrame = readExact(channel, channel.size() - sealLength, sealLength);
+      reopenSealedDataReadBytes += sealFrame.length;
+      SegmentSeal seal;
+      try {
+        seal = StateArchiveSegmentFormatV3.decodeSeal(sealFrame);
+      } catch (IllegalArgumentException invalid) {
+        throw new IOException("State Archive sealed segment seal is corrupt", invalid);
+      }
+      if (seal.getLaneId() != segment.getLaneId()
+          || seal.getSegmentSeq() != segment.getSegmentSeq()
+          || seal.getActualFirstBlock() != segment.getFirstBlock()
+          || seal.getActualLastBlock() != segment.getLastBlock()
+          || seal.getBlockFrameCount() != segment.getBlockFrameCount()
+          || seal.getDataEndOffset() != segment.getDataFileBytes() - sealLength
+          || !Arrays.equals(seal.getEncodedFrameDigest(), segment.getSealFrameDigest())) {
+        throw new IOException("State Archive sealed segment seal mismatch");
+      }
+    }
+    SegmentManifest manifestRecord;
+    try {
+      manifestRecord = StateArchiveSegmentFormatV3.decodeManifest(Files.readAllBytes(manifest));
+    } catch (IllegalArgumentException invalid) {
+      throw new IOException("State Archive sealed segment manifest is corrupt", invalid);
+    }
+    if (!Arrays.equals(manifestRecord.getManifestDigest(), segment.getManifestDigest())) {
+      throw new IOException("State Archive sealed segment manifest mismatch");
+    }
+  }
+
+  /**
+   * Opens one Catalog-current lane segment at the proof boundary. When the lane's final proof
+   * tail is in this segment, only bytes after that marker are scanned and the pre-marker
+   * cumulative statistics stay proof-derived until {@link #requireCompleteStats}; when the lane
+   * rotated after the checkpoint, the post-marker regions are scanned across the sealed boundary
+   * and the fresh current segment is scanned whole (it holds only uncheckpointed blocks).
+   */
+  private LaneState openFastLane(CurrentSegment record, FileTailProof tail,
+      ArchiveDurabilityProof proof, RecoveryPoint target, Map<Long, SealedSegment> sealed,
+      Map<Long, Map<Integer, FrameReference>> bundles) throws IOException {
+    int laneId = record.getLaneId();
+    long segmentSeq = record.getSegmentSeq();
+    if (tail.getSegmentSeq() < segmentSeq) {
+      scanSealedLaneTail(tail, target, segmentSeq, sealed, bundles);
+      ScannedSegment scanned;
+      try {
+        scanned = scanSegment(dataPath(laneId, segmentSeq),
+            new ParsedName(laneId, segmentSeq), bundles, false);
+      } catch (IllegalArgumentException invalid) {
+        throw new IOException("State Archive uncheckpointed segment is not verifiable",
+            invalid);
+      }
+      try {
+        if (scanned.seal != null || scanned.lastMarker != null
+            || scanned.firstBlock != record.getFirstBlock()
+            || !Arrays.equals(scanned.header.getHeaderDigest(), record.getHeaderDigest())) {
+          throw new IOException("State Archive Catalog current segment identity mismatch");
+        }
+        byte[] expectedPrevious = segmentSeq == 0
+            ? StateArchiveSegmentFormatV3.laneBaselineDigest(laneId)
+            : previousChainDigest(laneId, segmentSeq - 1);
+        if (!Arrays.equals(scanned.header.getPreviousSegmentDigest(), expectedPrevious)) {
+          throw new IOException("State Archive previous segment chain mismatch");
+        }
+        return scanned.openState();
+      } catch (IOException | RuntimeException failure) {
+        scanned.close();
+        throw failure;
+      }
+    }
+    Path data = dataPath(laneId, segmentSeq);
+    Path index = indexPath(laneId, segmentSeq);
+    if (!Files.isRegularFile(data) || !Files.isRegularFile(index)) {
+      throw new IOException("State Archive Catalog selected segment is missing");
+    }
+    FileChannel dataChannel = FileChannel.open(data, StandardOpenOption.READ,
+        StandardOpenOption.WRITE);
+    FileChannel indexChannel = FileChannel.open(index, StandardOpenOption.READ,
+        StandardOpenOption.WRITE);
+    try {
+      byte[] headerBytes = readExact(dataChannel, 0,
+          StateArchiveFileFormatV3.PART_HEADER_LENGTH);
+      SegmentHeader header;
+      try {
+        header = StateArchiveSegmentFormatV3.decodeHeader(headerBytes);
+      } catch (IllegalArgumentException invalid) {
+        throw new IOException("State Archive segment header is corrupt", invalid);
+      }
+      if (header.getLaneId() != laneId || header.getSegmentSeq() != segmentSeq
+          || header.getCompressionId() != compressionId
+          || header.getActualFirstBlock() != record.getFirstBlock()
+          || !Arrays.equals(header.getHeaderDigest(), record.getHeaderDigest())) {
+        throw new IOException("State Archive Catalog current segment identity mismatch");
+      }
+      byte[] expectedPrevious = segmentSeq == 0
+          ? StateArchiveSegmentFormatV3.laneBaselineDigest(laneId)
+          : previousChainDigest(laneId, segmentSeq - 1);
+      if (!Arrays.equals(header.getPreviousSegmentDigest(), expectedPrevious)) {
+        throw new IOException("State Archive previous segment chain mismatch");
+      }
+      if (indexChannel.size() < StateArchiveFileFormatV3.BLOCK_INDEX_HEADER_LENGTH) {
+        throw new IOException("Truncated State Archive block index header");
+      }
+      BlockIndexHeader indexHeader;
+      try {
+        indexHeader = StateArchiveSegmentFormatV3.decodeBlockIndexHeader(readExact(indexChannel,
+            0, StateArchiveFileFormatV3.BLOCK_INDEX_HEADER_LENGTH));
+      } catch (IllegalArgumentException invalid) {
+        throw new IOException("State Archive block index header is corrupt", invalid);
+      }
+      if (indexHeader.getLaneId() != laneId || indexHeader.getSegmentSeq() != segmentSeq
+          || !Arrays.equals(indexHeader.getDataSegmentHeaderDigest(),
+              header.getHeaderDigest())) {
+        throw new IOException("State Archive block index/header mismatch");
+      }
+      return openFastMarkedLane(record, header, headerBytes, tail, proof, dataChannel,
+          indexChannel, bundles);
+    } catch (IOException | RuntimeException failure) {
+      dataChannel.close();
+      indexChannel.close();
+      throw failure;
+    }
+  }
+
+  /** Resumes a current segment whose last durable marker is the lane's final proof tail. */
+  private LaneState openFastMarkedLane(CurrentSegment record, SegmentHeader header,
+      byte[] headerBytes, FileTailProof tail, ArchiveDurabilityProof proof, FileChannel data,
+      FileChannel index, Map<Long, Map<Integer, FrameReference>> bundles) throws IOException {
+    int laneId = record.getLaneId();
+    long segmentSeq = record.getSegmentSeq();
+    long dataSize = data.size();
+    if (dataSize < tail.getMarkerEndOffset()) {
+      throw new IOException("State Archive durability proof marker is cut");
+    }
+    byte[] markerFrame = readExact(data, tail.getMarkerOffset(), tail.getMarkerLength());
+    DurableMarker marker;
+    try {
+      marker = StateArchiveSegmentFormatV3.decodeDurableMarker(markerFrame);
+    } catch (IllegalArgumentException invalid) {
+      throw new IOException("State Archive durability proof marker is corrupt", invalid);
+    }
+    if (!Arrays.equals(encodedFrameDigest(markerFrame), tail.getMarkerDigest())
+        || marker.getLaneId() != laneId || marker.getSegmentSeq() != segmentSeq
+        || marker.getCheckpointSequence() != proof.getCheckpointSequence()
+        || marker.getMarkerEndOffset() != tail.getMarkerEndOffset()
+        || !Arrays.equals(marker.getCommonTargetDigest(), proof.getCommonTargetDigest())) {
+      throw new IOException("State Archive durability proof marker mismatch");
+    }
+    long[] markedRange = markedRangeBefore(data, marker, record.getFirstBlock());
+    LaneState state = new LaneState(laneId, segmentSeq, record.getFirstBlock(),
+        header.getHeaderDigest(), header.getPreviousHistoryDigest(), data, index,
+        newContentDigest(headerBytes));
+    state.lastBlock = marker.getLastBlock();
+    state.blockFrameCount = markedRange[0];
+    state.markedBlockFrameCount = markedRange[0];
+    state.logicalPayloadBytes = markedRange[1];
+    state.markedLogicalBytes = markedRange[1];
+    state.encodedBlockFrameBytes = markedRange[2];
+    state.markedEncodedBytes = markedRange[2];
+    state.dataEndOffset = tail.getMarkerEndOffset();
+    state.endHistoryDigest = marker.getResultHistoryDigest();
+    state.lastMarkerEndOffset = tail.getMarkerEndOffset();
+    state.lastMarkerOffset = tail.getMarkerOffset();
+    state.previousMarkerDigest = tail.getMarkerDigest();
+    state.lastCheckpointSequence = proof.getCheckpointSequence();
+    state.lastCommonTargetDigest = proof.getCommonTargetDigest();
+    state.incompleteStats = true;
+    scanUncheckpointedTail(state, dataPath(laneId, segmentSeq), tail.getMarkerEndOffset(),
+        dataSize, bundles);
+    return state;
+  }
+
+  /**
+   * Walks the marker chain backwards from the lane's final proof marker, verifying each
+   * previousMarkerDigest link, and returns the exact cumulative block count, logical payload
+   * bytes and encoded frame bytes covered by the segment's markers.
+   */
+  private long[] markedRangeBefore(FileChannel data, DurableMarker finalMarker,
+      long segmentFirstBlock) throws IOException {
+    int markerFrameLength = StateArchiveFileFormatV3.MARKER_HEADER_LENGTH
+        + StateArchiveFileFormatV3.FRAME_TRAILER_LENGTH;
+    long blockCount = finalMarker.getBlockCount();
+    long logicalBytes = finalMarker.getLogicalBytes();
+    long encodedBytes = finalMarker.getEncodedBytes();
+    DurableMarker marker = finalMarker;
+    while (marker.getCoveredStartOffset() > StateArchiveFileFormatV3.PART_HEADER_LENGTH) {
+      long previousOffset = marker.getCoveredStartOffset() - markerFrameLength;
+      byte[] frame = readExact(data, previousOffset, markerFrameLength);
+      DurableMarker previous;
+      try {
+        previous = StateArchiveSegmentFormatV3.decodeDurableMarker(frame);
+      } catch (IllegalArgumentException invalid) {
+        throw new IOException("State Archive durable marker chain is corrupt", invalid);
+      }
+      if (previous.getMarkerEndOffset() != marker.getCoveredStartOffset()
+          || previous.getLaneId() != marker.getLaneId()
+          || previous.getSegmentSeq() != marker.getSegmentSeq()
+          || previous.getCheckpointSequence() >= marker.getCheckpointSequence()
+          || previous.getLastBlock() + 1 != marker.getFirstBlock()
+          || !Arrays.equals(encodedFrameDigest(frame), marker.getPreviousMarkerDigest())) {
+        throw new IOException("State Archive durable marker chain mismatch");
+      }
+      blockCount = StrictMathWrapper.addExact(blockCount, previous.getBlockCount());
+      logicalBytes = StrictMathWrapper.addExact(logicalBytes, previous.getLogicalBytes());
+      encodedBytes = StrictMathWrapper.addExact(encodedBytes, previous.getEncodedBytes());
+      marker = previous;
+    }
+    if (blockCount != finalMarker.getLastBlock() - segmentFirstBlock + 1) {
+      throw new IOException("State Archive durable marker coverage mismatch");
+    }
+    return new long[]{blockCount, logicalBytes, encodedBytes};
+  }
+
+  /** Scans the uncheckpointed bytes after the proof marker; strict, fail closed, no repair. */
+  private void scanUncheckpointedTail(LaneState state, Path data, long fromOffset, long dataSize,
+      Map<Long, Map<Integer, FrameReference>> bundles) throws IOException {
+    List<BlockIndexEntry> tailEntries = new ArrayList<>();
+    long offset = fromOffset;
+    while (offset < dataSize) {
+      if (dataSize - offset < StateArchiveFileFormatV3.FRAME_ENVELOPE_LENGTH) {
+        throw new IOException("Truncated State Archive frame envelope");
+      }
+      byte[] envelope = readExact(state.data, offset,
+          StateArchiveFileFormatV3.FRAME_ENVELOPE_LENGTH);
+      ByteBuffer fields = ByteBuffer.wrap(envelope);
+      if (fields.getInt(0) != StateArchiveFileFormatV3.FRAME_MAGIC) {
+        throw new IOException("State Archive frame magic mismatch");
+      }
+      short frameType = fields.getShort(8);
+      long totalLength = fields.getLong(16);
+      if (totalLength <= 0 || totalLength > Integer.MAX_VALUE
+          || totalLength > dataSize - offset) {
+        throw new IOException("Truncated State Archive frame");
+      }
+      if (frameType != StateArchiveFileFormatV3.BLOCK_FRAME_TYPE) {
+        throw new IOException("State Archive frame beyond the durability proof boundary");
+      }
+      byte[] frame = readExact(state.data, offset, (int) totalLength);
+      if (ByteBuffer.wrap(frame).getShort(COMPRESSION_ID_OFFSET) != compressionId) {
+        throw new IOException("State Archive segment frame compression mismatch");
+      }
+      long number = blockNumber(frame);
+      if (number != state.lastBlock + 1) {
+        throw new IOException("Non-contiguous State Archive segment block");
+      }
+      byte[] digest = encodedFrameDigest(frame);
+      FrameReference duplicate = bundles.computeIfAbsent(number, ignored -> new HashMap<>())
+          .put(state.laneId, new FrameReference(data, offset, frame.length));
+      if (duplicate != null) {
+        throw new IOException("Duplicate State Archive lane block frame");
+      }
+      tailEntries.add(new BlockIndexEntry(number, offset, frame.length,
+          ByteBuffer.wrap(digest).getLong()));
+      state.lastBlock = number;
+      state.lastFrameDigest = Arrays.copyOf(digest, digest.length);
+      state.blockFrameCount++;
+      state.entryCount += ByteBuffer.wrap(frame).getLong(ENTRY_COUNT_OFFSET);
+      state.logicalPayloadBytes += ByteBuffer.wrap(frame).getLong(RAW_PAYLOAD_LENGTH_OFFSET);
+      state.encodedBlockFrameBytes += frame.length;
+      state.dataEndOffset += totalLength;
+      state.endHistoryDigest = Arrays.copyOfRange(frame, RESULT_HISTORY_DIGEST_OFFSET,
+          RESULT_HISTORY_DIGEST_OFFSET + StateArchiveFileFormatV3.HASH_LENGTH);
+      offset += totalLength;
+    }
+    long expectedIndexBytes = StateArchiveFileFormatV3.BLOCK_INDEX_HEADER_LENGTH
+        + state.blockFrameCount * StateArchiveFileFormatV3.BLOCK_INDEX_ENTRY_LENGTH;
+    if (state.index.size() != expectedIndexBytes) {
+      throw new IOException("State Archive block index length mismatch");
+    }
+    for (int position = 0; position < tailEntries.size(); position++) {
+      BlockIndexEntry actual;
+      try {
+        actual = StateArchiveSegmentFormatV3.decodeBlockIndexEntry(readExact(state.index,
+            StateArchiveFileFormatV3.BLOCK_INDEX_HEADER_LENGTH
+                + (state.markedBlockFrameCount + position)
+                    * StateArchiveFileFormatV3.BLOCK_INDEX_ENTRY_LENGTH,
+            StateArchiveFileFormatV3.BLOCK_INDEX_ENTRY_LENGTH));
+      } catch (IllegalArgumentException invalid) {
+        throw new IOException("State Archive block index tail entry is corrupt", invalid);
+      }
+      if (!ScannedSegment.sameEntry(actual, tailEntries.get(position))) {
+        throw new IOException("State Archive block index tail entry mismatch");
+      }
+    }
+  }
+
+  /**
+   * Scans the post-marker region of a lane whose final proof tail sits in a sealed segment,
+   * then fully scans any intermediate post-checkpoint segments. All of them are bounded by the
+   * uncheckpointed tail; their pre-marker bytes stay trusted through the Catalog seal checks.
+   */
+  private void scanSealedLaneTail(FileTailProof tail, RecoveryPoint target,
+      long currentSegmentSeq, Map<Long, SealedSegment> sealed,
+      Map<Long, Map<Integer, FrameReference>> bundles) throws IOException {
+    SealedSegment tailRecord = sealed.get(tail.getSegmentSeq());
+    if (tailRecord == null) {
+      throw new IOException("State Archive durability proof segment is not sealed in Catalog");
+    }
+    Path data = dataPath(tail.getLaneId(), tail.getSegmentSeq());
+    long lastBlock = target.getBlockNumber();
+    long size = tailRecord.getDataFileBytes();
+    boolean sealFound = false;
+    try (FileChannel channel = FileChannel.open(data, StandardOpenOption.READ)) {
+      long offset = tail.getMarkerEndOffset();
+      while (offset < size) {
+        if (size - offset < StateArchiveFileFormatV3.FRAME_ENVELOPE_LENGTH) {
+          throw new IOException("Truncated State Archive frame envelope");
+        }
+        byte[] envelope = readExact(channel, offset,
+            StateArchiveFileFormatV3.FRAME_ENVELOPE_LENGTH);
+        ByteBuffer fields = ByteBuffer.wrap(envelope);
+        if (fields.getInt(0) != StateArchiveFileFormatV3.FRAME_MAGIC) {
+          throw new IOException("State Archive frame magic mismatch");
+        }
+        short frameType = fields.getShort(8);
+        long totalLength = fields.getLong(16);
+        if (totalLength <= 0 || totalLength > Integer.MAX_VALUE
+            || totalLength > size - offset) {
+          throw new IOException("Truncated State Archive frame");
+        }
+        if (frameType == StateArchiveFileFormatV3.BLOCK_FRAME_TYPE) {
+          byte[] frame = readExact(channel, offset, (int) totalLength);
+          if (ByteBuffer.wrap(frame).getShort(COMPRESSION_ID_OFFSET) != compressionId) {
+            throw new IOException("State Archive segment frame compression mismatch");
+          }
+          long number = blockNumber(frame);
+          if (number != lastBlock + 1) {
+            throw new IOException("Non-contiguous State Archive segment block");
+          }
+          FrameReference duplicate = bundles.computeIfAbsent(number,
+              ignored -> new HashMap<>())
+              .put(tail.getLaneId(), new FrameReference(data, offset, frame.length));
+          if (duplicate != null) {
+            throw new IOException("Duplicate State Archive lane block frame");
+          }
+          lastBlock = number;
+        } else if (frameType == StateArchiveFileFormatV3.PART_SEAL_FRAME_TYPE) {
+          if (offset + totalLength != size) {
+            throw new IOException("State Archive seal has trailing bytes");
+          }
+          sealFound = true;
+        } else {
+          throw new IOException("State Archive frame beyond the durability proof boundary");
+        }
+        offset += totalLength;
+      }
+    }
+    if (!sealFound || lastBlock != tailRecord.getLastBlock()) {
+      throw new IOException("State Archive sealed segment tail mismatch");
+    }
+    for (long sequence = tail.getSegmentSeq() + 1; sequence < currentSegmentSeq; sequence++) {
+      SealedSegment intermediate = sealed.get(sequence);
+      if (intermediate == null) {
+        throw new IOException("State Archive Catalog sealed sequence has a gap");
+      }
+      ScannedSegment scanned;
+      try {
+        scanned = scanSegment(dataPath(tail.getLaneId(), sequence),
+            new ParsedName(tail.getLaneId(), sequence), bundles, false);
+      } catch (IllegalArgumentException invalid) {
+        throw new IOException("State Archive post-checkpoint segment is not verifiable",
+            invalid);
+      }
+      if (scanned.seal == null || !scanned.markers.isEmpty()
+          || !Arrays.equals(StateArchiveSegmentFormatV3.encodeSealedMapRecord(intermediate),
+              StateArchiveSegmentFormatV3.encodeSealedMapRecord(scanned.sealedMap()))) {
+        throw new IOException("State Archive sealed segment identity mismatch");
+      }
+    }
+  }
+
+  /**
+   * Recomputes the authoritative cumulative statistics of a fast-reopened segment with one
+   * full structural pass. The fast reopen skips the checkpointed prefix, so entry counts, the
+   * first frame digest and the running content digest only exist after this pass; the seal
+   * output is identical to a continuously tracked writer.
+   */
+  private LaneState requireCompleteStats(LaneState state) throws IOException {
+    if (!state.incompleteStats) {
+      return state;
+    }
+    ScannedSegment scanned;
+    try {
+      scanned = scanSegment(dataPath(state.laneId, state.segmentSeq),
+          new ParsedName(state.laneId, state.segmentSeq), new TreeMap<>(), false);
+    } catch (IllegalArgumentException invalid) {
+      throw new IOException("State Archive current segment is not verifiable", invalid);
+    }
+    if (scanned.seal != null || scanned.firstBlock != state.firstBlock
+        || scanned.lastBlock != state.lastBlock || scanned.dataEnd != state.dataEndOffset
+        || !Arrays.equals(scanned.startHistory, state.startHistoryDigest)
+        || !Arrays.equals(scanned.endHistory, state.endHistoryDigest)) {
+      scanned.close();
+      throw new IOException("State Archive current segment drifted after reopen");
+    }
+    LaneState complete = scanned.openState();
+    complete.lastMeta = state.lastMeta;
+    state.close();
+    lanes.put(state.laneId, complete);
+    return complete;
   }
 
   private void rebuildLastDurabilityProof(List<ScannedSegment> scannedSegments,
@@ -2124,6 +2644,7 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
     private byte[] previousMarkerDigest = new byte[StateArchiveFileFormatV3.HASH_LENGTH];
     private byte[] lastCommonTargetDigest;
     private long lastCheckpointSequence = -1;
+    private boolean incompleteStats;
 
     private LaneState(int laneId, long segmentSeq, long firstBlock, byte[] headerDigest,
         byte[] startHistoryDigest, FileChannel data, FileChannel index,

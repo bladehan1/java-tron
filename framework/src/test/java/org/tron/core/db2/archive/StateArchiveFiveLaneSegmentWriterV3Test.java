@@ -48,8 +48,8 @@ public class StateArchiveFiveLaneSegmentWriterV3Test {
     try (StateArchiveFiveLaneSegmentWriterV3 writer =
         new StateArchiveFiveLaneSegmentWriterV3(root, baseline,
             StateArchiveFileFormatV3.COMPRESSION_NONE, 1_500)) {
-      writer.append(first);
-      writer.append(second);
+      writer.appendForCheckpoint(first, 1, hash(109));
+      writer.appendForCheckpoint(second, 1, hash(109));
       assertEquals(2, writer.getAppendHead().getBlockNumber());
       assertEquals(1, writer.getSealedSegments().size());
       SealedSegment sealed = writer.getSealedSegments().get(0);
@@ -70,6 +70,10 @@ public class StateArchiveFiveLaneSegmentWriterV3Test {
           .allMatch(segment -> segment.getFirstBlock() == 1
               && segment.getCurrentLastBlock() == 2
               && segment.getSegmentSeq() == 0));
+
+      // The fast reopen requires the persisted durability proof of the last checkpoint.
+      StateArchiveFiveLaneDurabilityProofV3.publish(root,
+          writer.sync(1, point(second), hash(109)));
     }
 
     assertEquals(6, filesWithSuffix(root, ".dat").size());
@@ -173,6 +177,7 @@ public class StateArchiveFiveLaneSegmentWriterV3Test {
       writer.sync(11, point(first), hash(109));
       writer.appendForCheckpoint(second, 12, hash(110));
       ArchiveDurabilityProof proof = writer.sync(12, point(second), hash(110));
+      StateArchiveFiveLaneDurabilityProofV3.publish(root, proof);
       assertEquals(5, proof.getFileTails().size());
       assertFalse(writer.getSealedSegments().isEmpty());
     }
@@ -301,6 +306,9 @@ public class StateArchiveFiveLaneSegmentWriterV3Test {
           .allMatch(segment -> segment.getCurrentLastBlock() == 1
               && segment.getBlockFrameCount() == 1));
       assertTrue(Files.isRegularFile(segment(root, 13, ".bidx")));
+      // Publish the boundary proof the fast reopen requires before opening normally.
+      StateArchiveFiveLaneDurabilityProofV3.publish(root,
+          recovered.sync(1, point(first), hash(90)));
     }
 
     Map<Path, Long> repairedSizes = fileSizes(root);
@@ -346,16 +354,32 @@ public class StateArchiveFiveLaneSegmentWriterV3Test {
                 StateArchiveFileFormatV3.COMPRESSION_NONE, 10_000,
                 authorized, common, StateArchiveFiveLaneSegmentWriterV3.RecoveryFaultHook.NONE)) {
           assertEquals(1, recovered.getAppendHead().getBlockNumber());
+          StateArchiveFiveLaneDurabilityProofV3.publish(root,
+              recovered.sync(1, point(first), hash(71)));
         }
       } else {
         assertFalse(Files.exists(temporary));
         assertEquals(stage != RecoveryStage.INTENT_DELETED, Files.exists(intent));
+        if (stage == RecoveryStage.INTENT_DELETED) {
+          // The faulted recovery already finished; a rerun is a verified zero-action scan.
+          // The normal reopen below takes the fast path, which requires a persisted proof.
+          try (StateArchiveFiveLaneSegmentWriterV3 zeroAction =
+              StateArchiveFiveLaneSegmentWriterV3.recover(root, baseline,
+                  StateArchiveFileFormatV3.COMPRESSION_NONE, 10_000, authorized, common,
+                  StateArchiveFiveLaneSegmentWriterV3.RecoveryFaultHook.NONE)) {
+            assertEquals(1, zeroAction.getAppendHead().getBlockNumber());
+            StateArchiveFiveLaneDurabilityProofV3.publish(root,
+                zeroAction.sync(1, point(first), hash(71)));
+          }
+        }
         try (StateArchiveFiveLaneSegmentWriterV3 recovered =
             new StateArchiveFiveLaneSegmentWriterV3(root, baseline,
                 StateArchiveFileFormatV3.COMPRESSION_NONE, 10_000)) {
           assertEquals(1, recovered.getAppendHead().getBlockNumber());
           assertTrue(recovered.getCurrentSegments().stream()
               .allMatch(segment -> segment.getCurrentLastBlock() == 1));
+          StateArchiveFiveLaneDurabilityProofV3.publish(root,
+              recovered.sync(1, point(first), hash(71)));
         }
       }
       assertFalse(Files.exists(intent));
@@ -501,6 +525,8 @@ public class StateArchiveFiveLaneSegmentWriterV3Test {
           proof.getDescriptorDigest());
       writer.verifyDurabilityProof(proof);
       assertEquals(proof, writer.sync(8, point(second), commonTarget));
+      // The fast reopen below resumes from this persisted proof boundary.
+      StateArchiveFiveLaneDurabilityProofV3.publish(root, proof);
       writer.append(third);
     }
 
