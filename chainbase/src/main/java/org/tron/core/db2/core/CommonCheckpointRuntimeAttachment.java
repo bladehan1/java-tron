@@ -8,7 +8,7 @@ import org.tron.core.db2.archive.StateArchiveCheckpointReadSnapshot;
 public final class CommonCheckpointRuntimeAttachment implements AutoCloseable {
 
   private final CommonCheckpointRuntime runtime;
-  private State state;
+  private volatile State state;
 
   private CommonCheckpointRuntimeAttachment(CommonCheckpointRuntime runtime, State state) {
     this.runtime = runtime;
@@ -63,10 +63,16 @@ public final class CommonCheckpointRuntimeAttachment implements AutoCloseable {
   }
 
   /** Pins one point-only query from a fully recovered and non-failed runtime. */
-  public synchronized StateArchiveCheckpointReadSnapshot pinPoint(long targetBlock)
+  public StateArchiveCheckpointReadSnapshot pinPoint(long targetBlock)
       throws IOException {
     requireReady();
     return runtime.pinPoint(targetBlock);
+  }
+
+  public StateArchiveCheckpointReadSnapshot pinPoint(long targetBlock,
+      org.tron.core.db2.archive.HistoricalQueryControl control) throws IOException {
+    requireReady();
+    return runtime.pinPoint(targetBlock, control);
   }
 
   public synchronized State getState() {

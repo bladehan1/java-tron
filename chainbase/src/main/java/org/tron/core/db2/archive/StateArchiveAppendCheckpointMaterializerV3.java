@@ -268,6 +268,15 @@ public final class StateArchiveAppendCheckpointMaterializerV3
     return servingWorker.status();
   }
 
+  /** Caller owns the Common read lease, keeping this source and baseline alive until close. */
+  synchronized CheckpointPointHistory pinHistory(CommonCheckpointTarget target)
+      throws IOException {
+    requireOpen();
+    CommonCheckpointTarget admitted = requireTarget(target);
+    return new StateArchiveAppendReadAdapterV3(
+        servingWorker.pinIndexed(admitted.getLastBlock().getBlockNumber()), writer, admitted);
+  }
+
   public IOException servingIndexFailure() {
     return servingWorker.failure();
   }

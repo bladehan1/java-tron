@@ -10,7 +10,7 @@ import org.tron.core.db2.core.CommonCheckpointTarget;
 import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
 
 /** Request-owned exact-key reader for one published next-format checkpoint target. */
-public final class StateArchiveCheckpointReadAdapter implements AutoCloseable {
+public final class StateArchiveCheckpointReadAdapter implements CheckpointPointHistory {
 
   private final CommonCheckpointTarget target;
   private final StateArchiveCheckpointServingIndex.Reader reader;
@@ -42,15 +42,6 @@ public final class StateArchiveCheckpointReadAdapter implements AutoCloseable {
         StateArchiveCheckpointServingIndex.openReader(directory, admitted, engine));
   }
 
-  /** Opens a target already validated and pinned by the common-checkpoint runtime. */
-  public static StateArchiveCheckpointReadAdapter openTrusted(Path archiveDirectory,
-      CommonCheckpointTarget target, Engine engine) throws IOException {
-    Path directory = Objects.requireNonNull(archiveDirectory, "archiveDirectory");
-    CommonCheckpointTarget admitted = Objects.requireNonNull(target, "target");
-    return new StateArchiveCheckpointReadAdapter(admitted,
-        StateArchiveCheckpointServingIndex.openTrustedReader(directory, admitted, engine));
-  }
-
   /** Reconstructs the published target from disk before opening the exact-point reader. */
   public static StateArchiveCheckpointReadAdapter open(Path archiveDirectory,
       byte[] expectedFormatIdentity) throws IOException {
@@ -63,6 +54,15 @@ public final class StateArchiveCheckpointReadAdapter implements AutoCloseable {
     Path directory = Objects.requireNonNull(archiveDirectory, "archiveDirectory");
     return open(directory, StateArchiveCheckpointMaterializer.loadPublishedTarget(directory,
         expectedFormatIdentity, engine), engine);
+  }
+
+  /** Opens a target already validated and pinned by the common-checkpoint runtime. */
+  public static StateArchiveCheckpointReadAdapter openTrusted(Path archiveDirectory,
+      CommonCheckpointTarget target, Engine engine) throws IOException {
+    Path directory = Objects.requireNonNull(archiveDirectory, "archiveDirectory");
+    CommonCheckpointTarget admitted = Objects.requireNonNull(target, "target");
+    return new StateArchiveCheckpointReadAdapter(admitted,
+        StateArchiveCheckpointServingIndex.openTrustedReader(directory, admitted, engine));
   }
 
   /**

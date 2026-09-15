@@ -10,6 +10,9 @@ import org.tron.protos.Protocol;
 
 public interface Repository {
 
+  default void checkHistoricalQueryActive() {
+  }
+
   default boolean isHistorical() {
     return false;
   }

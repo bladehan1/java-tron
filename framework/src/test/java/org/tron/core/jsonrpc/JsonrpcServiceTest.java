@@ -778,15 +778,15 @@ public class JsonrpcServiceTest extends BaseTest {
    */
   @Test
   public void testGetCallWithBlockObject() {
-    // neither HashMap nor String -> invalid json request
+    // Shared historical selector syntax reports malformed values as invalid parameters.
     Exception nonMapEx = Assert.assertThrows(Exception.class,
         () -> tronJsonRpc.getCall(null, new Object()));
-    Assert.assertEquals("invalid json request", nonMapEx.getMessage());
+    Assert.assertEquals("invalid historical block selector", nonMapEx.getMessage());
 
-    // HashMap without blockNumber/blockHash keys -> invalid json request
+    // Map without exactly one blockNumber/blockHash selector is rejected.
     Exception emptyMapEx = Assert.assertThrows(Exception.class,
         () -> tronJsonRpc.getCall(null, new HashMap<String, String>()));
-    Assert.assertEquals("invalid json request", emptyMapEx.getMessage());
+    Assert.assertEquals("invalid historical block selector", emptyMapEx.getMessage());
 
     // blockNumber with malformed hex -> invalid block number
     HashMap<String, String> badHexParams = new HashMap<>();
@@ -802,20 +802,22 @@ public class JsonrpcServiceTest extends BaseTest {
         () -> tronJsonRpc.getCall(null, overflowParams));
     Assert.assertEquals("invalid block number", overflowEx.getMessage());
 
-    // blockNumber points to a non-existent block -> header not found
+    // With Archive disabled all valid historical selectors use the shared admission error.
     HashMap<String, String> missingNumParams = new HashMap<>();
     missingNumParams.put("blockNumber", "0x1");
     Exception missingNumEx = Assert.assertThrows(Exception.class,
         () -> tronJsonRpc.getCall(null, missingNumParams));
-    Assert.assertEquals("header not found", missingNumEx.getMessage());
+    Assert.assertEquals(
+        "QUANTITY not supported, just support TAG as latest", missingNumEx.getMessage());
 
-    // blockHash of an unknown block -> header for hash not found
+    // Hash lookup is also gated before consulting historical block storage.
     HashMap<String, String> missingHashParams = new HashMap<>();
     missingHashParams.put("blockHash",
         "0x1111111111111111111111111111111111111111111111111111111111111111");
     Exception missingHashEx = Assert.assertThrows(Exception.class,
         () -> tronJsonRpc.getCall(null, missingHashParams));
-    Assert.assertEquals("header for hash not found", missingHashEx.getMessage());
+    Assert.assertEquals(
+        "QUANTITY not supported, just support TAG as latest", missingHashEx.getMessage());
 
     HashMap<String, String> historicalParams = new HashMap<>();
     historicalParams.put("blockNumber", ByteArray.toJsonHex(blockCapsule1.getNum()));

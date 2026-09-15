@@ -24,6 +24,7 @@ public class VM {
       long factor = DYNAMIC_ENERGY_FACTOR_DECIMAL;
       long energyUsage = 0L;
       // hoist once per execution: avoids a per-opcode VMConfig.current() thread-local lookup
+      final boolean historical = program.getContractState().isHistorical();
       final boolean allowDynamicEnergy = VMConfig.allowDynamicEnergy();
 
       if (allowDynamicEnergy) {
@@ -31,6 +32,9 @@ public class VM {
       }
 
       while (!program.isStopped()) {
+        if (historical) {
+          program.getContractState().checkHistoricalQueryActive();
+        }
         if (VMConfig.vmTrace()) {
           program.saveOpTrace();
         }
@@ -88,6 +92,9 @@ public class VM {
 
           /* exec op action */
           op.execute(program);
+          if (historical) {
+            program.getContractState().checkHistoricalQueryActive();
+          }
 
           program.setPreviouslyExecutedOp((byte) op.getOpcode());
         } catch (RuntimeException e) {

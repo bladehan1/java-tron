@@ -265,6 +265,11 @@ public class RepositoryImpl implements Repository {
   }
 
   @Override
+  public void checkHistoricalQueryActive() {
+    stateSource.checkActive();
+  }
+
+  @Override
   public boolean isHistorical() {
     return readOnlyRoot;
   }

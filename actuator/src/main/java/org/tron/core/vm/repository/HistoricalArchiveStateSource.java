@@ -49,6 +49,11 @@ final class HistoricalArchiveStateSource implements RepositoryStateSource {
   }
 
   @Override
+  public void checkActive() {
+    session.checkActive();
+  }
+
+  @Override
   public boolean isReadOnly() {
     return true;
   }

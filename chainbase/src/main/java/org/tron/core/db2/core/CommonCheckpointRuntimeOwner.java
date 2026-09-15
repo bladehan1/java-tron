@@ -98,8 +98,31 @@ public final class CommonCheckpointRuntimeOwner implements AutoCloseable {
 
   /** Acquires a request-thread-owned lease that blocks checkpoint publication until closed. */
   public ReadLease acquireReadLease() throws IOException {
-    gate.readLock().lock();
+    return acquireReadLease(null);
+  }
+
+  public ReadLease acquireReadLease(
+      org.tron.core.db2.archive.HistoricalQueryControl control) throws IOException {
+    if (control == null) {
+      gate.readLock().lock();
+    } else {
+      try {
+        while (!gate.readLock().tryLock(Math.min(control.remainingNanos(),
+            java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(50)),
+            java.util.concurrent.TimeUnit.NANOSECONDS)) {
+          control.checkActive();
+        }
+      } catch (InterruptedException failure) {
+        Thread.currentThread().interrupt();
+        throw new org.tron.core.db2.archive.HistoricalQueryException(
+            org.tron.core.db2.archive.HistoricalQueryException.Reason.CANCELLED,
+            "Historical pin interrupted", failure);
+      }
+    }
     try {
+      if (control != null) {
+        control.checkActive();
+      }
       requireState(State.READY, "common checkpoint runtime is not readable");
       return new ReadLease(Thread.currentThread());
     } catch (IOException | RuntimeException failure) {

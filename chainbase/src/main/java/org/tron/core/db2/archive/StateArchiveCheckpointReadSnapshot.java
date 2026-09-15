@@ -6,8 +6,8 @@ import java.util.Arrays;
 import java.util.Objects;
 import java.util.Optional;
 import org.tron.core.db2.archive.ArchiveReadSnapshot.PinnedLatestState;
-import org.tron.core.db2.core.CommonCheckpointTarget;
 import org.tron.core.db2.core.CommonCheckpointRuntimeOwner;
+import org.tron.core.db2.core.CommonCheckpointTarget;
 import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
 
 /** Request-owned, point-only view over one published next-format checkpoint head. */
@@ -17,13 +17,13 @@ public final class StateArchiveCheckpointReadSnapshot implements ArchivePointSna
   private final long pinnedBlock;
   private final byte[] pinnedHash;
   private final CommonCheckpointRuntimeOwner.ReadLease lease;
-  private final StateArchiveCheckpointReadAdapter archive;
+  private final CheckpointPointHistory archive;
   private final PinnedLatestState latest;
   private boolean closed;
 
   private StateArchiveCheckpointReadSnapshot(long targetBlock,
       CommonCheckpointRuntimeOwner.ReadLease lease,
-      StateArchiveCheckpointReadAdapter archive, PinnedLatestState latest) {
+      CheckpointPointHistory archive, PinnedLatestState latest) {
     this.targetBlock = targetBlock;
     this.pinnedBlock = archive.getIndexedThrough();
     this.pinnedHash = archive.getHeadHash();
@@ -39,7 +39,7 @@ public final class StateArchiveCheckpointReadSnapshot implements ArchivePointSna
       PinnedLatestStateFactory latestFactory) throws IOException {
     CommonCheckpointRuntimeOwner admittedOwner = Objects.requireNonNull(owner, "owner");
     CommonCheckpointRuntimeOwner.ReadLease lease = admittedOwner.acquireReadLease();
-    StateArchiveCheckpointReadAdapter archive = null;
+    CheckpointPointHistory archive = null;
     PinnedLatestState latest = null;
     try {
       archive = StateArchiveCheckpointReadAdapter.open(archiveDirectory,
@@ -64,7 +64,7 @@ public final class StateArchiveCheckpointReadSnapshot implements ArchivePointSna
       PinnedLatestStateFactory latestFactory) throws IOException {
     CommonCheckpointRuntimeOwner admittedOwner = Objects.requireNonNull(owner, "owner");
     CommonCheckpointRuntimeOwner.ReadLease lease = admittedOwner.acquireReadLease();
-    StateArchiveCheckpointReadAdapter archive = null;
+    CheckpointPointHistory archive = null;
     PinnedLatestState latest = null;
     try {
       archive = StateArchiveCheckpointReadAdapter.openTrusted(archiveDirectory,
@@ -76,6 +76,28 @@ public final class StateArchiveCheckpointReadSnapshot implements ArchivePointSna
           archive.getIndexedThrough(), archive.getHeadHash());
       return new StateArchiveCheckpointReadSnapshot(targetBlock, lease, archive,
           Objects.requireNonNull(latest, "pinned latest state"));
+    } catch (IOException | RuntimeException failure) {
+      closeAfterFailedPin(lease, archive, latest, failure);
+      throw failure;
+    }
+  }
+
+  /** Pins append history and its single serving DB under the Common publication lease. */
+  public static StateArchiveCheckpointReadSnapshot pinAppend(long targetBlock,
+      CommonCheckpointRuntimeOwner owner, StateArchiveAppendCheckpointMaterializerV3 materializer,
+      CommonCheckpointTarget publishedTarget, PinnedLatestStateFactory latestFactory)
+      throws IOException {
+    CommonCheckpointRuntimeOwner.ReadLease lease = owner.acquireReadLease();
+    CheckpointPointHistory archive = null;
+    PinnedLatestState latest = null;
+    try {
+      archive = materializer.pinHistory(publishedTarget);
+      if (targetBlock < archive.getIndexedFrom() || targetBlock > archive.getIndexedThrough()) {
+        throw new IllegalArgumentException("checkpoint target block is outside indexed coverage");
+      }
+      latest = Objects.requireNonNull(latestFactory.pin(archive.getIndexedThrough(),
+          archive.getHeadHash()), "pinned latest state");
+      return new StateArchiveCheckpointReadSnapshot(targetBlock, lease, archive, latest);
     } catch (IOException | RuntimeException failure) {
       closeAfterFailedPin(lease, archive, latest, failure);
       throw failure;
@@ -119,23 +141,7 @@ public final class StateArchiveCheckpointReadSnapshot implements ArchivePointSna
       return;
     }
     closed = true;
-    IOException failure = null;
-    try {
-      latest.close();
-    } catch (IOException e) {
-      failure = e;
-    }
-    try {
-      archive.close();
-    } catch (RuntimeException e) {
-      if (failure == null) {
-        failure = new IOException("Failed to close checkpoint Archive reader", e);
-      } else {
-        failure.addSuppressed(e);
-      }
-    } finally {
-      lease.close();
-    }
+    IOException failure = closeResources(lease, archive, latest);
     if (failure != null) {
       throw failure;
     }
@@ -157,7 +163,7 @@ public final class StateArchiveCheckpointReadSnapshot implements ArchivePointSna
   }
 
   private static void closeAfterFailedPin(CommonCheckpointRuntimeOwner.ReadLease lease,
-      StateArchiveCheckpointReadAdapter archive, PinnedLatestState latest,
+      CheckpointPointHistory archive, PinnedLatestState latest,
       Exception failure) {
     IOException closeFailure = closeResources(lease, archive, latest);
     if (closeFailure != null) {
@@ -166,19 +172,19 @@ public final class StateArchiveCheckpointReadSnapshot implements ArchivePointSna
   }
 
   private static IOException closeResources(CommonCheckpointRuntimeOwner.ReadLease lease,
-      StateArchiveCheckpointReadAdapter archive, PinnedLatestState latest) {
+      CheckpointPointHistory archive, PinnedLatestState latest) {
     IOException failure = null;
     if (latest != null) {
       try {
         latest.close();
-      } catch (IOException e) {
-        failure = e;
+      } catch (IOException | RuntimeException e) {
+        failure = new IOException("Failed to close checkpoint latest snapshot", e);
       }
     }
     if (archive != null) {
       try {
         archive.close();
-      } catch (RuntimeException e) {
+      } catch (IOException | RuntimeException e) {
         failure = append(failure, new IOException(
             "Failed to close checkpoint Archive reader", e));
       }

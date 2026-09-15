@@ -37,6 +37,10 @@ public final class HistoricalQuerySession implements AutoCloseable {
     public static Limits defaults() {
       return new Limits(100_000L, 64L * 1024L * 1024L, 10_000L);
     }
+
+    public long getTimeoutMillis() {
+      return timeoutMillis;
+    }
   }
 
   private static final Map<String, StoreAdapter<byte[]>> RAW_ADAPTERS = rawAdapters();
@@ -45,18 +49,20 @@ public final class HistoricalQuerySession implements AutoCloseable {
   private final ArchiveReadContext context;
   private final byte[] targetBlockHash;
   private final Limits limits;
-  private final long deadlineNanos;
+  private final HistoricalQueryControl control;
+  private final Runnable releaseAdmission;
   private long reads;
   private long bytes;
   private boolean closed;
 
   private HistoricalQuerySession(ArchiveReadContext context, byte[] targetBlockHash,
-      Limits limits) {
+      Limits limits, HistoricalQueryControl control, Runnable releaseAdmission) {
     this.context = Objects.requireNonNull(context, "context");
     this.targetBlockHash = copyHash(targetBlockHash);
     this.limits = Objects.requireNonNull(limits, "limits");
-    this.deadlineNanos = System.nanoTime()
-        + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(limits.timeoutMillis);
+    this.control = Objects.requireNonNull(control, "control");
+    this.releaseAdmission = Objects.requireNonNull(releaseAdmission, "releaseAdmission");
+    control.checkActive();
     context.requirePinnedIdentity();
   }
 
@@ -75,9 +81,18 @@ public final class HistoricalQuerySession implements AutoCloseable {
   /** Takes ownership of a common-checkpoint point snapshot. */
   public static HistoricalQuerySession open(StateArchiveCheckpointReadSnapshot snapshot,
       byte[] targetBlockHash, Limits limits) throws IOException {
+    return open(snapshot, targetBlockHash, limits,
+        new HistoricalQueryControl(limits.timeoutMillis), () -> { });
+  }
+
+  /** Request admission remains owned by the caller until this method returns successfully. */
+  public static HistoricalQuerySession open(StateArchiveCheckpointReadSnapshot snapshot,
+      byte[] targetBlockHash, Limits limits, HistoricalQueryControl control,
+      Runnable releaseAdmission) throws IOException {
     ArchiveReadContext context = ArchiveReadContext.open(snapshot, EXACT_ADAPTERS);
     try {
-      return new HistoricalQuerySession(context, targetBlockHash, limits);
+      return new HistoricalQuerySession(context, targetBlockHash, limits, control,
+          releaseAdmission);
     } catch (RuntimeException failure) {
       try {
         context.close();
@@ -91,9 +106,17 @@ public final class HistoricalQuerySession implements AutoCloseable {
   /** Takes ownership of {@code lease}, including if session construction fails. */
   public static HistoricalQuerySession open(ArchiveRuntimeQueryGate.Lease lease,
       byte[] targetBlockHash, Limits limits) throws IOException {
+    return open(lease, targetBlockHash, limits,
+        new HistoricalQueryControl(limits.timeoutMillis), () -> { });
+  }
+
+  public static HistoricalQuerySession open(ArchiveRuntimeQueryGate.Lease lease,
+      byte[] targetBlockHash, Limits limits, HistoricalQueryControl control,
+      Runnable releaseAdmission) throws IOException {
     ArchiveReadContext context = ArchiveReadContext.open(lease, EXACT_ADAPTERS);
     try {
-      return new HistoricalQuerySession(context, targetBlockHash, limits);
+      return new HistoricalQuerySession(context, targetBlockHash, limits, control,
+          releaseAdmission);
     } catch (RuntimeException failure) {
       try {
         context.close();
@@ -167,13 +190,14 @@ public final class HistoricalQuerySession implements AutoCloseable {
     requireReadBudget();
     try {
       OldValue value = context.getExact(dbName, copyKey(physicalRawKey, "physicalRawKey"));
+      control.checkActive();
       if (value.isPresent()) {
         accountBytes(value.getValue().length);
       }
       return value.isPresent() ? Optional.of(value.getValue()) : Optional.empty();
     } catch (IOException failure) {
-      throw new ArchivePersistenceException("Failed to read historical Store " + dbName,
-          failure);
+      throw new HistoricalQueryException(HistoricalQueryException.Reason.DATA_ACCESS,
+          "Failed to read historical Store " + dbName, failure);
     }
   }
 
@@ -182,8 +206,19 @@ public final class HistoricalQuerySession implements AutoCloseable {
     context.requirePinnedIdentity();
   }
 
+  /** Also called for pure-compute VM execution, which may perform no Store reads. */
+  public void checkActive() {
+    ensureOpen();
+    control.checkActive();
+  }
+
+  public void cancel() {
+    control.cancel();
+  }
+
   @Override
   public synchronized void close() {
+    control.requireOwner();
     if (closed) {
       return;
     }
@@ -192,6 +227,8 @@ public final class HistoricalQuerySession implements AutoCloseable {
       context.close();
     } catch (IOException failure) {
       throw new ArchivePersistenceException("Failed to close historical query session", failure);
+    } finally {
+      releaseAdmission.run();
     }
   }
 
@@ -199,12 +236,11 @@ public final class HistoricalQuerySession implements AutoCloseable {
     if (closed) {
       throw new IllegalStateException("Historical query session is closed");
     }
+    control.checkActive();
   }
 
   private synchronized void requireReadBudget() {
-    if (System.nanoTime() - deadlineNanos > 0) {
-      throw new HistoricalQueryBudgetException("Historical query deadline exceeded");
-    }
+    control.checkActive();
     if (reads >= limits.maxReads) {
       throw new HistoricalQueryBudgetException("Historical query read budget exceeded");
     }
