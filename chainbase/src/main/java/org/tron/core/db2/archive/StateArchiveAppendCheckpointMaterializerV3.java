@@ -78,12 +78,11 @@ public final class StateArchiveAppendCheckpointMaterializerV3
       ArchiveDurabilityProof proof = StateArchiveFiveLaneDurabilityProofV3.decode(
           Files.readAllBytes(proofFile));
       if (matches(proof, target)) {
-        // Only an exactly published SAP3 target authorizes this startup trim. A newer prepared
-        // proof may belong to pending Common WAL and must instead retain the existing redo path.
-        // recover validates the full identity and uses its durable intent for torn/open tails.
-        return StateArchiveFiveLaneSegmentWriterV3.recover(directory, baselineHistoryDigest,
-            compressionId, rotationTargetBytes, proof.getTarget(), proof.getTarget(),
-            StateArchiveFiveLaneSegmentWriterV3.RecoveryFaultHook.NONE);
+        // An exactly matching published proof lets normal startup use fast reopen. The
+        // recover/full-scan path remains for actual recovery intents or requests, such as
+        // pending Common WAL or explicit repair.
+        return new StateArchiveFiveLaneSegmentWriterV3(directory, baselineHistoryDigest,
+            compressionId, rotationTargetBytes);
       }
     }
     return new StateArchiveFiveLaneSegmentWriterV3(directory, baselineHistoryDigest,
@@ -279,6 +278,10 @@ public final class StateArchiveAppendCheckpointMaterializerV3
 
   public IOException servingIndexFailure() {
     return servingWorker.failure();
+  }
+
+  StateArchiveFiveLaneSegmentWriterV3 appendWriter() {
+    return writer;
   }
 
   @Override
