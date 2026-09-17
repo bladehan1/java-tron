@@ -42,12 +42,12 @@ public class StateArchiveCommittedViewV5Test {
   }
 
   @Test
-  public void pinsVisibilityButRejectsSuffixOnLaterReopen() throws Exception {
+  public void pinsVisibilityAndAllowsCommittedPrefixBesideAppendOnlySuffix() throws Exception {
     Path root = temporaryFolder.newFolder("suffix").toPath();
     StateArchiveTailV5 tail;
     CommonCheckpointTarget target = target(101);
     try (StateArchiveFiveLaneWriterV5 writer =
-        new StateArchiveFiveLaneWriterV5(root, 100, hash(99))) {
+        new StateArchiveFiveLaneWriterV5(root, 100, hash(99), 650)) {
       writer.append(diff(100));
       writer.append(diff(101));
       tail = writer.forceTailReady(target);
@@ -62,6 +62,13 @@ public class StateArchiveCommittedViewV5Test {
     StateArchiveTailV5 committedTail = tail;
     assertThrows(IOException.class,
         () -> StateArchiveCommittedViewV5.open(root, committedTail, target));
+    try (StateArchiveCommittedViewV5 view = StateArchiveCommittedViewV5.openCommittedPrefix(
+        root, committedTail, target)) {
+      assertRange(view.locate(0, 101), 0, 608, 704);
+      assertThrows(IllegalArgumentException.class, () -> view.locate(0, 102));
+    }
+    assertThrows(IOException.class,
+        () -> StateArchiveLaneIndexV5.openWritableCommitted(indexPath(root, 0), 2));
   }
 
   @Test

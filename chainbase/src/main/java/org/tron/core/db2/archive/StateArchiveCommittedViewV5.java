@@ -50,29 +50,35 @@ final class StateArchiveCommittedViewV5 implements Closeable {
 
   static StateArchiveCommittedViewV5 open(Path root, StateArchiveTailV5 tail,
       CommonCheckpointTarget target) throws IOException {
-    return open(root, tail, target, null, NO_OP);
+    return open(root, tail, target, null, NO_OP, true);
   }
 
   static StateArchiveCommittedViewV5 open(Path root, StateArchiveTailV5 tail,
       CommonCheckpointTarget target, ReadObserver observer) throws IOException {
-    return open(root, tail, target, null, Objects.requireNonNull(observer, "observer"));
+    return open(root, tail, target, null, Objects.requireNonNull(observer, "observer"), true);
+  }
+
+  static StateArchiveCommittedViewV5 openCommittedPrefix(Path root, StateArchiveTailV5 tail,
+      CommonCheckpointTarget target) throws IOException {
+    return open(root, tail, target, null, NO_OP, false);
   }
 
   static StateArchiveCommittedViewV5 openForPreopen(Path root, StateArchiveTailV5 tail,
       CommonCheckpointTarget target, ProcessFdAdmission admission) throws IOException {
-    return open(root, tail, target, Objects.requireNonNull(admission, "admission"), NO_OP);
+    return open(root, tail, target, Objects.requireNonNull(admission, "admission"), NO_OP,
+        false);
   }
 
   static StateArchiveCommittedViewV5 openForPreopen(Path root, StateArchiveTailV5 tail,
       CommonCheckpointTarget target, ProcessFdAdmission admission, ReadObserver observer)
       throws IOException {
     return open(root, tail, target, Objects.requireNonNull(admission, "admission"),
-        Objects.requireNonNull(observer, "observer"));
+        Objects.requireNonNull(observer, "observer"), false);
   }
 
   private static StateArchiveCommittedViewV5 open(Path root, StateArchiveTailV5 tail,
-      CommonCheckpointTarget target, ProcessFdAdmission admission, ReadObserver observer)
-      throws IOException {
+      CommonCheckpointTarget target, ProcessFdAdmission admission, ReadObserver observer,
+      boolean requireExactPhysicalEnd) throws IOException {
     Path admittedRoot = Objects.requireNonNull(root, "root");
     StateArchiveTailV5 admittedTail = Objects.requireNonNull(tail, "tail");
     admittedTail.requireTarget(Objects.requireNonNull(target, "target"));
@@ -100,10 +106,12 @@ final class StateArchiveCommittedViewV5 implements Closeable {
         LaneTerminal terminal = terminals.get(index);
         Path indexPath = StateArchiveFiveLaneWriterV5.laneRoot(admittedRoot, laneId)
             .resolve("blocks.idx");
-        StateArchiveLaneIndexV5 laneIndex = StateArchiveLaneIndexV5.openCommitted(
-            indexPath, frameCount);
+        StateArchiveLaneIndexV5 laneIndex = requireExactPhysicalEnd
+            ? StateArchiveLaneIndexV5.openCommitted(indexPath, frameCount)
+            : StateArchiveLaneIndexV5.openCommittedPrefix(indexPath, frameCount);
         opened.put(laneId, laneIndex);
-        validateLane(admittedRoot, laneIndex, terminal, first, last, observer);
+        validateLane(admittedRoot, laneIndex, terminal, first, last, observer,
+            requireExactPhysicalEnd);
       }
       return new StateArchiveCommittedViewV5(admittedRoot, first, last, opened, dataFiles,
           admission != null);
@@ -173,8 +181,8 @@ final class StateArchiveCommittedViewV5 implements Closeable {
   }
 
   private static void validateLane(Path root, StateArchiveLaneIndexV5 laneIndex,
-      LaneTerminal terminal, long firstBlock, long committedBlock, ReadObserver observer)
-      throws IOException {
+      LaneTerminal terminal, long firstBlock, long committedBlock, ReadObserver observer,
+      boolean requireExactPhysicalEnd) throws IOException {
     int laneId = laneIndex.getLaneId();
     if (terminal.getLaneId() != laneId || terminal.getFlags() != StateArchiveTailV5.LANE_ACTIVE
         || laneIndex.getFirstBlockNumber() != firstBlock) {
@@ -223,16 +231,20 @@ final class StateArchiveCommittedViewV5 implements Closeable {
     }
 
     FrameRange terminalRange = laneIndex.locate(committedBlock);
+    long terminalFileLength = Files.size(previousPath);
     if (terminalRange.getFileId() != terminal.getTerminalFileId()
         || terminalRange.getEndOffset() != terminal.getTerminalDataEndOffset()
-        || Files.size(previousPath) != terminalRange.getEndOffset()
+        || terminalFileLength < terminalRange.getEndOffset()
+        || requireExactPhysicalEnd && terminalFileLength != terminalRange.getEndOffset()
         || !Arrays.equals(previousHeader.digest(), terminal.getTerminalSegmentHeaderDigest())
         || !Arrays.equals(readStoredFrameDigest(previousPath, terminalRange, observer),
             terminal.getTerminalFrameDigest())) {
       throw invalid("terminal segment mismatch");
     }
-    rejectUnexpectedDataFiles(StateArchiveFiveLaneWriterV5.laneRoot(root, laneId),
-        expectedPaths);
+    if (requireExactPhysicalEnd) {
+      rejectUnexpectedDataFiles(StateArchiveFiveLaneWriterV5.laneRoot(root, laneId),
+          expectedPaths);
+    }
   }
 
   private static StateArchiveSegmentHeaderV5 readHeader(Path path, ReadObserver observer)

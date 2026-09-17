@@ -62,16 +62,21 @@ final class StateArchiveLaneIndexV5 implements Closeable {
 
   static StateArchiveLaneIndexV5 openCommitted(Path path, long committedFrameCount)
       throws IOException {
-    return openCommitted(path, committedFrameCount, false);
+    return openCommitted(path, committedFrameCount, false, true);
+  }
+
+  static StateArchiveLaneIndexV5 openCommittedPrefix(Path path, long committedFrameCount)
+      throws IOException {
+    return openCommitted(path, committedFrameCount, false, false);
   }
 
   static StateArchiveLaneIndexV5 openWritableCommitted(Path path, long committedFrameCount)
       throws IOException {
-    return openCommitted(path, committedFrameCount, true);
+    return openCommitted(path, committedFrameCount, true, true);
   }
 
   private static StateArchiveLaneIndexV5 openCommitted(Path path, long committedFrameCount,
-      boolean writable) throws IOException {
+      boolean writable, boolean requireExactLength) throws IOException {
     Path admitted = Objects.requireNonNull(path, "path");
     requireNonNegative(committedFrameCount, "committed frame count");
     FileChannel channel = writable
@@ -81,7 +86,8 @@ final class StateArchiveLaneIndexV5 implements Closeable {
       Header header = Header.decode(readFully(channel, 0,
           StateArchiveGethFormatV5.LANE_INDEX_HEADER_LENGTH));
       long expectedLength = expectedLength(committedFrameCount);
-      if (channel.size() != expectedLength) {
+      long actualLength = channel.size();
+      if (actualLength < expectedLength || requireExactLength && actualLength != expectedLength) {
         throw new IOException("State Archive V5 lane index committed length mismatch");
       }
       Boundary initial = readBoundary(channel, 0);
