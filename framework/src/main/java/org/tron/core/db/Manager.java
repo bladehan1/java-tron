@@ -138,6 +138,7 @@ import org.tron.core.db2.archive.OldValue;
 import org.tron.core.db2.archive.SnapshotOldValueCollector;
 import org.tron.core.db2.archive.SnapshotPathStateTransitionCollector;
 import org.tron.core.db2.archive.StateArchiveAppendCheckpointMaterializerV4;
+import org.tron.core.db2.archive.StateArchiveAppendCheckpointMaterializerV5;
 import org.tron.core.db2.archive.StateArchiveAppendFileRuntime;
 import org.tron.core.db2.archive.StateArchiveCheckpointMaterializer;
 import org.tron.core.db2.archive.StateArchiveCheckpointReadSnapshot;
@@ -800,11 +801,13 @@ public class Manager {
     org.tron.core.config.args.StorageConfig.StateArchiveAppendFileConfig appendConfig =
         storage.getStateArchiveAppendFileSettings();
     boolean appendEnabled = appendConfig != null && appendConfig.isEnabled();
-    Path appendDirectory = archiveDirectory.resolve("history").resolve("v4");
+    int appendFormatVersion = appendEnabled ? appendConfig.getFormatVersion() : 4;
+    Path appendDirectory = archiveDirectory.resolve("history")
+        .resolve("v" + appendFormatVersion);
     PathStatePhysicalOverlayHead pathOwner = null;
     CommonCheckpointRuntimeAttachment attachment = null;
     StateArchiveHotStore hotStore = null;
-    StateArchiveAppendCheckpointMaterializerV4 appendMaterializer = null;
+    StateArchiveAppendFileRuntime appendMaterializer = null;
     try {
       PathStateStoreManifest.Engine pathEngine = configuredAuxiliaryEngine(
           storage.getPathStateRootEngine(), storage.getDbEngine());
@@ -926,9 +929,8 @@ public class Manager {
       StateArchiveHotCheckpointMaterializer hotMaterializer = null;
       org.tron.core.db2.core.CommonCheckpointMaterializer archiveMaterializer;
       if (appendEnabled) {
-        appendMaterializer = new StateArchiveAppendCheckpointMaterializerV4(
-            appendDirectory, formatIdentity, archiveRuntimeEngine, baseline.getStateRoot(),
-            StateArchiveFileFormatV3.COMPRESSION_NONE, appendConfig.getSegmentTargetBytes());
+        appendMaterializer = createAppendMaterializer(appendDirectory, formatIdentity,
+            archiveRuntimeEngine, baseline, appendConfig);
         archiveMaterializer = appendMaterializer;
       } else if (hotEnabled) {
         hotStore = StateArchiveHotStore.openOrCreate(hotDirectory, formatIdentity, hotEngine,
@@ -947,7 +949,7 @@ public class Manager {
       PathStatePhysicalOverlayHead admittedOwner = pathOwner;
       StateArchiveHotCheckpointMaterializer admittedHotMaterializer = hotMaterializer;
       StateArchiveHotStore admittedHotStore = hotStore;
-      StateArchiveAppendCheckpointMaterializerV4 admittedAppendMaterializer = appendMaterializer;
+      StateArchiveAppendFileRuntime admittedAppendMaterializer = appendMaterializer;
       attachment = CommonCheckpointRuntimeAttachment.open(true,
           () -> {
             CommonCheckpointRuntimeOwner owner = new CommonCheckpointRuntimeOwner(coordinator);
@@ -1081,9 +1083,8 @@ public class Manager {
     CommonCheckpointMaterializedStore materializedStore =
         new CommonCheckpointMaterializedStore(checkpointDirectory);
     org.tron.core.db2.core.CommonCheckpointMaterializer archiveRecovery = appendEnabled
-        ? new StateArchiveAppendCheckpointMaterializerV4(appendDirectory, formatIdentity,
-            archiveEngine, baseline.getStateRoot(), StateArchiveFileFormatV3.COMPRESSION_NONE,
-            appendConfig.getSegmentTargetBytes())
+        ? createAppendMaterializer(appendDirectory, formatIdentity, archiveEngine, baseline,
+            appendConfig)
         : new StateArchiveCheckpointMaterializer(archiveDirectory, formatIdentity, baseline,
             archiveEngine, materializedStore);
     try (PathStateCheckpointMaterializer.RecoverySession pathRecovery =
@@ -1100,6 +1101,35 @@ public class Manager {
       logger.info("Common checkpoint startup redo completed before PathState open: action={}",
           action);
     }
+  }
+
+  private StateArchiveAppendFileRuntime createAppendMaterializer(Path appendDirectory,
+      byte[] formatIdentity, PathStateStoreManifest.Engine archiveEngine,
+      CommonCheckpointBaseline baseline,
+      org.tron.core.config.args.StorageConfig.StateArchiveAppendFileConfig appendConfig)
+      throws java.io.IOException {
+    if (appendConfig.getFormatVersion() == 4) {
+      return new StateArchiveAppendCheckpointMaterializerV4(
+          appendDirectory, formatIdentity, archiveEngine, baseline.getStateRoot(),
+          StateArchiveFileFormatV3.COMPRESSION_NONE, appendConfig.getSegmentTargetBytes());
+    }
+    if (appendConfig.getFormatVersion() != 5) {
+      throw new java.io.IOException("Unsupported State Archive append-file format version: "
+          + appendConfig.getFormatVersion());
+    }
+    final long firstBlockNumber;
+    try {
+      firstBlockNumber = Math.addExact(baseline.getHead().getBlockNumber(), 1L);
+    } catch (ArithmeticException failure) {
+      throw new java.io.IOException("State Archive V5 first block overflows", failure);
+    }
+    CommonCheckpointRecoveryStateAdapter canonical =
+        new CommonCheckpointRecoveryStateAdapter(getDynamicPropertiesStore(), chainBaseManager);
+    byte[] baselineHistoryDigest = StateArchiveAppendCheckpointMaterializerV5
+        .baselineHistoryDigest(firstBlockNumber, baseline.getHead().getBlockHash());
+    return new StateArchiveAppendCheckpointMaterializerV5(appendDirectory, formatIdentity,
+        archiveEngine, firstBlockNumber, baselineHistoryDigest,
+        appendConfig.getSegmentTargetBytes(), canonical::loadIfPresent);
   }
 
   private BlockSnapshotMeta currentCanonicalBlockMeta()
