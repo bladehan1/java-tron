@@ -183,17 +183,17 @@ public class StorageConfig {
   public static class StateArchiveAppendFileConfig {
 
     private boolean enabled = false;
-    private int formatVersion = 3;
+    private int formatVersion = 4;
     private int appendBufferBytes = 2097152;
     private int maxBlockFrameBytes = 67108864;
-    private long segmentTargetBytes = 2000000000L;
+    private long segmentTargetBytes = 2L * 1024 * 1024 * 1024;
     private int shardMaxSegments = 1024;
 
     void postProcess() {
-      if (formatVersion != 3 || appendBufferBytes != 2097152
+      if (formatVersion != 4 || appendBufferBytes != 2097152
           || maxBlockFrameBytes != 67108864 || shardMaxSegments != 1024) {
         throw new IllegalArgumentException(
-            "stateArchive.appendFile v3 fixed format settings differ");
+            "stateArchive.appendFile v4 fixed format settings differ");
       }
       if (segmentTargetBytes <= 512) {
         throw new IllegalArgumentException(

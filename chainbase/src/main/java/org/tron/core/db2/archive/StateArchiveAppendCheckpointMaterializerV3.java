@@ -20,7 +20,7 @@ import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
 
 /** Default-off Common participant backed by the five-lane append-file v3 authority. */
 public final class StateArchiveAppendCheckpointMaterializerV3
-    implements CommonCheckpointMaterializer, StateArchiveCheckpointPlanner {
+    implements CommonCheckpointMaterializer, StateArchiveAppendFileRuntime {
 
   private final Path directory;
   private final byte[] commonFormatIdentity;
@@ -266,8 +266,9 @@ public final class StateArchiveAppendCheckpointMaterializerV3
     return servingWorker.status();
   }
 
-  /** Caller owns the Common read lease, keeping this source and baseline alive until close. */
-  synchronized CheckpointPointHistory pinHistory(CommonCheckpointTarget target)
+  /** Pins one short-lived serving-index view; callers do not hold the Common publication gate. */
+  @Override
+  public synchronized CheckpointPointHistory pinHistory(CommonCheckpointTarget target)
       throws IOException {
     requireOpen();
     CommonCheckpointTarget admitted = requireTarget(target);

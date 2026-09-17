@@ -59,6 +59,21 @@ public class LatestStateGenerationAdapterTest {
   }
 
   @Test
+  public void pointAccessPinsOnlyTheRequestedStore() throws Exception {
+    FakeStore account = new FakeStore("account", "rocksdb:/state/account", bytes("value"));
+    FakeStore properties = new FakeStore("properties", "leveldb:/state/properties",
+        bytes("property"));
+    LatestStateGenerationAdapter adapter = adapter(account, properties);
+
+    assertArrayEquals(bytes("value"),
+        adapter.get(7, hash(7), "account", bytes("key")).getValue());
+    assertEquals(1, account.pinnedSnapshots.get());
+    assertEquals(1, account.closedSnapshots.get());
+    assertEquals(0, properties.pinnedSnapshots.get());
+    assertEquals(0, properties.closedSnapshots.get());
+  }
+
+  @Test
   public void releasesPartialAcquireAndRejectsReplacementIdentity() throws Exception {
     FakeStore account = new FakeStore("account", "rocksdb:/state/account", bytes("old"));
     FakeStore properties = new FakeStore("properties", "leveldb:/state/properties",
@@ -131,6 +146,7 @@ public class LatestStateGenerationAdapterTest {
     private final AtomicBoolean failPin = new AtomicBoolean();
     private final AtomicBoolean wrongBlock = new AtomicBoolean();
     private final AtomicBoolean replaceAfterPin = new AtomicBoolean();
+    private final AtomicInteger pinnedSnapshots = new AtomicInteger();
     private final AtomicInteger closedSnapshots = new AtomicInteger();
     private String identity;
     private byte[] value;
@@ -161,6 +177,7 @@ public class LatestStateGenerationAdapterTest {
       if (failPin.get()) {
         throw new IOException("injected pin failure");
       }
+      pinnedSnapshots.incrementAndGet();
       String candidateIdentity = identity;
       byte[] pinnedValue = Arrays.copyOf(value, value.length);
       if (replaceAfterPin.get()) {

@@ -12,7 +12,7 @@ import org.slf4j.LoggerFactory;
 import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.db2.archive.ArchiveStoreScope;
 import org.tron.core.db2.archive.BlockReverseDiff;
-import org.tron.core.db2.archive.StateArchiveAppendCheckpointMaterializerV3;
+import org.tron.core.db2.archive.StateArchiveAppendFileRuntime;
 import org.tron.core.db2.archive.StateArchiveCheckpointMaterializer;
 import org.tron.core.db2.archive.StateArchiveCheckpointPlanner;
 import org.tron.core.db2.archive.StateArchiveCheckpointReadSnapshot;
@@ -146,8 +146,8 @@ public final class CommonCheckpointRuntime implements AutoCloseable {
       publishedTarget = archivePlanner == null
           ? StateArchiveCheckpointMaterializer.loadPublishedTargetIfPresent(
               archiveDirectory, formatIdentity, engine, materializedStore).orElse(null) : null;
-      if (archivePlanner instanceof StateArchiveAppendCheckpointMaterializerV3) {
-        publishedTarget = ((StateArchiveAppendCheckpointMaterializerV3) archivePlanner)
+      if (archivePlanner instanceof StateArchiveAppendFileRuntime) {
+        publishedTarget = ((StateArchiveAppendFileRuntime) archivePlanner)
             .loadPublishedTargetIfPresent().orElse(null);
       }
       if (publishedTarget != null) {
@@ -232,7 +232,7 @@ public final class CommonCheckpointRuntime implements AutoCloseable {
 
   /** Called only after SnapshotManager has selected a non-revocable prefix. */
   public synchronized void appendFinalizedHistory(int flushCount) throws IOException {
-    if (!(archivePlanner instanceof StateArchiveAppendCheckpointMaterializerV3)) {
+    if (!(archivePlanner instanceof StateArchiveAppendFileRuntime)) {
       return;
     }
     long started = nanoTime.getAsLong();
@@ -261,7 +261,7 @@ public final class CommonCheckpointRuntime implements AutoCloseable {
       }
       collectUs = elapsedUs(started);
       long appendStarted = nanoTime.getAsLong();
-      ((StateArchiveAppendCheckpointMaterializerV3) archivePlanner).appendFinalized(diffs);
+      ((StateArchiveAppendFileRuntime) archivePlanner).appendFinalized(diffs);
       appendUs = elapsedUs(appendStarted);
       success = true;
     } catch (IOException | RuntimeException failure) {
@@ -278,44 +278,27 @@ public final class CommonCheckpointRuntime implements AutoCloseable {
     }
   }
 
-  /** Pins one point-only historical request under the same publication gate. */
+  /** Opens one lock-free point request; each key resolves against its access-time head. */
   public StateArchiveCheckpointReadSnapshot pinPoint(long targetBlock) throws IOException {
     return pinPoint(targetBlock, null);
   }
 
   public StateArchiveCheckpointReadSnapshot pinPoint(long targetBlock,
       org.tron.core.db2.archive.HistoricalQueryControl control) throws IOException {
-    try (CommonCheckpointRuntimeOwner.ReadLease ignored = owner.acquireReadLease(control)) {
-      StateArchiveCheckpointReadSnapshot snapshot;
-      if (archivePlanner != null
-          && !(archivePlanner instanceof StateArchiveAppendCheckpointMaterializerV3)) {
-        throw new IOException("Hot Archive runtime point reads are not integrated");
-      }
-      CommonCheckpointTarget target = publishedTarget;
-      if (target == null) {
-        throw new IOException("State Archive has no published common-checkpoint target");
-      }
-      if (archivePlanner instanceof StateArchiveAppendCheckpointMaterializerV3) {
-        snapshot = StateArchiveCheckpointReadSnapshot.pinAppend(targetBlock, owner,
-            (StateArchiveAppendCheckpointMaterializerV3) archivePlanner, target, latestFactory);
-      } else {
-        snapshot = StateArchiveCheckpointReadSnapshot.pin(targetBlock, owner, archiveDirectory,
-            target, engine, latestFactory);
-      }
-      try {
-        if (control != null) {
-          control.checkActive();
-        }
-        return snapshot;
-      } catch (RuntimeException failure) {
-        try {
-          snapshot.close();
-        } catch (Exception closeFailure) {
-          failure.addSuppressed(closeFailure);
-        }
-        throw failure;
-      }
+    if (control != null) {
+      control.checkActive();
     }
+    if (archivePlanner != null
+        && !(archivePlanner instanceof StateArchiveAppendFileRuntime)) {
+      throw new IOException("Hot Archive runtime point reads are not integrated");
+    }
+    if (archivePlanner instanceof StateArchiveAppendFileRuntime) {
+      return StateArchiveCheckpointReadSnapshot.pinAppend(targetBlock,
+          (StateArchiveAppendFileRuntime) archivePlanner,
+          () -> publishedTarget, latestFactory);
+    }
+    return StateArchiveCheckpointReadSnapshot.pin(targetBlock, archiveDirectory,
+        () -> publishedTarget, engine, latestFactory);
   }
 
   public CommonCheckpointRuntimeOwner.State getState() {

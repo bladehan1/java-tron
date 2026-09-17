@@ -137,7 +137,8 @@ import org.tron.core.db2.archive.LatestStateGenerationCoordinatorFactory;
 import org.tron.core.db2.archive.OldValue;
 import org.tron.core.db2.archive.SnapshotOldValueCollector;
 import org.tron.core.db2.archive.SnapshotPathStateTransitionCollector;
-import org.tron.core.db2.archive.StateArchiveAppendCheckpointMaterializerV3;
+import org.tron.core.db2.archive.StateArchiveAppendCheckpointMaterializerV4;
+import org.tron.core.db2.archive.StateArchiveAppendFileRuntime;
 import org.tron.core.db2.archive.StateArchiveCheckpointMaterializer;
 import org.tron.core.db2.archive.StateArchiveCheckpointReadSnapshot;
 import org.tron.core.db2.archive.StateArchiveFileFormatV3;
@@ -259,7 +260,7 @@ public class Manager {
   private PathStateRuntimeAttachment pathStateRuntime;
   @Getter
   private CommonCheckpointRuntimeAttachment commonCheckpointRuntime;
-  private StateArchiveAppendCheckpointMaterializerV3 stateArchiveAppendMaterializer;
+  private StateArchiveAppendFileRuntime stateArchiveAppendMaterializer;
   private boolean stateArchiveServingLive;
   private StateArchiveRuntimeOwner.ServingIndexFaultHook stateArchiveServingIndexFaultHook =
       stage -> { };
@@ -799,11 +800,11 @@ public class Manager {
     org.tron.core.config.args.StorageConfig.StateArchiveAppendFileConfig appendConfig =
         storage.getStateArchiveAppendFileSettings();
     boolean appendEnabled = appendConfig != null && appendConfig.isEnabled();
-    Path appendDirectory = archiveDirectory.resolve("history").resolve("v3");
+    Path appendDirectory = archiveDirectory.resolve("history").resolve("v4");
     PathStatePhysicalOverlayHead pathOwner = null;
     CommonCheckpointRuntimeAttachment attachment = null;
     StateArchiveHotStore hotStore = null;
-    StateArchiveAppendCheckpointMaterializerV3 appendMaterializer = null;
+    StateArchiveAppendCheckpointMaterializerV4 appendMaterializer = null;
     try {
       PathStateStoreManifest.Engine pathEngine = configuredAuxiliaryEngine(
           storage.getPathStateRootEngine(), storage.getDbEngine());
@@ -925,7 +926,7 @@ public class Manager {
       StateArchiveHotCheckpointMaterializer hotMaterializer = null;
       org.tron.core.db2.core.CommonCheckpointMaterializer archiveMaterializer;
       if (appendEnabled) {
-        appendMaterializer = new StateArchiveAppendCheckpointMaterializerV3(
+        appendMaterializer = new StateArchiveAppendCheckpointMaterializerV4(
             appendDirectory, formatIdentity, archiveRuntimeEngine, baseline.getStateRoot(),
             StateArchiveFileFormatV3.COMPRESSION_NONE, appendConfig.getSegmentTargetBytes());
         archiveMaterializer = appendMaterializer;
@@ -946,18 +947,18 @@ public class Manager {
       PathStatePhysicalOverlayHead admittedOwner = pathOwner;
       StateArchiveHotCheckpointMaterializer admittedHotMaterializer = hotMaterializer;
       StateArchiveHotStore admittedHotStore = hotStore;
-      StateArchiveAppendCheckpointMaterializerV3 admittedAppendMaterializer = appendMaterializer;
+      StateArchiveAppendCheckpointMaterializerV4 admittedAppendMaterializer = appendMaterializer;
       attachment = CommonCheckpointRuntimeAttachment.open(true,
           () -> {
             CommonCheckpointRuntimeOwner owner = new CommonCheckpointRuntimeOwner(coordinator);
             if (admittedAppendMaterializer != null) {
               return new CommonCheckpointRuntime(owner, snapshots.getDbs(), appendDirectory,
-                  formatIdentity, archiveRuntimeEngine, latest::pin,
+                  formatIdentity, archiveRuntimeEngine, latest,
                   admittedOwner::prepareCommonCheckpointRebase, admittedAppendMaterializer);
             }
             if (admittedHotMaterializer == null) {
               return new CommonCheckpointRuntime(owner, snapshots.getDbs(), archiveDirectory,
-                  formatIdentity, archiveRuntimeEngine, latest::pin,
+                  formatIdentity, archiveRuntimeEngine, latest,
                   admittedOwner::prepareCommonCheckpointRebase, materializedStore);
             }
             CommonCheckpointRecoveryStateAdapter recoveryState =
@@ -966,7 +967,7 @@ public class Manager {
             CommonCheckpointHotRecovery recovery = new CommonCheckpointHotRecovery(checkpointFile,
                 recoveryState, recoveryState, admittedHotMaterializer::reconcilePreparedTail);
             return new CommonCheckpointRuntime(owner, snapshots.getDbs(), archiveDirectory,
-                formatIdentity, archiveRuntimeEngine, latest::pin,
+                formatIdentity, archiveRuntimeEngine, latest,
                 admittedOwner::prepareCommonCheckpointRebase, admittedHotMaterializer, recovery);
           });
 
@@ -1080,7 +1081,7 @@ public class Manager {
     CommonCheckpointMaterializedStore materializedStore =
         new CommonCheckpointMaterializedStore(checkpointDirectory);
     org.tron.core.db2.core.CommonCheckpointMaterializer archiveRecovery = appendEnabled
-        ? new StateArchiveAppendCheckpointMaterializerV3(appendDirectory, formatIdentity,
+        ? new StateArchiveAppendCheckpointMaterializerV4(appendDirectory, formatIdentity,
             archiveEngine, baseline.getStateRoot(), StateArchiveFileFormatV3.COMPRESSION_NONE,
             appendConfig.getSegmentTargetBytes())
         : new StateArchiveCheckpointMaterializer(archiveDirectory, formatIdentity, baseline,
@@ -1166,7 +1167,7 @@ public class Manager {
 
   private static void requireAppendCommonPublishedAuthorities(Path checkpointDirectory,
       Path pathDirectory, byte[] formatIdentity,
-      StateArchiveAppendCheckpointMaterializerV3 materializer) throws java.io.IOException {
+      StateArchiveAppendFileRuntime materializer) throws java.io.IOException {
     ChainbaseCheckpointMaterializer.PublishedHead chain =
         ChainbaseCheckpointMaterializer.loadPublishedHead(checkpointDirectory, formatIdentity);
     PathStateCheckpointMaterializer.PublishedHead path =
@@ -3921,7 +3922,7 @@ public class Manager {
   }
 
   private void updateStateArchiveServingMode(boolean syncSource) {
-    StateArchiveAppendCheckpointMaterializerV3 materializer = stateArchiveAppendMaterializer;
+    StateArchiveAppendFileRuntime materializer = stateArchiveAppendMaterializer;
     if (materializer == null || syncSource || stateArchiveServingLive) {
       return;
     }

@@ -21,7 +21,8 @@ import org.tron.core.db2.archive.ArchiveReadSnapshot.PinnedLatestStateFactory;
 import org.tron.core.db2.common.DB;
 
 /** Fail-closed adapter for one exact latest-state engine generation. */
-public final class LatestStateGenerationAdapter implements PinnedLatestStateFactory {
+public final class LatestStateGenerationAdapter implements PinnedLatestStateFactory,
+    StateArchiveCheckpointReadSnapshot.PinnedLatestStateFactory {
 
   private final List<String> participants;
   private final Map<String, SnapshotCapableStore> stores;
@@ -171,6 +172,31 @@ public final class LatestStateGenerationAdapter implements PinnedLatestStateFact
     String generationId = "common-checkpoint-" + blockNumber + '-'
         + com.google.common.io.BaseEncoding.base16().lowerCase().encode(blockHash);
     return pin(generationId, blockNumber, blockHash, participants);
+  }
+
+  /** Reads one Store at key-access time without pinning every latest-state participant. */
+  @Override
+  public OldValue get(long blockNumber, byte[] blockHash, String dbName,
+      byte[] physicalRawKey) throws IOException {
+    if (blockNumber < 0 || blockHash == null || blockHash.length != 32
+        || dbName == null || physicalRawKey == null) {
+      throw new IllegalArgumentException("Latest point access identity is invalid");
+    }
+    SnapshotCapableStore store = stores.get(dbName);
+    if (store == null) {
+      throw new ArchivePersistenceException(
+          "Database is outside latest point access: " + dbName);
+    }
+    String expectedSource = sourceIdentities.get(dbName);
+    if (!expectedSource.equals(store.getSourceIdentity())) {
+      throw new ArchivePersistenceException(
+          "Latest-state Store source was replaced before point access: " + dbName);
+    }
+    try (StoreSnapshot snapshot = Objects.requireNonNull(
+        store.pin(blockNumber, blockHash), "pinned Store snapshot")) {
+      validateSnapshot(dbName, expectedSource, blockNumber, blockHash, snapshot);
+      return OldValue.fromNullable(snapshot.get(physicalRawKey));
+    }
   }
 
   PinnedLatestState pin(String generationId, long blockNumber, byte[] blockHash,

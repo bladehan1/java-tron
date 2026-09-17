@@ -95,10 +95,11 @@ final class ServingIndexTiming implements AutoCloseable {
   static void source(long from, long through, long totalNanos, long decodeNanos,
       long bytes, long frames, boolean success) {
     LOGGER.info("Serving source read: from={}, through={}, success={}, encodedBytes={}, "
-            + "frames={}, lockedTotalUs={}, decodeUs={}", from, through, success, bytes, frames,
+            + "frames={}, totalUs={}, decodeUs={}", from, through, success, bytes, frames,
         totalNanos / 1000, decodeNanos / 1000);
     if (Metrics.enabled()) {
       String result = success ? "success" : "failure";
+      // Preserve the existing label for dashboards; P04 narrowed locking to view capture only.
       Export.DURATION.labels("source", "locked_read", result).observe(totalNanos / 1e9);
       Export.DURATION.labels("source", "decode", result).observe(decodeNanos / 1e9);
       Export.WORK.labels("source", "encoded_bytes", result).inc(bytes);
@@ -108,7 +109,7 @@ final class ServingIndexTiming implements AutoCloseable {
 
   static void sourceCall(long started) {
     if (Metrics.enabled()) {
-      // Each attempt includes monitor acquisition; locked_read excludes acquisition.
+      // Each attempt includes published-view monitor acquisition and the request-scoped read.
       Export.DURATION.labels("source", "call", "all").observe(
           (System.nanoTime() - started) / 1e9);
     }

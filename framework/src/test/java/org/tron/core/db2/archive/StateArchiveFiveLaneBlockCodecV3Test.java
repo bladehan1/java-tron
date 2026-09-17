@@ -8,6 +8,7 @@ import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
 import java.nio.ByteBuffer;
+import java.nio.ReadOnlyBufferException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -69,6 +70,35 @@ public class StateArchiveFiveLaneBlockCodecV3Test {
     assertEquivalent(diff(12, Collections.emptyList()), decoded.getDiff());
     assertArrayEquals(bundle.getBlockHistoryDigest(), decoded.getBlockHistoryDigest());
     assertArrayEquals(bundle.getResultHistoryDigest(), decoded.getResultHistoryDigest());
+  }
+
+  @Test
+  public void exposesImmutableEncodedOwnershipToTheSegmentWriter() {
+    byte[] previousDigest = hash(41);
+    EncodedBundle bundle = codec.encode(diff(42, Collections.emptyList()), previousDigest,
+        StateArchiveFileFormatV3.COMPRESSION_RAW_DEFLATE_LEVEL_1);
+    EncodedLane lane = bundle.getLanes().get(0);
+    byte[] expectedFrame = lane.getFrame();
+
+    assertArrayEquals(previousDigest, bundle.getPreviousHistoryDigest());
+    assertEquals(StateArchiveFileFormatV3.COMPRESSION_RAW_DEFLATE_LEVEL_1,
+        lane.getCompressionId());
+    assertEquals(0, lane.getEntryCount());
+    assertEquals(32, lane.getRawPayloadLength());
+    assertEquals(expectedFrame.length, lane.getFrameLength());
+    assertEquals(ByteBuffer.wrap(lane.getEncodedFrameDigest()).getLong(),
+        lane.getEncodedFrameDigestPrefix());
+    assertArrayEquals(bundle.getResultHistoryDigest(), lane.getResultHistoryDigest());
+    assertTrue(lane.frameView().isReadOnly());
+    assertThrows(ReadOnlyBufferException.class, () -> lane.frameView().put(0, (byte) 0));
+
+    previousDigest[0] ^= 1;
+    byte[] returnedPrevious = bundle.getPreviousHistoryDigest();
+    returnedPrevious[0] ^= 1;
+    byte[] returnedFrame = lane.getFrame();
+    returnedFrame[0] ^= 1;
+    assertArrayEquals(hash(41), bundle.getPreviousHistoryDigest());
+    assertArrayEquals(expectedFrame, lane.getFrame());
   }
 
   @Test

@@ -7,19 +7,28 @@ import java.util.Optional;
 import java.util.OptionalLong;
 import org.tron.core.db2.core.CommonCheckpointTarget;
 
-/** Same-DB index snapshot with bounded, indexed reads of authoritative five-lane bodies. */
+/** Same-DB index snapshot with bounded point reads and a legacy bundle-replay fallback. */
 final class StateArchiveAppendReadAdapterV3 implements CheckpointPointHistory {
 
   private final PersistentServingKeyIndexGeneration index;
-  private final StateArchiveFiveLaneSegmentWriterV3 source;
+  private final StateArchiveServingSource source;
+  private final StateArchivePointSource pointSource;
   private boolean closed;
 
-  /** Takes ownership of the index, including on admission failure. Caller holds Common lease. */
+  /** Takes ownership of one short-lived index pin, including on admission failure. */
   StateArchiveAppendReadAdapterV3(PersistentServingKeyIndexGeneration index,
-      StateArchiveFiveLaneSegmentWriterV3 source, CommonCheckpointTarget target)
+      StateArchiveServingSource source, CommonCheckpointTarget target)
       throws IOException {
+    this(index, source, null, target);
+  }
+
+  /** Uses a dedicated point source while retaining the replay source for coverage admission. */
+  StateArchiveAppendReadAdapterV3(PersistentServingKeyIndexGeneration index,
+      StateArchiveServingSource source, StateArchivePointSource pointSource,
+      CommonCheckpointTarget target) throws IOException {
     this.index = index;
     this.source = source;
+    this.pointSource = pointSource;
     try {
       if (index.getIndexedThrough() != target.getLastBlock().getBlockNumber()
           || !Arrays.equals(index.getHeadHash(), target.getLastBlock().getBlockHash())
@@ -51,6 +60,9 @@ final class StateArchiveAppendReadAdapterV3 implements CheckpointPointHistory {
       return Optional.empty();
     }
     long block = first.getAsLong();
+    if (pointSource != null) {
+      return Optional.of(pointSource.readCommittedOldValue(dbName, rawKey, block));
+    }
     // One indexed block only, using the existing bounded serving decoder. Never scan history
     // or interpret a missing/corrupt indexed value as permission to use latest.
     List<BlockReverseDiff> diffs = source.readCommittedDiffs(block - 1, block,

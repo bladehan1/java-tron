@@ -3,7 +3,7 @@ package org.tron.core.db2.archive;
 import java.io.IOException;
 import java.util.Optional;
 
-/** Pinned reverse-history coverage consumed with a same-head Chainbase snapshot. */
+/** Short-lived reverse-history coverage used for one lock-free key access. */
 interface CheckpointPointHistory extends AutoCloseable {
 
   Optional<OldValue> findOldValueAfter(String dbName, byte[] rawKey, long targetBlock)

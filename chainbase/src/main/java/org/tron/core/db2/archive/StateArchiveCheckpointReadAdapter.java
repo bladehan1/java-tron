@@ -56,7 +56,7 @@ public final class StateArchiveCheckpointReadAdapter implements CheckpointPointH
         expectedFormatIdentity, engine), engine);
   }
 
-  /** Opens a target already validated and pinned by the common-checkpoint runtime. */
+  /** Opens a target selected for the current lock-free key access. */
   public static StateArchiveCheckpointReadAdapter openTrusted(Path archiveDirectory,
       CommonCheckpointTarget target, Engine engine) throws IOException {
     Path directory = Objects.requireNonNull(archiveDirectory, "archiveDirectory");
@@ -67,7 +67,7 @@ public final class StateArchiveCheckpointReadAdapter implements CheckpointPointH
 
   /**
    * Returns the old value from the first change in {@code (targetBlock, publishedHead]}, or empty
-   * when the caller must use its pinned latest-state value.
+   * when the caller must read the key's access-time latest baseline.
    */
   public synchronized Optional<OldValue> findOldValueAfter(String dbName, byte[] rawKey,
       long targetBlock) throws IOException {

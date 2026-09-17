@@ -10,109 +10,108 @@ import org.tron.core.db2.core.CommonCheckpointRuntimeOwner;
 import org.tron.core.db2.core.CommonCheckpointTarget;
 import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
 
-/** Request-owned, point-only view over one published next-format checkpoint head. */
+/** Request-owned, point-only view whose keys independently use the current published head. */
 public final class StateArchiveCheckpointReadSnapshot implements ArchivePointSnapshot {
 
   private final long targetBlock;
-  private final long pinnedBlock;
-  private final byte[] pinnedHash;
-  private final CommonCheckpointRuntimeOwner.ReadLease lease;
-  private final CheckpointPointHistory archive;
-  private final PinnedLatestState latest;
+  private final long admissionBlock;
+  private final byte[] admissionHash;
+  private final HistoryFactory historyFactory;
+  private final PinnedLatestStateFactory latestFactory;
   private boolean closed;
 
   private StateArchiveCheckpointReadSnapshot(long targetBlock,
-      CommonCheckpointRuntimeOwner.ReadLease lease,
-      CheckpointPointHistory archive, PinnedLatestState latest) {
+      CheckpointPointHistory admission, HistoryFactory historyFactory,
+      PinnedLatestStateFactory latestFactory) {
     this.targetBlock = targetBlock;
-    this.pinnedBlock = archive.getIndexedThrough();
-    this.pinnedHash = archive.getHeadHash();
-    this.lease = lease;
-    this.archive = archive;
-    this.latest = latest;
-    validateIdentity();
+    this.admissionBlock = admission.getIndexedThrough();
+    this.admissionHash = admission.getHeadHash();
+    this.historyFactory = Objects.requireNonNull(historyFactory, "historyFactory");
+    this.latestFactory = Objects.requireNonNull(latestFactory, "latestFactory");
   }
 
-  /** Pins the publication gate, Archive index, and latest engine head as one request unit. */
+  /** Opens a lock-free accessor over the current published filesystem checkpoint. */
   public static StateArchiveCheckpointReadSnapshot pin(long targetBlock,
       CommonCheckpointRuntimeOwner owner, Path archiveDirectory, byte[] expectedFormatIdentity,
       PinnedLatestStateFactory latestFactory) throws IOException {
-    CommonCheckpointRuntimeOwner admittedOwner = Objects.requireNonNull(owner, "owner");
-    CommonCheckpointRuntimeOwner.ReadLease lease = admittedOwner.acquireReadLease();
-    CheckpointPointHistory archive = null;
-    PinnedLatestState latest = null;
-    try {
-      archive = StateArchiveCheckpointReadAdapter.open(archiveDirectory,
-          expectedFormatIdentity);
-      if (targetBlock < archive.getIndexedFrom() || targetBlock > archive.getIndexedThrough()) {
-        throw new IllegalArgumentException("checkpoint target block is outside indexed coverage");
-      }
-      latest = Objects.requireNonNull(latestFactory, "latestFactory").pin(
-          archive.getIndexedThrough(), archive.getHeadHash());
-      return new StateArchiveCheckpointReadSnapshot(targetBlock, lease, archive,
-          Objects.requireNonNull(latest, "pinned latest state"));
-    } catch (IOException | RuntimeException failure) {
-      closeAfterFailedPin(lease, archive, latest, failure);
-      throw failure;
-    }
+    Objects.requireNonNull(owner, "owner");
+    Path directory = Objects.requireNonNull(archiveDirectory, "archiveDirectory");
+    byte[] formatIdentity = Arrays.copyOf(
+        Objects.requireNonNull(expectedFormatIdentity, "expectedFormatIdentity"),
+        expectedFormatIdentity.length);
+    return open(targetBlock,
+        () -> StateArchiveCheckpointReadAdapter.open(directory, formatIdentity), latestFactory);
   }
 
-  /** Pins a target already validated and bound by its owning common-checkpoint runtime. */
+  /** Opens a lock-free accessor over a fixed trusted checkpoint identity. */
   public static StateArchiveCheckpointReadSnapshot pin(long targetBlock,
       CommonCheckpointRuntimeOwner owner, Path archiveDirectory,
       CommonCheckpointTarget publishedTarget, Engine engine,
       PinnedLatestStateFactory latestFactory) throws IOException {
-    CommonCheckpointRuntimeOwner admittedOwner = Objects.requireNonNull(owner, "owner");
-    CommonCheckpointRuntimeOwner.ReadLease lease = admittedOwner.acquireReadLease();
-    CheckpointPointHistory archive = null;
-    PinnedLatestState latest = null;
-    try {
-      archive = StateArchiveCheckpointReadAdapter.openTrusted(archiveDirectory,
-          publishedTarget, engine);
-      if (targetBlock < archive.getIndexedFrom() || targetBlock > archive.getIndexedThrough()) {
-        throw new IllegalArgumentException("checkpoint target block is outside indexed coverage");
-      }
-      latest = Objects.requireNonNull(latestFactory, "latestFactory").pin(
-          archive.getIndexedThrough(), archive.getHeadHash());
-      return new StateArchiveCheckpointReadSnapshot(targetBlock, lease, archive,
-          Objects.requireNonNull(latest, "pinned latest state"));
-    } catch (IOException | RuntimeException failure) {
-      closeAfterFailedPin(lease, archive, latest, failure);
-      throw failure;
-    }
+    Objects.requireNonNull(owner, "owner");
+    Path directory = Objects.requireNonNull(archiveDirectory, "archiveDirectory");
+    CommonCheckpointTarget target = Objects.requireNonNull(publishedTarget, "publishedTarget");
+    Engine admittedEngine = Objects.requireNonNull(engine, "engine");
+    return open(targetBlock,
+        () -> StateArchiveCheckpointReadAdapter.openTrusted(directory, target, admittedEngine),
+        latestFactory);
   }
 
-  /** Pins append history and its single serving DB under the Common publication lease. */
+  /** Opens append history independently for every key without a Common publication lease. */
   public static StateArchiveCheckpointReadSnapshot pinAppend(long targetBlock,
-      CommonCheckpointRuntimeOwner owner, StateArchiveAppendCheckpointMaterializerV3 materializer,
+      CommonCheckpointRuntimeOwner owner, StateArchiveAppendFileRuntime materializer,
       CommonCheckpointTarget publishedTarget, PinnedLatestStateFactory latestFactory)
       throws IOException {
-    CommonCheckpointRuntimeOwner.ReadLease lease = owner.acquireReadLease();
-    CheckpointPointHistory archive = null;
-    PinnedLatestState latest = null;
-    try {
-      archive = materializer.pinHistory(publishedTarget);
-      if (targetBlock < archive.getIndexedFrom() || targetBlock > archive.getIndexedThrough()) {
-        throw new IllegalArgumentException("checkpoint target block is outside indexed coverage");
-      }
-      latest = Objects.requireNonNull(latestFactory.pin(archive.getIndexedThrough(),
-          archive.getHeadHash()), "pinned latest state");
-      return new StateArchiveCheckpointReadSnapshot(targetBlock, lease, archive, latest);
-    } catch (IOException | RuntimeException failure) {
-      closeAfterFailedPin(lease, archive, latest, failure);
-      throw failure;
-    }
+    Objects.requireNonNull(owner, "owner");
+    StateArchiveAppendFileRuntime admittedMaterializer =
+        Objects.requireNonNull(materializer, "materializer");
+    CommonCheckpointTarget target = Objects.requireNonNull(publishedTarget, "publishedTarget");
+    return open(targetBlock, () -> admittedMaterializer.pinHistory(target), latestFactory);
   }
 
-  /** Returns the first reverse-diff old value, or the same-request pinned latest value. */
+  public static StateArchiveCheckpointReadSnapshot pinAppend(long targetBlock,
+      StateArchiveAppendFileRuntime materializer,
+      PublishedTargetSupplier targetSupplier, PinnedLatestStateFactory latestFactory)
+      throws IOException {
+    StateArchiveAppendFileRuntime admittedMaterializer =
+        Objects.requireNonNull(materializer, "materializer");
+    PublishedTargetSupplier admittedTargets = Objects.requireNonNull(targetSupplier,
+        "targetSupplier");
+    return open(targetBlock, () -> admittedMaterializer.pinHistory(
+        requirePublishedTarget(admittedTargets.get())), latestFactory);
+  }
+
+  public static StateArchiveCheckpointReadSnapshot pin(long targetBlock, Path archiveDirectory,
+      PublishedTargetSupplier targetSupplier, Engine engine,
+      PinnedLatestStateFactory latestFactory) throws IOException {
+    Path directory = Objects.requireNonNull(archiveDirectory, "archiveDirectory");
+    PublishedTargetSupplier admittedTargets = Objects.requireNonNull(targetSupplier,
+        "targetSupplier");
+    Engine admittedEngine = Objects.requireNonNull(engine, "engine");
+    return open(targetBlock, () -> StateArchiveCheckpointReadAdapter.openTrusted(directory,
+        requirePublishedTarget(admittedTargets.get()), admittedEngine), latestFactory);
+  }
+
+  /** Returns this key's reverse-diff old value or a latest value pinned only for this access. */
   public synchronized OldValue get(String dbName, byte[] physicalRawKey) throws IOException {
     ensureOpen();
-    Optional<OldValue> historical = archive.findOldValueAfter(dbName, physicalRawKey,
-        targetBlock);
-    OldValue value = historical.isPresent()
-        ? historical.get() : latest.get(dbName, physicalRawKey);
+    String admittedDbName = Objects.requireNonNull(dbName, "dbName");
+    byte[] admittedKey = Objects.requireNonNull(physicalRawKey, "physicalRawKey");
+    long accessBlock;
+    byte[] accessHash;
+    try (CheckpointPointHistory history = historyFactory.open()) {
+      requireCoverage(history);
+      Optional<OldValue> historical = history.findOldValueAfter(admittedDbName, admittedKey,
+          targetBlock);
+      if (historical.isPresent()) {
+        return historical.get();
+      }
+      accessBlock = history.getIndexedThrough();
+      accessHash = history.getHeadHash();
+    }
+    OldValue value = latestFactory.get(accessBlock, accessHash, admittedDbName, admittedKey);
     if (value == null) {
-      throw new IllegalStateException("Pinned latest state returned null");
+      throw new IllegalStateException("Latest state access returned null");
     }
     return value;
   }
@@ -122,37 +121,31 @@ public final class StateArchiveCheckpointReadSnapshot implements ArchivePointSna
   }
 
   public long getPinnedBlock() {
-    return pinnedBlock;
+    return admissionBlock;
   }
 
   public byte[] getPinnedHash() {
-    return Arrays.copyOf(pinnedHash, pinnedHash.length);
+    return Arrays.copyOf(admissionHash, admissionHash.length);
   }
 
-  /** Revalidates the request-owned history and latest head identity. */
+  /** Revalidates current coverage without freezing it for the request lifetime. */
   public synchronized void requirePinnedIdentity() {
     ensureOpen();
-    validateIdentity();
+    try (CheckpointPointHistory history = historyFactory.open()) {
+      requireCoverage(history);
+    } catch (IOException failure) {
+      throw new IllegalStateException("checkpoint history access validation failed", failure);
+    }
   }
 
   @Override
   public synchronized void close() throws IOException {
-    if (closed) {
-      return;
-    }
     closed = true;
-    IOException failure = closeResources(lease, archive, latest);
-    if (failure != null) {
-      throw failure;
-    }
   }
 
-  private void validateIdentity() {
-    if (pinnedBlock != archive.getIndexedThrough()
-        || !Arrays.equals(pinnedHash, archive.getHeadHash())
-        || latest.getBlockNumber() != pinnedBlock
-        || !Arrays.equals(pinnedHash, latest.getBlockHash())) {
-      throw new IllegalArgumentException("checkpoint Archive read snapshot identity mismatch");
+  private void requireCoverage(CheckpointPointHistory history) {
+    if (targetBlock < history.getIndexedFrom() || targetBlock > history.getIndexedThrough()) {
+      throw new IllegalArgumentException("checkpoint target block is outside indexed coverage");
     }
   }
 
@@ -162,52 +155,51 @@ public final class StateArchiveCheckpointReadSnapshot implements ArchivePointSna
     }
   }
 
-  private static void closeAfterFailedPin(CommonCheckpointRuntimeOwner.ReadLease lease,
-      CheckpointPointHistory archive, PinnedLatestState latest,
-      Exception failure) {
-    IOException closeFailure = closeResources(lease, archive, latest);
-    if (closeFailure != null) {
-      failure.addSuppressed(closeFailure);
+  private static StateArchiveCheckpointReadSnapshot open(long targetBlock,
+      HistoryFactory historyFactory, PinnedLatestStateFactory latestFactory) throws IOException {
+    HistoryFactory admittedHistory = Objects.requireNonNull(historyFactory, "historyFactory");
+    PinnedLatestStateFactory admittedLatest = Objects.requireNonNull(latestFactory,
+        "latestFactory");
+    try (CheckpointPointHistory admission = admittedHistory.open()) {
+      StateArchiveCheckpointReadSnapshot snapshot = new StateArchiveCheckpointReadSnapshot(
+          targetBlock, admission, admittedHistory, admittedLatest);
+      snapshot.requireCoverage(admission);
+      return snapshot;
     }
   }
 
-  private static IOException closeResources(CommonCheckpointRuntimeOwner.ReadLease lease,
-      CheckpointPointHistory archive, PinnedLatestState latest) {
-    IOException failure = null;
-    if (latest != null) {
-      try {
-        latest.close();
-      } catch (IOException | RuntimeException e) {
-        failure = new IOException("Failed to close checkpoint latest snapshot", e);
-      }
+  private static CommonCheckpointTarget requirePublishedTarget(CommonCheckpointTarget target)
+      throws IOException {
+    if (target == null) {
+      throw new IOException("State Archive has no published common-checkpoint target");
     }
-    if (archive != null) {
-      try {
-        archive.close();
-      } catch (IOException | RuntimeException e) {
-        failure = append(failure, new IOException(
-            "Failed to close checkpoint Archive reader", e));
-      }
-    }
-    try {
-      lease.close();
-    } catch (RuntimeException e) {
-      failure = append(failure, new IOException(
-          "Failed to release common checkpoint read lease", e));
-    }
-    return failure;
-  }
-
-  private static IOException append(IOException failure, IOException addition) {
-    if (failure == null) {
-      return addition;
-    }
-    failure.addSuppressed(addition);
-    return failure;
+    return target;
   }
 
   @FunctionalInterface
   public interface PinnedLatestStateFactory {
     PinnedLatestState pin(long blockNumber, byte[] blockHash) throws IOException;
+
+    default OldValue get(long blockNumber, byte[] blockHash, String dbName,
+        byte[] physicalRawKey) throws IOException {
+      try (PinnedLatestState latest = Objects.requireNonNull(
+          pin(blockNumber, blockHash), "pinned latest state")) {
+        if (latest.getBlockNumber() != blockNumber
+            || !Arrays.equals(blockHash, latest.getBlockHash())) {
+          throw new IllegalArgumentException("checkpoint latest access identity mismatch");
+        }
+        return latest.get(dbName, physicalRawKey);
+      }
+    }
+  }
+
+  @FunctionalInterface
+  interface HistoryFactory {
+    CheckpointPointHistory open() throws IOException;
+  }
+
+  @FunctionalInterface
+  public interface PublishedTargetSupplier {
+    CommonCheckpointTarget get();
   }
 }

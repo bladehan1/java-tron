@@ -12,7 +12,7 @@ import org.tron.core.db2.archive.P66AccountAssetCodec.DecodedAssetRow;
 import org.tron.core.db2.archive.P66AccountAssetCodec.Phase;
 import org.tron.protos.Protocol.Account;
 
-/** Resolves one historical TRC10 balance from a single pinned archive generation. */
+/** Resolves one historical TRC10 balance through a request-owned archive accessor. */
 public final class HistoricalAccountAssetBalanceResolver {
 
   static final String PROPERTIES_DATABASE = "properties";
