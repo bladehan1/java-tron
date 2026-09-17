@@ -9,6 +9,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -115,10 +116,13 @@ public class StateArchiveAppendCheckpointMaterializerV3Test {
         when(latest.getBlockHash()).thenReturn(hash(13));
         org.mockito.Mockito.doThrow(new IllegalStateException("latest close failure"))
             .when(latest).close();
-        IllegalArgumentException mismatch = assertThrows(IllegalArgumentException.class,
-            () -> runtime.pinPoint(10));
+        IllegalArgumentException mismatch;
+        try (StateArchiveCheckpointReadSnapshot snapshot = runtime.pinPoint(10)) {
+          mismatch = assertThrows(IllegalArgumentException.class,
+              () -> snapshot.get("code", new byte[]{4}));
+        }
         assertEquals(1, mismatch.getSuppressed().length);
-        verify(latest).close();
+        verify(latest, times(1)).close();
         org.mockito.Mockito.doNothing().when(latest).close();
         when(latest.getBlockHash()).thenReturn(hash(12));
         org.mockito.Mockito.clearInvocations(latest);

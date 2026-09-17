@@ -28,6 +28,7 @@ import java.util.Objects;
 import java.util.OptionalLong;
 import java.util.stream.Stream;
 import org.tron.common.math.StrictMathWrapper;
+import org.tron.core.db2.core.CommonCheckpointTarget;
 import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
 
 /** Persistent immutable exact-key serving generation backed by the configured database engine. */
@@ -42,6 +43,7 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
   private static final byte KEY_META_PREFIX = 3;
   private static final byte KEY_PAGE_PREFIX = 4;
   private static final byte STORE_COVERAGE_PREFIX = 5;
+  private static final byte[] ARCHIVE_TAIL_KEY = new byte[]{0x7f, 'S', 'A', 4};
   private static final int INLINE_EPOCH_LIMIT = 4;
   private static final int EPOCHS_PER_PAGE = 512;
   private static final byte INLINE = 1;
@@ -651,6 +653,17 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
     return firstChange(readPage(dbName, rawKey, low), targetBlock, upperBound);
   }
 
+  StateArchiveTailV4 archiveTail(CommonCheckpointTarget target) throws IOException {
+    ensureOpen();
+    byte[] encoded = database.get(ARCHIVE_TAIL_KEY);
+    if (encoded == null) {
+      throw new ArchivePersistenceException("Serving index has no committed Archive tail");
+    }
+    StateArchiveTailV4 tail = StateArchiveTailV4.decode(encoded);
+    tail.requireTarget(target);
+    return tail;
+  }
+
   private long[] readPage(String dbName, byte[] rawKey, int pageIndex) throws IOException {
     byte[] encoded = database.get(keyPageKey(dbName, rawKey, pageIndex));
     if (encoded == null) {
@@ -761,8 +774,12 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
               StateArchiveIndexDatabase.openReader(directory.resolve(DATABASE), engine);
               StateArchiveIndexDatabase.Cursor cursor = reader.cursor()) {
             cursor.seek(new byte[0]);
-            if (cursor.next() != null) {
-              throw new IOException("Serving data exists without atomic progress");
+            StateArchiveIndexDatabase.KeyValue entry;
+            while ((entry = cursor.next()) != null) {
+              if (!Arrays.equals(entry.getKey(), ARCHIVE_TAIL_KEY)) {
+                throw new IOException("Serving data exists without atomic progress");
+              }
+              StateArchiveTailV4.decode(entry.getValue());
             }
           }
         }
@@ -790,6 +807,47 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
       return descriptor == null ? "empty" : descriptor.generationId;
     }
 
+    synchronized void publishArchiveTail(StateArchiveTailV4 tail) throws IOException {
+      requireHealthy();
+      StateArchiveTailV4 replacement = Objects.requireNonNull(tail, "tail");
+      byte[] encoded = replacement.encode();
+      byte[] existing;
+      try {
+        existing = writer.get(ARCHIVE_TAIL_KEY);
+      } catch (IOException | RuntimeException failure) {
+        failed = true;
+        throw failure;
+      }
+      if (Arrays.equals(existing, encoded)) {
+        return;
+      }
+      if (existing != null) {
+        StateArchiveTailV4 current = StateArchiveTailV4.decode(existing);
+        if (replacement.getCheckpointSequence() <= current.getCheckpointSequence()
+            || replacement.getCommonBlockNumber() <= current.getCommonBlockNumber()) {
+          throw new ArchivePersistenceException("Archive tail publication is not monotonic");
+        }
+      }
+      try {
+        writer.write(Collections.singletonList(
+            StateArchiveIndexDatabase.put(ARCHIVE_TAIL_KEY, encoded)), true);
+      } catch (IOException | RuntimeException failure) {
+        failed = true;
+        throw failure;
+      }
+    }
+
+    synchronized StateArchiveTailV4 archiveTail(CommonCheckpointTarget target)
+        throws IOException {
+      requireHealthy();
+      byte[] encoded = writer.get(ARCHIVE_TAIL_KEY);
+      if (encoded == null) {
+        throw new ArchivePersistenceException("Serving index has no committed Archive tail");
+      }
+      StateArchiveTailV4 tail = StateArchiveTailV4.decode(encoded);
+      tail.requireTarget(target);
+      return tail;
+    }
 
     synchronized void append(String identity, ServingIndexIncrementalPlan plan,
         byte[] latestSourceIdentity, ExactWriteFaultHook beforeWrite,

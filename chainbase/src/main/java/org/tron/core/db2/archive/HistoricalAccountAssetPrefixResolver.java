@@ -14,7 +14,7 @@ import org.tron.core.db2.archive.P66AccountAssetCodec.DecodedAssetRow;
 import org.tron.core.db2.archive.P66AccountAssetCodec.Phase;
 import org.tron.protos.Protocol.Account;
 
-/** Bounded historical AccountAsset address-prefix resolver over one pinned generation. */
+/** Bounded historical AccountAsset address-prefix resolver over a request archive accessor. */
 public final class HistoricalAccountAssetPrefixResolver {
 
   private final P66AccountAssetCodec codec = new P66AccountAssetCodec();

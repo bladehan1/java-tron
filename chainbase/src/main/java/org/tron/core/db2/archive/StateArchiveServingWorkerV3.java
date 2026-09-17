@@ -11,7 +11,7 @@ import org.tron.core.db2.core.CommonCheckpointTarget;
 final class StateArchiveServingWorkerV3 implements AutoCloseable {
   static final long MAX_SOURCE_BYTES = 32L * 1024 * 1024;
   private final CoordinatorFactory factory;
-  private final StateArchiveFiveLaneSegmentWriterV3 source;
+  private final StateArchiveServingSource source;
   private final Object dispatch = new Object();
   private final Thread thread;
   private final Runnable beforeBuild;
@@ -28,12 +28,12 @@ final class StateArchiveServingWorkerV3 implements AutoCloseable {
   private volatile BuildProgress progress;
 
   StateArchiveServingWorkerV3(CoordinatorFactory factory,
-      StateArchiveFiveLaneSegmentWriterV3 source, Runnable beforeBuild) {
+      StateArchiveServingSource source, Runnable beforeBuild) {
     this(factory, source, beforeBuild, 15_000);
   }
 
   StateArchiveServingWorkerV3(CoordinatorFactory factory,
-      StateArchiveFiveLaneSegmentWriterV3 source, Runnable beforeBuild, long tailDelayMillis) {
+      StateArchiveServingSource source, Runnable beforeBuild, long tailDelayMillis) {
     this.factory = factory;
     this.source = source;
     this.beforeBuild = beforeBuild;
@@ -142,6 +142,35 @@ final class StateArchiveServingWorkerV3 implements AutoCloseable {
     }
   }
 
+  void publishArchiveTail(StateArchiveTailV4 tail) throws IOException {
+    synchronized (dispatch) {
+      awaitCoordinator();
+      coordinator.publishArchiveTail(tail);
+    }
+  }
+
+  StateArchiveTailV4 archiveTail(CommonCheckpointTarget target) throws IOException {
+    synchronized (dispatch) {
+      awaitCoordinator();
+      return coordinator.archiveTail(target);
+    }
+  }
+
+  private void awaitCoordinator() throws IOException {
+    synchronized (this) {
+      while (coordinator == null) {
+        requireHealthy();
+        try {
+          wait();
+        } catch (InterruptedException interrupted) {
+          Thread.currentThread().interrupt();
+          throw new IOException("Interrupted waiting for serving index owner", interrupted);
+        }
+      }
+      requireHealthy();
+    }
+  }
+
   private void await(CommonCheckpointTarget target, boolean requireLive) throws IOException {
     while (!target.equals(completed) || requireLive && !live) {
       requireHealthy();
@@ -170,7 +199,10 @@ final class StateArchiveServingWorkerV3 implements AutoCloseable {
   private void run() {
     try {
       coordinator = factory.open();
-      progress = coordinator.status();
+      synchronized (this) {
+        progress = coordinator.status();
+        notifyAll();
+      }
       if (coordinator.getIndexedFrom() >= 0
           && coordinator.getIndexedFrom() != source.getHistoryStartBlock() - 1) {
         throw new IOException("Serving indexedFrom differs from available history baseline");
@@ -224,7 +256,7 @@ final class StateArchiveServingWorkerV3 implements AutoCloseable {
               try {
                 batch = readSource(cursor, batchEnd, MAX_SOURCE_BYTES);
                 break;
-              } catch (StateArchiveFiveLaneSegmentWriterV3.ServingReadBudgetException tooLarge) {
+              } catch (StateArchiveServingSource.ReadBudgetException tooLarge) {
                 if (batchEnd == cursor + 1) {
                   throw tooLarge;
                 }

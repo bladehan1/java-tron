@@ -69,7 +69,8 @@ public final class StateArchiveFiveLaneBlockCodecV3 {
       lanes.add(encodeLaneFrame(meta, previousDigest, descriptorDigest,
           blockHistoryDigest, resultHistoryDigest, payload, compressionId));
     }
-    return new EncodedBundle(lanes, blockHistoryDigest, resultHistoryDigest, diff);
+    return new EncodedBundle(lanes, previousDigest, blockHistoryDigest,
+        resultHistoryDigest, diff);
   }
 
   /** Decodes five frames and only returns after verifying the complete bundle. */
@@ -359,8 +360,10 @@ public final class StateArchiveFiveLaneBlockCodecV3 {
     int crcLength = frame.position();
     frame.putInt(crc32c(frame.array(), 0, crcLength));
     frame.putInt(StateArchiveFileFormatV3.FRAME_TRAILER_MAGIC);
-    return new EncodedLane(payload.laneId, payload.bodyCodec, payload.coverageBitmap,
-        payload.bytes, payload.payloadDigest, encodedDigest, frame.array());
+    return new EncodedLane(payload.laneId, payload.bodyCodec, compressionId,
+        payload.coverageBitmap, payload.entryCount, payload.bytes.length,
+        payload.bytes, payload.payloadDigest, encodedDigest, resultHistoryDigest,
+        frame.array());
   }
 
   private DecodedLane decodeLane(byte[] frameBytes) {
@@ -454,6 +457,11 @@ public final class StateArchiveFiveLaneBlockCodecV3 {
         blockHash, parentHash, timestamp), previousHistoryDigest, blockHistoryDigest,
         resultHistoryDigest, payload, decoded.groups, compressionId,
         encodedFrameDigest);
+  }
+
+  /** Decodes and validates one lane frame without requiring the other four bundle members. */
+  DecodedLane decodeLaneFrame(byte[] frameBytes) {
+    return decodeLane(frameBytes);
   }
 
   private DecodedPayload decodePayload(int laneId, short bodyCodec, byte[] payloadBytes,
@@ -971,13 +979,15 @@ public final class StateArchiveFiveLaneBlockCodecV3 {
 
   public static final class EncodedBundle {
     private final List<EncodedLane> lanes;
+    private final byte[] previousHistoryDigest;
     private final byte[] blockHistoryDigest;
     private final byte[] resultHistoryDigest;
     private final BlockReverseDiff diff;
 
-    private EncodedBundle(List<EncodedLane> lanes, byte[] blockHistoryDigest,
-        byte[] resultHistoryDigest, BlockReverseDiff diff) {
+    private EncodedBundle(List<EncodedLane> lanes, byte[] previousHistoryDigest,
+        byte[] blockHistoryDigest, byte[] resultHistoryDigest, BlockReverseDiff diff) {
       this.lanes = java.util.Collections.unmodifiableList(new ArrayList<>(lanes));
+      this.previousHistoryDigest = previousHistoryDigest;
       this.blockHistoryDigest = blockHistoryDigest;
       this.resultHistoryDigest = resultHistoryDigest;
       this.diff = diff;
@@ -985,6 +995,10 @@ public final class StateArchiveFiveLaneBlockCodecV3 {
 
     public List<EncodedLane> getLanes() {
       return lanes;
+    }
+
+    public byte[] getPreviousHistoryDigest() {
+      return Arrays.copyOf(previousHistoryDigest, previousHistoryDigest.length);
     }
 
     public byte[] getBlockHistoryDigest() {
@@ -1003,21 +1017,30 @@ public final class StateArchiveFiveLaneBlockCodecV3 {
   public static final class EncodedLane {
     private final int laneId;
     private final short bodyCodec;
+    private final short compressionId;
     private final long coverageBitmap;
+    private final long entryCount;
+    private final long rawPayloadLength;
     private final byte[] canonicalPayload;
     private final byte[] payloadDigest;
     private final byte[] encodedFrameDigest;
+    private final byte[] resultHistoryDigest;
     private final byte[] frame;
 
-    private EncodedLane(int laneId, short bodyCodec, long coverageBitmap,
+    private EncodedLane(int laneId, short bodyCodec, short compressionId,
+        long coverageBitmap, long entryCount, long rawPayloadLength,
         byte[] canonicalPayload, byte[] payloadDigest, byte[] encodedFrameDigest,
-        byte[] frame) {
+        byte[] resultHistoryDigest, byte[] frame) {
       this.laneId = laneId;
       this.bodyCodec = bodyCodec;
+      this.compressionId = compressionId;
       this.coverageBitmap = coverageBitmap;
+      this.entryCount = entryCount;
+      this.rawPayloadLength = rawPayloadLength;
       this.canonicalPayload = canonicalPayload;
       this.payloadDigest = payloadDigest;
       this.encodedFrameDigest = encodedFrameDigest;
+      this.resultHistoryDigest = resultHistoryDigest;
       this.frame = frame;
     }
 
@@ -1027,6 +1050,10 @@ public final class StateArchiveFiveLaneBlockCodecV3 {
 
     public short getBodyCodec() {
       return bodyCodec;
+    }
+
+    short getCompressionId() {
+      return compressionId;
     }
 
     public long getCoverageBitmap() {
@@ -1043,6 +1070,30 @@ public final class StateArchiveFiveLaneBlockCodecV3 {
 
     public byte[] getEncodedFrameDigest() {
       return Arrays.copyOf(encodedFrameDigest, encodedFrameDigest.length);
+    }
+
+    long getEntryCount() {
+      return entryCount;
+    }
+
+    long getRawPayloadLength() {
+      return rawPayloadLength;
+    }
+
+    int getFrameLength() {
+      return frame.length;
+    }
+
+    long getEncodedFrameDigestPrefix() {
+      return ByteBuffer.wrap(encodedFrameDigest).getLong();
+    }
+
+    byte[] getResultHistoryDigest() {
+      return Arrays.copyOf(resultHistoryDigest, resultHistoryDigest.length);
+    }
+
+    ByteBuffer frameView() {
+      return ByteBuffer.wrap(frame).asReadOnlyBuffer();
     }
 
     public byte[] getFrame() {
@@ -1111,6 +1162,10 @@ public final class StateArchiveFiveLaneBlockCodecV3 {
 
     public int getLaneId() {
       return laneId;
+    }
+
+    public BlockSnapshotMeta getMeta() {
+      return meta;
     }
 
     public List<DbGroup> getGroups() {

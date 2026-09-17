@@ -44,7 +44,8 @@ import org.tron.core.db2.archive.StateArchiveSegmentFormatV3.SegmentManifest;
 import org.tron.core.db2.archive.StateArchiveSegmentFormatV3.SegmentSeal;
 
 /** Default-off five-lane append writer for State Archive v3 segment data and block indexes. */
-public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable {
+public final class StateArchiveFiveLaneSegmentWriterV3
+    implements AutoCloseable, StateArchiveServingSource {
 
   private static final int APPEND_BUFFER_BYTES = 2 * 1024 * 1024;
   private static final int BLOCK_NUMBER_OFFSET = 40;
@@ -400,19 +401,16 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
       throws IOException {
     requireUsable();
     Objects.requireNonNull(bundle, "bundle");
-    List<byte[]> frames = bundle.getLanes().stream().map(EncodedLane::getFrame)
-        .collect(Collectors.toList());
-    DecodedBundle decoded = codec.decode(frames);
-    BlockSnapshotMeta meta = decoded.getDiff().getMeta();
-    validateNext(meta, frames.get(0));
+    BlockSnapshotMeta meta = bundle.getDiff().getMeta();
+    byte[] previousHistoryDigest = bundle.getPreviousHistoryDigest();
+    validateNext(meta, previousHistoryDigest);
     if (checkpointSequence >= 0 && activeCheckpointSequence < 0) {
       activeCheckpointSequence = checkpointSequence;
       activeCommonTargetDigest = Arrays.copyOf(commonTargetDigest, commonTargetDigest.length);
     }
     try {
       for (EncodedLane lane : bundle.getLanes()) {
-        if (ByteBuffer.wrap(lane.getFrame()).getShort(COMPRESSION_ID_OFFSET)
-            != compressionId) {
+        if (lane.getCompressionId() != compressionId) {
           throw new IllegalArgumentException("State Archive writer compression mismatch");
         }
         LaneState state = lanes.get(lane.getLaneId());
@@ -432,12 +430,12 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
         }
         if (state == null) {
           state = openNewSegment(lane.getLaneId(), meta.getBlockNumber(),
-              previousHistoryDigest(lane.getFrame()));
+              previousHistoryDigest);
         }
         appendLaneFrame(state, meta, lane);
       }
       appendHead = meta;
-      resultHistoryDigest = decoded.getResultHistoryDigest();
+      resultHistoryDigest = bundle.getResultHistoryDigest();
       if (structuralChanged || !catalog.isPublished()) {
         publishCatalog();
       }
@@ -483,6 +481,7 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
     return appendHead;
   }
 
+  @Override
   public synchronized long getHistoryStartBlock() {
     long first = Long.MAX_VALUE;
     for (CurrentSegment segment : getCurrentSegments()) {
@@ -510,69 +509,34 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
   }
 
   /** Replays complete five-lane bundles from Catalog-selected authority for serving repair. */
-  public synchronized List<BlockReverseDiff> readCommittedDiffs(long fromExclusive, long through)
+  public List<BlockReverseDiff> readCommittedDiffs(long fromExclusive, long through)
       throws IOException {
     return readCommittedDiffs(fromExclusive, through, Long.MAX_VALUE);
   }
 
-  synchronized List<BlockReverseDiff> readCommittedDiffs(long fromExclusive, long through,
+  @Override
+  public List<BlockReverseDiff> readCommittedDiffs(long fromExclusive, long through,
       long maxEncodedBytes) throws IOException {
     long started = System.nanoTime();
     long decodeNanos = 0;
     boolean success = false;
-    servingReadFrames = 0;
-    servingReadBytes = 0;
+    ServingReadStats stats = new ServingReadStats();
     try {
-      requireUsable();
-      if (fromExclusive < 0 || through < fromExclusive || appendHead == null
-          || through > appendHead.getBlockNumber()) {
-        throw new IllegalArgumentException("Invalid State Archive committed read range");
-      }
-      if (fromExclusive == through) {
+      PublishedReadView view = capturePublishedReadView(fromExclusive, through);
+      if (view.blockCount == 0) {
         success = true;
         return Collections.emptyList();
       }
-      int blockCount = StrictMathWrapper.toIntExact(through - fromExclusive);
       int[] laneIds = StateArchiveFileFormatV3.fiveLaneIds();
-      byte[][][] bundles = new byte[laneIds.length][blockCount][];
-      if (servingSegments == null) {
-        servingSegments = new HashMap<>();
-        for (int laneId : StateArchiveFileFormatV3.fiveLaneIds()) {
-          servingSegments.put(laneId, new TreeMap<>());
-        }
-        for (SealedSegment segment : sealedSegments) {
-          servingSegments.get(segment.getLaneId()).put(segment.getFirstBlock(), segment);
-        }
-      }
-      long first = fromExclusive + 1;
+      byte[][][] bundles = new byte[laneIds.length][view.blockCount][];
       for (int laneOrdinal = 0; laneOrdinal < laneIds.length; laneOrdinal++) {
-        int laneId = laneIds[laneOrdinal];
-        NavigableMap<Long, SealedSegment> segments = servingSegments.get(laneId);
-        Map.Entry<Long, SealedSegment> selected = segments.floorEntry(first);
-        if (selected == null) {
-          selected = segments.ceilingEntry(first);
-        }
-        while (selected != null && selected.getKey() <= through) {
-          SealedSegment segment = selected.getValue();
-          if (segment.getLastBlock() >= first) {
-            readIndexedRange(laneId, segment.getSegmentSeq(), segment.getFirstBlock(),
-                StrictMathWrapper.max(first, segment.getFirstBlock()),
-                StrictMathWrapper.min(through, segment.getLastBlock()),
-                segment.getSegmentHeaderDigest(),
-                first, bundles[laneOrdinal], maxEncodedBytes);
-          }
-          selected = segments.higherEntry(selected.getKey());
-        }
-        LaneState current = lanes.get(laneId);
-        if (current != null && current.firstBlock <= through && current.lastBlock >= first) {
-          readIndexedRange(laneId, current.segmentSeq, current.firstBlock,
-              StrictMathWrapper.max(first, current.firstBlock),
-              StrictMathWrapper.min(through, current.lastBlock),
-              current.headerDigest, first, bundles[laneOrdinal], maxEncodedBytes);
+        for (ReadableSegment segment : view.segmentsByLane.get(laneOrdinal)) {
+          readIndexedRange(segment, view.firstBlock, bundles[laneOrdinal], maxEncodedBytes,
+              stats);
         }
       }
-      List<BlockReverseDiff> result = new ArrayList<>(blockCount);
-      for (int block = 0; block < blockCount; block++) {
+      List<BlockReverseDiff> result = new ArrayList<>(view.blockCount);
+      for (int block = 0; block < view.blockCount; block++) {
         List<byte[]> ordered = new ArrayList<>(laneIds.length);
         for (int lane = 0; lane < laneIds.length; lane++) {
           byte[] frame = bundles[lane][block];
@@ -592,19 +556,115 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
       success = true;
       return Collections.unmodifiableList(result);
     } finally {
+      recordServingReadStats(stats);
       ServingIndexTiming.source(fromExclusive, through, System.nanoTime() - started, decodeNanos,
-          servingReadBytes, servingReadFrames, success);
+          stats.bytes, stats.frames, success);
     }
+  }
+
+  private synchronized PublishedReadView capturePublishedReadView(long fromExclusive,
+      long through) {
+    requireUsable();
+    if (fromExclusive < 0 || through < fromExclusive || appendHead == null
+        || through > appendHead.getBlockNumber()) {
+      throw new IllegalArgumentException("Invalid State Archive committed read range");
+    }
+    int blockCount = StrictMathWrapper.toIntExact(through - fromExclusive);
+    if (blockCount == 0) {
+      return new PublishedReadView(fromExclusive + 1, blockCount,
+          Collections.emptyList());
+    }
+    if (servingSegments == null) {
+      servingSegments = new HashMap<>();
+      for (int laneId : StateArchiveFileFormatV3.fiveLaneIds()) {
+        servingSegments.put(laneId, new TreeMap<>());
+      }
+      for (SealedSegment segment : sealedSegments) {
+        servingSegments.get(segment.getLaneId()).put(segment.getFirstBlock(), segment);
+      }
+    }
+    long first = fromExclusive + 1;
+    List<List<ReadableSegment>> segmentsByLane = new ArrayList<>();
+    for (int laneId : StateArchiveFileFormatV3.fiveLaneIds()) {
+      List<ReadableSegment> readable = new ArrayList<>();
+      NavigableMap<Long, SealedSegment> segments = servingSegments.get(laneId);
+      Map.Entry<Long, SealedSegment> selected = segments.floorEntry(first);
+      if (selected == null) {
+        selected = segments.ceilingEntry(first);
+      }
+      while (selected != null && selected.getKey() <= through) {
+        SealedSegment segment = selected.getValue();
+        if (segment.getLastBlock() >= first) {
+          readable.add(new ReadableSegment(laneId, segment.getSegmentSeq(),
+              segment.getFirstBlock(), StrictMathWrapper.max(first, segment.getFirstBlock()),
+              StrictMathWrapper.min(through, segment.getLastBlock()),
+              segment.getSegmentHeaderDigest()));
+        }
+        selected = segments.higherEntry(selected.getKey());
+      }
+      LaneState current = lanes.get(laneId);
+      if (current != null && current.firstBlock <= through && current.lastBlock >= first) {
+        readable.add(new ReadableSegment(laneId, current.segmentSeq, current.firstBlock,
+            StrictMathWrapper.max(first, current.firstBlock),
+            StrictMathWrapper.min(through, current.lastBlock), current.headerDigest));
+      }
+      segmentsByLane.add(Collections.unmodifiableList(readable));
+    }
+    return new PublishedReadView(first, blockCount,
+        Collections.unmodifiableList(segmentsByLane));
+  }
+
+  private synchronized void recordServingReadStats(ServingReadStats stats) {
+    servingReadFrames = stats.frames;
+    servingReadBytes = stats.bytes;
   }
 
   synchronized long getServingReadFrames() {
     return servingReadFrames;
   }
 
-  static final class ServingReadBudgetException extends IOException {
+  static final class ServingReadBudgetException
+      extends StateArchiveServingSource.ReadBudgetException {
     ServingReadBudgetException() {
-      super("Serving source encoded-byte budget exceeded");
+      super();
     }
+  }
+
+  private static final class PublishedReadView {
+    private final long firstBlock;
+    private final int blockCount;
+    private final List<List<ReadableSegment>> segmentsByLane;
+
+    private PublishedReadView(long firstBlock, int blockCount,
+        List<List<ReadableSegment>> segmentsByLane) {
+      this.firstBlock = firstBlock;
+      this.blockCount = blockCount;
+      this.segmentsByLane = segmentsByLane;
+    }
+  }
+
+  private static final class ReadableSegment {
+    private final int laneId;
+    private final long sequence;
+    private final long segmentFirstBlock;
+    private final long firstBlock;
+    private final long lastBlock;
+    private final byte[] headerDigest;
+
+    private ReadableSegment(int laneId, long sequence, long segmentFirstBlock,
+        long firstBlock, long lastBlock, byte[] headerDigest) {
+      this.laneId = laneId;
+      this.sequence = sequence;
+      this.segmentFirstBlock = segmentFirstBlock;
+      this.firstBlock = firstBlock;
+      this.lastBlock = lastBlock;
+      this.headerDigest = Arrays.copyOf(headerDigest, headerDigest.length);
+    }
+  }
+
+  private static final class ServingReadStats {
+    private long frames;
+    private long bytes;
   }
 
   synchronized long getServingReadBytes() {
@@ -616,29 +676,31 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
     return reopenSealedDataReadBytes;
   }
 
-  private void readIndexedRange(int laneId, long sequence, long segmentFirst,
-      long first, long last, byte[] headerDigest,
-      long rangeFirst, byte[][] laneFrames, long maxEncodedBytes) throws IOException {
-    try (FileChannel data = FileChannel.open(dataPath(laneId, sequence),
+  private void readIndexedRange(ReadableSegment segment, long rangeFirst,
+      byte[][] laneFrames, long maxEncodedBytes, ServingReadStats stats) throws IOException {
+    if (Thread.holdsLock(this)) {
+      throw new IllegalStateException("State Archive serving file I/O holds the writer monitor");
+    }
+    try (FileChannel data = FileChannel.open(dataPath(segment.laneId, segment.sequence),
         StandardOpenOption.READ);
-        FileChannel index = FileChannel.open(indexPath(laneId, sequence),
+        FileChannel index = FileChannel.open(indexPath(segment.laneId, segment.sequence),
             StandardOpenOption.READ)) {
       BlockIndexHeader header = StateArchiveSegmentFormatV3.decodeBlockIndexHeader(
           readExact(index, 0, StateArchiveFileFormatV3.BLOCK_INDEX_HEADER_LENGTH));
-      if (header.getLaneId() != laneId || header.getSegmentSeq() != sequence
-          || !Arrays.equals(headerDigest, header.getDataSegmentHeaderDigest())) {
+      if (header.getLaneId() != segment.laneId || header.getSegmentSeq() != segment.sequence
+          || !Arrays.equals(segment.headerDigest, header.getDataSegmentHeaderDigest())) {
         throw new IOException("State Archive serving block index identity mismatch");
       }
       long dataBytes = data.size();
       int entryBytes = StateArchiveFileFormatV3.BLOCK_INDEX_ENTRY_LENGTH;
       byte[] entries = null;
-      for (long block = first; block <= last; block++) {
-        int entryInBatch = (int) ((block - first) % 256);
+      for (long block = segment.firstBlock; block <= segment.lastBlock; block++) {
+        int entryInBatch = (int) ((block - segment.firstBlock) % 256);
         if (entryInBatch == 0) {
           long offset = StrictMathWrapper.addExact(
               StateArchiveFileFormatV3.BLOCK_INDEX_HEADER_LENGTH,
-              StrictMathWrapper.multiplyExact(block - segmentFirst, entryBytes));
-          int count = (int) StrictMathWrapper.min(256, last - block + 1);
+              StrictMathWrapper.multiplyExact(block - segment.segmentFirstBlock, entryBytes));
+          int count = (int) StrictMathWrapper.min(256, segment.lastBlock - block + 1);
           entries = readExact(index, offset, count * entryBytes);
         }
         BlockIndexEntry entry = StateArchiveSegmentFormatV3.decodeBlockIndexEntry(
@@ -648,13 +710,13 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
             || entry.getFrameOffset() > dataBytes - entry.getFrameLength()) {
           throw new IOException("State Archive serving block index range mismatch");
         }
-        if (entry.getFrameLength() > maxEncodedBytes - servingReadBytes) {
+        if (entry.getFrameLength() > maxEncodedBytes - stats.bytes) {
           throw new ServingReadBudgetException();
         }
         byte[] frame = readExact(data, entry.getFrameOffset(), entry.getFrameLength());
-        servingReadFrames++;
-        servingReadBytes += frame.length;
-        if (blockNumber(frame) != block || laneIdFromFrame(frame) != laneId
+        stats.frames++;
+        stats.bytes += frame.length;
+        if (blockNumber(frame) != block || laneIdFromFrame(frame) != segment.laneId
             || ByteBuffer.wrap(frame).getLong(frame.length - ENCODED_DIGEST_FROM_END)
             != entry.getEncodedFrameDigestPrefix()) {
           throw new IOException("State Archive serving block index frame mismatch");
@@ -863,8 +925,7 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
     }
   }
 
-  private void validateNext(BlockSnapshotMeta meta, byte[] firstFrame) {
-    byte[] previousDigest = previousHistoryDigest(firstFrame);
+  private void validateNext(BlockSnapshotMeta meta, byte[] previousDigest) {
     if (appendHead == null) {
       if (!Arrays.equals(previousDigest, baselineHistoryDigest)) {
         throw new IllegalArgumentException("State Archive first bundle history mismatch");
@@ -924,20 +985,20 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
 
   private void appendLaneFrame(LaneState state, BlockSnapshotMeta meta, EncodedLane lane)
       throws IOException {
-    byte[] frame = lane.getFrame();
-    if (frame.length > StateArchiveFileFormatV3.MAX_BLOCK_FRAME_BYTES) {
+    int frameLength = lane.getFrameLength();
+    if (frameLength > StateArchiveFileFormatV3.MAX_BLOCK_FRAME_BYTES) {
       throw new IllegalArgumentException("State Archive block frame exceeds 64 MiB");
     }
     long offset = state.dataEndOffset;
     state.data.position(offset);
-    writeBuffered(state.data, frame, state.appendBuffer);
-    state.contentDigest.update(frame);
+    writeFully(state.data, lane.frameView());
+    state.contentDigest.update(lane.frameView());
     byte[] indexEntry = StateArchiveSegmentFormatV3.encodeBlockIndexEntry(
-        new BlockIndexEntry(meta.getBlockNumber(), offset, frame.length,
-            ByteBuffer.wrap(lane.getEncodedFrameDigest()).getLong()));
+        new BlockIndexEntry(meta.getBlockNumber(), offset, frameLength,
+            lane.getEncodedFrameDigestPrefix()));
     state.index.position(state.index.size());
     writeFully(state.index, ByteBuffer.wrap(indexEntry));
-    state.record(meta, frame, lane.getEncodedFrameDigest());
+    state.record(meta, lane, lane.getEncodedFrameDigest());
   }
 
   private FileTailProof markRotation(LaneState state, long checkpointSequence,
@@ -2611,7 +2672,7 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
       DecodedBundle decoded;
       try {
         decoded = codec.decode(frames);
-        validateNext(decoded.getDiff().getMeta(), frames.get(0));
+        validateNext(decoded.getDiff().getMeta(), previousHistoryDigest(frames.get(0)));
       } catch (IllegalArgumentException invalidBundle) {
         if (recoveryBoundary != null) {
           return commonHead;
@@ -3011,19 +3072,6 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
     }
   }
 
-  private static void writeBuffered(FileChannel channel, byte[] bytes, ByteBuffer staging)
-      throws IOException {
-    int offset = 0;
-    while (offset < bytes.length) {
-      staging.clear();
-      int length = StrictMathWrapper.min(staging.remaining(), bytes.length - offset);
-      staging.put(bytes, offset, length);
-      staging.flip();
-      writeFully(channel, staging);
-      offset += length;
-    }
-  }
-
   private static void syncDirectory(Path directory) throws IOException {
     try (FileChannel channel = FileChannel.open(directory, StandardOpenOption.READ)) {
       channel.force(true);
@@ -3310,7 +3358,6 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
     private final FileChannel data;
     private final FileChannel index;
     private final MessageDigest contentDigest;
-    private final ByteBuffer appendBuffer = ByteBuffer.allocateDirect(APPEND_BUFFER_BYTES);
     private long lastBlock;
     private long blockFrameCount;
     private long entryCount;
@@ -3345,7 +3392,7 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
       this.contentDigest = contentDigest;
     }
 
-    private void record(BlockSnapshotMeta meta, byte[] frame, byte[] digest) {
+    private void record(BlockSnapshotMeta meta, EncodedLane lane, byte[] digest) {
       long blockNumber = meta.getBlockNumber();
       if (blockFrameCount > 0 && blockNumber != lastBlock + 1) {
         throw new IllegalArgumentException("Non-contiguous State Archive lane block");
@@ -3356,12 +3403,11 @@ public final class StateArchiveFiveLaneSegmentWriterV3 implements AutoCloseable 
       lastFrameDigest = Arrays.copyOf(digest, digest.length);
       lastBlock = blockNumber;
       blockFrameCount++;
-      entryCount += ByteBuffer.wrap(frame).getLong(ENTRY_COUNT_OFFSET);
-      logicalPayloadBytes += ByteBuffer.wrap(frame).getLong(RAW_PAYLOAD_LENGTH_OFFSET);
-      encodedBlockFrameBytes += frame.length;
-      dataEndOffset += frame.length;
-      endHistoryDigest = Arrays.copyOfRange(frame, RESULT_HISTORY_DIGEST_OFFSET,
-          RESULT_HISTORY_DIGEST_OFFSET + StateArchiveFileFormatV3.HASH_LENGTH);
+      entryCount += lane.getEntryCount();
+      logicalPayloadBytes += lane.getRawPayloadLength();
+      encodedBlockFrameBytes += lane.getFrameLength();
+      dataEndOffset += lane.getFrameLength();
+      endHistoryDigest = lane.getResultHistoryDigest();
       lastMeta = meta;
     }
 

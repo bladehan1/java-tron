@@ -75,8 +75,8 @@ public class StorageConfigTest {
     assertEquals(4, defaults.getStateArchive().getHotStore().getYellowFrozenGenerations());
     assertEquals(7, defaults.getStateArchive().getHotStore().getRedFrozenGenerations());
     assertFalse(defaults.getStateArchive().getAppendFile().isEnabled());
-    assertEquals(3, defaults.getStateArchive().getAppendFile().getFormatVersion());
-    assertEquals(2000000000L,
+    assertEquals(4, defaults.getStateArchive().getAppendFile().getFormatVersion());
+    assertEquals(2L * 1024 * 1024 * 1024,
         defaults.getStateArchive().getAppendFile().getSegmentTargetBytes());
 
     StorageConfig configured = StorageConfig.fromConfig(withRef(

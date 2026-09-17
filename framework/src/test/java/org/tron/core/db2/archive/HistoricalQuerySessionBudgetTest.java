@@ -1,6 +1,7 @@
 package org.tron.core.db2.archive;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.mock;
@@ -124,7 +125,9 @@ public class HistoricalQuerySessionBudgetTest {
               fixture.releases::incrementAndGet));
       assertEquals(Reason.CANCELLED, cancelled.getReason());
       assertEquals(0, fixture.releases.get());
-      assertTrue(fixture.latest.closed);
+      assertThrows(IllegalStateException.class,
+          () -> snapshot.get("account", MATCH_KEY));
+      assertFalse(fixture.latest.closed);
     }
   }
 

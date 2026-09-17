@@ -170,7 +170,7 @@ public final class HistoricalQuerySession implements AutoCloseable {
     return encoded.map(HistoricalQuerySession::decodeContractState);
   }
 
-  /** Contract metadata and storage-row lookup are resolved by the same pinned context. */
+  /** Contract metadata and storage-row lookup are resolved by the same request context. */
   public Optional<byte[]> getStorage(byte[] contractAddress, byte[] logicalSlot) {
     ensureOpen();
     byte[] address = copyKey(contractAddress, "contractAddress");

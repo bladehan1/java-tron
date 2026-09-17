@@ -77,7 +77,7 @@ public final class StateArchiveFileFormatV3 {
   static final int U0_SEGMENT_BLOCK_SPAN = 16_384;
   static final long U0_PART_MAX_BYTES = 2_000_000_000L;
   public static final int MAX_BLOCK_FRAME_BYTES = 67_108_864;
-  public static final long SEGMENT_TARGET_BYTES = 2_000_000_000L;
+  public static final long SEGMENT_TARGET_BYTES = 2L * 1024 * 1024 * 1024;
   public static final int SHARD_MAX_SEGMENTS = 1_024;
   public static final long EXACT_COVERAGE_BITMAP = 0x0000000007ffffffL;
   public static final long MIXED_LANE_COVERAGE_BITMAP = 0x0000000007dfefe7L;

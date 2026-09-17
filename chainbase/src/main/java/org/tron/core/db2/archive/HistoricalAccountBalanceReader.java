@@ -6,7 +6,7 @@ import java.util.Arrays;
 import java.util.Objects;
 import org.tron.protos.Protocol.Account;
 
-/** Narrow historical TRX account-balance reader over one pinned archive snapshot. */
+/** Narrow historical TRX account-balance reader over one request archive accessor. */
 public final class HistoricalAccountBalanceReader {
 
   public static final String ACCOUNT_DATABASE = "account";

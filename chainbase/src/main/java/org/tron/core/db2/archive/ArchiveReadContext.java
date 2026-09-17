@@ -14,7 +14,7 @@ import java.util.Set;
 import org.tron.core.store.StorageRowKeyCodec;
 import org.tron.protos.contract.SmartContractOuterClass.SmartContract;
 
-/** Request-owned bindings from every versioned Store to one pinned archive snapshot. */
+/** Request-owned bindings from every versioned Store to one archive point accessor. */
 public final class ArchiveReadContext implements Closeable {
 
   private final ArchivePointSnapshot snapshot;
@@ -105,7 +105,7 @@ public final class ArchiveReadContext implements Closeable {
     snapshot.requirePinnedIdentity();
   }
 
-  /** Resolves exact Account bytes and one P66-aware token balance from this request snapshot. */
+  /** Resolves exact Account bytes and one P66-aware token balance through this request accessor. */
   public synchronized HistoricalAccountAssetBalanceResolver.Result resolveAccountAsset(
       byte[] address, String tokenId) throws IOException {
     ensureOpen();
@@ -119,7 +119,7 @@ public final class ArchiveReadContext implements Closeable {
     return accountAssetPrefixResolver.resolve(snapshot, address, limits);
   }
 
-  /** Resolves one logical contract slot using contract metadata from this same pinned context. */
+  /** Resolves one logical contract slot using contract metadata from this request context. */
   public synchronized Optional<byte[]> getStorage(byte[] contractAddress, byte[] logicalSlot)
       throws IOException {
     ensureOpen();

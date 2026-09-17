@@ -13,9 +13,11 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
+import org.springframework.test.util.ReflectionTestUtils;
 import org.tron.core.db2.archive.ArchiveReadSnapshot.PinnedLatestState;
 import org.tron.core.db2.archive.BlockReverseDiff.DbGroup;
 import org.tron.core.db2.archive.BlockReverseDiff.Entry;
@@ -34,7 +36,7 @@ public class StateArchiveCheckpointReadSnapshotTest {
   public final TemporaryFolder temporaryFolder = new TemporaryFolder();
 
   @Test
-  public void combinesHistoryAndPinnedLatestUnderOneRuntimeLease() throws Exception {
+  public void readsHistoryAndPinsLatestOnlyForEachAccessWithoutRuntimeLease() throws Exception {
     Path root = temporaryFolder.newFolder("snapshot").toPath();
     byte[] format = hash(90);
     CommonCheckpointPayload payload = payload(format, 1, 3);
@@ -44,13 +46,16 @@ public class StateArchiveCheckpointReadSnapshotTest {
     materializer.materialize(payload, target);
     materializer.publish(target);
     CommonCheckpointRuntimeOwner owner = readyOwner(root.resolve("runtime"));
-    FakeLatest latest = new FakeLatest(3, hash(3), OldValue.present(new byte[]{99}));
+    List<FakeLatest> latestPins = new ArrayList<>();
 
     try (StateArchiveCheckpointReadSnapshot snapshot =
         StateArchiveCheckpointReadSnapshot.pin(2, owner, root, format,
             (blockNumber, blockHash) -> {
               assertEquals(3, blockNumber);
               assertArrayEquals(hash(3), blockHash);
+              FakeLatest latest = new FakeLatest(3, hash(3),
+                  OldValue.present(new byte[]{(byte) (99 + latestPins.size())}));
+              latestPins.add(latest);
               return latest;
             })) {
       assertEquals(2, snapshot.getTargetBlock());
@@ -58,16 +63,22 @@ public class StateArchiveCheckpointReadSnapshotTest {
       assertArrayEquals(hash(3), snapshot.getPinnedHash());
       assertArrayEquals(new byte[]{2}, snapshot.get("code", new byte[]{3}).getValue());
       assertArrayEquals(new byte[]{99}, snapshot.get("code", new byte[]{1}).getValue());
+      assertArrayEquals(new byte[]{100}, snapshot.get("code", new byte[]{1}).getValue());
       snapshot.requirePinnedIdentity();
-      assertFalse(latest.closed);
+      assertEquals(2, latestPins.size());
+      assertTrue(latestPins.stream().allMatch(latest -> latest.closed));
+      ReentrantReadWriteLock gate = (ReentrantReadWriteLock) ReflectionTestUtils.getField(
+          owner, "gate");
+      assertEquals(0, gate.getReadLockCount());
+      assertTrue(gate.writeLock().tryLock());
+      gate.writeLock().unlock();
     }
-    assertTrue(latest.closed);
     owner.close();
     assertEquals(CommonCheckpointRuntimeOwner.State.CLOSED, owner.getState());
   }
 
   @Test
-  public void rejectsLatestHeadMismatchAndClosesFailedPin() throws Exception {
+  public void rejectsLatestHeadMismatchAtKeyAccessAndClosesThatPin() throws Exception {
     Path root = temporaryFolder.newFolder("mismatch").toPath();
     byte[] format = hash(91);
     CommonCheckpointPayload payload = payload(format, 1, 2);
@@ -79,9 +90,12 @@ public class StateArchiveCheckpointReadSnapshotTest {
     CommonCheckpointRuntimeOwner owner = readyOwner(root.resolve("runtime"));
     FakeLatest latest = new FakeLatest(1, hash(1), OldValue.absent());
 
-    assertThrows(IllegalArgumentException.class,
-        () -> StateArchiveCheckpointReadSnapshot.pin(1, owner, root, format,
-            (blockNumber, blockHash) -> latest));
+    try (StateArchiveCheckpointReadSnapshot snapshot =
+        StateArchiveCheckpointReadSnapshot.pin(1, owner, root, format,
+            (blockNumber, blockHash) -> latest)) {
+      assertThrows(IllegalArgumentException.class,
+          () -> snapshot.get("code", new byte[]{9}));
+    }
     assertTrue(latest.closed);
     owner.close();
     assertEquals(CommonCheckpointRuntimeOwner.State.CLOSED, owner.getState());

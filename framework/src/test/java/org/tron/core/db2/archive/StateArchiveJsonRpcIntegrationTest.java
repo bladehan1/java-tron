@@ -26,10 +26,12 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
@@ -92,6 +94,10 @@ public class StateArchiveJsonRpcIntegrationTest {
       "410000000000000000000000000000000000000006");
   private static final String RPC_LOOP_ADDRESS =
       "0x0000000000000000000000000000000000000006";
+  private static final byte[] BASELINE_CALL_ADDRESS = ByteArray.fromHexString(
+      "410000000000000000000000000000000000000007");
+  private static final String RPC_BASELINE_CALL_ADDRESS =
+      "0x0000000000000000000000000000000000000007";
 
   @Rule
   public final TemporaryFolder temporaryFolder = new TemporaryFolder();
@@ -175,7 +181,7 @@ public class StateArchiveJsonRpcIntegrationTest {
   }
 
   @Test(timeout = 30000)
-  public void canonicalChangeDuringPinClosesRequestAndSubsequentRequestSucceeds()
+  public void canonicalChangeDuringLatestAccessIsAllowedByPrototypeScope()
       throws Exception {
     try (Fixture fixture = new Fixture(temporaryFolder.newFolder("canonical-race").toPath(),
         Engine.ROCKSDB)) {
@@ -183,7 +189,8 @@ public class StateArchiveJsonRpcIntegrationTest {
       BlockCapsule canonical = fixture.blocks.get(10L);
       BlockCapsule fork = new BlockCapsule(10, Sha256Hash.ZERO_HASH, 99999, ByteString.EMPTY);
       fixture.onPin = () -> fixture.blocks.put(10L, fork);
-      fixture.error("eth_getCode", RPC_ADDRESS, fixture.hashSelector(10));
+      assertEquals("0x", fixture.result("eth_getCode",
+          "410000000000000000000000000000000000000099", fixture.hashSelector(10)));
       assertEquals(1, fixture.pins);
       assertEquals(fixture.pins, fixture.releases);
       fixture.onPin = () -> { };
@@ -202,7 +209,10 @@ public class StateArchiveJsonRpcIntegrationTest {
       Map<String, Object> call = map("to", RPC_CALL_ADDRESS);
       call.put("from", RPC_ADDRESS);
       call.put("data", "0x");
-      assertEquals(word(7), fixture.result("eth_call", call, "0xa"));
+      for (Object selector : Arrays.asList("0xa", map("blockNumber", "0xa"),
+          fixture.hashSelector(10))) {
+        assertEquals(word(7), fixture.result("eth_call", call, selector));
+      }
       assertEquals(word(7), fixture.result("eth_getStorageAt",
           RPC_CALL_ADDRESS, "0x0", "0xa"));
       assertEquals(word(0), fixture.result("eth_getStorageAt",
@@ -210,6 +220,48 @@ public class StateArchiveJsonRpcIntegrationTest {
       assertArrayEquals(digest(99),
           fixture.baseline.get(key("storage-row", fixture.callLatestSlot)));
       assertEquals(fixture.pins, fixture.releases);
+    }
+  }
+
+  @Test(timeout = 30000)
+  public void historicalCallDoesNotBlockCommonCheckpointPublication() throws Exception {
+    try (Fixture fixture = new Fixture(temporaryFolder.newFolder("lock-free-call").toPath(),
+        Engine.ROCKSDB)) {
+      fixture.ready();
+      fixture.enableHistoricalVm();
+      CountDownLatch accessStarted = new CountDownLatch(1);
+      CountDownLatch releaseAccess = new CountDownLatch(1);
+      AtomicBoolean blockFirstAccess = new AtomicBoolean(true);
+      fixture.onPin = () -> {
+        if (!blockFirstAccess.compareAndSet(true, false)) {
+          return;
+        }
+        accessStarted.countDown();
+        try {
+          assertTrue(releaseAccess.await(5, TimeUnit.SECONDS));
+        } catch (InterruptedException failure) {
+          Thread.currentThread().interrupt();
+          throw new AssertionError(failure);
+        }
+      };
+      ExecutorService executor = Executors.newFixedThreadPool(2);
+      try {
+        Future<String> call = executor.submit(() -> fixture.result("eth_call",
+            call(RPC_BASELINE_CALL_ADDRESS), "0xa"));
+        assertTrue(accessStarted.await(5, TimeUnit.SECONDS));
+        Future<?> checkpoint = executor.submit(() -> {
+          fixture.owner.apply(fixture.payload);
+          return null;
+        });
+        checkpoint.get(5, TimeUnit.SECONDS);
+        releaseAccess.countDown();
+        assertEquals(word(7), call.get(5, TimeUnit.SECONDS));
+        assertEquals(fixture.pins, fixture.releases);
+      } finally {
+        releaseAccess.countDown();
+        executor.shutdownNow();
+        assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+      }
     }
   }
 
@@ -325,6 +377,8 @@ public class StateArchiveJsonRpcIntegrationTest {
     private final Manager manager = new Manager();
     private final StateArchiveAppendCheckpointMaterializerV3 archive;
     private final CommonCheckpointRuntimeAttachment attachment;
+    private final CommonCheckpointRuntimeOwner owner;
+    private final CommonCheckpointPayload payload;
     private final CommonCheckpointTarget target;
     private final TronJsonRpcImpl rpc;
     private final JsonRpcServer server;
@@ -362,6 +416,10 @@ public class StateArchiveJsonRpcIntegrationTest {
           .setContractAddress(ByteString.copyFrom(REVERT_ADDRESS)).setVersion(0).build();
       SmartContract loopContract = SmartContract.newBuilder()
           .setContractAddress(ByteString.copyFrom(LOOP_ADDRESS)).setVersion(0).build();
+      SmartContract baselineCallContract = SmartContract.newBuilder()
+          .setContractAddress(ByteString.copyFrom(BASELINE_CALL_ADDRESS)).setVersion(0).build();
+      byte[] baselineCallSlot = StorageRowKeyCodec.physicalKey(BASELINE_CALL_ADDRESS, digest(0),
+          0, null);
       baseline.put(key("account", ADDRESS), account(99).toByteArray());
       baseline.put(key("code", ADDRESS), new byte[]{99});
       baseline.put(key("contract", ADDRESS), latestContract.toByteArray());
@@ -381,6 +439,12 @@ public class StateArchiveJsonRpcIntegrationTest {
       baseline.put(key("account", LOOP_ADDRESS), account(LOOP_ADDRESS, 0).toByteArray());
       baseline.put(key("code", LOOP_ADDRESS), new byte[]{0});
       baseline.put(key("contract", LOOP_ADDRESS), loopContract.toByteArray());
+      baseline.put(key("account", BASELINE_CALL_ADDRESS),
+          account(BASELINE_CALL_ADDRESS, 0).toByteArray());
+      baseline.put(key("code", BASELINE_CALL_ADDRESS), callCode);
+      baseline.put(key("contract", BASELINE_CALL_ADDRESS),
+          baselineCallContract.toByteArray());
+      baseline.put(key("storage-row", baselineCallSlot), digest(7));
       List<BlockReverseDiff> diffs = new ArrayList<>();
       for (int number = 11; number <= 12; number++) {
         BlockCapsule block = blocks.get((long) number);
@@ -421,10 +485,10 @@ public class StateArchiveJsonRpcIntegrationTest {
       archive = new StateArchiveAppendCheckpointMaterializerV3(root.resolve("archive"),
           digest(77), engine, digest(87), StateArchiveFileFormatV3.COMPRESSION_NONE, 1500);
       StateArchiveHotBatchDescriptor descriptor = archive.planCheckpoint(diffs);
-      CommonCheckpointPayload payload = payload(diffs, descriptor);
+      payload = payload(diffs, descriptor);
       target = archive.prepare(CommonCheckpointCapture.create(payload, diffs, descriptor));
       archive.publish(target);
-      CommonCheckpointRuntimeOwner owner = new CommonCheckpointRuntimeOwner(
+      owner = new CommonCheckpointRuntimeOwner(
           new CommonCheckpointRedoCoordinator(new CommonCheckpointFile(root.resolve("wal")),
               authority(Authority.CHAINBASE), authority(Authority.PATH_STATE), archive));
       CommonCheckpointRuntime runtime = new CommonCheckpointRuntime(owner,
