@@ -97,7 +97,7 @@ final class StateArchiveServingSourceV5 implements StateArchiveServingSource {
     if (maxEncodedBytes < 0) {
       throw new IllegalArgumentException("State Archive V5 serving budget is negative");
     }
-    try (StateArchiveCommittedViewV5 view = StateArchiveCommittedViewV5.open(
+    try (StateArchiveCommittedViewV5 view = StateArchiveCommittedViewV5.openCommittedPrefix(
         root, tail, target)) {
       requireBudget(view, fromExclusive + 1, through, maxEncodedBytes);
       if (!validated) {
