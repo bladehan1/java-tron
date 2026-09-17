@@ -190,14 +190,18 @@ public class StorageConfig {
     private int shardMaxSegments = 1024;
 
     void postProcess() {
-      if (formatVersion != 4 || appendBufferBytes != 2097152
+      if ((formatVersion != 4 && formatVersion != 5) || appendBufferBytes != 2097152
           || maxBlockFrameBytes != 67108864 || shardMaxSegments != 1024) {
         throw new IllegalArgumentException(
-            "stateArchive.appendFile v4 fixed format settings differ");
+            "stateArchive.appendFile fixed format settings differ");
       }
       if (segmentTargetBytes <= 512) {
         throw new IllegalArgumentException(
             "stateArchive.appendFile.segmentTargetBytes must exceed the segment header");
+      }
+      if (formatVersion == 5 && segmentTargetBytes != 2L * 1024 * 1024 * 1024) {
+        throw new IllegalArgumentException(
+            "stateArchive.appendFile v5 segmentTargetBytes must equal 2 GiB");
       }
     }
   }

@@ -247,6 +247,23 @@ public final class StateArchiveServingIndexBuildCoordinatorV3 implements AutoClo
     return index.archiveTail(target);
   }
 
+  synchronized void publishArchiveTailV5(StateArchiveTailV5 tail) throws IOException {
+    publishArchiveTailV5(tail, () -> { });
+  }
+
+  synchronized void publishArchiveTailV5(StateArchiveTailV5 tail,
+      PersistentServingKeyIndexGeneration.ExactWriteFaultHook beforeWrite)
+      throws IOException {
+    requireOpen();
+    index.publishArchiveTailV5(tail, beforeWrite);
+  }
+
+  synchronized StateArchiveTailV5 archiveTailV5(CommonCheckpointTarget target)
+      throws IOException {
+    requireOpen();
+    return index.archiveTailV5(target);
+  }
+
   private String generationId(long blockNumber, byte[] hash) {
     return String.format("append-v3-%020d-%s-%08d", blockNumber,
         Hex.toHexString(Arrays.copyOf(hash, 6)), buildSequence + 1);

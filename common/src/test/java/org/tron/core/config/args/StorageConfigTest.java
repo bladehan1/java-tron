@@ -201,6 +201,29 @@ public class StorageConfigTest {
     assertTrue(configured.getStateArchive().getAppendFile().isEnabled());
   }
 
+  @Test
+  public void testAppendFileExplicitlyAdmitsV5ButKeepsV4Default() {
+    StorageConfig configured = StorageConfig.fromConfig(withRef(
+        "storage.stateArchive.enabled = true\n"
+            + "storage.stateArchive.appendFile.enabled = true\n"
+            + "storage.stateArchive.appendFile.formatVersion = 5\n"
+            + "storage.pathStateRoot.enabled = true\n"
+            + "storage.commonCheckpoint.enabled = true"));
+
+    assertEquals(5, configured.getStateArchive().getAppendFile().getFormatVersion());
+    assertEquals(4, StorageConfig.fromConfig(withRef()).getStateArchive()
+        .getAppendFile().getFormatVersion());
+  }
+
+  @Test
+  public void testAppendFileRejectsUnknownFormatAndNonCanonicalV5SegmentSize() {
+    assertThrows(IllegalArgumentException.class, () -> StorageConfig.fromConfig(withRef(
+        "storage.stateArchive.appendFile.formatVersion = 6")));
+    assertThrows(IllegalArgumentException.class, () -> StorageConfig.fromConfig(withRef(
+        "storage.stateArchive.appendFile.formatVersion = 5\n"
+            + "storage.stateArchive.appendFile.segmentTargetBytes = 1048576")));
+  }
+
   @Test(expected = IllegalArgumentException.class)
   public void testAppendFileRequiresCommonCheckpoint() {
     StorageConfig.fromConfig(withRef(
