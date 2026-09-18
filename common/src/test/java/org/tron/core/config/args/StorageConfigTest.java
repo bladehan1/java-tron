@@ -75,6 +75,7 @@ public class StorageConfigTest {
     assertEquals(4, defaults.getStateArchive().getHotStore().getYellowFrozenGenerations());
     assertEquals(7, defaults.getStateArchive().getHotStore().getRedFrozenGenerations());
     assertFalse(defaults.getStateArchive().getAppendFile().isEnabled());
+    assertFalse(defaults.getStateArchive().getAppendFile().isTestOnlyForceServingHandoff());
     assertEquals(4, defaults.getStateArchive().getAppendFile().getFormatVersion());
     assertEquals(2L * 1024 * 1024 * 1024,
         defaults.getStateArchive().getAppendFile().getSegmentTargetBytes());
@@ -89,6 +90,16 @@ public class StorageConfigTest {
     assertEquals(8, configured.getStateArchive().getQueueCapacity());
     assertEquals("LEVELDB", configured.getStateArchive().getServingIndexEngine());
     assertEquals("LEVELDB", configured.getStateArchive().getHotStore().getEngine());
+  }
+
+  @Test
+  public void testStateArchiveServingHandoffOverrideIsExplicitAndTestOnly() {
+    StorageConfig configured = StorageConfig.fromConfig(withRef(
+        "storage.stateArchive.appendFile.testOnlyForceServingHandoff = true"));
+
+    assertTrue(configured.getStateArchive().getAppendFile().isTestOnlyForceServingHandoff());
+    assertFalse(StorageConfig.fromConfig(withRef()).getStateArchive().getAppendFile()
+        .isTestOnlyForceServingHandoff());
   }
 
   @Test

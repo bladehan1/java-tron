@@ -1007,6 +1007,12 @@ public class Manager {
       snapshots.attachCommonCheckpointRuntime(attachment);
       commonCheckpointRuntime = attachment;
       stateArchiveAppendMaterializer = admittedAppendMaterializer;
+      if (admittedAppendMaterializer != null
+          && appendConfig.isTestOnlyForceServingHandoff()) {
+        logger.warn("TEST-ONLY State Archive serving handoff forced at the recovered local "
+            + "Common boundary; historical results during catch-up are not reliable");
+        updateStateArchiveServingMode(false);
+      }
       pathOwner = null;
       attachment = null;
       hotStore = null;
