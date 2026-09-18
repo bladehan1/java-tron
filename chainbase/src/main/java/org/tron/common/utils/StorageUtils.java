@@ -1,6 +1,5 @@
 package org.tron.common.utils;
 
-import static org.tron.common.parameter.CommonParameter.ENERGY_LIMIT_HARD_FORK;
 import static org.tron.core.db.common.DbSourceInter.LEVELDB;
 
 import java.io.File;
@@ -9,6 +8,7 @@ import org.iq80.leveldb.Options;
 import org.slf4j.LoggerFactory;
 import org.tron.common.parameter.CommonParameter;
 import org.tron.core.Constant;
+import org.tron.core.vm.config.VMConfig;
 
 
 public class StorageUtils {
@@ -16,7 +16,7 @@ public class StorageUtils {
   private static final org.slf4j.Logger levelDbLogger = LoggerFactory.getLogger(LEVELDB);
 
   public static boolean getEnergyLimitHardFork() {
-    return ENERGY_LIMIT_HARD_FORK;
+    return VMConfig.getEnergyLimitHardFork();
   }
 
   public static String getOutputDirectoryByDbName(String dbName) {

@@ -311,6 +311,67 @@ public class ArgsTest {
     Args.clearParam();
   }
 
+  @Test
+  public void testPathStateRootStorageConfigMapping() {
+    Map<String, String> override = new HashMap<>();
+    override.put("storage.db.directory", "database");
+    override.put("storage.pathStateRoot.enabled", "true");
+    override.put("storage.pathStateRoot.engine", "LEVELDB");
+    override.put("storage.pathStateRoot.directory", "root-mapped");
+    override.put("storage.pathStateRoot.reversibleLayerLimit", "9");
+    override.put("storage.pathStateRoot.reversibleLayerBytes", "8192");
+    override.put("storage.pathStateRoot.volatileSnapshotBenchmark", "true");
+    override.put("storage.pathStateRoot.nodeCacheBytes", "1073741824");
+    override.put("storage.pathStateRoot.participantThreads", "2");
+    override.put("storage.pathStateRoot.branchThreads", "3");
+    override.put("storage.pathStateRoot.asyncPrepareBenchmark", "true");
+    Config config = ConfigFactory.parseMap(override)
+        .withFallback(ConfigFactory.defaultReference());
+
+    Args.applyConfigParams(config);
+
+    Storage storage = Args.getInstance().getStorage();
+    Assert.assertTrue(storage.isPathStateRootEnabled());
+    Assert.assertEquals("shadow", storage.getPathStateRootMode());
+    Assert.assertEquals("root-mapped", storage.getPathStateRootDirectory());
+    Assert.assertEquals("LEVELDB", storage.getPathStateRootEngine());
+    Assert.assertEquals(1, storage.getPathStateRootFormatVersion());
+    Assert.assertEquals(9, storage.getPathStateRootReversibleLayerLimit());
+    Assert.assertEquals(8192L, storage.getPathStateRootReversibleLayerBytes());
+    Assert.assertEquals(268435456L, storage.getPathStateRootWriteBufferBytes());
+    Assert.assertEquals(1073741824L, storage.getPathStateRootNodeCacheBytes());
+    Assert.assertEquals(2, storage.getPathStateRootParticipantThreads());
+    Assert.assertEquals(3, storage.getPathStateRootBranchThreads());
+    Assert.assertFalse(storage.isPathStateRootRebuildFromGenesis());
+    Assert.assertTrue(storage.isPathStateRootVerifyEveryBlock());
+    Assert.assertTrue(storage.isPathStateRootVolatileSnapshotBenchmark());
+    Assert.assertTrue(storage.isPathStateRootAsyncPrepareBenchmark());
+    Args.clearParam();
+  }
+
+  @Test
+  public void testAuxiliaryDatabaseEnginesMapIndependentlyFromChainbase() {
+    Map<String, String> override = new HashMap<>();
+    override.put("storage.db.engine", "LEVELDB");
+    override.put("storage.stateArchive.servingIndexEngine", "ROCKSDB");
+    override.put("storage.stateArchive.hotStore.engine", "LEVELDB");
+    override.put("storage.stateArchive.appendFile.segmentTargetBytes", "123456789");
+    override.put("storage.pathStateRoot.engine", "ROCKSDB");
+    Config config = ConfigFactory.parseMap(override)
+        .withFallback(ConfigFactory.defaultReference());
+
+    Args.applyConfigParams(config);
+
+    Storage storage = Args.getInstance().getStorage();
+    Assert.assertEquals("LEVELDB", storage.getDbEngine());
+    Assert.assertEquals("ROCKSDB", storage.getStateArchiveServingIndexEngine());
+    Assert.assertEquals("LEVELDB", storage.getStateArchiveHotStoreSettings().getEngine());
+    Assert.assertEquals(123456789L,
+        storage.getStateArchiveAppendFileSettings().getSegmentTargetBytes());
+    Assert.assertEquals("ROCKSDB", storage.getPathStateRootEngine());
+    Args.clearParam();
+  }
+
   /**
    * Verify that event.subscribe.enable = false from config is read correctly.
    */

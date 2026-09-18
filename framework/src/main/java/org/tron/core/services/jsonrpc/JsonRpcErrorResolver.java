@@ -22,6 +22,11 @@ public enum JsonRpcErrorResolver implements ErrorResolver {
   @Override
   public JsonError resolveError(
       Throwable thrownException, Method method, List<JsonNode> arguments) {
+    if (thrownException instanceof HistoricalRpcException) {
+      HistoricalRpcException historical = (HistoricalRpcException) thrownException;
+      return new JsonError(historical.getCode(), historical.getMessage(),
+          historical.getErrorData());
+    }
     JsonRpcError resolver = getResolverForException(thrownException, method);
     if (notFoundResolver(resolver)) {
       return null;

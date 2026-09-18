@@ -723,6 +723,10 @@ public class BandwidthProcessorTest extends BaseTest {
     // V2
     chainBaseManager.getAssetIssueV2Store().put(assetIssueCapsule.createDbV2Key(),
         assetIssueCapsule);
+    AssetIssueCapsule legacyBefore =
+        chainBaseManager.getAssetIssueStore().get(assetIssueCapsule.createDbKey());
+    byte[] legacyBytesBefore = legacyBefore == null
+        ? null : legacyBefore.getInstance().toByteArray();
 
     AccountCapsule ownerCapsule =
         new AccountCapsule(
@@ -777,6 +781,13 @@ public class BandwidthProcessorTest extends BaseTest {
           chainBaseManager.getAssetIssueV2Store().get(assetIssueCapsule.createDbV2Key());
       Assert.assertNotNull(assetIssueCapsuleV2);
       Assert.assertEquals(assetIssueCapsuleV2.getPublicFreeAssetNetUsage(), byteSize);
+      AssetIssueCapsule legacyAfter =
+          chainBaseManager.getAssetIssueStore().get(assetIssueCapsule.createDbKey());
+      if (legacyBytesBefore == null) {
+        Assert.assertNull(legacyAfter);
+      } else {
+        Assert.assertArrayEquals(legacyBytesBefore, legacyAfter.getInstance().toByteArray());
+      }
 
       AccountCapsule fromAccount =
           chainBaseManager.getAccountStore().get(ByteArray.fromHexString(OWNER_ADDRESS));

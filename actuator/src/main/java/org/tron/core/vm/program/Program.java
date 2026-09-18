@@ -58,6 +58,8 @@ import org.tron.core.exception.ContractValidateException;
 import org.tron.core.exception.TronException;
 import org.tron.core.utils.TransactionUtil;
 import org.tron.core.vm.EnergyCost;
+import org.tron.core.vm.HistoricalCapabilityException;
+import org.tron.core.vm.HistoricalExecutionGuard;
 import org.tron.core.vm.MessageCall;
 import org.tron.core.vm.Op;
 import org.tron.core.vm.OperationRegistry;
@@ -811,6 +813,10 @@ public class Program {
 
   private void createContractImpl(DataWord value, byte[] programCode, byte[] newAddress,
       boolean isCreate2) {
+    if (getContractState().isHistorical()) {
+      throw new HistoricalCapabilityException(
+          "CREATE and CREATE2 are not supported by historical execution");
+    }
     byte[] senderAddress = getContextAddress();
 
     if (logger.isDebugEnabled()) {
@@ -1660,6 +1666,10 @@ public class Program {
       PrecompiledContracts.PrecompiledContract contract) {
     returnDataBuffer = null; // reset return buffer right before the call
 
+    if (getContractState().isHistorical()) {
+      HistoricalExecutionGuard.requirePrecompileAllowed(contract);
+    }
+
     if (getCallDeep() == MAX_DEPTH) {
       stackPushZero();
       this.refundEnergy(msg.getEnergy().longValue(), " call deep limit reach");
@@ -2363,11 +2373,11 @@ public class Program {
 
     if (contractStateCapsule == null) {
       contractStateCapsule = new ContractStateCapsule(
-          contractState.getDynamicPropertiesStore().getCurrentCycleNumber());
+          contractState.getDynamicPropertyLong("CURRENT_CYCLE_NUMBER"));
       contractState.updateContractState(getContextAddress(), contractStateCapsule);
     } else {
       if (contractStateCapsule.catchUpToCycle(
-          contractState.getDynamicPropertiesStore().getCurrentCycleNumber(),
+          contractState.getDynamicPropertyLong("CURRENT_CYCLE_NUMBER"),
           VMConfig.getDynamicEnergyThreshold(),
           VMConfig.getDynamicEnergyIncreaseFactor(),
           VMConfig.getDynamicEnergyMaxFactor(),
