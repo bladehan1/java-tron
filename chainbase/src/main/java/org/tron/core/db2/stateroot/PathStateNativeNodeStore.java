@@ -348,7 +348,7 @@ final class PathStateNativeNodeStore implements Closeable {
           .setChecksumType(ChecksumType.kCRC32c)
           .setBlockCache(blockCache)
           .setCacheIndexAndFilterBlocks(true)
-          .setPinL0FilterAndIndexBlocksInCache(false)
+          .setPinL0FilterAndIndexBlocksInCache(true)
           .setWholeKeyFiltering(true)
           .setFilter(bloomFilter);
       options = new org.rocksdb.Options()
@@ -369,6 +369,7 @@ final class PathStateNativeNodeStore implements Closeable {
           .setTargetFileSizeBase(config.getTargetFileSizeBase())
           .setMaxBytesForLevelBase(config.getMaxBytesForLevelBase())
           .setMaxBytesForLevelMultiplier(config.getMaxBytesForLevelMultiplier())
+          .setUseDirectIoForFlushAndCompaction(true)
           .setTableFormatConfig(table);
       statistics = readStatistics ? new Statistics() : null;
       if (statistics != null) {
