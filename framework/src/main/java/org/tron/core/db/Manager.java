@@ -118,7 +118,6 @@ import org.tron.core.db.api.EnergyPriceHistoryLoader;
 import org.tron.core.db.api.MigrateTurkishKeyHelper;
 import org.tron.core.db.api.MoveAbiHelper;
 import org.tron.core.db2.ISession;
-import org.tron.core.db2.archive.AccountAssetArchiveProjector;
 import org.tron.core.db2.archive.ArchiveFormatAdmissionValidator.Result;
 import org.tron.core.db2.archive.ArchiveFormatAdmissionValidator.Status;
 import org.tron.core.db2.archive.ArchiveHistoryWriter;
@@ -136,7 +135,6 @@ import org.tron.core.db2.archive.LatestStateGenerationAdapter;
 import org.tron.core.db2.archive.LatestStateGenerationCoordinatorFactory;
 import org.tron.core.db2.archive.OldValue;
 import org.tron.core.db2.archive.SnapshotOldValueCollector;
-import org.tron.core.db2.archive.SnapshotPathStateTransitionCollector;
 import org.tron.core.db2.archive.StateArchiveAppendCheckpointMaterializerV4;
 import org.tron.core.db2.archive.StateArchiveAppendCheckpointMaterializerV5;
 import org.tron.core.db2.archive.StateArchiveAppendFileRuntime;
@@ -575,14 +573,15 @@ public class Manager {
     accountStateCallBack.setChainBaseManager(chainBaseManager);
     trieService.setChainBaseManager(chainBaseManager);
     revokingStore.disable();
-    if (Args.getInstance().getStorage().isP66SnapshotEnabled()) {
-      if (!Args.getInstance().getStorage().isCommonCheckpointEnabled()) {
-        throw new IllegalStateException("P66 Snapshot requires Common checkpoint");
-      }
-      chainBaseManager.getAccountAssetStore()
-          .enableSnapshots((SnapshotManager) revokingStore, true);
+    if (!(revokingStore instanceof SnapshotManager)) {
+      throw new IllegalStateException("AccountAsset Snapshot requires SnapshotManager");
     }
+    SnapshotManager snapshotManager = (SnapshotManager) revokingStore;
+    chainBaseManager.getAccountAssetStore().enableSnapshots(snapshotManager, true);
     revokingStore.check();
+    if (!Args.getInstance().getStorage().isCommonCheckpointEnabled()) {
+      chainBaseManager.getAccountAssetStore().finishSnapshotRecovery(snapshotManager);
+    }
     transactionCache.initCache();
     rewardViCalService.init();
     this.setProposalController(ProposalController.createInstance(this));
@@ -740,30 +739,15 @@ public class Manager {
         throw new IllegalStateException(
             "State archive committed head differs from the persisted state root");
       }
-      java.util.Map<String,
-          org.tron.core.db2.archive.LatestStateGenerationAdapter.SnapshotCapableStore>
-          supplementalStores = java.util.Collections.emptyMap();
       SnapshotOldValueCollector archiveCollector = new SnapshotOldValueCollector();
       boolean accountAssetRegistered = ((SnapshotManager) revokingStore).getDbs().stream()
-          .anyMatch(database -> AccountAssetArchiveProjector.ACCOUNT_ASSET_DB
-              .equals(database.getDbName()));
+          .anyMatch(database -> "account-asset".equals(database.getDbName()));
       if (!accountAssetRegistered) {
-        AccountAssetStore accountAssetStore = chainBaseManager.getAccountAssetStore();
-        if (accountAssetStore == null) {
-          throw new IllegalStateException("State archive requires account-asset Store");
-        }
-        supplementalStores = java.util.Collections.singletonMap(
-            AccountAssetArchiveProjector.ACCOUNT_ASSET_DB,
-            org.tron.core.db2.archive.LatestStateGenerationAdapter.fromDataSource(
-                AccountAssetArchiveProjector.ACCOUNT_ASSET_DB,
-                accountAssetStore.getDbSource()));
-        archiveCollector = new SnapshotOldValueCollector(
-            new AccountAssetArchiveProjector(), accountAssetStore::prefixQuery,
-            SnapshotOldValueCollector::resolveTargetAssetOptimization);
+        throw new IllegalStateException(
+            "State archive requires the AccountAsset Snapshot participant");
       }
       archiveHistoryWriter = recovered.attachNormalWriter(archiveCollector,
-          storage.getStateArchiveQueueCapacity(), canonicalHead,
-          supplementalStores);
+          storage.getStateArchiveQueueCapacity(), canonicalHead);
       stateArchiveRuntime = recovered;
       recovered = null;
       logger.info("State archive runtime attached: directory={}, head={}, actions={}, engine={}",
@@ -858,9 +842,7 @@ public class Manager {
           pathDirectory, pathEngine, servingIndexEngine,
           storage.getPathStateRootNodeCacheBytes(), formatIdentity, baselineFile, baselineExists,
           modeAdmitted, appendEnabled, appendDirectory, appendConfig);
-      if (storage.isP66SnapshotEnabled()) {
-        chainBaseManager.getAccountAssetStore().finishSnapshotRecovery(snapshots);
-      }
+      chainBaseManager.getAccountAssetStore().finishSnapshotRecovery(snapshots);
       BlockSnapshotMeta canonical = currentCanonicalBlockMeta();
       P66Phase phase = currentPathStatePhase();
       if (modeAdmitted && Files.isRegularFile(
@@ -902,10 +884,8 @@ public class Manager {
         baselineFile.retireBootstrapIntent();
       }
 
-      java.util.Map<String, LatestStateGenerationAdapter.SnapshotCapableStore>
-          supplementalStores = commonCheckpointSupplementalStores(snapshots);
-      LatestStateGenerationAdapter latest = LatestStateGenerationCoordinatorFactory.createAdapter(
-          snapshots, supplementalStores);
+      LatestStateGenerationAdapter latest =
+          LatestStateGenerationCoordinatorFactory.createAdapter(snapshots);
       CommonCheckpointMaterializedStore materializedStore =
           new CommonCheckpointMaterializedStore(checkpointDirectory);
       PathStateCheckpointMaterializer pathMaterializer = pathOwner.checkpointMaterializer(
@@ -1254,34 +1234,14 @@ public class Manager {
     }
   }
 
-  private java.util.Map<String, LatestStateGenerationAdapter.SnapshotCapableStore>
-      commonCheckpointSupplementalStores(SnapshotManager snapshots) {
-    if (snapshots.getDbs().stream().anyMatch(database ->
-        AccountAssetArchiveProjector.ACCOUNT_ASSET_DB.equals(database.getDbName()))) {
-      return java.util.Collections.emptyMap();
-    }
-    AccountAssetStore accountAssetStore = chainBaseManager.getAccountAssetStore();
-    if (accountAssetStore == null) {
-      throw new IllegalStateException("Common checkpoint requires account-asset Store");
-    }
-    return java.util.Collections.singletonMap(AccountAssetArchiveProjector.ACCOUNT_ASSET_DB,
-        LatestStateGenerationAdapter.fromDataSource(AccountAssetArchiveProjector.ACCOUNT_ASSET_DB,
-            accountAssetStore.getDbSource()));
-  }
-
   private SnapshotOldValueCollector commonCheckpointArchiveCollector() {
     SnapshotManager snapshots = (SnapshotManager) revokingStore;
-    if (snapshots.getDbs().stream().anyMatch(database ->
-        AccountAssetArchiveProjector.ACCOUNT_ASSET_DB.equals(database.getDbName()))) {
-      return new SnapshotOldValueCollector();
+    if (snapshots.getDbs().stream().noneMatch(database ->
+        "account-asset".equals(database.getDbName()))) {
+      throw new IllegalStateException(
+          "Common checkpoint requires the AccountAsset Snapshot participant");
     }
-    AccountAssetStore accountAssetStore = chainBaseManager.getAccountAssetStore();
-    if (accountAssetStore == null) {
-      throw new IllegalStateException("Common checkpoint requires account-asset Store");
-    }
-    return new SnapshotOldValueCollector(new AccountAssetArchiveProjector(),
-        accountAssetStore::prefixQuery,
-        SnapshotOldValueCollector::resolveTargetAssetOptimization);
+    return new SnapshotOldValueCollector();
   }
 
 
@@ -1368,10 +1328,7 @@ public class Manager {
           "Path-state block-final capture requires account-asset Store");
     }
     org.tron.core.db2.stateroot.PathStateTransitionCollector collector =
-        Args.getInstance().getStorage().isP66SnapshotEnabled()
-            ? new org.tron.core.db2.archive.PhysicalSnapshotPathStateCollector()
-            : new SnapshotPathStateTransitionCollector(
-                accountAssetStore::prefixQuery, this::scanPathStateActivationAccounts);
+        new org.tron.core.db2.archive.PhysicalSnapshotPathStateCollector();
     org.tron.core.config.args.Storage storage = Args.getInstance().getStorage();
     PathStateRuntimeAttachment attachment = storage.isCommonCheckpointEnabled()
         ? PathStateRuntimeAttachment.commonCheckpoint(collector, pathStateSnapshotHead)
@@ -1387,26 +1344,6 @@ public class Manager {
     attachment.synchronizeReadyHead(pathStateSnapshotHead.getHead());
     ((SnapshotManager) revokingStore).attachPathStateRuntime(attachment);
     pathStateRuntime = attachment;
-  }
-
-  private void scanPathStateActivationAccounts(
-      SnapshotPathStateTransitionCollector.ActivationAccountConsumer consumer)
-      throws java.io.IOException {
-    SnapshotManager snapshotManager = (SnapshotManager) revokingStore;
-    org.tron.core.db2.core.Chainbase account = snapshotManager.getDbs().stream()
-        .filter(database -> AccountAssetArchiveProjector.ACCOUNT_DB.equals(database.getDbName()))
-        .findFirst()
-        .orElseThrow(() -> new java.io.IOException(
-            "Path-state P66 activation requires the Account Store"));
-    java.util.Iterator<java.util.Map.Entry<byte[], byte[]>> iterator = account.iterator();
-    while (iterator.hasNext()) {
-      java.util.Map.Entry<byte[], byte[]> entry = iterator.next();
-      if (entry.getKey() == null || entry.getValue() == null) {
-        throw new java.io.IOException("Path-state P66 activation Account scan contains null");
-      }
-      consumer.accept(Arrays.copyOf(entry.getKey(), entry.getKey().length),
-          Arrays.copyOf(entry.getValue(), entry.getValue().length));
-    }
   }
 
   private void advancePathStateRoot(PathStateBlockTransition transition)
@@ -1429,25 +1366,14 @@ public class Manager {
 
   private void rebuildPathStateRoot(SnapshotManager snapshotManager, Path directory,
       PathStateStoreManifest.Engine engine) throws java.io.IOException {
-    java.util.Map<String,
-        org.tron.core.db2.archive.LatestStateGenerationAdapter.SnapshotCapableStore>
-        supplementalStores = java.util.Collections.emptyMap();
     boolean accountAssetRegistered = snapshotManager.getDbs().stream()
-        .anyMatch(database -> AccountAssetArchiveProjector.ACCOUNT_ASSET_DB
-            .equals(database.getDbName()));
+        .anyMatch(database -> "account-asset".equals(database.getDbName()));
     if (!accountAssetRegistered) {
-      AccountAssetStore accountAssetStore = chainBaseManager.getAccountAssetStore();
-      if (accountAssetStore == null) {
-        throw new java.io.IOException("Path-state rebuild requires account-asset Store");
-      }
-      supplementalStores = java.util.Collections.singletonMap(
-          AccountAssetArchiveProjector.ACCOUNT_ASSET_DB,
-          org.tron.core.db2.archive.LatestStateGenerationAdapter.fromDataSource(
-              AccountAssetArchiveProjector.ACCOUNT_ASSET_DB,
-              accountAssetStore.getDbSource()));
+      throw new java.io.IOException(
+          "Path-state rebuild requires the AccountAsset Snapshot participant");
     }
     try (PathStateNativeSnapshotSource source = PathStateNativeSnapshotSource.acquire(
-        snapshotManager, supplementalStores, this::readPathStateSnapshotIdentity,
+        snapshotManager, java.util.Collections.emptyMap(), this::readPathStateSnapshotIdentity,
         PATH_STATE_REBUILD_PAGE_SIZE, PATH_STATE_REBUILD_MARKET_ENTRY_LIMIT)) {
       SnapshotIdentity identity = source.identity();
       PathStateRootMetadata metadata;

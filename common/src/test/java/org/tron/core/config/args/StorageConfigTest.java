@@ -154,22 +154,9 @@ public class StorageConfigTest {
   }
 
   @Test
-  public void testP66SnapshotRequiresCommonAndAcceptsExplicitOptIn() {
-    assertThrows(IllegalArgumentException.class, () -> StorageConfig.fromConfig(withRef(
-        "storage.commonCheckpoint.p66SnapshotEnabled = true")));
-    StorageConfig configured = StorageConfig.fromConfig(withRef(
-        "storage.stateArchive.enabled = true\n"
-            + "storage.pathStateRoot.enabled = true\n"
-            + "storage.commonCheckpoint.enabled = true\n"
-            + "storage.commonCheckpoint.p66SnapshotEnabled = true"));
-    assertTrue(configured.getCommonCheckpoint().isP66SnapshotEnabled());
-  }
-
-  @Test
   public void testCommonCheckpointDefaultsAndAdmission() {
     StorageConfig defaults = StorageConfig.fromConfig(withRef());
     assertFalse(defaults.getCommonCheckpoint().isEnabled());
-    assertFalse(defaults.getCommonCheckpoint().isP66SnapshotEnabled());
     assertEquals("common-checkpoint", defaults.getCommonCheckpoint().getDirectory());
 
     StorageConfig configured = StorageConfig.fromConfig(withRef(

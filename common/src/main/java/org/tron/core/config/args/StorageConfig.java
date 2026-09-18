@@ -244,9 +244,6 @@ public class StorageConfig {
   @Getter
   @Setter
   public static class CommonCheckpointConfig {
-
-    private boolean p66SnapshotEnabled = false;
-
     private boolean enabled = false;
     private String directory = "common-checkpoint";
 
@@ -442,9 +439,6 @@ public class StorageConfig {
     sc.snapshot.postProcess();
     sc.stateArchive.postProcess();
     sc.commonCheckpoint.postProcess();
-    if (sc.commonCheckpoint.p66SnapshotEnabled && !sc.commonCheckpoint.enabled) {
-      throw new IllegalArgumentException("p66SnapshotEnabled requires commonCheckpoint.enabled");
-    }
     sc.pathStateRoot.postProcess();
     if (sc.commonCheckpoint.enabled
         && (!sc.stateArchive.enabled || !sc.pathStateRoot.enabled)) {

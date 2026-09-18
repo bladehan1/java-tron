@@ -35,6 +35,7 @@ import org.tron.core.db2.core.SnapshotManager;
 import org.tron.core.db2.core.SnapshotRoot;
 
 public class LatestStateGenerationCoordinatorFactoryTest {
+  private static final String ACCOUNT_ASSET_DB = "account-asset";
 
   private final List<Registry> openRegistries = new ArrayList<>();
 
@@ -71,29 +72,6 @@ public class LatestStateGenerationCoordinatorFactoryTest {
             LatestStateGenerationCoordinatorFactory.create(registry.manager, readerVisible);
         LatestStateGenerationCoordinator.Candidate candidate =
             coordinator.acquire("generation-1")) {
-      assertEquals(ArchiveStoreScope.getStateDatabases().size(), totalPins(registry));
-    }
-    assertEquals(ArchiveStoreScope.getStateDatabases().size(), totalCloses(registry));
-  }
-
-  @Test
-  public void combinesSnapshotManagerStoresWithSupplementalAccountAsset() throws Exception {
-    Registry registry = registry(false);
-    DB<byte[], byte[]> accountAsset = registry.engines.get(
-        AccountAssetArchiveProjector.ACCOUNT_ASSET_DB);
-    registry.manager.getDbs().removeIf(database ->
-        AccountAssetArchiveProjector.ACCOUNT_ASSET_DB.equals(database.getDbName()));
-    ArchiveProgressEnvelope authority = new ArchiveProgressEnvelope(Kind.READER_VISIBLE, null, 1,
-        hash(1), new byte[16], new byte[32], registry.participants);
-
-    try (LatestStateGenerationCoordinator coordinator =
-            LatestStateGenerationCoordinatorFactory.create(registry.manager,
-                java.util.Collections.singletonMap(
-                    AccountAssetArchiveProjector.ACCOUNT_ASSET_DB,
-                    (LatestStateGenerationAdapter.SnapshotCapableStore) accountAsset),
-                () -> authority);
-        LatestStateGenerationCoordinator.Candidate candidate =
-            coordinator.acquire("generation-supplemental")) {
       assertEquals(ArchiveStoreScope.getStateDatabases().size(), totalPins(registry));
     }
     assertEquals(ArchiveStoreScope.getStateDatabases().size(), totalCloses(registry));

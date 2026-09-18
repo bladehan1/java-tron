@@ -3,7 +3,6 @@ package org.tron.core.db2.archive;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
 import java.util.TreeMap;
 import java.util.TreeSet;
@@ -32,24 +31,15 @@ public final class LatestStateGenerationCoordinatorFactory {
       LatestStateGenerationCoordinator.AuthorityReader authorityReader)
       throws ArchivePersistenceException {
     Objects.requireNonNull(authorityReader, "authorityReader");
-    return create(manager, java.util.Collections.emptyMap(), authorityReader);
-  }
-
-  public static LatestStateGenerationCoordinator create(SnapshotManager manager,
-      Map<String, SnapshotCapableStore> supplementalStores,
-      LatestStateGenerationCoordinator.AuthorityReader authorityReader)
-      throws ArchivePersistenceException {
-    LatestStateGenerationAdapter adapter = createAdapter(manager, supplementalStores);
+    LatestStateGenerationAdapter adapter = createAdapter(manager);
     return new LatestStateGenerationCoordinator(adapter.participantsForCoordinator(),
         adapter.storesForCoordinator(), manager::withArchiveStateBarrier, authorityReader);
   }
 
   /** Builds a direct request-pinning adapter for the common-checkpoint read gate. */
-  public static LatestStateGenerationAdapter createAdapter(SnapshotManager manager,
-      Map<String, SnapshotCapableStore> supplementalStores)
+  public static LatestStateGenerationAdapter createAdapter(SnapshotManager manager)
       throws ArchivePersistenceException {
     Objects.requireNonNull(manager, "manager");
-    Objects.requireNonNull(supplementalStores, "supplementalStores");
     List<Chainbase> registered = new ArrayList<>(manager.getDbs());
     try {
       ArchiveStoreScope.validate(registered);
@@ -71,7 +61,7 @@ public final class LatestStateGenerationCoordinatorFactory {
     }
 
     TreeMap<String, SnapshotCapableStore> stores = new TreeMap<>();
-    for (Map.Entry<String, Chainbase> entry : stateDatabases.entrySet()) {
+    for (java.util.Map.Entry<String, Chainbase> entry : stateDatabases.entrySet()) {
       Snapshot root = entry.getValue().getHead().getRoot();
       if (!Snapshot.isRoot(root)) {
         throw new ArchivePersistenceException(
@@ -85,18 +75,9 @@ public final class LatestStateGenerationCoordinatorFactory {
       }
       stores.put(entry.getKey(), (SnapshotCapableStore) engine);
     }
-    for (Map.Entry<String, SnapshotCapableStore> entry : supplementalStores.entrySet()) {
-      SnapshotCapableStore store = Objects.requireNonNull(entry.getValue(),
-          "supplemental Store");
-      if (!entry.getKey().equals(store.getDbName())
-          || stores.putIfAbsent(entry.getKey(), store) != null) {
-        throw new ArchivePersistenceException(
-            "Duplicate or mismatched supplemental latest Store: " + entry.getKey());
-      }
-    }
     if (!stores.keySet().equals(expected)) {
       throw new ArchivePersistenceException(
-          "SnapshotManager plus supplemental archive Store set is incomplete or unexpected");
+          "SnapshotManager archive Store set is incomplete or unexpected");
     }
 
     List<String> participants = new ArrayList<>(stores.keySet());

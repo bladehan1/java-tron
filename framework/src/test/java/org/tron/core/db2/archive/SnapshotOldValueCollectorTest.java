@@ -71,9 +71,7 @@ import org.tron.core.db2.stateroot.PathStateSnapshotHead;
 import org.tron.core.db2.stateroot.PathStateStoreManifest;
 import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
 import org.tron.core.exception.TronError;
-import org.tron.core.store.AccountAssetStore;
 import org.tron.core.store.CheckTmpStore;
-import org.tron.protos.Protocol.Account;
 import org.tron.protos.Protocol.Transaction;
 
 public class SnapshotOldValueCollectorTest extends BaseMethodTest {
@@ -207,8 +205,7 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
     manager.enable();
     manager.installArchiveCollector(new SnapshotOldValueCollector(), diff -> { });
     AtomicReference<PathStateBlockTransition> published = new AtomicReference<>();
-    SnapshotPathStateTransitionCollector collector = new SnapshotPathStateTransitionCollector(
-        key -> Collections.emptyMap());
+    PhysicalSnapshotPathStateCollector collector = new PhysicalSnapshotPathStateCollector();
     PathStateRuntimeAttachment attachment = new PathStateRuntimeAttachment(
         collector::collect, published::set,
         (blockNumber, blockHash) -> { }, null, (meta, transition) -> null);
@@ -372,7 +369,7 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
     PathStateSnapshotHead owner = PathStateSnapshotHead.open(
         manifest, PathStateLayerLimits.defaults());
     PathStateRuntimeAttachment runtime = new PathStateRuntimeAttachment(
-        new SnapshotPathStateTransitionCollector(ignored -> Collections.emptyMap()),
+        new PhysicalSnapshotPathStateCollector(),
         owner::advance, (blockNumber, blockHash) -> { },
         transition -> owner.prepare(transition).getStateRoot());
     runtime.synchronizeReadyHead(base);
@@ -436,88 +433,6 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
     assertSame(runtime, shadow.detachPathStateRuntime(runtime));
     control.shutdown();
     shadow.shutdown();
-  }
-
-  @Test
-  public void pathStateP66ActivationScansPostStateThenResumesIncrementalCapture()
-      throws Exception {
-    byte[] firstAddress = archiveAddress(21);
-    byte[] secondAddress = archiveAddress(22);
-    Account firstBefore = Account.newBuilder()
-        .setAddress(ByteString.copyFrom(firstAddress))
-        .putAssetV2("1000021", 21L)
-        .build();
-    Account firstPost = firstBefore.toBuilder().putAssetV2("1000021", 210L).build();
-    Account second = Account.newBuilder()
-        .setAddress(ByteString.copyFrom(secondAddress))
-        .putAssetV2("1000022", 22L)
-        .build();
-    MemoryDb accountDb = new MemoryDb("account");
-    accountDb.put(firstAddress, firstBefore.toByteArray());
-    accountDb.put(secondAddress, second.toByteArray());
-    MemoryDb propertiesDb = new MemoryDb("properties");
-    propertiesDb.put(HistoricalAccountAssetBalanceResolver.proposal66PhysicalKey(),
-        Longs.toByteArray(0L));
-    SnapshotManager manager = new SnapshotManager("");
-    Chainbase account = new Chainbase(new SnapshotRoot(accountDb));
-    Chainbase properties = new Chainbase(new SnapshotRoot(propertiesDb));
-    Chainbase code = new Chainbase(new SnapshotRoot(new MemoryDb("code")));
-    manager.add(account);
-    manager.add(properties);
-    manager.add(code);
-    manager.enable();
-    List<PathStateBlockTransition> published = new ArrayList<>();
-    SnapshotPathStateTransitionCollector collector = new SnapshotPathStateTransitionCollector(
-        ignored -> Collections.emptyMap(), consumer -> {
-      Iterator<Map.Entry<byte[], byte[]>> entries = account.iterator();
-      while (entries.hasNext()) {
-        Map.Entry<byte[], byte[]> entry = entries.next();
-        consumer.accept(entry.getKey(), entry.getValue());
-      }
-    });
-    PathStateRuntimeAttachment attachment = new PathStateRuntimeAttachment(collector,
-        published::add);
-    manager.attachPathStateRuntime(attachment);
-
-    try (ISession block = manager.buildSession()) {
-      properties.put(HistoricalAccountAssetBalanceResolver.proposal66PhysicalKey(),
-          Longs.toByteArray(1L));
-      account.put(firstAddress, firstPost.toByteArray());
-      block.commit(BlockSnapshotMeta.forBlock(1, hash(1), hash(0), 1L));
-    }
-
-    assertFalse(attachment.isFailed());
-    assertEquals(1, published.size());
-    PathStateBlockTransition activation = published.get(0);
-    assertEquals(P66Phase.P66_ACTIVATION, activation.getPhase());
-    assertEquals(5, activation.getMutations().size());
-    assertEquals(2, mutationCount(activation, "account"));
-    assertEquals(2, mutationCount(activation, "account-asset"));
-    PathStateMutation firstAccount = mutation(activation, "account", firstAddress);
-    Account canonicalFirst = Account.parseFrom(firstAccount.getCanonicalValue());
-    assertTrue(canonicalFirst.getAssetOptimized());
-    assertTrue(canonicalFirst.getAssetV2Map().isEmpty());
-    PathStateMutation firstAsset = mutation(activation, "account-asset",
-        Bytes.concat(firstAddress, bytes("1000021")));
-    assertArrayEquals(Longs.toByteArray(210L), firstAsset.getCanonicalValue());
-    assertTrue(firstAccount.isPreviousValueKnown());
-    assertFalse(firstAsset.isPreviousValueKnown());
-
-    byte[] codeKey = bytes("after-activation");
-    try (ISession block = manager.buildSession()) {
-      code.put(codeKey, bytes("incremental"));
-      block.commit(BlockSnapshotMeta.forBlock(2, hash(2), hash(1), 2L));
-    }
-
-    assertFalse(attachment.isFailed());
-    assertEquals(2, published.size());
-    assertEquals(P66Phase.P66_ON, published.get(1).getPhase());
-    assertEquals(1, published.get(1).getMutations().size());
-    assertEquals("code", published.get(1).getMutations().get(0).getDbName());
-    assertTrue(published.get(1).getMutations().get(0).isPreviousValueKnown());
-    assertNull(published.get(1).getMutations().get(0).getPreviousPhysicalValue());
-    manager.detachPathStateRuntime(attachment);
-    manager.shutdown();
   }
 
   @Test
@@ -926,256 +841,6 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
   }
 
   @Test
-  public void projectsAccountAssetTransitionBeforeRootMerge() {
-    byte[] address = archiveAddress(1);
-    byte[] token = bytes("1000001");
-    Account oldAccount = Account.newBuilder()
-        .setAddress(ByteString.copyFrom(address))
-        .putAssetV2("1000001", 100L)
-        .build();
-    Account postAccount = oldAccount.toBuilder().putAssetV2("1000001", 80L).build();
-
-    MemoryDb memoryDb = new MemoryDb("account");
-    memoryDb.put(address, oldAccount.toByteArray());
-    AccountAssetStore assetStore = mock(AccountAssetStore.class);
-    when(assetStore.prefixQuery(any(byte[].class))).thenReturn(new HashMap<>());
-
-    SnapshotManager manager = new SnapshotManager("");
-    Chainbase database = new Chainbase(new SnapshotRoot(memoryDb));
-    manager.add(database);
-    manager.enable();
-    AccountAssetArchiveProjector projector = new AccountAssetArchiveProjector();
-    manager.installArchiveCollector(new SnapshotOldValueCollector(projector,
-        accountKey -> assetStore.prefixQuery(accountKey), () -> true), diff -> { });
-
-    try (ISession block = manager.buildSession()) {
-      database.put(address, postAccount.toByteArray());
-      block.commit(BlockSnapshotMeta.forBlock(1, hash(1), hash(0), 1L));
-    }
-
-    BlockReverseDiff diff = prepared(database);
-    DbGroup accountGroup = diff.getGroups().stream()
-        .filter(group -> "account".equals(group.getDbName()))
-        .findFirst().orElseThrow(AssertionError::new);
-    Account archivedAccount;
-    try {
-      archivedAccount = Account.parseFrom(find(accountGroup, address).getOldValue().getValue());
-    } catch (com.google.protobuf.InvalidProtocolBufferException e) {
-      throw new AssertionError(e);
-    }
-    assertFalse(archivedAccount.getAssetOptimized());
-    assertEquals(100L, archivedAccount.getAssetV2Map().get("1000001").longValue());
-
-    DbGroup assetGroup = diff.getGroups().stream()
-        .filter(group -> "account-asset".equals(group.getDbName()))
-        .findFirst().orElseThrow(AssertionError::new);
-    Entry assetEntry = find(assetGroup, Bytes.concat(address, token));
-    assertFalse(assetEntry.getOldValue().isPresent());
-    manager.shutdown();
-  }
-
-  @Test
-  public void projectsOldPhysicalAssetValueForOptimizedAccount() {
-    byte[] address = archiveAddress(2);
-    byte[] token = bytes("1000002");
-    byte[] assetKey = Bytes.concat(address, token);
-    Account oldAccount = Account.newBuilder()
-        .setAddress(ByteString.copyFrom(address))
-        .setAssetOptimized(true)
-        .build();
-    Account postAccount = oldAccount.toBuilder().putAssetV2("1000002", 80L).build();
-
-    MemoryDb memoryDb = new MemoryDb("account");
-    memoryDb.put(address, oldAccount.toByteArray());
-    AccountAssetStore assetStore = mock(AccountAssetStore.class);
-    Map<WrappedByteArray, byte[]> persisted = new HashMap<>();
-    persisted.put(WrappedByteArray.copyOf(assetKey), Longs.toByteArray(100L));
-    when(assetStore.prefixQuery(any(byte[].class))).thenReturn(persisted);
-
-    SnapshotManager manager = new SnapshotManager("");
-    Chainbase database = new Chainbase(new SnapshotRoot(memoryDb));
-    manager.add(database);
-    manager.enable();
-    manager.installArchiveCollector(new SnapshotOldValueCollector(
-        new AccountAssetArchiveProjector(),
-        accountKey -> assetStore.prefixQuery(accountKey), () -> true), diff -> { });
-
-    try (ISession block = manager.buildSession()) {
-      database.put(address, postAccount.toByteArray());
-      block.commit(BlockSnapshotMeta.forBlock(1, hash(1), hash(0), 1L));
-    }
-
-    BlockReverseDiff diff = prepared(database);
-    assertFalse(diff.getGroups().stream()
-        .anyMatch(group -> "account".equals(group.getDbName())));
-    DbGroup assetGroup = diff.getGroups().stream()
-        .filter(group -> "account-asset".equals(group.getDbName()))
-        .findFirst().orElseThrow(AssertionError::new);
-    assertArrayEquals(Longs.toByteArray(100L),
-        find(assetGroup, assetKey).getOldValue().getValue());
-    manager.shutdown();
-  }
-
-  @Test
-  public void pureProjectionRequiresAndCopiesExplicitOldPhysicalAssets() {
-    byte[] address = archiveAddress(4);
-    byte[] assetKey = Bytes.concat(address, bytes("1000009"));
-    Account optimized = Account.newBuilder()
-        .setAddress(ByteString.copyFrom(address))
-        .setAssetOptimized(true)
-        .build();
-    Map<WrappedByteArray, byte[]> oldPhysicalAssets = new HashMap<>();
-    oldPhysicalAssets.put(WrappedByteArray.copyOf(assetKey), Longs.toByteArray(900L));
-    AccountAssetArchiveProjector projector = new AccountAssetArchiveProjector();
-
-    assertThrows(ArchivePersistenceException.class,
-        () -> projector.project(address, optimized.toByteArray(),
-            BlockChangeView.PostValue.absent(), true, null));
-    Map<WrappedByteArray, byte[]> wrongAccountAssets = new HashMap<>();
-    wrongAccountAssets.put(WrappedByteArray.copyOf(bytes("another-account-token")),
-        Longs.toByteArray(1L));
-    assertThrows(ArchivePersistenceException.class,
-        () -> projector.project(address, optimized.toByteArray(),
-            BlockChangeView.PostValue.absent(), true, wrongAccountAssets));
-
-    AccountAssetArchiveProjector.Projection projection = projector.project(address,
-        optimized.toByteArray(), BlockChangeView.PostValue.absent(), true,
-        oldPhysicalAssets);
-    oldPhysicalAssets.clear();
-
-    assertEquals(1, projection.reverseAssets.size());
-    assertArrayEquals(assetKey, projection.reverseAssets.get(0).getKey());
-    assertArrayEquals(Longs.toByteArray(900L),
-        projection.reverseAssets.get(0).getOldValue().getValue());
-  }
-
-  @Test
-  public void targetAssetOptimizationOverridesLegacySupplierAndCoversDelete() {
-    byte[] address = archiveAddress(5);
-    byte[] assetKey = Bytes.concat(address, bytes("1000003"));
-    Account rawPost = Account.newBuilder()
-        .setAddress(ByteString.copyFrom(address))
-        .putAssetV2("1000003", 300L)
-        .build();
-    AccountAssetArchiveProjector projector = new AccountAssetArchiveProjector();
-
-    AccountAssetArchiveProjector.Projection enabled = projector.project(address, null,
-        BlockChangeView.PostValue.present(rawPost.toByteArray()), true, Collections.emptyMap());
-    assertTrue(parseAccount(enabled.postAccount.getValue()).getAssetOptimized());
-
-    AccountAssetArchiveProjector.Projection disabled =
-        new AccountAssetArchiveProjector().project(address, null,
-            BlockChangeView.PostValue.present(rawPost.toByteArray()), false,
-            Collections.emptyMap());
-    assertArrayEquals(rawPost.toByteArray(), disabled.postAccount.getValue());
-    Map<WrappedByteArray, byte[]> mixedPhysical = new HashMap<>();
-    mixedPhysical.put(WrappedByteArray.copyOf(assetKey), Longs.toByteArray(300L));
-    assertThrows(ArchivePersistenceException.class,
-        () -> projector.project(address, null,
-            BlockChangeView.PostValue.present(rawPost.toByteArray()), true, mixedPhysical));
-
-    Account optimizedOld = rawPost.toBuilder()
-        .setAssetOptimized(true)
-        .clearAssetV2()
-        .build();
-    Map<WrappedByteArray, byte[]> persisted = new HashMap<>();
-    persisted.put(WrappedByteArray.copyOf(assetKey), Longs.toByteArray(300L));
-    AccountAssetArchiveProjector.Projection deleted = projector.project(address,
-        optimizedOld.toByteArray(), BlockChangeView.PostValue.absent(), true, persisted);
-    assertFalse(deleted.postAccount.isPresent());
-    assertEquals(1, deleted.reverseAssets.size());
-  }
-
-  @Test
-  public void targetAssetOptimizationComesFromTheCapturedPropertiesPostState() {
-    List<byte[]> invalidValues = Arrays.asList(null, new byte[]{1}, Longs.toByteArray(2));
-    for (byte[] invalidValue : invalidValues) {
-      SnapshotManager manager = new SnapshotManager("");
-      Chainbase account = new Chainbase(new SnapshotRoot(new MemoryDb("account")));
-      MemoryDb propertiesRoot = new MemoryDb("properties");
-      if (invalidValue != null) {
-        propertiesRoot.put(HistoricalAccountAssetBalanceResolver.proposal66PhysicalKey(),
-            invalidValue);
-      }
-      Chainbase properties = new Chainbase(new SnapshotRoot(propertiesRoot));
-      manager.add(account);
-      manager.add(properties);
-      manager.enable();
-      manager.installArchiveCollector(new SnapshotOldValueCollector(
-          new AccountAssetArchiveProjector(), ignored -> Collections.emptyMap(),
-          SnapshotOldValueCollector::resolveTargetAssetOptimization), diff -> { });
-      byte[] address = archiveAddress(12);
-      Account post = Account.newBuilder().setAddress(ByteString.copyFrom(address))
-          .putAssetV2("1000012", 12L).build();
-
-      assertThrows(ArchivePersistenceException.class, () -> {
-        try (ISession block = manager.buildSession()) {
-          account.put(address, post.toByteArray());
-          block.commit(BlockSnapshotMeta.forBlock(1, hash(1), hash(0), 1L));
-        }
-      });
-      assertEquals(0, manager.getActiveSession());
-      assertEquals(0, manager.size());
-      manager.shutdown();
-    }
-
-    SnapshotManager manager = new SnapshotManager("");
-    Chainbase account = new Chainbase(new SnapshotRoot(new MemoryDb("account")));
-    MemoryDb propertiesRoot = new MemoryDb("properties");
-    propertiesRoot.put(HistoricalAccountAssetBalanceResolver.proposal66PhysicalKey(),
-        Longs.toByteArray(0));
-    Chainbase properties = new Chainbase(new SnapshotRoot(propertiesRoot));
-    manager.add(account);
-    manager.add(properties);
-    manager.enable();
-    manager.installArchiveCollector(new SnapshotOldValueCollector(
-        new AccountAssetArchiveProjector(), ignored -> Collections.emptyMap(),
-        SnapshotOldValueCollector::resolveTargetAssetOptimization), diff -> { });
-    byte[] address = archiveAddress(13);
-    Account post = Account.newBuilder().setAddress(ByteString.copyFrom(address))
-        .putAssetV2("1000013", 13L).build();
-    try (ISession block = manager.buildSession()) {
-      properties.put(HistoricalAccountAssetBalanceResolver.proposal66PhysicalKey(),
-          Longs.toByteArray(1));
-      account.put(address, post.toByteArray());
-      block.commit(BlockSnapshotMeta.forBlock(1, hash(1), hash(0), 1L));
-    }
-    DbGroup assetGroup = prepared(account).getGroups().stream()
-        .filter(group -> "account-asset".equals(group.getDbName()))
-        .findFirst().orElseThrow(AssertionError::new);
-    assertFalse(find(assetGroup, Bytes.concat(address, bytes("1000013")))
-        .getOldValue().isPresent());
-    manager.shutdown();
-  }
-
-  @Test
-  public void sharedProjectionMatchesSnapshotRootBytesWithProposalSixtySix() {
-    byte[] address = new byte[21];
-    address[0] = 65;
-    address[20] = 79;
-    String token = "1000005";
-    byte[] assetKey = Bytes.concat(address, bytes(token));
-    Account rawPost = Account.newBuilder()
-        .setAddress(ByteString.copyFrom(address))
-        .putAssetV2(token, 500L)
-        .build();
-    AccountAssetArchiveProjector.Projection projection =
-        new AccountAssetArchiveProjector().project(address, null,
-            BlockChangeView.PostValue.present(rawPost.toByteArray()), true,
-            Collections.emptyMap());
-
-    chainBaseManager.getDynamicPropertiesStore().setAllowAccountAssetOptimization(0);
-    chainBaseManager.getDynamicPropertiesStore().setAllowAssetOptimization(1);
-    MemoryDb accountRootDb = new MemoryDb("account");
-    SnapshotRoot accountRoot = new SnapshotRoot(accountRootDb);
-    accountRoot.put(address, rawPost.toByteArray());
-
-    assertArrayEquals(projection.postAccount.getValue(), accountRootDb.get(address));
-    assertArrayEquals(Longs.toByteArray(500L),
-        chainBaseManager.getAccountAssetStore().get(assetKey));
-  }
-
-  @Test
   public void archiveDurabilityFailurePreventsCheckpointAndRefresh() throws Exception {
     MemoryDb memoryDb = new MemoryDb("code");
     SnapshotManager manager = new SnapshotManager("");
@@ -1350,14 +1015,6 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
         .orElseThrow(AssertionError::new);
   }
 
-  private static Account parseAccount(byte[] value) {
-    try {
-      return Account.parseFrom(value);
-    } catch (com.google.protobuf.InvalidProtocolBufferException e) {
-      throw new AssertionError(e);
-    }
-  }
-
   private static BlockReverseDiff prepared(Chainbase database) {
     return ((SnapshotImpl) database.getHead()).getPreparedArchiveBlock();
   }
@@ -1388,21 +1045,6 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
 
   private static boolean contains(DbGroup group, byte[] key) {
     return group.getEntries().stream().anyMatch(entry -> Arrays.equals(entry.getKey(), key));
-  }
-
-  private static int mutationCount(PathStateBlockTransition transition, String dbName) {
-    return (int) transition.getMutations().stream()
-        .filter(mutation -> dbName.equals(mutation.getDbName()))
-        .count();
-  }
-
-  private static PathStateMutation mutation(PathStateBlockTransition transition,
-      String dbName, byte[] key) {
-    return transition.getMutations().stream()
-        .filter(candidate -> dbName.equals(candidate.getDbName())
-            && Arrays.equals(key, candidate.getCanonicalKey()))
-        .findFirst()
-        .orElseThrow(AssertionError::new);
   }
 
   private static BlockChangeView captureView(SnapshotManager manager, Chainbase database,
