@@ -150,6 +150,8 @@ public class PathStateNativeNodeStoreTest {
     assertTrue(nativeOptions, nativeOptions.contains("filter_policy=rocksdb.BuiltinBloomFilter")
         || nativeOptions.contains("filter_policy=bloomfilter"));
     assertTrue(nativeOptions.contains("checksum=kCRC32c"));
+    assertTrue(nativeOptions.contains("pin_l0_filter_and_index_blocks_in_cache=true"));
+    assertTrue(nativeOptions.contains("use_direct_io_for_flush_and_compaction=true"));
   }
 
   @Test
