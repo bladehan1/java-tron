@@ -373,7 +373,7 @@ public class StateArchiveAppendCheckpointMaterializerV3Test {
       reopened.afterCommit(target);
       reopened.completeServingInitialSync(target);
       assertEquals(1, reopened.servingIndexStatus().getIndexedThrough());
-      assertEquals(StateArchiveServingIndexBuildCoordinatorV3.Mode.LIVE_IMMEDIATE,
+      assertEquals(StateArchiveServingIndexBuildCoordinatorV3.Mode.LIVE_BACKGROUND,
           reopened.servingIndexStatus().getMode());
       reopened.materialize(payload, target);
       reopened.publish(target);
@@ -520,7 +520,7 @@ public class StateArchiveAppendCheckpointMaterializerV3Test {
           archive.servingIndexStatus().getMode());
       archive.afterCommit(firstTarget);
       archive.completeServingInitialSync(firstTarget);
-      assertEquals(StateArchiveServingIndexBuildCoordinatorV3.Mode.LIVE_IMMEDIATE,
+      assertEquals(StateArchiveServingIndexBuildCoordinatorV3.Mode.LIVE_BACKGROUND,
           archive.servingIndexStatus().getMode());
       assertEquals(1, archive.servingIndexStatus().getIndexedThrough());
 
@@ -537,6 +537,7 @@ public class StateArchiveAppendCheckpointMaterializerV3Test {
       assertThrows(java.io.IOException.class, () -> archive.pinHistory(secondTarget));
       archive.afterCommit(secondTarget);
       assertEquals(Status.PUBLISHED, archive.inspect(secondTarget));
+      awaitIndexed(archive, 2);
       assertEquals(2, archive.servingIndexStatus().getIndexedThrough());
       assertEquals(0, archive.servingIndexStatus().getPendingBlocks());
       assertThrows(java.io.IOException.class, () -> archive.inspect(firstTarget));
@@ -654,6 +655,16 @@ public class StateArchiveAppendCheckpointMaterializerV3Test {
       return files.filter(path -> path.getFileName().toString().matches(
           "catalog-[0-9]{20}\\.bin")).count();
     }
+  }
+
+  private static void awaitIndexed(StateArchiveAppendCheckpointMaterializerV3 archive,
+      long block) throws InterruptedException {
+    long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5);
+    while (archive.servingIndexStatus().getIndexedThrough() != block
+        && System.nanoTime() < deadline) {
+      Thread.sleep(10);
+    }
+    assertEquals(block, archive.servingIndexStatus().getIndexedThrough());
   }
 
   private static CommonCheckpointCapture capture(Path root, byte[] format, byte[] baseline,

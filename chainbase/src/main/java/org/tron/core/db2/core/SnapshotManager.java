@@ -97,12 +97,7 @@ public class SnapshotManager implements RevokingDatabase {
       ((SnapshotRoot) accounts.getHead()).useMaterializedCoupledMutations();
     }
     p66Materializer = new P66CoupledMutationMaterializer(accounts, assets, properties);
-    artifactExecutor = new ThreadPoolExecutor(1, 1, 0L,
-        TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(1), task -> {
-          Thread thread = new Thread(task, "block-final-archive");
-          thread.setDaemon(true);
-          return thread;
-        });
+    ensureArtifactExecutor();
   }
 
   public synchronized void finishP66Recovery() {
@@ -166,6 +161,17 @@ public class SnapshotManager implements RevokingDatabase {
   private volatile ArchiveWalBinding recoveredArchiveWalBinding;
 
   public SnapshotManager(String checkpointPath) {
+  }
+
+  private void ensureArtifactExecutor() {
+    if (artifactExecutor == null) {
+      artifactExecutor = new ThreadPoolExecutor(1, 1, 0L,
+          TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(1), task -> {
+            Thread thread = new Thread(task, "block-final-archive");
+            thread.setDaemon(true);
+            return thread;
+          });
+    }
   }
 
   @PostConstruct
@@ -391,7 +397,7 @@ public class SnapshotManager implements RevokingDatabase {
     private final Thread owner = Thread.currentThread();
     private final boolean commonPathState = pathStateRuntimeAttachment != null
         && pathStateRuntimeAttachment.isCommonCheckpointOnly();
-    private final boolean parallel = p66Materializer != null && oldValueCollector != null
+    private final boolean parallel = oldValueCollector != null
         && pathStateRuntimeAttachment != null;
     private boolean open = true;
     private boolean legacySessionEnded;
@@ -699,6 +705,9 @@ public class SnapshotManager implements RevokingDatabase {
     }
     oldValueCollector = Objects.requireNonNull(collector, "collector");
     blockReverseDiffSink = Objects.requireNonNull(sink, "sink");
+    if (pathStateRuntimeAttachment != null) {
+      ensureArtifactExecutor();
+    }
   }
 
   /** Installs Archive artifact capture without any legacy per-block or flush-time sink. */
@@ -709,6 +718,9 @@ public class SnapshotManager implements RevokingDatabase {
       throw new IllegalStateException("Archive collaborators are already installed");
     }
     oldValueCollector = Objects.requireNonNull(collector, "collector");
+    if (pathStateRuntimeAttachment != null) {
+      ensureArtifactExecutor();
+    }
   }
 
   /** Clears a partially installed common-checkpoint collector during startup rollback. */
@@ -736,6 +748,9 @@ public class SnapshotManager implements RevokingDatabase {
     oldValueCollector = candidate.getCollector();
     blockReverseDiffSink = candidate.getSink();
     archiveRuntimeAttachment = candidate;
+    if (pathStateRuntimeAttachment != null) {
+      ensureArtifactExecutor();
+    }
   }
 
   /** Detaches the exact borrowed bundle without closing resources owned by its runtime. */
@@ -764,6 +779,9 @@ public class SnapshotManager implements RevokingDatabase {
       throw new IllegalStateException("Path-state runtime is already attached");
     }
     pathStateRuntimeAttachment = candidate;
+    if (oldValueCollector != null) {
+      ensureArtifactExecutor();
+    }
   }
 
   /**
@@ -791,6 +809,7 @@ public class SnapshotManager implements RevokingDatabase {
       throw new IllegalStateException(
           "Common checkpoint requires Archive capture and a checkpoint-only PathState runtime");
     }
+    ensureArtifactExecutor();
     commonCheckpointRuntimeAttachment = candidate;
   }
 

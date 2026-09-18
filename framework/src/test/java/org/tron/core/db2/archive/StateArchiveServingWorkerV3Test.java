@@ -22,19 +22,32 @@ public class StateArchiveServingWorkerV3Test {
   public final TemporaryFolder temporaryFolder = new TemporaryFolder();
 
   @Test(timeout = 15000)
-  public void blockedBuilderAllowsCoalescedOffersAndOrderedHandoffThenLive() throws Exception {
+  public void blockedBuilderAllowsCoalescedOffersAndBackgroundRangeAfterHandoff()
+      throws Exception {
     Path root = temporaryFolder.newFolder().toPath();
     CountDownLatch entered = new CountDownLatch(1);
     CountDownLatch release = new CountDownLatch(1);
+    CountDownLatch liveEntered = new CountDownLatch(1);
+    CountDownLatch liveRelease = new CountDownLatch(1);
+    java.util.concurrent.atomic.AtomicBoolean firstBuild =
+        new java.util.concurrent.atomic.AtomicBoolean(true);
+    java.util.concurrent.atomic.AtomicBoolean blockLiveBuild =
+        new java.util.concurrent.atomic.AtomicBoolean();
     java.util.concurrent.atomic.AtomicReference<Thread> buildThread =
         new java.util.concurrent.atomic.AtomicReference<>();
     try (StateArchiveFiveLaneSegmentWriterV3 source = source(root)) {
       append(source, 1);
       StateArchiveServingWorkerV3 worker = worker(root, source, () -> {
         buildThread.set(Thread.currentThread());
-        entered.countDown();
+        boolean first = firstBuild.getAndSet(false);
+        if (!first && !blockLiveBuild.get()) {
+          return;
+        }
+        CountDownLatch currentEntered = first ? entered : liveEntered;
+        CountDownLatch currentRelease = first ? release : liveRelease;
+        currentEntered.countDown();
         try {
-          if (!release.await(5, TimeUnit.SECONDS)) {
+          if (!currentRelease.await(5, TimeUnit.SECONDS)) {
             throw new IllegalStateException("test release timed out");
           }
         } catch (InterruptedException failure) {
@@ -52,17 +65,25 @@ public class StateArchiveServingWorkerV3Test {
         release.countDown();
         worker.completeInitialSync(target(2, 2));
         assertEquals(2, worker.status().getIndexedThrough());
-        assertEquals(Mode.LIVE_IMMEDIATE, worker.status().getMode());
-        append(source, 3);
-        worker.offer(target(3, 3));
-        assertEquals(Thread.currentThread(), buildThread.get());
-        assertEquals(3, worker.status().getIndexedThrough());
+        assertEquals(Mode.LIVE_BACKGROUND, worker.status().getMode());
+        blockLiveBuild.set(true);
         long sequence = worker.status().getBuildSequence();
-        worker.offer(target(3, 3));
-        assertEquals(sequence, worker.status().getBuildSequence());
-        assertThrows(IOException.class, () -> worker.offer(target(5, 5)));
+        for (int block = 3; block <= 12; block++) {
+          append(source, block);
+        }
+        worker.offer(target(3, 12));
+        assertTrue(liveEntered.await(5, TimeUnit.SECONDS));
+        assertTrue(buildThread.get() != Thread.currentThread());
+        assertEquals(2, worker.status().getIndexedThrough());
+        liveRelease.countDown();
+        awaitIndexed(worker, 12);
+        assertEquals(sequence + 1, worker.status().getBuildSequence());
+        worker.offer(target(3, 12));
+        assertEquals(sequence + 1, worker.status().getBuildSequence());
+        assertThrows(IOException.class, () -> worker.offer(target(14, 14)));
       } finally {
         release.countDown();
+        liveRelease.countDown();
         worker.close();
       }
     }
@@ -149,6 +170,15 @@ public class StateArchiveServingWorkerV3Test {
     return new StateArchiveServingWorkerV3(
         () -> new StateArchiveServingIndexBuildCoordinatorV3(root, Engine.ROCKSDB, 1000),
         source, hook, 10);
+  }
+
+  private void awaitIndexed(StateArchiveServingWorkerV3 worker, long block)
+      throws InterruptedException {
+    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+    while (worker.status().getIndexedThrough() != block && System.nanoTime() < deadline) {
+      Thread.sleep(10);
+    }
+    assertEquals(block, worker.status().getIndexedThrough());
   }
 
   private StateArchiveFiveLaneSegmentWriterV3 source(Path root) throws IOException {

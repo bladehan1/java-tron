@@ -64,7 +64,7 @@ public class StateArchiveCatalogAndServingCornerCaseTest {
   }
 
   @Test
-  public void liveRangePublishesEveryBlockWithTheBulkLogicalIdentity() throws Exception {
+  public void liveRangePublishesOnceWithTheBulkLogicalIdentity() throws Exception {
     List<BlockReverseDiff> all = diffs(1, 17, 0);
     Path bulkRoot = temporaryFolder.newFolder("bulk-reference").toPath();
     Path liveRoot = temporaryFolder.newFolder("live-range").toPath();
@@ -79,7 +79,8 @@ public class StateArchiveCatalogAndServingCornerCaseTest {
       List<BlockReverseDiff> suffix = all.subList(1, all.size());
       live.indexNow(suffix, target(suffix, 3));
       assertEquals(17, liveOwner.status().getIndexedThrough());
-      assertEquals(17, liveOwner.status().getBuildSequence());
+      // One initial build plus one atomic publication for the full 16-block Common range.
+      assertEquals(2, liveOwner.status().getBuildSequence());
       assertEquals(0, liveOwner.status().getPendingBlocks());
     }
     try (MutableIndex bulk = new MutableIndex(

@@ -229,6 +229,53 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
     manager.shutdown();
   }
 
+  @Test(timeout = 10000)
+  public void commonPathStateCapturesArchiveAndPathStateInParallelWithoutP66() throws Exception {
+    MemoryDb propertiesDb = new MemoryDb("properties");
+    propertiesDb.put(HistoricalAccountAssetBalanceResolver.proposal66PhysicalKey(),
+        Longs.toByteArray(1L));
+    SnapshotManager manager = new SnapshotManager("");
+    Chainbase properties = new Chainbase(new SnapshotRoot(propertiesDb));
+    Chainbase code = new Chainbase(new SnapshotRoot(new MemoryDb("code")));
+    manager.add(properties);
+    manager.add(code);
+    manager.enable();
+    CountDownLatch archiveEntered = new CountDownLatch(1);
+    CountDownLatch pathEntered = new CountDownLatch(1);
+    AtomicReference<BlockChangeView> archiveView = new AtomicReference<>();
+    AtomicReference<BlockChangeView> pathView = new AtomicReference<>();
+    AtomicReference<Thread> archiveThread = new AtomicReference<>();
+    manager.installArchiveCollector(view -> {
+      archiveView.set(view);
+      archiveThread.set(Thread.currentThread());
+      archiveEntered.countDown();
+      awaitLatch(pathEntered);
+      return new SnapshotOldValueCollector().collect(view);
+    }, diff -> { });
+    PathStateRuntimeAttachment attachment = new PathStateRuntimeAttachment(view -> {
+      pathView.set(view);
+      pathEntered.countDown();
+      awaitLatch(archiveEntered);
+      BlockSnapshotMeta meta = view.getMeta();
+      return new PathStateBlockTransition(meta.getBlockNumber(), meta.getBlockHash(),
+          meta.getParentHash(), meta.getTimestamp(), P66Phase.P66_ON,
+          Collections.singletonList(
+              PathStateMutation.put("code", bytes("contract"), bytes("runtime"))));
+    }, transition -> { });
+    manager.attachPathStateRuntime(attachment);
+
+    try (ISession block = manager.buildSession()) {
+      code.put(bytes("contract"), bytes("runtime"));
+      block.commit(BlockSnapshotMeta.forBlock(1, hash(1), hash(0), 3_000L));
+    }
+
+    assertSame(archiveView.get(), pathView.get());
+    assertTrue(archiveThread.get() != Thread.currentThread());
+    assertFalse(attachment.isFailed());
+    manager.detachPathStateRuntime(attachment);
+    manager.shutdown();
+  }
+
   @Test
   public void pathStateForwardDeltaIsOwnedByTheSameBlockSnapshotLayer() throws Exception {
     MemoryDb codeDb = new MemoryDb("code");
@@ -1486,6 +1533,15 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
     @Override
     public void releaseThrough(long epoch) {
       writer.releaseThrough(epoch);
+    }
+  }
+
+  private static void awaitLatch(CountDownLatch latch) {
+    try {
+      assertTrue(latch.await(5, TimeUnit.SECONDS));
+    } catch (InterruptedException interrupted) {
+      Thread.currentThread().interrupt();
+      throw new AssertionError("interrupted waiting for parallel artifact branch", interrupted);
     }
   }
 

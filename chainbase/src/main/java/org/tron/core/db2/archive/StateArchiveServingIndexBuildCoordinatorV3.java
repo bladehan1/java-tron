@@ -113,7 +113,7 @@ public final class StateArchiveServingIndexBuildCoordinatorV3 implements AutoClo
     }
   }
 
-  /** Drains through the exact Common boundary and returns a session-bound live handle. */
+  /** Drains through the exact Common boundary and returns a background-owner session handle. */
   public synchronized LiveServingIndexer completeInitialSync(CommonCheckpointTarget boundary)
       throws IOException {
     requireOpen();
@@ -128,7 +128,7 @@ public final class StateArchiveServingIndexBuildCoordinatorV3 implements AutoClo
           || !Arrays.equals(indexedHash, boundary.getLastBlock().getBlockHash())) {
         throw new IOException("Serving handoff did not reach the exact Common boundary");
       }
-      mode = Mode.LIVE_IMMEDIATE;
+      mode = Mode.LIVE_BACKGROUND;
       syncSession++;
       return new LiveServingIndexer(syncSession, buildSequence,
           index.identity());
@@ -229,7 +229,7 @@ public final class StateArchiveServingIndexBuildCoordinatorV3 implements AutoClo
 
   synchronized PersistentServingKeyIndexGeneration pinIndexed(long baseline) throws IOException {
     requireOpen();
-    if (mode != Mode.LIVE_IMMEDIATE || baseline < index.indexedFrom()
+    if (mode != Mode.LIVE_BACKGROUND || baseline < index.indexedFrom()
         || baseline > indexedThrough) {
       throw new IOException("Serving query baseline is outside ready coverage");
     }
@@ -286,7 +286,7 @@ public final class StateArchiveServingIndexBuildCoordinatorV3 implements AutoClo
     RECOVERING,
     BULK_CATCH_UP,
     HANDOFF_DRAINING,
-    LIVE_IMMEDIATE,
+    LIVE_BACKGROUND,
     CATCH_UP_REQUIRED,
     DEGRADED,
     CLOSED
@@ -353,34 +353,27 @@ public final class StateArchiveServingIndexBuildCoordinatorV3 implements AutoClo
       this.generation = generation;
     }
 
-    /** Commits every block and its progress atomically in the same long-lived database. */
+    /** Commits one Common-published range and its progress as one atomic durable batch. */
     public BuildProgress indexNow(List<BlockReverseDiff> diffs, CommonCheckpointTarget target)
         throws IOException {
       synchronized (StateArchiveServingIndexBuildCoordinatorV3.this) {
         requireOpen();
-        if (!valid || mode != Mode.LIVE_IMMEDIATE || session != syncSession
+        if (!valid || mode != Mode.LIVE_BACKGROUND || session != syncSession
             || sequence != buildSequence || !generation.equals(index.identity())) {
           throw new IllegalStateException("Serving live handle is stale");
         }
         List<BlockReverseDiff> admitted = new ArrayList<>(Objects.requireNonNull(diffs, "diffs"));
-        int published = 0;
         boolean rangeAccepted = false;
         try {
           admit(admitted, target);
           rangeAccepted = true;
-          pending.clear();
-          for (BlockReverseDiff diff : admitted) {
-            pending.add(diff);
-            flushPending();
-            published++;
-          }
+          flushPending();
           sequence = buildSequence;
           generation = index.identity();
           return progress();
         } catch (IOException | RuntimeException failure) {
           if (rangeAccepted) {
             pending.clear();
-            pending.addAll(admitted.subList(published, admitted.size()));
           }
           valid = false;
           mode = Mode.CATCH_UP_REQUIRED;
