@@ -6,6 +6,7 @@ import static org.junit.Assert.assertThrows;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
@@ -30,7 +31,7 @@ public class StateArchiveServingSourceV5Test {
   public final TemporaryFolder temporaryFolder = new TemporaryFolder();
 
   @Test(timeout = 15000)
-  public void fullyValidatesReconstructsAndFeedsExistingServingOwner() throws Exception {
+  public void reconstructsRequestedRangeAndFeedsExistingServingOwner() throws Exception {
     Fixture fixture = fixture("valid", true);
     StateArchiveServingSourceV5 source = fixture.source(fixture.metas::get);
 
@@ -57,7 +58,7 @@ public class StateArchiveServingSourceV5Test {
   }
 
   @Test
-  public void rejectsCanonicalMismatchMissingCoverageAndRollingMismatch() throws Exception {
+  public void rejectsCanonicalMismatchAndMissingCoverage() throws Exception {
     Fixture fixture = fixture("identity", false);
     Map<Long, BlockSnapshotMeta> wrong = new HashMap<>(fixture.metas);
     wrong.put(101L, BlockSnapshotMeta.forBlock(101, hash(77), hash(100), 303_000L));
@@ -68,13 +69,45 @@ public class StateArchiveServingSourceV5Test {
     missing.remove(101L);
     assertThrows(IOException.class, () -> fixture.source(missing::get)
         .readCommittedDiffs(99, 102, Long.MAX_VALUE));
+  }
 
-    StateArchiveTailV5 wrongTail = StateArchiveTailV5.forTarget(100, fixture.target,
-        hash(55), fixture.tail.getLanes());
-    StateArchiveServingSourceV5 wrongRolling = new StateArchiveServingSourceV5(
-        fixture.root, wrongTail, fixture.target, fixture.baseline, fixture.metas::get);
-    assertThrows(IOException.class,
-        () -> wrongRolling.readCommittedDiffs(99, 102, Long.MAX_VALUE));
+  @Test
+  public void publishedAdvanceReadsOnlyRequestedSuffix() throws Exception {
+    Path root = temporaryFolder.newFolder("advance").toPath();
+    byte[] baseline = hash(90);
+    Map<Long, BlockSnapshotMeta> metas = new HashMap<>();
+    for (int block = 100; block <= 102; block++) {
+      metas.put((long) block, BlockSnapshotMeta.forBlock(block, hash(block),
+          hash(block - 1), block * 3_000L));
+    }
+    CommonCheckpointTarget through101 = CommonCheckpointTarget.restore(hash(70), hash(71),
+        metas.get(100L), metas.get(101L), hash(72), hash(73));
+    CommonCheckpointTarget through102 = CommonCheckpointTarget.restore(hash(74), hash(75),
+        metas.get(102L), metas.get(102L), hash(76), hash(77));
+    List<Long> canonicalReads = new ArrayList<>();
+    try (StateArchiveFiveLaneWriterV5 writer = new StateArchiveFiveLaneWriterV5(
+        root, 100, baseline, 700)) {
+      writer.append(new BlockReverseDiff(metas.get(100L), Collections.emptyList()));
+      writer.append(new BlockReverseDiff(metas.get(101L), Collections.emptyList()));
+      StateArchiveTailV5 tail101 = writer.forceTailReady(through101);
+      StateArchiveServingSourceV5 source = new StateArchiveServingSourceV5(
+          root, tail101, through101, baseline, block -> {
+        canonicalReads.add(block);
+        return metas.get(block);
+      });
+
+      writer.append(new BlockReverseDiff(metas.get(102L), Collections.emptyList()));
+      StateArchiveTailV5 tail102 = writer.forceTailReady(through102);
+      for (int laneId : StateArchiveGethFormatV5.laneIds()) {
+        Files.delete(StateArchiveFiveLaneWriterV5.dataPath(root, laneId, 0));
+      }
+      source.updatePublished(tail102, through102);
+      List<BlockReverseDiff> replayed = source.readCommittedDiffs(
+          101, 102, Long.MAX_VALUE);
+
+      assertEquals(1, replayed.size());
+      assertEquals(Collections.singletonList(102L), canonicalReads);
+    }
   }
 
   @Test

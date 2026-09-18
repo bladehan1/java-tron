@@ -63,6 +63,44 @@ final class StateArchiveCommittedViewV5 implements Closeable {
     return open(root, tail, target, null, NO_OP, false);
   }
 
+  /** Opens a point-read view without repeating startup's complete segment-chain validation. */
+  static StateArchiveCommittedViewV5 openServingPrefix(Path root, StateArchiveTailV5 tail,
+      CommonCheckpointTarget target) throws IOException {
+    Path admittedRoot = Objects.requireNonNull(root, "root");
+    StateArchiveTailV5 admittedTail = Objects.requireNonNull(tail, "tail");
+    admittedTail.requireTarget(Objects.requireNonNull(target, "target"));
+    long first = admittedTail.getFirstBlockNumber();
+    long last = admittedTail.getCommonBlockNumber();
+    long frameCount;
+    try {
+      frameCount = Math.addExact(Math.subtractExact(last, first), 1);
+    } catch (ArithmeticException failure) {
+      throw new IOException("State Archive V5 committed range overflow", failure);
+    }
+    Map<Integer, StateArchiveLaneIndexV5> opened = new LinkedHashMap<>();
+    try {
+      int[] laneIds = StateArchiveGethFormatV5.laneIds();
+      List<LaneTerminal> terminals = admittedTail.getLanes();
+      for (int index = 0; index < laneIds.length; index++) {
+        int laneId = laneIds[index];
+        Path indexPath = StateArchiveFiveLaneWriterV5.laneRoot(admittedRoot, laneId)
+            .resolve("blocks.idx");
+        StateArchiveLaneIndexV5 laneIndex = StateArchiveLaneIndexV5.openCommittedPrefix(
+            indexPath, frameCount);
+        opened.put(laneId, laneIndex);
+        validateServingTerminal(admittedRoot, laneIndex, terminals.get(index), first, last);
+      }
+      return new StateArchiveCommittedViewV5(admittedRoot, first, last, opened,
+          Collections.emptyList(), false);
+    } catch (IOException | RuntimeException failure) {
+      closeAll(opened.values(), failure);
+      if (failure instanceof IOException) {
+        throw (IOException) failure;
+      }
+      throw new IOException("State Archive V5 serving view open failed", failure);
+    }
+  }
+
   static StateArchiveCommittedViewV5 openForPreopen(Path root, StateArchiveTailV5 tail,
       CommonCheckpointTarget target, ProcessFdAdmission admission) throws IOException {
     return open(root, tail, target, Objects.requireNonNull(admission, "admission"), NO_OP,
@@ -244,6 +282,41 @@ final class StateArchiveCommittedViewV5 implements Closeable {
     if (requireExactPhysicalEnd) {
       rejectUnexpectedDataFiles(StateArchiveFiveLaneWriterV5.laneRoot(root, laneId),
           expectedPaths);
+    }
+  }
+
+  private static void validateServingTerminal(Path root, StateArchiveLaneIndexV5 laneIndex,
+      LaneTerminal terminal, long firstBlock, long committedBlock) throws IOException {
+    int laneId = laneIndex.getLaneId();
+    if (terminal.getLaneId() != laneId || terminal.getFlags() != StateArchiveTailV5.LANE_ACTIVE
+        || laneIndex.getFirstBlockNumber() != firstBlock) {
+      throw invalid("serving lane identity mismatch");
+    }
+    Boundary indexTerminal = laneIndex.getLastBoundary();
+    if (indexTerminal.getFileId() != terminal.getTerminalFileId()
+        || indexTerminal.getEndOffset() != terminal.getTerminalDataEndOffset()) {
+      throw invalid("serving terminal boundary mismatch");
+    }
+    Path terminalPath = StateArchiveFiveLaneWriterV5.dataPath(root, laneId,
+        terminal.getTerminalFileId());
+    StateArchiveSegmentHeaderV5 header = readHeader(terminalPath, NO_OP);
+    if (header.getLaneId() != laneId || header.getFileId() != terminal.getTerminalFileId()
+        || !Arrays.equals(header.digest(), terminal.getTerminalSegmentHeaderDigest())) {
+      throw invalid("serving terminal segment identity mismatch");
+    }
+    if (terminal.getTerminalFileId() == 0
+        && (header.getFirstBlockNumber() != firstBlock
+        || !Arrays.equals(header.getIndexHeaderDigest(), laneIndex.getHeaderDigest()))) {
+      throw invalid("serving first segment binding mismatch");
+    }
+    FrameRange terminalRange = laneIndex.locate(committedBlock);
+    long terminalFileLength = Files.size(terminalPath);
+    if (terminalRange.getFileId() != terminal.getTerminalFileId()
+        || terminalRange.getEndOffset() != terminal.getTerminalDataEndOffset()
+        || terminalFileLength < terminalRange.getEndOffset()
+        || !Arrays.equals(readStoredFrameDigest(terminalPath, terminalRange, NO_OP),
+            terminal.getTerminalFrameDigest())) {
+      throw invalid("serving terminal segment mismatch");
     }
   }
 

@@ -25,12 +25,10 @@ final class StateArchiveServingSourceV5 implements StateArchiveServingSource {
 
   private final Path root;
   private final long firstBlockNumber;
-  private final byte[] baselineHistoryDigest;
   private final StateArchiveCanonicalBlockMetaSource canonical;
   private final StateArchiveBlockFrameCodecV5 codec = new StateArchiveBlockFrameCodecV5();
   private StateArchiveTailV5 tail;
   private CommonCheckpointTarget target;
-  private boolean validated;
 
   StateArchiveServingSourceV5(Path root, StateArchiveTailV5 tail,
       CommonCheckpointTarget target, byte[] baselineHistoryDigest,
@@ -47,8 +45,7 @@ final class StateArchiveServingSourceV5 implements StateArchiveServingSource {
       throw new IllegalArgumentException("State Archive V5 first block is negative");
     }
     this.firstBlockNumber = firstBlockNumber;
-    this.baselineHistoryDigest = requireHash(baselineHistoryDigest,
-        "baseline history digest");
+    requireHash(baselineHistoryDigest, "baseline history digest");
     this.canonical = Objects.requireNonNull(canonical, "canonical");
   }
 
@@ -86,7 +83,6 @@ final class StateArchiveServingSourceV5 implements StateArchiveServingSource {
     }
     tail = admittedTail;
     target = admittedTarget;
-    validated = false;
   }
 
   @Override
@@ -97,73 +93,26 @@ final class StateArchiveServingSourceV5 implements StateArchiveServingSource {
     if (maxEncodedBytes < 0) {
       throw new IllegalArgumentException("State Archive V5 serving budget is negative");
     }
-    try (StateArchiveCommittedViewV5 view = StateArchiveCommittedViewV5.openCommittedPrefix(
+    try (StateArchiveCommittedViewV5 view = StateArchiveCommittedViewV5.openServingPrefix(
         root, tail, target)) {
       requireBudget(view, fromExclusive + 1, through, maxEncodedBytes);
-      if (!validated) {
-        List<BlockReverseDiff> result = validateCompleteHistory(
-            view, fromExclusive + 1, through);
-        validated = true;
-        return result;
-      }
       if (fromExclusive == through) {
         return Collections.emptyList();
       }
       List<BlockReverseDiff> result = new ArrayList<>();
       try (ReplayHandles handles = new ReplayHandles()) {
         for (long block = fromExclusive + 1; block <= through; block++) {
-          result.add(decodeBlock(view, handles, block, requireCanonical(block)).diff);
+          result.add(decodeBlock(view, handles, block, requireCanonical(block)));
         }
       }
       return Collections.unmodifiableList(result);
     }
   }
 
-  private List<BlockReverseDiff> validateCompleteHistory(StateArchiveCommittedViewV5 view,
-      long requestedFirst, long requestedThrough) throws IOException {
-    byte[] rolling = Arrays.copyOf(baselineHistoryDigest, baselineHistoryDigest.length);
-    BlockSnapshotMeta previous = null;
-    Map<Integer, Long> currentFiles = new HashMap<>();
-    List<BlockReverseDiff> requested = new ArrayList<>();
-    try (ReplayHandles handles = new ReplayHandles()) {
-      for (long block = tail.getFirstBlockNumber(); block <= tail.getCommonBlockNumber(); block++) {
-        BlockSnapshotMeta meta = requireCanonical(block);
-        if (meta.getEpoch() != block || meta.getBlockNumber() != block
-            || previous != null && !Arrays.equals(meta.getParentHash(), previous.getBlockHash())) {
-          throw invalid("canonical metadata is not contiguous at block " + block);
-        }
-        DecodedBlock decoded = decodeBlock(view, handles, block, meta);
-        for (PointLocation location : decoded.locations) {
-          Long previousFile = currentFiles.put(location.getLaneId(), location.getFileId());
-          if (previousFile == null || previousFile.longValue() != location.getFileId()) {
-            requireSegmentStart(handles, location, block, rolling);
-          }
-        }
-        rolling = StateArchiveGethFormatV5.nextHistoryDigest(rolling,
-            StateArchiveGethFormatV5.blockHistoryDigest(meta, decoded.laneItemDigests));
-        previous = meta;
-        if (block >= requestedFirst && block <= requestedThrough) {
-          requested.add(decoded.diff);
-        }
-      }
-    }
-    if (previous == null || !previous.equals(target.getLastBlock())
-        || !Arrays.equals(rolling, tail.getResultHistoryDigest())) {
-      throw invalid("canonical coverage or rolling tail differs");
-    }
-    BlockSnapshotMeta targetFirst = requireCanonical(target.getFirstBlock().getBlockNumber());
-    if (!targetFirst.equals(target.getFirstBlock())) {
-      throw invalid("Common first-block metadata differs from canonical source");
-    }
-    return Collections.unmodifiableList(requested);
-  }
-
-  private DecodedBlock decodeBlock(StateArchiveCommittedViewV5 view,
+  private BlockReverseDiff decodeBlock(StateArchiveCommittedViewV5 view,
       ReplayHandles handles, long block, BlockSnapshotMeta meta) throws IOException {
     int[] laneIds = StateArchiveGethFormatV5.laneIds();
     List<DbGroup> groups = new ArrayList<>();
-    List<byte[]> laneItemDigests = new ArrayList<>(laneIds.length);
-    List<PointLocation> locations = new ArrayList<>(laneIds.length);
     for (int laneId : laneIds) {
       PointLocation location = view.capture(laneId, block);
       DecodedFrame frame;
@@ -177,28 +126,8 @@ final class StateArchiveServingSourceV5 implements StateArchiveServingSource {
         throw invalid("lane bundle identity differs at block " + block + " lane " + laneId);
       }
       groups.addAll(frame.getGroups());
-      laneItemDigests.add(frame.getLaneItemDigest());
-      locations.add(location);
     }
-    return new DecodedBlock(new BlockReverseDiff(meta, groups), laneItemDigests, locations);
-  }
-
-  private void requireSegmentStart(ReplayHandles handles, PointLocation location,
-      long block, byte[] rolling) throws IOException {
-    StateArchiveSegmentHeaderV5 header;
-    try {
-      header = StateArchiveSegmentHeaderV5.decode(handles.read(location, 0,
-          StateArchiveGethFormatV5.SEGMENT_HEADER_LENGTH));
-    } catch (IllegalArgumentException failure) {
-      throw invalid("segment header decode failed", failure);
-    }
-    if (header.getLaneId() != location.getLaneId()
-        || header.getFileId() != location.getFileId()
-        || header.getFirstBlockNumber() != block
-        || !Arrays.equals(header.getStartHistoryDigest(), rolling)) {
-      throw invalid("segment start history differs at block " + block
-          + " lane " + location.getLaneId());
-    }
+    return new BlockReverseDiff(meta, groups);
   }
 
   private void requireBudget(StateArchiveCommittedViewV5 view, long first, long through,
@@ -274,19 +203,6 @@ final class StateArchiveServingSourceV5 implements StateArchiveServingSource {
       updatePublished(initial, initialTarget);
     } catch (IOException failure) {
       throw new IllegalArgumentException(failure.getMessage(), failure);
-    }
-  }
-
-  private static final class DecodedBlock {
-    private final BlockReverseDiff diff;
-    private final List<byte[]> laneItemDigests;
-    private final List<PointLocation> locations;
-
-    private DecodedBlock(BlockReverseDiff diff, List<byte[]> laneItemDigests,
-        List<PointLocation> locations) {
-      this.diff = diff;
-      this.laneItemDigests = laneItemDigests;
-      this.locations = locations;
     }
   }
 
