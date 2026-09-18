@@ -183,6 +183,7 @@ public class StorageConfig {
   public static class StateArchiveAppendFileConfig {
 
     private boolean enabled = false;
+    private boolean testOnlyForceServingHandoff = false;
     private int formatVersion = 4;
     private int appendBufferBytes = 2097152;
     private int maxBlockFrameBytes = 67108864;
