@@ -123,7 +123,8 @@ final class ServingIndexTiming implements AutoCloseable {
       Export.HEIGHT.labels("backlog_blocks").set(progress.getIndexedThrough() < 0 ? -1
           : progress.getCommittedThrough() - progress.getIndexedThrough());
       Export.HEIGHT.labels("ready").set(progress.getMode()
-          == StateArchiveServingIndexBuildCoordinatorV3.Mode.LIVE_IMMEDIATE ? 1 : 0);
+          == StateArchiveServingIndexBuildCoordinatorV3.Mode.LIVE_BACKGROUND
+          && progress.getIndexedThrough() == progress.getCommittedThrough() ? 1 : 0);
     }
   }
 

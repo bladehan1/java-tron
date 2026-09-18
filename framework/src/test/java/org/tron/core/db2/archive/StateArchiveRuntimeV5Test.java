@@ -48,13 +48,14 @@ public class StateArchiveRuntimeV5Test {
           Arrays.asList(diff(100), diff(101)));
       archive.afterCommit(initial);
       archive.completeServingInitialSync(initial);
-      assertEquals(Mode.LIVE_IMMEDIATE, archive.servingIndexStatus().getMode());
+      assertEquals(Mode.LIVE_BACKGROUND, archive.servingIndexStatus().getMode());
       assertEquals(99, archive.servingIndexStatus().getIndexedFrom());
       assertEquals(101, archive.servingIndexStatus().getIndexedThrough());
       assertHistory(archive, initial, 99, 100);
 
       successor = publish(archive, format, Collections.singletonList(diff(102)));
       archive.afterCommit(successor);
+      awaitIndexed(archive, 102);
       assertEquals(102, archive.servingIndexStatus().getIndexedThrough());
       assertHistory(archive, successor, 101, 102);
     }
@@ -64,7 +65,7 @@ public class StateArchiveRuntimeV5Test {
       assertEquals(successor, reopened.loadPublishedTargetIfPresent().get());
       reopened.afterCommit(successor);
       reopened.completeServingInitialSync(successor);
-      assertEquals(Mode.LIVE_IMMEDIATE, reopened.servingIndexStatus().getMode());
+      assertEquals(Mode.LIVE_BACKGROUND, reopened.servingIndexStatus().getMode());
       assertEquals(99, reopened.servingIndexStatus().getIndexedFrom());
       assertEquals(102, reopened.servingIndexStatus().getIndexedThrough());
       assertEquals(0, reopened.servingIndexStatus().getBuildSequence());
@@ -78,6 +79,16 @@ public class StateArchiveRuntimeV5Test {
     return new StateArchiveAppendCheckpointMaterializerV5(root, format, Engine.LEVELDB,
         100, baseline, 700, (required, reserve) -> { }, canonical::get, null,
         (path, position, length) -> { }, (stage, laneId) -> { }, () -> { });
+  }
+
+  private static void awaitIndexed(StateArchiveAppendCheckpointMaterializerV5 archive,
+      long block) throws InterruptedException {
+    long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5);
+    while (archive.servingIndexStatus().getIndexedThrough() != block
+        && System.nanoTime() < deadline) {
+      Thread.sleep(10);
+    }
+    assertEquals(block, archive.servingIndexStatus().getIndexedThrough());
   }
 
   private static CommonCheckpointTarget publish(

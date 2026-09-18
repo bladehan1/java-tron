@@ -51,7 +51,7 @@ public class StateArchiveServingSourceV5Test {
             fixture.root, Engine.LEVELDB, 1_000), source, () -> { }, 0)) {
       worker.offer(fixture.target);
       worker.completeInitialSync(fixture.target);
-      assertEquals(Mode.LIVE_IMMEDIATE, worker.status().getMode());
+      assertEquals(Mode.LIVE_BACKGROUND, worker.status().getMode());
       assertEquals(99, worker.status().getIndexedFrom());
       assertEquals(102, worker.status().getIndexedThrough());
     }

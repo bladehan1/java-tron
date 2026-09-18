@@ -68,26 +68,6 @@ final class StateArchiveServingWorkerV3 implements AutoCloseable {
         }
         notifyAll();
       }
-      if (live && !target.equals(completed)) {
-        try {
-          beforeBuild.run();
-          List<BlockReverseDiff> batch = readSource(
-              progress.getIndexedThrough(), target.getLastBlock().getBlockNumber(),
-              MAX_SOURCE_BYTES);
-          progress = liveHandle.indexNow(batch, target);
-          ServingIndexTiming.progress(status());
-          synchronized (this) {
-            completed = target;
-            pendingSince = 0;
-          }
-        } catch (IOException | RuntimeException error) {
-          progress = coordinator.status();
-          ServingIndexTiming.progress(status());
-          IOException cause = new IOException("Foreground serving index failed", error);
-          fail(cause);
-          throw cause;
-        }
-      }
     }
   }
 
@@ -101,14 +81,6 @@ final class StateArchiveServingWorkerV3 implements AutoCloseable {
         handoff = target;
         notifyAll();
         await(target, true);
-      }
-      try {
-        thread.join();
-      } catch (InterruptedException interrupted) {
-        Thread.currentThread().interrupt();
-        IOException cause = new IOException("Interrupted joining serving bulk owner", interrupted);
-        fail(cause);
-        throw cause;
       }
     }
   }
@@ -129,7 +101,7 @@ final class StateArchiveServingWorkerV3 implements AutoCloseable {
     return failure;
   }
 
-  /** Pins only after the background owner has handed the single DB to live dispatch. */
+  /** Pins only after the background owner has crossed the initial-sync readiness barrier. */
   PersistentServingKeyIndexGeneration pinIndexed(long baseline) throws IOException {
     synchronized (dispatch) {
       synchronized (this) {
@@ -304,10 +276,6 @@ final class StateArchiveServingWorkerV3 implements AutoCloseable {
           live = failure == null && liveHandle != null;
           ServingIndexTiming.progress(status());
           notifyAll();
-          if (live) {
-            // No further background writes. Dispatch now owns the same coordinator and DB.
-            return;
-          }
         }
       }
     } catch (InterruptedException interrupted) {
