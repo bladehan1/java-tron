@@ -19,7 +19,6 @@ public class P66SnapshotManagerIntegrationTest extends BaseMethodTest {
   protected void beforeContext() {
     Storage storage = Args.getInstance().getStorage();
     storage.setCommonCheckpointEnabled(true);
-    storage.setP66SnapshotEnabled(true);
     storage.setStateArchiveEnabled(true);
     storage.setPathStateRootEnabled(true);
     storage.setPathStateRootEngine("LEVELDB");

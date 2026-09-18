@@ -123,10 +123,6 @@ public class Storage {
 
   @Getter
   @Setter
-  private boolean p66SnapshotEnabled;
-
-  @Getter
-  @Setter
   private String commonCheckpointDirectory;
 
   @Getter

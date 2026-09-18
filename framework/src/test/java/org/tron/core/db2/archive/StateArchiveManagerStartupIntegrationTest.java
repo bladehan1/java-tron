@@ -71,6 +71,7 @@ import org.tron.core.store.DynamicPropertiesStore;
 import org.tron.protos.Protocol.Account;
 
 public class StateArchiveManagerStartupIntegrationTest {
+  private static final String ACCOUNT_ASSET_DB = "account-asset";
 
   private static final List<String> PARTICIPANTS = participants();
 
@@ -503,29 +504,6 @@ public class StateArchiveManagerStartupIntegrationTest {
         () -> restartedManager.getArchiveAccountAssets(10, mixedAddress, prefixLimits()));
     invoke(restartedManager, "closeStateArchive");
     restarted.snapshots.shutdown();
-  }
-
-  @Test
-  public void managerProjectsP66HistoryFromNativeSupplementalAccountAssetAndRestart()
-      throws Exception {
-    for (String engine : Arrays.asList("LEVELDB", "ROCKSDB")) {
-      Path output = temporaryFolder.newFolder(
-          "supplemental-p66-" + engine.toLowerCase()).toPath();
-      withArchiveConfig(output, engine, true,
-          () -> runSupplementalP66Scenario(output, engine));
-    }
-  }
-
-  @Test
-  public void postRefreshFailuresReopenNativeSupplementalP66FixedPoint() throws Exception {
-    for (String engine : Arrays.asList("LEVELDB", "ROCKSDB")) {
-      for (ReadableStateStage failureStage : ReadableStateStage.values()) {
-        Path output = temporaryFolder.newFolder("post-refresh-p66-"
-            + engine.toLowerCase() + "-" + failureStage.name().toLowerCase()).toPath();
-        withArchiveConfig(output, engine, true,
-            () -> runPostRefreshP66Failure(output, engine, failureStage));
-      }
-    }
   }
 
   private void runPostRefreshP66Failure(Path output, String engine,
@@ -1287,7 +1265,7 @@ public class StateArchiveManagerStartupIntegrationTest {
     Map<String, Chainbase> databases = new LinkedHashMap<>();
     for (String participant : PARTICIPANTS) {
       if (!includeAccountAsset
-          && AccountAssetArchiveProjector.ACCOUNT_ASSET_DB.equals(participant)) {
+          && ACCOUNT_ASSET_DB.equals(participant)) {
         continue;
       }
       Chainbase database = new Chainbase(new SnapshotRoot(new MemoryDb(participant)));
@@ -1322,7 +1300,7 @@ public class StateArchiveManagerStartupIntegrationTest {
     Map<String, Chainbase> databases = new LinkedHashMap<>();
     Map<String, SnapshotCapableStore> nativeStores = new LinkedHashMap<>();
     for (String participant : PARTICIPANTS) {
-      if (AccountAssetArchiveProjector.ACCOUNT_ASSET_DB.equals(participant)) {
+      if (ACCOUNT_ASSET_DB.equals(participant)) {
         continue;
       }
       DB<byte[], byte[]> nativeStore = openNativeStore(output, engine, participant);
@@ -1662,7 +1640,7 @@ public class StateArchiveManagerStartupIntegrationTest {
   private static void seedNativeExact27(Map<String, Chainbase> databases, int epoch) {
     int storeIndex = 0;
     for (String dbName : PARTICIPANTS) {
-      if (!AccountAssetArchiveProjector.ACCOUNT_ASSET_DB.equals(dbName)
+      if (!ACCOUNT_ASSET_DB.equals(dbName)
           && !"account".equals(dbName)) {
         databases.get(dbName).put(nativeExactKey(dbName, storeIndex),
             nativeExactValue(epoch, storeIndex));
@@ -1674,7 +1652,7 @@ public class StateArchiveManagerStartupIntegrationTest {
   private static void mutateNativeExact27(Map<String, Chainbase> databases, int epoch) {
     int storeIndex = 0;
     for (String dbName : PARTICIPANTS) {
-      if (!AccountAssetArchiveProjector.ACCOUNT_ASSET_DB.equals(dbName)
+      if (!ACCOUNT_ASSET_DB.equals(dbName)
           && !"account".equals(dbName)) {
         Chainbase database = databases.get(dbName);
         if (epoch == 7 || storeIndex % 3 == 0) {
@@ -1694,7 +1672,7 @@ public class StateArchiveManagerStartupIntegrationTest {
     for (int epoch = 6; epoch <= 8; epoch++) {
       int storeIndex = 0;
       for (String dbName : PARTICIPANTS) {
-        if (!AccountAssetArchiveProjector.ACCOUNT_ASSET_DB.equals(dbName)
+        if (!ACCOUNT_ASSET_DB.equals(dbName)
             && !"account".equals(dbName)) {
           byte[] expected;
           if (epoch == 6) {
@@ -1712,7 +1690,7 @@ public class StateArchiveManagerStartupIntegrationTest {
         storeIndex++;
       }
       assertTrue(manager.getArchiveStateValue(epoch, "account", address).isPresent());
-      assertHistoricalValue(manager, epoch, AccountAssetArchiveProjector.ACCOUNT_ASSET_DB,
+      assertHistoricalValue(manager, epoch, ACCOUNT_ASSET_DB,
           directKey, epoch == 6 ? null : longValue(epoch == 7 ? 30 : 40));
     }
   }
@@ -1738,10 +1716,10 @@ public class StateArchiveManagerStartupIntegrationTest {
     }
     DbSourceInter<byte[]> source = accountAssetStore.getDbSource();
     if (source instanceof LevelDbDataSourceImpl) {
-      identities.put(AccountAssetArchiveProjector.ACCOUNT_ASSET_DB,
+      identities.put(ACCOUNT_ASSET_DB,
           ((LevelDbDataSourceImpl) source).getSnapshotSourceIdentity());
     } else if (source instanceof RocksDbDataSourceImpl) {
-      identities.put(AccountAssetArchiveProjector.ACCOUNT_ASSET_DB,
+      identities.put(ACCOUNT_ASSET_DB,
           ((RocksDbDataSourceImpl) source).getSnapshotSourceIdentity());
     } else {
       throw new IllegalArgumentException("AccountAsset Store is not native");
@@ -1850,7 +1828,7 @@ public class StateArchiveManagerStartupIntegrationTest {
     private boolean failPrefixQuery;
 
     private TestAccountAssetStore() {
-      super(AccountAssetArchiveProjector.ACCOUNT_ASSET_DB);
+      super(ACCOUNT_ASSET_DB);
     }
 
     private void failNextPrefixQuery() {

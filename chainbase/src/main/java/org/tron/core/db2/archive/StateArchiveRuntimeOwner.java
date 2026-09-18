@@ -253,13 +253,6 @@ public final class StateArchiveRuntimeOwner implements Closeable {
   /** Continues this recovered owner into one atomically attached normal-write runtime. */
   public synchronized ArchiveHistoryWriter attachNormalWriter(OldValueCollector collector,
       int queueCapacity, BlockSnapshotMeta canonicalHead) throws IOException {
-    return attachNormalWriter(collector, queueCapacity, canonicalHead, Collections.emptyMap());
-  }
-
-  public synchronized ArchiveHistoryWriter attachNormalWriter(OldValueCollector collector,
-      int queueCapacity, BlockSnapshotMeta canonicalHead,
-      Map<String, LatestStateGenerationAdapter.SnapshotCapableStore> supplementalStores)
-      throws IOException {
     if (state != State.RECOVERED) {
       throw new IllegalStateException("State Archive owner is not recovered");
     }
@@ -287,7 +280,7 @@ public final class StateArchiveRuntimeOwner implements Closeable {
             archiveDirectory.resolve(SERVING_INDEX_RUNTIME_DIRECTORY));
       }
       latest = LatestStateGenerationCoordinatorFactory.create(snapshotManager,
-          supplementalStores, this::readLatestAuthority);
+          this::readLatestAuthority);
       restoreLatestState(writer, catalog, builder, latest, canonicalHead);
       if (lastServingApply == null) {
         lastServingApply = ServingIndexApplyStatistics.zeroAction(canonicalHead);
