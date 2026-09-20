@@ -21,6 +21,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
+import org.tron.common.TestConstants;
 import org.tron.common.parameter.CommonParameter;
 import org.tron.common.utils.Sha256Hash;
 import org.tron.core.ChainBaseManager;
@@ -452,6 +453,7 @@ public class PathStateManagerStartupIntegrationTest {
   @Test
   public void commonCheckpointRedoPrecedesPathStateOpenAfterPartialMaterialization()
       throws Exception {
+    TestConstants.assumeLevelDbAvailable();
     Path output = temporaryFolder.newFolder("common-checkpoint-partial-path-redo").toPath();
     Path pathDirectory = output.resolve("path-state-root");
     Path checkpointDirectory = output.resolve("common-checkpoint");

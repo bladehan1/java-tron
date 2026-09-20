@@ -167,6 +167,7 @@ public class ChainbaseCheckpointMaterializerTest {
 
   @Test
   public void payloadFactoryCoalescesSnapshotMutationsWithoutDurableReads() throws Exception {
+    TestConstants.assumeLevelDbAvailable();
     MemoryDb code = new MemoryDb("code");
     MemoryDb storage = new MemoryDb("storage-row");
     Chainbase codeChainbase = new Chainbase(new SnapshotRoot(code));
@@ -238,6 +239,7 @@ public class ChainbaseCheckpointMaterializerTest {
   @Test
   public void realThreeAuthorityCoordinatorCrossesBothBarriersThenRetiresWal()
       throws Exception {
+    TestConstants.assumeLevelDbAvailable();
     java.nio.file.Path root = temporaryFolder.newFolder("three-authority").toPath();
     byte[] format = hash(88);
     MemoryDb code = new MemoryDb("code");
@@ -410,6 +412,7 @@ public class ChainbaseCheckpointMaterializerTest {
 
   @Test
   public void runtimeComposesStartupCheckpointRebaseAndPointQuery() throws Exception {
+    TestConstants.assumeLevelDbAvailable();
     java.nio.file.Path root = temporaryFolder.newFolder("composed-runtime").toPath();
     byte[] format = hash(93);
     MemoryDb code = new MemoryDb("code");
@@ -475,6 +478,7 @@ public class ChainbaseCheckpointMaterializerTest {
 
   @Test
   public void hotRuntimePreparesV2BeforeWalAndCompletesBothBarriers() throws Exception {
+    TestConstants.assumeLevelDbAvailable();
     java.nio.file.Path root = temporaryFolder.newFolder("hot-runtime-v2").toPath();
     byte[] format = hash(94);
     V2Snapshots snapshots = new V2Snapshots();
@@ -505,6 +509,7 @@ public class ChainbaseCheckpointMaterializerTest {
 
   @Test
   public void appendRuntimePreparesSap3BeforeWalAndReopensPublishedTarget() throws Exception {
+    TestConstants.assumeLevelDbAvailable();
     java.nio.file.Path root = temporaryFolder.newFolder("append-runtime-v3").toPath();
     java.nio.file.Path history = root.resolve("history");
     byte[] format = hash(96);
@@ -555,6 +560,7 @@ public class ChainbaseCheckpointMaterializerTest {
 
   @Test
   public void hotRuntimeRetriesAfterPrepareButBeforeWalPublication() throws Exception {
+    TestConstants.assumeLevelDbAvailable();
     java.nio.file.Path root = temporaryFolder.newFolder("hot-runtime-retry").toPath();
     byte[] format = hash(95);
     V2Snapshots snapshots = new V2Snapshots();

@@ -19,9 +19,11 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import org.junit.BeforeClass;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
+import org.tron.common.TestConstants;
 import org.tron.core.db2.archive.BlockReverseDiff.DbGroup;
 import org.tron.core.db2.archive.BlockReverseDiff.Entry;
 import org.tron.core.db2.archive.StateArchiveFiveLaneSegmentWriterV3.ArchiveDurabilityProof;
@@ -45,6 +47,11 @@ public class StateArchiveAppendCheckpointMaterializerV3Test {
 
   @Rule
   public final TemporaryFolder temporaryFolder = new TemporaryFolder();
+
+  @BeforeClass
+  public static void assumeLevelDbAvailable() {
+    TestConstants.assumeLevelDbAvailable();
+  }
 
   @Test(timeout = 15000)
   public void runtimePinsAppendHistoryWithValuesDifferentFromLatest() throws Exception {

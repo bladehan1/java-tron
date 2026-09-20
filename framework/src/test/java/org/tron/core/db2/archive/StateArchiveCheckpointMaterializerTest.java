@@ -21,6 +21,8 @@ import org.iq80.leveldb.Options;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
+import org.tron.common.TestConstants;
+import org.tron.common.arch.Arch;
 import org.tron.core.db2.archive.BlockReverseDiff.DbGroup;
 import org.tron.core.db2.archive.BlockReverseDiff.Entry;
 import org.tron.core.db2.core.CommonCheckpointMaterializer.Status;
@@ -37,6 +39,7 @@ public class StateArchiveCheckpointMaterializerTest {
   @Test
   public void preservesEveryBlockBoundaryBeforePublishingReadableAcrossReopen()
       throws Exception {
+    TestConstants.assumeLevelDbAvailable();
     Path root = temporaryFolder.newFolder("normal").toPath();
     byte[] format = hash(90);
     CommonCheckpointPayload payload = payload(format, 1, 3, hash(0), hash(10), hash(13));
@@ -112,7 +115,7 @@ public class StateArchiveCheckpointMaterializerTest {
 
   @Test
   public void reusesServingWriterAcrossTargetsAndClosesItWithMaterializer() throws Exception {
-    for (Engine engine : Engine.values()) {
+    for (Engine engine : availableEngines()) {
       Path root = temporaryFolder.newFolder("writer-lifecycle-" + engine).toPath();
       byte[] format = hash(89);
       StateArchiveCheckpointMaterializer materializer =
@@ -143,7 +146,7 @@ public class StateArchiveCheckpointMaterializerTest {
 
   @Test
   public void releasesRetainedWriterAfterCheckpointFailure() throws Exception {
-    for (Engine engine : Engine.values()) {
+    for (Engine engine : availableEngines()) {
       Path root = temporaryFolder.newFolder("writer-failure-" + engine).toPath();
       byte[] format = hash(88);
       CommonCheckpointPayload payload = payload(format, 1, 2, hash(0), hash(10), hash(12));
@@ -192,6 +195,7 @@ public class StateArchiveCheckpointMaterializerTest {
   @Test
   public void rejectsForeignFormatCorruptImmutableBlockAndNonParentReadable()
       throws Exception {
+    TestConstants.assumeLevelDbAvailable();
     Path root = temporaryFolder.newFolder("reject").toPath();
     byte[] format = hash(92);
     CommonCheckpointPayload payload = payload(format, 1, 2, hash(0), hash(30), hash(32));
@@ -229,6 +233,10 @@ public class StateArchiveCheckpointMaterializerTest {
       database.put(new byte[]{0}, new byte[]{1});
     }
     assertThrows(IOException.class, () -> clean.inspect(target));
+  }
+
+  private static Engine[] availableEngines() {
+    return Arch.isArm64() ? new Engine[]{Engine.ROCKSDB} : Engine.values();
   }
 
   private static StateArchiveCheckpointMaterializer.FaultHook failAt(

@@ -7,9 +7,11 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import org.junit.BeforeClass;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
+import org.tron.common.TestConstants;
 import org.tron.core.db2.archive.BlockReverseDiff.DbGroup;
 import org.tron.core.db2.archive.BlockReverseDiff.Entry;
 import org.tron.core.db2.archive.StateArchiveServingIndexBuildCoordinatorV3.BuildProgress;
@@ -22,6 +24,11 @@ public class StateArchiveServingIndexSpeedTest {
 
   @Rule
   public final TemporaryFolder temporaryFolder = new TemporaryFolder();
+
+  @BeforeClass
+  public static void assumeLevelDbAvailable() {
+    TestConstants.assumeLevelDbAvailable();
+  }
 
   @Test
   public void measuresBulkThenLiveDurablePublication() throws Exception {

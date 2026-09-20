@@ -8,9 +8,11 @@ import static org.mockito.Mockito.when;
 
 import java.nio.file.Path;
 import java.util.Collections;
+import org.junit.BeforeClass;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
+import org.tron.common.TestConstants;
 import org.tron.core.db2.core.CommonCheckpointCapture;
 import org.tron.core.db2.core.CommonCheckpointFile;
 import org.tron.core.db2.core.CommonCheckpointMaterializer;
@@ -27,6 +29,11 @@ public class StateArchiveHotCheckpointMaterializerTest {
 
   @Rule
   public final TemporaryFolder temporaryFolder = new TemporaryFolder();
+
+  @BeforeClass
+  public static void assumeLevelDbAvailable() {
+    TestConstants.assumeLevelDbAvailable();
+  }
 
   @Test
   public void commonParticipantOnlyVerifiesPreparedHotBodiesThenPublishes() throws Exception {

@@ -36,6 +36,7 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.springframework.test.util.ReflectionTestUtils;
+import org.tron.common.arch.Arch;
 import org.tron.common.runtime.vm.DataWord;
 import org.tron.common.utils.ByteArray;
 import org.tron.common.utils.Sha256Hash;
@@ -104,7 +105,7 @@ public class StateArchiveJsonRpcIntegrationTest {
 
   @Test(timeout = 30000)
   public void numberAndHashReadHistoricalBalanceCodeAndStorageThroughManager() throws Exception {
-    for (Engine engine : Engine.values()) {
+    for (Engine engine : availableEngines()) {
       try (Fixture fixture = new Fixture(temporaryFolder.newFolder(engine.name()).toPath(),
           engine)) {
         fixture.ready();
@@ -336,6 +337,10 @@ public class StateArchiveJsonRpcIntegrationTest {
       }
       assertEquals(fixture.pins, fixture.releases);
     }
+  }
+
+  private static Engine[] availableEngines() {
+    return Arch.isArm64() ? new Engine[]{Engine.ROCKSDB} : Engine.values();
   }
 
   private static Map<String, Object> map(String key, Object value) {

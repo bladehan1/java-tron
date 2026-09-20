@@ -21,9 +21,11 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import org.junit.BeforeClass;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
+import org.tron.common.TestConstants;
 import org.tron.core.db2.archive.BlockReverseDiff.DbGroup;
 import org.tron.core.db2.archive.BlockReverseDiff.Entry;
 import org.tron.core.db2.core.CommonCheckpointCapture;
@@ -55,6 +57,11 @@ public class StateArchiveServingChainKillProcessTest {
 
   @Rule
   public final TemporaryFolder temporaryFolder = new TemporaryFolder();
+
+  @BeforeClass
+  public static void assumeLevelDbAvailable() {
+    TestConstants.assumeLevelDbAvailable();
+  }
 
   @Test
   public void jvmHaltWithCommittedCommonAndUnpublishedIndexReplaysOnRestart() throws Exception {

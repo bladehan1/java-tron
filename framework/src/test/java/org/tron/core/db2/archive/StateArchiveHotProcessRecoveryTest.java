@@ -16,9 +16,11 @@ import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import org.junit.BeforeClass;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
+import org.tron.common.TestConstants;
 import org.tron.core.db2.archive.BlockReverseDiff.DbGroup;
 import org.tron.core.db2.archive.BlockReverseDiff.Entry;
 import org.tron.core.db2.core.CommonCheckpointFile;
@@ -35,6 +37,11 @@ public class StateArchiveHotProcessRecoveryTest {
 
   @Rule
   public final TemporaryFolder temporaryFolder = new TemporaryFolder();
+
+  @BeforeClass
+  public static void assumeLevelDbAvailable() {
+    TestConstants.assumeLevelDbAvailable();
+  }
 
   @Test
   public void jvmHaltAfterHotPrepareBeforeCommonWalTruncatesOrphanOnRestart()

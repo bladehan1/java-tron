@@ -18,6 +18,7 @@ import java.util.Map;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
+import org.tron.common.TestConstants;
 import org.tron.core.db2.archive.BlockReverseDiff.DbGroup;
 import org.tron.core.db2.archive.BlockReverseDiff.Entry;
 import org.tron.core.db2.archive.StateArchiveCommittedViewV5.PointLocation;
@@ -32,6 +33,7 @@ public class StateArchiveServingSourceV5Test {
 
   @Test(timeout = 15000)
   public void reconstructsRequestedRangeAndFeedsExistingServingOwner() throws Exception {
+    TestConstants.assumeLevelDbAvailable();
     Fixture fixture = fixture("valid", true);
     StateArchiveServingSourceV5 source = fixture.source(fixture.metas::get);
 

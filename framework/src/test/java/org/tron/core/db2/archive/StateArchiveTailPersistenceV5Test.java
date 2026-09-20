@@ -9,9 +9,11 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import org.junit.BeforeClass;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
+import org.tron.common.TestConstants;
 import org.tron.core.db2.archive.PersistentServingKeyIndexGeneration.MutableIndex;
 import org.tron.core.db2.archive.StateArchiveTailV5.LaneTerminal;
 import org.tron.core.db2.core.CommonCheckpointTarget;
@@ -21,6 +23,11 @@ public class StateArchiveTailPersistenceV5Test {
 
   @Rule
   public final TemporaryFolder temporaryFolder = new TemporaryFolder();
+
+  @BeforeClass
+  public static void assumeLevelDbAvailable() {
+    TestConstants.assumeLevelDbAvailable();
+  }
 
   @Test
   public void syncsDistinctTailIdempotentlyAndReopensIt() throws Exception {

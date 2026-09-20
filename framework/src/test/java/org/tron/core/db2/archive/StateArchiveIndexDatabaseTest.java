@@ -18,6 +18,7 @@ import java.util.stream.Stream;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
+import org.tron.common.arch.Arch;
 import org.tron.core.config.args.StorageConfig.NativeDbConfig;
 import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
 
@@ -28,7 +29,7 @@ public class StateArchiveIndexDatabaseTest {
 
   @Test
   public void supportsConfiguredEngineAndRejectsEngineDrift() throws Exception {
-    for (Engine engine : Engine.values()) {
+    for (Engine engine : availableEngines()) {
       Path root = temporaryFolder.newFolder(engine.name().toLowerCase(Locale.ROOT)).toPath();
       Path database = root.resolve("keys");
       StateArchiveIndexEngineManifest.openOrCreate(root, engine);
@@ -106,6 +107,10 @@ public class StateArchiveIndexDatabaseTest {
     corrupt[7] = 2;
     Files.write(current.resolve(StateArchiveIndexEngineManifest.FILE), corrupt);
     assertThrows(IOException.class, () -> StateArchiveIndexEngineManifest.load(current));
+  }
+
+  private static Engine[] availableEngines() {
+    return Arch.isArm64() ? new Engine[]{Engine.ROCKSDB} : Engine.values();
   }
 
   private static Path latestOptionsFile(Path directory) throws IOException {

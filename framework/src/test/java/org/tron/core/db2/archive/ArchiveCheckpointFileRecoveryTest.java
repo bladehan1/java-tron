@@ -8,10 +8,12 @@ import java.nio.file.Path;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
+import org.junit.BeforeClass;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.springframework.context.ApplicationContext;
+import org.tron.common.TestConstants;
 import org.tron.common.parameter.CommonParameter;
 import org.tron.core.config.args.Storage;
 import org.tron.core.config.args.StorageConfig;
@@ -27,6 +29,11 @@ public class ArchiveCheckpointFileRecoveryTest {
 
   @Rule
   public TemporaryFolder temporaryFolder = new TemporaryFolder();
+
+  @BeforeClass
+  public static void assumeLevelDbAvailable() {
+    TestConstants.assumeLevelDbAvailable();
+  }
 
   @Test
   public void v1ReopensTheSameBindingAcrossSecondRestart() throws Exception {

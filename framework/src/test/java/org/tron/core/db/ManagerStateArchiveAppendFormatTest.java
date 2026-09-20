@@ -6,10 +6,12 @@ import static org.mockito.Mockito.when;
 
 import java.nio.ByteBuffer;
 import java.nio.file.Path;
+import org.junit.BeforeClass;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.springframework.test.util.ReflectionTestUtils;
+import org.tron.common.TestConstants;
 import org.tron.core.ChainBaseManager;
 import org.tron.core.config.args.StorageConfig.StateArchiveAppendFileConfig;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
@@ -24,6 +26,11 @@ public class ManagerStateArchiveAppendFormatTest {
 
   @Rule
   public final TemporaryFolder temporaryFolder = new TemporaryFolder();
+
+  @BeforeClass
+  public static void assumeLevelDbAvailable() {
+    TestConstants.assumeLevelDbAvailable();
+  }
 
   @Test
   public void factoryKeepsV4DefaultAndRequiresExplicitV5() throws Exception {

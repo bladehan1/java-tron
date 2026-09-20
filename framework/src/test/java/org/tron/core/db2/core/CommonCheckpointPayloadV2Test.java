@@ -15,6 +15,7 @@ import java.util.Collections;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
+import org.tron.common.TestConstants;
 import org.tron.core.db2.archive.ArchivePersistenceException;
 import org.tron.core.db2.archive.BlockReverseDiff;
 import org.tron.core.db2.archive.BlockReverseDiff.DbGroup;
@@ -33,6 +34,7 @@ public class CommonCheckpointPayloadV2Test {
 
   @Test
   public void roundTripsDigestOnlyArchiveBindingWithoutOldValueBody() throws Exception {
+    TestConstants.assumeLevelDbAvailable();
     byte[] format = hash(7);
     byte[] oldValueSentinel = new byte[96];
     for (int index = 0; index < oldValueSentinel.length; index++) {

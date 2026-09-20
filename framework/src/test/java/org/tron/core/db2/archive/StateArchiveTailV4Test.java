@@ -11,6 +11,7 @@ import java.util.List;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
+import org.tron.common.TestConstants;
 import org.tron.core.db2.archive.PersistentServingKeyIndexGeneration.MutableIndex;
 import org.tron.core.db2.archive.PersistentServingKeyIndexGeneration.RuntimeBuilder;
 import org.tron.core.db2.archive.StateArchiveTailV4.LaneTerminal;
@@ -63,6 +64,7 @@ public class StateArchiveTailV4Test {
 
   @Test
   public void reservedTailSurvivesIndexAppendReopenAndShadowCheckpoint() throws Exception {
+    TestConstants.assumeLevelDbAvailable();
     Path root = temporaryFolder.newFolder("archive-tail-index").toPath();
     Path indexPath = root.resolve("index");
     CommonCheckpointTarget target = target(101);

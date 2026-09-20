@@ -18,6 +18,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
+import org.tron.common.TestConstants;
 import org.tron.core.db2.archive.BlockReverseDiff;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
 import org.tron.core.db2.archive.StateArchiveHotBatchDescriptor;
@@ -38,6 +39,7 @@ public class CommonCheckpointHotRecoveryTest {
 
   @Test
   public void validWalSelectsTargetBeforeChainbaseBlockExists() throws Exception {
+    TestConstants.assumeLevelDbAvailable();
     Path root = temporaryFolder.newFolder("wal-authority").toPath();
     BlockSnapshotMeta target = meta(1);
     CommonCheckpointFile file = new CommonCheckpointFile(root.resolve("wal"));
@@ -65,6 +67,7 @@ public class CommonCheckpointHotRecoveryTest {
 
   @Test
   public void walRejectsDynamicAndExistingBlockIdentityDrift() throws Exception {
+    TestConstants.assumeLevelDbAvailable();
     Path root = temporaryFolder.newFolder("wal-drift").toPath();
     BlockSnapshotMeta target = meta(1);
     CommonCheckpointFile wrongDynamicFile = new CommonCheckpointFile(
@@ -92,6 +95,7 @@ public class CommonCheckpointHotRecoveryTest {
 
   @Test
   public void absentWalUsesPersistedDynamicAndTruncatesOrphanIdempotently() throws Exception {
+    TestConstants.assumeLevelDbAvailable();
     Path root = temporaryFolder.newFolder("dynamic-authority").toPath();
     byte[] format = hash(70);
     BlockSnapshotMeta block = meta(1);
@@ -120,6 +124,7 @@ public class CommonCheckpointHotRecoveryTest {
 
   @Test
   public void runtimeInvokesOptionalHotRecoveryBeforeCommonRedo() throws Exception {
+    TestConstants.assumeLevelDbAvailable();
     Path root = temporaryFolder.newFolder("runtime").toPath();
     CommonCheckpointFile file = new CommonCheckpointFile(root.resolve("wal"));
     AtomicBoolean reconciled = new AtomicBoolean();

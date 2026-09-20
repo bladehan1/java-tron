@@ -34,6 +34,7 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.slf4j.LoggerFactory;
+import org.tron.common.TestConstants;
 import org.tron.common.parameter.CommonParameter;
 import org.tron.common.storage.leveldb.LevelDbDataSourceImpl;
 import org.tron.core.config.args.Args;
@@ -72,6 +73,11 @@ public class P66SnapshotPipelineTest {
   @BeforeClass
   public static void configure() {
     Args.setParam(new String[]{"--output-directory", "output_p66_pipeline"}, "config-test.conf");
+  }
+
+  @BeforeClass
+  public static void assumeLevelDbAvailable() {
+    TestConstants.assumeLevelDbAvailable();
   }
 
   @AfterClass

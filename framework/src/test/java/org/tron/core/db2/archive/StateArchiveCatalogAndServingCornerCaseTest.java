@@ -15,6 +15,7 @@ import java.util.OptionalLong;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
+import org.tron.common.TestConstants;
 import org.tron.core.db2.archive.BlockReverseDiff.DbGroup;
 import org.tron.core.db2.archive.BlockReverseDiff.Entry;
 import org.tron.core.db2.archive.PersistentServingKeyIndexGeneration.MutableIndex;
@@ -30,6 +31,7 @@ public class StateArchiveCatalogAndServingCornerCaseTest {
 
   @Test
   public void bulkBatchCutsProduceTheSameExactIndexIdentity() throws Exception {
+    TestConstants.assumeLevelDbAvailable();
     List<BlockReverseDiff> all = diffs(1, 6, 0);
     Path oneBatch = temporaryFolder.newFolder("one-batch").toPath();
     Path splitBatch = temporaryFolder.newFolder("split-batch").toPath();
@@ -65,6 +67,7 @@ public class StateArchiveCatalogAndServingCornerCaseTest {
 
   @Test
   public void liveRangePublishesOnceWithTheBulkLogicalIdentity() throws Exception {
+    TestConstants.assumeLevelDbAvailable();
     List<BlockReverseDiff> all = diffs(1, 17, 0);
     Path bulkRoot = temporaryFolder.newFolder("bulk-reference").toPath();
     Path liveRoot = temporaryFolder.newFolder("live-range").toPath();
@@ -105,6 +108,7 @@ public class StateArchiveCatalogAndServingCornerCaseTest {
 
   @Test
   public void gapInvalidatesLiveHandleWithoutAdvancingI() throws Exception {
+    TestConstants.assumeLevelDbAvailable();
     Path root = temporaryFolder.newFolder("live-gap").toPath();
     List<BlockReverseDiff> first = diffs(1, 1, 0);
     try (StateArchiveServingIndexBuildCoordinatorV3 coordinator =

@@ -40,6 +40,8 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.mockito.ArgumentCaptor;
+import org.tron.common.TestConstants;
+import org.tron.common.arch.Arch;
 import org.tron.common.parameter.CommonParameter;
 import org.tron.common.storage.leveldb.LevelDbDataSourceImpl;
 import org.tron.common.storage.rocksdb.RocksDbDataSourceImpl;
@@ -230,7 +232,7 @@ public class StateArchiveManagerStartupIntegrationTest {
 
   @Test
   public void managerBootstrapsFreshBaseAndContinuesNormalFlush() throws Exception {
-    for (String engine : Arrays.asList("LEVELDB", "ROCKSDB")) {
+    for (String engine : availableEngines()) {
       Path output = temporaryFolder.newFolder(
           "fresh-manager-" + engine.toLowerCase(Locale.ROOT)).toPath();
       Path archive = output.resolve("state-archive");
@@ -633,7 +635,7 @@ public class StateArchiveManagerStartupIntegrationTest {
 
   @Test
   public void allNativeExact27StoresReopenWithStableIdentityAndHistory() throws Exception {
-    for (String engine : Arrays.asList("LEVELDB", "ROCKSDB")) {
+    for (String engine : availableEngines()) {
       Path output = temporaryFolder.newFolder("all-native-exact27-"
           + engine.toLowerCase(Locale.ROOT)).toPath();
       withArchiveConfig(output, engine, true,
@@ -903,7 +905,7 @@ public class StateArchiveManagerStartupIntegrationTest {
 
   @Test
   public void managerRunsTwoNormalFlushTargetsThroughExact27FixedPoint() throws Exception {
-    for (String engine : Arrays.asList("LEVELDB", "ROCKSDB")) {
+    for (String engine : availableEngines()) {
       Path output = temporaryFolder.newFolder(
           "manager-" + engine.toLowerCase(Locale.ROOT)).toPath();
       Path archive = output.resolve("state-archive");
@@ -983,7 +985,7 @@ public class StateArchiveManagerStartupIntegrationTest {
 
   @Test
   public void managerRunsMultiTargetNormalFlushThroughExact27FixedPoint() throws Exception {
-    for (String engine : Arrays.asList("LEVELDB", "ROCKSDB")) {
+    for (String engine : availableEngines()) {
       Path output = temporaryFolder.newFolder(
           "multi-target-" + engine.toLowerCase(Locale.ROOT)).toPath();
       Path archive = output.resolve("state-archive");
@@ -1103,7 +1105,7 @@ public class StateArchiveManagerStartupIntegrationTest {
 
   @Test
   public void newRuntimeDoesNotOpenLegacyParticipantEvidence() throws Exception {
-    for (String engine : Arrays.asList("LEVELDB", "ROCKSDB")) {
+    for (String engine : availableEngines()) {
       Path output = temporaryFolder.newFolder(
           "partial-" + engine.toLowerCase(Locale.ROOT)).toPath();
       Path archive = output.resolve("state-archive");
@@ -1127,6 +1129,7 @@ public class StateArchiveManagerStartupIntegrationTest {
 
   @Test
   public void missingWalBindingFailsBeforeNormalWriterAttachment() throws Exception {
+    TestConstants.assumeLevelDbAvailable();
     Path output = temporaryFolder.newFolder("missing-wal-binding").toPath();
     Path archive = output.resolve("state-archive");
     HistoryCommitMarker head = initializeRecoverableTail(archive, "LEVELDB");
@@ -1222,6 +1225,15 @@ public class StateArchiveManagerStartupIntegrationTest {
     assertNull(manager.getStateArchiveRuntime());
     assertArrayEquals(evidence, Files.readAllBytes(archive.resolve("unexpected-evidence")));
     assertFalse(Files.exists(archive.resolve("participants")));
+  }
+
+  private static List<String> availableEngines() {
+    List<String> engines = new ArrayList<>();
+    if (!Arch.isArm64()) {
+      engines.add("LEVELDB");
+    }
+    engines.add("ROCKSDB");
+    return engines;
   }
 
   private static Manager manager(SnapshotManager snapshots, HistoryCommitMarker head)

@@ -20,6 +20,8 @@ import java.util.Set;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
+import org.tron.common.TestConstants;
+import org.tron.common.arch.Arch;
 import org.tron.core.config.args.StorageConfig.NativeDbConfig;
 import org.tron.core.config.args.StorageConfig.StateArchiveHotStoreConfig;
 import org.tron.core.db2.archive.BlockReverseDiff.DbGroup;
@@ -33,7 +35,7 @@ public class StateArchiveHotStoreTest {
 
   @Test
   public void appendsSealsQueriesAndReopensAcrossBothEngines() throws Exception {
-    for (Engine engine : Engine.values()) {
+    for (Engine engine : availableEngines()) {
       Path root = temporaryFolder.newFolder("hot-" + engine.name()).toPath();
       byte[] format = hash(90);
       try (StateArchiveHotStore store = open(root, format, engine, 0, hash(0), 3, 2)) {
@@ -125,6 +127,7 @@ public class StateArchiveHotStoreTest {
 
   @Test
   public void rejectsDescriptorLayoutBeforeMutationDigestRemoval() throws Exception {
+    TestConstants.assumeLevelDbAvailable();
     Path root = temporaryFolder.newFolder("hot-descriptor-version").toPath();
     byte[] format = hash(123);
     try (StateArchiveHotStore store = open(root, format, Engine.LEVELDB,
@@ -149,6 +152,7 @@ public class StateArchiveHotStoreTest {
 
   @Test
   public void recoversEveryRotationPublicationBoundary() throws Exception {
+    TestConstants.assumeLevelDbAvailable();
     for (StateArchiveHotStore.Stage failedStage : Arrays.asList(
         StateArchiveHotStore.Stage.AFTER_SEAL,
         StateArchiveHotStore.Stage.AFTER_NEW_GENERATION,
@@ -179,7 +183,7 @@ public class StateArchiveHotStoreTest {
 
   @Test
   public void reconcilesOnlyCurrentPreparedTailAcrossBothEngines() throws Exception {
-    for (Engine engine : Engine.values()) {
+    for (Engine engine : availableEngines()) {
       Path root = temporaryFolder.newFolder("reconcile-" + engine.name()).toPath();
       byte[] format = hash(94);
       try (StateArchiveHotStore store = open(root, format, engine, 0, hash(0), 3, 10)) {
@@ -207,6 +211,7 @@ public class StateArchiveHotStoreTest {
 
   @Test
   public void resumesEveryPreparedTailTruncateBoundary() throws Exception {
+    TestConstants.assumeLevelDbAvailable();
     for (StateArchiveHotStore.Stage failedStage : Arrays.asList(
         StateArchiveHotStore.Stage.AFTER_TRUNCATE_INTENT,
         StateArchiveHotStore.Stage.AFTER_TRUNCATE_DELETE_BATCH,
@@ -238,7 +243,7 @@ public class StateArchiveHotStoreTest {
 
   @Test
   public void preparesPublishesAndReopensAcrossBothEngines() throws Exception {
-    for (Engine engine : Engine.values()) {
+    for (Engine engine : availableEngines()) {
       Path root = temporaryFolder.newFolder("publication-" + engine.name()).toPath();
       byte[] format = hash(97);
       byte[] target = hash(112);
@@ -286,6 +291,7 @@ public class StateArchiveHotStoreTest {
 
   @Test
   public void recoversPrepareAndPublishNativeBoundaries() throws Exception {
+    TestConstants.assumeLevelDbAvailable();
     Path preparedRoot = temporaryFolder.newFolder("fault-prepare").toPath();
     byte[] format = hash(98);
     byte[] preparedTarget = hash(113);
@@ -333,6 +339,7 @@ public class StateArchiveHotStoreTest {
 
   @Test
   public void rejectsPreparedRotationBeforeWritingWhenFrozenBacklogIsFull() throws Exception {
+    TestConstants.assumeLevelDbAvailable();
     Path root = temporaryFolder.newFolder("prepare-full-backlog").toPath();
     try (StateArchiveHotStore store = open(root, hash(99), Engine.LEVELDB,
         0, hash(0), 1, 1)) {
@@ -351,7 +358,7 @@ public class StateArchiveHotStoreTest {
   @Test
   public void persistsAndRevalidatesExactPreparedDescriptorAcrossBothEngines()
       throws Exception {
-    for (Engine engine : Engine.values()) {
+    for (Engine engine : availableEngines()) {
       Path root = temporaryFolder.newFolder("descriptor-" + engine.name()).toPath();
       byte[] format = hash(100);
       BlockReverseDiff original = diff(1, 0, "code", new byte[]{1}, OldValue.absent());
@@ -387,6 +394,7 @@ public class StateArchiveHotStoreTest {
 
   @Test
   public void recoveryCeilingNeverTruncatesFrozenHistory() throws Exception {
+    TestConstants.assumeLevelDbAvailable();
     Path root = temporaryFolder.newFolder("truncate-frozen").toPath();
     try (StateArchiveHotStore store = open(root, hash(96), Engine.LEVELDB,
         0, hash(0), 3, 1)) {
@@ -404,6 +412,7 @@ public class StateArchiveHotStoreTest {
 
   @Test
   public void rejectsGapsParentDriftIdentityDriftAndFrozenOverflow() throws Exception {
+    TestConstants.assumeLevelDbAvailable();
     Path root = temporaryFolder.newFolder("reject").toPath();
     byte[] format = hash(92);
     try (StateArchiveHotStore store = open(root, format, Engine.LEVELDB, 0, hash(0), 1, 1)) {
@@ -425,6 +434,7 @@ public class StateArchiveHotStoreTest {
 
   @Test
   public void dedicatedConfigurationControlsRotationAndBacklogStatistics() throws Exception {
+    TestConstants.assumeLevelDbAvailable();
     Path disabledRoot = temporaryFolder.newFolder("hot-disabled").toPath();
     StateArchiveHotStoreConfig config = new StateArchiveHotStoreConfig();
     assertThrows(IllegalStateException.class, () -> StateArchiveHotStore.openOrCreate(
@@ -463,6 +473,10 @@ public class StateArchiveHotStoreTest {
       assertEquals(StateArchiveHotStore.BacklogLevel.RED,
           store.getStatistics().getBacklogLevel());
     }
+  }
+
+  private static Engine[] availableEngines() {
+    return Arch.isArm64() ? new Engine[]{Engine.ROCKSDB} : Engine.values();
   }
 
   private StateArchiveHotStore open(Path root, byte[] format, Engine engine, long baseBlock,
