@@ -132,9 +132,16 @@ public class RepositoryImpl implements Repository {
   }
 
   public RepositoryImpl(StoreFactory storeFactory, RepositoryImpl repository) {
-    this(storeFactory, repository,
-        repository == null ? new CurrentStoreStateSource(storeFactory) : repository.stateSource,
+    this(storeFactory, repository, resolveStateSource(storeFactory, repository),
         repository != null && repository.readOnlyRoot);
+  }
+
+  private static RepositoryStateSource resolveStateSource(StoreFactory storeFactory,
+      RepositoryImpl repository) {
+    if (repository != null) {
+      return repository.stateSource;
+    }
+    return storeFactory == null ? null : new CurrentStoreStateSource(storeFactory);
   }
 
   private RepositoryImpl(StoreFactory storeFactory, Repository parent,
@@ -242,7 +249,7 @@ public class RepositoryImpl implements Repository {
     if (storeFactory != null) {
       this.storeFactory = storeFactory;
     }
-    if (bindCurrentStores) {
+    if (bindCurrentStores && storeFactory != null) {
       ChainBaseManager manager = storeFactory.getChainBaseManager();
       dynamicPropertiesStore = manager.getDynamicPropertiesStore();
       accountStore = manager.getAccountStore();
