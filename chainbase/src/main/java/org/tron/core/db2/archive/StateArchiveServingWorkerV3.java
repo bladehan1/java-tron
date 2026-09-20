@@ -281,7 +281,9 @@ final class StateArchiveServingWorkerV3 implements AutoCloseable {
     } catch (InterruptedException interrupted) {
       Thread.currentThread().interrupt();
       fail(new IOException("Serving owner interrupted", interrupted));
-    } catch (IOException | RuntimeException buildFailure) {
+    } catch (IOException | RuntimeException | Error buildFailure) {
+      // Native linkage failures surface as Error, not Exception; without this they kill the
+      // owner silently and leave offer/completeInitialSync waiters blocked forever.
       if (coordinator != null) {
         progress = coordinator.status();
       }
