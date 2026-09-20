@@ -54,6 +54,11 @@ public class AccountAssetStore extends TronDatabase<byte[]> {
     snapshots = lane;
   }
 
+  /** Whether the Snapshot lane is already attached to a SnapshotManager. */
+  public boolean isSnapshotsAttached() {
+    return snapshots != null;
+  }
+
   public synchronized void finishSnapshotRecovery(SnapshotManager manager) {
     manager.finishP66Recovery();
     recoveringSnapshots = false;

@@ -578,7 +578,10 @@ public class Manager {
       throw new IllegalStateException("AccountAsset Snapshot requires SnapshotManager");
     }
     SnapshotManager snapshotManager = (SnapshotManager) revokingStore;
-    chainBaseManager.getAccountAssetStore().enableSnapshots(snapshotManager, true);
+    // The lane survives Manager re-creation inside the same context lifecycle.
+    if (!chainBaseManager.getAccountAssetStore().isSnapshotsAttached()) {
+      chainBaseManager.getAccountAssetStore().enableSnapshots(snapshotManager, true);
+    }
     revokingStore.check();
     if (!Args.getInstance().getStorage().isCommonCheckpointEnabled()) {
       chainBaseManager.getAccountAssetStore().finishSnapshotRecovery(snapshotManager);
