@@ -47,7 +47,20 @@ public class SnapshotRoot extends AbstractSnapshot<byte[], byte[]> {
   }
 
   private boolean needOptAsset() {
-    return isAccountDB && !coupledMutationsMaterialized && ChainBaseManager.getInstance().getDynamicPropertiesStore()
+    return isAccountDB && !coupledMutationsMaterialized && assetOptimizationEnabled();
+  }
+
+  /**
+   * Direct root writes only happen while no revoking session exists, so the legacy eager
+   * Account-to-AccountAsset migration still applies to them; session-bound writes are folded
+   * by the P66 materializer inside the block layer instead.
+   */
+  private boolean needOptAssetOnDirectWrite() {
+    return isAccountDB && assetOptimizationEnabled();
+  }
+
+  private boolean assetOptimizationEnabled() {
+    return ChainBaseManager.getInstance().getDynamicPropertiesStore()
             .getAllowAccountAssetOptimizationFromRoot() == 1;
   }
 
@@ -70,7 +83,7 @@ public class SnapshotRoot extends AbstractSnapshot<byte[], byte[]> {
   @Override
   public void put(byte[] key, byte[] value) {
     byte[] v = value;
-    if (needOptAsset()) {
+    if (needOptAssetOnDirectWrite()) {
       if (ByteArray.isEmpty(value)) {
         remove(key);
         return;
@@ -92,7 +105,7 @@ public class SnapshotRoot extends AbstractSnapshot<byte[], byte[]> {
 
   @Override
   public void remove(byte[] key) {
-    if (needOptAsset()) {
+    if (needOptAssetOnDirectWrite()) {
       ChainBaseManager.getInstance().getAccountAssetStore().deleteAccount(key);
     }
     db.remove(key);
