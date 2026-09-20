@@ -648,6 +648,8 @@ public class StateArchiveManagerStartupIntegrationTest {
     AtomicLong targetOptimization = new AtomicLong();
     TestAccountAssetStore accountAssetStore = new TestAccountAssetStore();
     Manager manager = manager(fixture.snapshots, base, accountAssetStore, targetOptimization);
+    accountAssetStore.enableSnapshots(fixture.snapshots, true);
+    accountAssetStore.finishSnapshotRecovery(fixture.snapshots);
     byte[] address = archiveAddress(13);
     String tokenId = "1000013";
     byte[] directKey = new P66AccountAssetCodec().assetPhysicalKey(address, tokenId);
@@ -703,7 +705,9 @@ public class StateArchiveManagerStartupIntegrationTest {
     assertEquals(sourceIdentities, sourceIdentities(restarted, reopenedAccountAssetStore));
     Manager restartedManager = manager(restarted.snapshots, target, reopenedAccountAssetStore,
         targetOptimization);
+    reopenedAccountAssetStore.enableSnapshots(restarted.snapshots, true);
     invokeCheckpointRecovery(restarted.snapshots, restarted.checkpoint);
+    reopenedAccountAssetStore.finishSnapshotRecovery(restarted.snapshots);
     invoke(restartedManager, "initStateArchive");
     assertEquals(0, restartedManager.getStateArchiveRuntime().getStartupRecoveryActionCount());
     assertEquals(target,
@@ -725,7 +729,9 @@ public class StateArchiveManagerStartupIntegrationTest {
     assertEquals(sourceIdentities, sourceIdentities(secondRestart, secondAccountAssetStore));
     Manager secondManager = manager(secondRestart.snapshots, target, secondAccountAssetStore,
         targetOptimization);
+    secondAccountAssetStore.enableSnapshots(secondRestart.snapshots, true);
     invokeCheckpointRecovery(secondRestart.snapshots, secondRestart.checkpoint);
+    secondAccountAssetStore.finishSnapshotRecovery(secondRestart.snapshots);
     invoke(secondManager, "initStateArchive");
     assertEquals(0, secondManager.getStateArchiveRuntime().getStartupRecoveryActionCount());
     assertEquals(target, secondManager.getStateArchiveRuntime().verifyNormalWriteFixedPoint());
