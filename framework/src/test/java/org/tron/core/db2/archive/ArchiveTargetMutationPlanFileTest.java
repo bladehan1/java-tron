@@ -17,6 +17,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import org.junit.Rule;
 import org.junit.Test;
@@ -173,7 +174,7 @@ public class ArchiveTargetMutationPlanFileTest {
 
     for (ArchiveTargetMutationPlan expected : vectors) {
       Path checkpoint = temporaryFolder.newFolder(
-          "p66-plan-" + expected.getTargetPhase().name().toLowerCase())
+          "p66-plan-" + expected.getTargetPhase().name().toLowerCase(Locale.ROOT))
           .toPath().resolve("checkpoint.progress");
       new ArchiveTargetMutationPlanFile(checkpoint).store(expected);
 

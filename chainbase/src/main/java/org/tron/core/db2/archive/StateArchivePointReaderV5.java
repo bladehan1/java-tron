@@ -8,6 +8,7 @@ import java.nio.channels.FileChannel;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.Objects;
+import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.db2.archive.StateArchiveCommittedViewV5.PointLocation;
 import org.tron.core.db2.archive.StateArchiveDataHandlePoolV5.Lease;
 
@@ -258,7 +259,7 @@ final class StateArchivePointReaderV5 implements StateArchivePointSource {
     long result = 0;
     try {
       for (long value : values) {
-        result = Math.addExact(result, value);
+        result = StrictMathWrapper.addExact(result, value);
       }
       return result;
     } catch (ArithmeticException failure) {
@@ -268,7 +269,7 @@ final class StateArchivePointReaderV5 implements StateArchivePointSource {
 
   private static long multiply(long left, long right) {
     try {
-      return Math.multiplyExact(left, right);
+      return StrictMathWrapper.multiplyExact(left, right);
     } catch (ArithmeticException failure) {
       throw invalid("size overflow", failure);
     }

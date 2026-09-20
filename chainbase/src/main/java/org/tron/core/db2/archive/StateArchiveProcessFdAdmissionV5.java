@@ -3,6 +3,7 @@ package org.tron.core.db2.archive;
 import com.sun.management.UnixOperatingSystemMXBean;
 import java.io.IOException;
 import java.lang.management.ManagementFactory;
+import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.db2.archive.StateArchiveDataHandlePoolV5.ProcessFdAdmission;
 
 /** Fail-closed process file-descriptor admission for the default-off V5 runtime. */
@@ -29,7 +30,7 @@ final class StateArchiveProcessFdAdmissionV5 implements ProcessFdAdmission {
     long limit = unix.getMaxFileDescriptorCount();
     final long required;
     try {
-      required = Math.addExact(Math.addExact(open, requiredNewDataHandles), reserveHandles);
+      required = StrictMathWrapper.addExact(StrictMathWrapper.addExact(open, requiredNewDataHandles), reserveHandles);
     } catch (ArithmeticException failure) {
       throw new IOException("Archive V5 process FD requirement overflow", failure);
     }

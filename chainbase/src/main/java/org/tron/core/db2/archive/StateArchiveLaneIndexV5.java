@@ -11,6 +11,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.Arrays;
 import java.util.Objects;
+import org.tron.common.math.StrictMathWrapper;
 
 /** One lane-wide append-only block boundary index for the State Archive V5 prototype. */
 final class StateArchiveLaneIndexV5 implements Closeable {
@@ -114,7 +115,7 @@ final class StateArchiveLaneIndexV5 implements Closeable {
     requireWritable();
     long expectedBlock;
     try {
-      expectedBlock = Math.addExact(header.firstBlockNumber, frameCount);
+      expectedBlock = StrictMathWrapper.addExact(header.firstBlockNumber, frameCount);
     } catch (ArithmeticException failure) {
       throw new IllegalStateException("State Archive V5 block number overflow", failure);
     }
@@ -131,7 +132,7 @@ final class StateArchiveLaneIndexV5 implements Closeable {
   synchronized FrameRange locate(long blockNumber) throws IOException {
     long ordinal;
     try {
-      ordinal = Math.subtractExact(blockNumber, header.firstBlockNumber);
+      ordinal = StrictMathWrapper.subtractExact(blockNumber, header.firstBlockNumber);
     } catch (ArithmeticException failure) {
       throw new IllegalArgumentException("State Archive V5 block ordinal overflow", failure);
     }
@@ -183,8 +184,8 @@ final class StateArchiveLaneIndexV5 implements Closeable {
   static long expectedLength(long frameCount) {
     requireNonNegative(frameCount, "frame count");
     try {
-      return Math.addExact(StateArchiveGethFormatV5.LANE_INDEX_HEADER_LENGTH,
-          Math.multiplyExact(Math.addExact(frameCount, 1),
+      return StrictMathWrapper.addExact(StateArchiveGethFormatV5.LANE_INDEX_HEADER_LENGTH,
+          StrictMathWrapper.multiplyExact(StrictMathWrapper.addExact(frameCount, 1),
               StateArchiveGethFormatV5.LANE_INDEX_ENTRY_LENGTH));
     } catch (ArithmeticException failure) {
       throw new IllegalArgumentException("State Archive V5 index length overflow", failure);
@@ -194,8 +195,8 @@ final class StateArchiveLaneIndexV5 implements Closeable {
   static long boundaryPosition(long ordinal) {
     requireNonNegative(ordinal, "boundary ordinal");
     try {
-      return Math.addExact(StateArchiveGethFormatV5.LANE_INDEX_HEADER_LENGTH,
-          Math.multiplyExact(ordinal, StateArchiveGethFormatV5.LANE_INDEX_ENTRY_LENGTH));
+      return StrictMathWrapper.addExact(StateArchiveGethFormatV5.LANE_INDEX_HEADER_LENGTH,
+          StrictMathWrapper.multiplyExact(ordinal, StateArchiveGethFormatV5.LANE_INDEX_ENTRY_LENGTH));
     } catch (ArithmeticException failure) {
       throw new IllegalArgumentException("State Archive V5 index position overflow", failure);
     }

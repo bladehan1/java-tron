@@ -18,6 +18,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Stream;
+import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.db2.archive.StateArchiveDataHandlePoolV5.ProcessFdAdmission;
 import org.tron.core.db2.archive.StateArchiveLaneIndexV5.Boundary;
 import org.tron.core.db2.archive.StateArchiveLaneIndexV5.FrameRange;
@@ -73,7 +74,7 @@ final class StateArchiveCommittedViewV5 implements Closeable {
     long last = admittedTail.getCommonBlockNumber();
     long frameCount;
     try {
-      frameCount = Math.addExact(Math.subtractExact(last, first), 1);
+      frameCount = StrictMathWrapper.addExact(StrictMathWrapper.subtractExact(last, first), 1);
     } catch (ArithmeticException failure) {
       throw new IOException("State Archive V5 committed range overflow", failure);
     }
@@ -124,7 +125,7 @@ final class StateArchiveCommittedViewV5 implements Closeable {
     long last = admittedTail.getCommonBlockNumber();
     long frameCount;
     try {
-      frameCount = Math.addExact(Math.subtractExact(last, first), 1);
+      frameCount = StrictMathWrapper.addExact(StrictMathWrapper.subtractExact(last, first), 1);
     } catch (ArithmeticException failure) {
       throw new IOException("State Archive V5 committed range overflow", failure);
     }
@@ -421,7 +422,7 @@ final class StateArchiveCommittedViewV5 implements Closeable {
     long result = 0;
     try {
       for (LaneTerminal terminal : terminals) {
-        result = Math.addExact(result, Math.addExact(terminal.getTerminalFileId(), 1));
+        result = StrictMathWrapper.addExact(result, StrictMathWrapper.addExact(terminal.getTerminalFileId(), 1));
       }
       return result;
     } catch (ArithmeticException failure) {

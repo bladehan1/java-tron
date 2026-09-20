@@ -31,6 +31,7 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
@@ -151,7 +152,7 @@ public class StateArchiveManagerStartupIntegrationTest {
       throws Exception {
     for (ServingIndexStage failureStage : ServingIndexStage.values()) {
       Path output = temporaryFolder.newFolder(
-          "serving-failure-" + failureStage.name().toLowerCase()).toPath();
+          "serving-failure-" + failureStage.name().toLowerCase(Locale.ROOT)).toPath();
       Path archive = output.resolve("state-archive");
       HistoryCommitMarker head = initializeRecoverableTail(archive, "ROCKSDB");
       SnapshotFixture fixture = snapshotFixture();
@@ -230,7 +231,8 @@ public class StateArchiveManagerStartupIntegrationTest {
   @Test
   public void managerBootstrapsFreshBaseAndContinuesNormalFlush() throws Exception {
     for (String engine : Arrays.asList("LEVELDB", "ROCKSDB")) {
-      Path output = temporaryFolder.newFolder("fresh-manager-" + engine.toLowerCase()).toPath();
+      Path output = temporaryFolder.newFolder(
+          "fresh-manager-" + engine.toLowerCase(Locale.ROOT)).toPath();
       Path archive = output.resolve("state-archive");
       BlockSnapshotMeta head = new BlockSnapshotMeta(6, 6, hash(6), hash(5), 6_000L);
       SnapshotFixture fixture = snapshotFixture();
@@ -264,7 +266,8 @@ public class StateArchiveManagerStartupIntegrationTest {
       assertEquals(target, manager.getStateArchiveRuntime().verifyNormalWriteFixedPoint());
       assertServingFixedPoint(archive, target, 6);
       try (PersistentServingKeyIndexGeneration serving = manager.getArchiveHistoryWriter()
-          .buildServingGeneration(output.resolve("serving-" + engine.toLowerCase()), "fresh")) {
+          .buildServingGeneration(output.resolve(
+              "serving-" + engine.toLowerCase(Locale.ROOT)), "fresh")) {
         assertEquals(6, serving.getIndexedFrom());
         assertEquals(7, serving.getIndexedThrough());
       }
@@ -632,7 +635,7 @@ public class StateArchiveManagerStartupIntegrationTest {
   public void allNativeExact27StoresReopenWithStableIdentityAndHistory() throws Exception {
     for (String engine : Arrays.asList("LEVELDB", "ROCKSDB")) {
       Path output = temporaryFolder.newFolder("all-native-exact27-"
-          + engine.toLowerCase()).toPath();
+          + engine.toLowerCase(Locale.ROOT)).toPath();
       withArchiveConfig(output, engine, true,
           () -> runAllNativeExact27Scenario(output, engine));
     }
@@ -895,7 +898,8 @@ public class StateArchiveManagerStartupIntegrationTest {
   @Test
   public void managerRunsTwoNormalFlushTargetsThroughExact27FixedPoint() throws Exception {
     for (String engine : Arrays.asList("LEVELDB", "ROCKSDB")) {
-      Path output = temporaryFolder.newFolder("manager-" + engine.toLowerCase()).toPath();
+      Path output = temporaryFolder.newFolder(
+          "manager-" + engine.toLowerCase(Locale.ROOT)).toPath();
       Path archive = output.resolve("state-archive");
       HistoryCommitMarker head = initializeRecoverableTail(archive, engine);
       SnapshotFixture fixture = snapshotFixture();
@@ -974,7 +978,8 @@ public class StateArchiveManagerStartupIntegrationTest {
   @Test
   public void managerRunsMultiTargetNormalFlushThroughExact27FixedPoint() throws Exception {
     for (String engine : Arrays.asList("LEVELDB", "ROCKSDB")) {
-      Path output = temporaryFolder.newFolder("multi-target-" + engine.toLowerCase()).toPath();
+      Path output = temporaryFolder.newFolder(
+          "multi-target-" + engine.toLowerCase(Locale.ROOT)).toPath();
       Path archive = output.resolve("state-archive");
       HistoryCommitMarker head = initializeRecoverableTail(archive, engine);
       SnapshotFixture fixture = snapshotFixture();
@@ -1093,7 +1098,8 @@ public class StateArchiveManagerStartupIntegrationTest {
   @Test
   public void newRuntimeDoesNotOpenLegacyParticipantEvidence() throws Exception {
     for (String engine : Arrays.asList("LEVELDB", "ROCKSDB")) {
-      Path output = temporaryFolder.newFolder("partial-" + engine.toLowerCase()).toPath();
+      Path output = temporaryFolder.newFolder(
+          "partial-" + engine.toLowerCase(Locale.ROOT)).toPath();
       Path archive = output.resolve("state-archive");
       HistoryCommitMarker head = initializeHistory(archive, 7);
       SnapshotManager snapshots = snapshotFixture().snapshots;

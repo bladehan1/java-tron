@@ -15,6 +15,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import org.bouncycastle.util.encoders.Hex;
 import org.iq80.leveldb.DBIterator;
@@ -80,7 +81,7 @@ public class PathNodeStoreEngineTest {
   @Test
   public void engineAdaptersPreserveRootPathBytesAcrossReopen() throws Exception {
     for (String engine : availableEngines()) {
-      File parent = temporaryFolder.newFolder("path-reopen-" + engine.toLowerCase());
+      File parent = temporaryFolder.newFolder("path-reopen-" + engine.toLowerCase(Locale.ROOT));
       byte[] rootPath = new byte[0];
       byte[] encodedNode = Hex.decode("c22080");
       EnginePathNodeStore first = open(engine, parent, "root");

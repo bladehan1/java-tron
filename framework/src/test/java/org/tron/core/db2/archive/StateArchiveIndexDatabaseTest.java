@@ -13,6 +13,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
+import java.util.Locale;
 import java.util.stream.Stream;
 import org.junit.Rule;
 import org.junit.Test;
@@ -28,7 +29,7 @@ public class StateArchiveIndexDatabaseTest {
   @Test
   public void supportsConfiguredEngineAndRejectsEngineDrift() throws Exception {
     for (Engine engine : Engine.values()) {
-      Path root = temporaryFolder.newFolder(engine.name().toLowerCase()).toPath();
+      Path root = temporaryFolder.newFolder(engine.name().toLowerCase(Locale.ROOT)).toPath();
       Path database = root.resolve("keys");
       StateArchiveIndexEngineManifest.openOrCreate(root, engine);
       assertEquals(12, Files.size(root.resolve(StateArchiveIndexEngineManifest.FILE)));

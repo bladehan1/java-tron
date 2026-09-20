@@ -1,6 +1,7 @@
 package org.tron.core.db2.archive;
 
 import java.util.concurrent.TimeUnit;
+import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.db2.archive.HistoricalQueryException.Reason;
 
 /** Cooperative cancellation shared by admission, state reads and every historical VM frame. */
@@ -36,7 +37,7 @@ public final class HistoricalQueryControl {
 
   public long remainingNanos() {
     checkActive();
-    return Math.max(1L, deadlineNanos - System.nanoTime());
+    return StrictMathWrapper.max(1L, deadlineNanos - System.nanoTime());
   }
 
   public void requireOwner() {

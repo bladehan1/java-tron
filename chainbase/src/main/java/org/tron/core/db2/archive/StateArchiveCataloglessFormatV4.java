@@ -5,6 +5,7 @@ import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Objects;
+import org.tron.common.math.StrictMathWrapper;
 
 /** Byte-exact primitives for the catalogless five-lane append-file v4 format. */
 final class StateArchiveCataloglessFormatV4 {
@@ -97,7 +98,7 @@ final class StateArchiveCataloglessFormatV4 {
           "file descriptor block range mismatch");
       long expectedCount;
       try {
-        expectedCount = Math.addExact(Math.subtractExact(endBlockNumber,
+        expectedCount = StrictMathWrapper.addExact(StrictMathWrapper.subtractExact(endBlockNumber,
             firstRecordBlockNumber), 1L);
       } catch (ArithmeticException e) {
         throw new IllegalArgumentException("file descriptor record count overflow", e);

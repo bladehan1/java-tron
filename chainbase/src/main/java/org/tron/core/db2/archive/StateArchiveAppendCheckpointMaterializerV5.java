@@ -10,6 +10,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.db2.archive.PersistentServingKeyIndexGeneration.ExactWriteFaultHook;
 import org.tron.core.db2.archive.StateArchiveCommittedViewV5.ReadObserver;
 import org.tron.core.db2.archive.StateArchiveDataHandlePoolV5.ChannelOpener;
@@ -427,7 +428,7 @@ public final class StateArchiveAppendCheckpointMaterializerV5
       throws IOException {
     long total;
     try {
-      total = Math.addExact(requiredDataHandles,
+      total = StrictMathWrapper.addExact(requiredDataHandles,
           StateArchiveServingSourceV5.MAX_REPLAY_DATA_HANDLES);
     } catch (ArithmeticException failure) {
       throw new IOException("Archive V5 runtime data handle requirement overflow", failure);

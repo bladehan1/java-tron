@@ -14,6 +14,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.db2.archive.StateArchiveCataloglessFormatV4.FileDescriptor;
 import org.tron.core.db2.archive.StateArchiveCataloglessMetadataV4.CommittedView;
 import org.tron.core.db2.archive.StateArchiveCataloglessMetadataV4.LaneView;
@@ -154,13 +155,13 @@ final class StateArchiveCataloglessWriterV4
   public synchronized long getHistoryStartBlock() {
     long first = Long.MAX_VALUE;
     for (LaneState state : lanes.values()) {
-      first = Math.min(first, state.firstBlock);
+      first = StrictMathWrapper.min(first, state.firstBlock);
     }
     if (publishedView != null) {
       for (int laneId : StateArchiveCataloglessFormatV4.laneIds()) {
         LaneView lane = publishedView.lane(laneId);
         if (!lane.getSealed().isEmpty()) {
-          first = Math.min(first, lane.getSealed().get(0).getFirstRecordBlockNumber());
+          first = StrictMathWrapper.min(first, lane.getSealed().get(0).getFirstRecordBlockNumber());
         }
       }
     }
@@ -186,7 +187,7 @@ final class StateArchiveCataloglessWriterV4
       List<byte[]> frames = new ArrayList<>();
       for (int laneId : StateArchiveCataloglessFormatV4.laneIds()) {
         byte[] frame = readFrame(view, laneId, block);
-        encodedBytes = Math.addExact(encodedBytes, frame.length);
+        encodedBytes = StrictMathWrapper.addExact(encodedBytes, frame.length);
         if (encodedBytes > maxEncodedBytes) {
           throw new StateArchiveServingSource.ReadBudgetException();
         }
@@ -354,7 +355,7 @@ final class StateArchiveCataloglessWriterV4
       if (lane.getEntryCount() > 0) {
         state.changedFrameCount++;
       }
-      state.entryCount = Math.addExact(state.entryCount, lane.getEntryCount());
+      state.entryCount = StrictMathWrapper.addExact(state.entryCount, lane.getEntryCount());
     }
   }
 
@@ -391,7 +392,7 @@ final class StateArchiveCataloglessWriterV4
       if (value < 0) {
         throw new IOException("Archive V4 frame entry count is invalid");
       }
-      entries = Math.addExact(entries, value);
+      entries = StrictMathWrapper.addExact(entries, value);
       if (value > 0) {
         changed++;
       }
@@ -473,7 +474,7 @@ final class StateArchiveCataloglessWriterV4
   private static BlockIndexEntry readIndexEntry(FileChannel index, long ordinal)
       throws IOException {
     long offset = StateArchiveFileFormatV3.BLOCK_INDEX_HEADER_LENGTH
-        + Math.multiplyExact(ordinal, StateArchiveFileFormatV3.BLOCK_INDEX_ENTRY_LENGTH);
+        + StrictMathWrapper.multiplyExact(ordinal, StateArchiveFileFormatV3.BLOCK_INDEX_ENTRY_LENGTH);
     return StateArchiveSegmentFormatV3.decodeBlockIndexEntry(readFully(index, offset,
         StateArchiveFileFormatV3.BLOCK_INDEX_ENTRY_LENGTH));
   }

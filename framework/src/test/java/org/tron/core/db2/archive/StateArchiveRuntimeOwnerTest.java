@@ -18,6 +18,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 import java.util.OptionalLong;
 import org.junit.Rule;
 import org.junit.Test;
@@ -36,7 +37,8 @@ public class StateArchiveRuntimeOwnerTest {
   @Test
   public void freshBootstrapPublishesRecoverableExact27FixedPoint() throws Exception {
     for (String engine : Arrays.asList("LEVELDB", "ROCKSDB")) {
-      Path parent = temporaryFolder.newFolder("bootstrap-" + engine.toLowerCase()).toPath();
+      Path parent = temporaryFolder.newFolder(
+          "bootstrap-" + engine.toLowerCase(Locale.ROOT)).toPath();
       Path archive = parent.resolve("state-archive");
       BlockSnapshotMeta head = BlockSnapshotMeta.forBlock(123, hash(123), hash(122), 456_000L);
       SnapshotManager snapshots = new SnapshotManager("");

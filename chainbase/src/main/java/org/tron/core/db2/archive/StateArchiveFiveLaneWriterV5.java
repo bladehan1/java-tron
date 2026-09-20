@@ -15,6 +15,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.db2.archive.StateArchiveBlockFrameCodecV5.EncodedFrame;
 import org.tron.core.db2.archive.StateArchiveCommittedViewV5.ReadObserver;
 import org.tron.core.db2.archive.StateArchiveTailV5.LaneTerminal;
@@ -120,8 +121,8 @@ final class StateArchiveFiveLaneWriterV5 implements Closeable {
 
   private void initializeRecovered(StateArchiveTailV5 tail, byte[] baselineHistoryDigest,
       ReadObserver observer) throws IOException {
-    long frameCount = Math.addExact(
-        Math.subtractExact(tail.getCommonBlockNumber(), firstBlockNumber), 1);
+    long frameCount = StrictMathWrapper.addExact(
+        StrictMathWrapper.subtractExact(tail.getCommonBlockNumber(), firstBlockNumber), 1);
     List<LaneState> opened = new ArrayList<>();
     try {
       for (LaneTerminal terminal : tail.getLanes()) {
@@ -228,8 +229,8 @@ final class StateArchiveFiveLaneWriterV5 implements Closeable {
         || !Arrays.equals(appendHead.getBlockHash(), admitted.getLastBlock().getBlockHash())) {
       throw new IllegalArgumentException("State Archive V5 append head differs from target");
     }
-    long expectedFrameCount = Math.addExact(
-        Math.subtractExact(appendHead.getBlockNumber(), firstBlockNumber), 1);
+    long expectedFrameCount = StrictMathWrapper.addExact(
+        StrictMathWrapper.subtractExact(appendHead.getBlockNumber(), firstBlockNumber), 1);
     try {
       for (LaneState state : lanes.values()) {
         requireTerminal(state, expectedFrameCount);
@@ -331,7 +332,7 @@ final class StateArchiveFiveLaneWriterV5 implements Closeable {
 
   private void appendFrame(LaneState state, EncodedFrame frame) throws IOException {
     byte[] bytes = frame.getBytes();
-    long endOffset = Math.addExact(state.dataEndOffset, bytes.length);
+    long endOffset = StrictMathWrapper.addExact(state.dataEndOffset, bytes.length);
     if (endOffset > 0xffffffffL) {
       throw new IOException("State Archive V5 data offset exceeds u32");
     }

@@ -13,6 +13,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
+import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.db2.archive.BlockReverseDiff.DbGroup;
 import org.tron.core.db2.archive.BlockReverseDiff.Entry;
 
@@ -357,7 +358,7 @@ final class StateArchiveBlockFrameCodecV5 {
 
   private static long checkedAdd(long left, long right, String name) {
     try {
-      return Math.addExact(left, right);
+      return StrictMathWrapper.addExact(left, right);
     } catch (ArithmeticException failure) {
       throw new IllegalArgumentException("State Archive V5 " + name + " overflow", failure);
     }
@@ -374,7 +375,7 @@ final class StateArchiveBlockFrameCodecV5 {
 
   private static long checkedMultiply(long left, long right, String name) {
     try {
-      return Math.multiplyExact(left, right);
+      return StrictMathWrapper.multiplyExact(left, right);
     } catch (ArithmeticException failure) {
       throw new IllegalArgumentException("State Archive V5 " + name + " overflow", failure);
     }

@@ -4,6 +4,7 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.util.Objects;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
+import org.tron.common.math.StrictMathWrapper;
 
 /** Explicit lifecycle and read gate for the next-format common-checkpoint runtime. */
 public final class CommonCheckpointRuntimeOwner implements AutoCloseable {
@@ -107,7 +108,7 @@ public final class CommonCheckpointRuntimeOwner implements AutoCloseable {
       gate.readLock().lock();
     } else {
       try {
-        while (!gate.readLock().tryLock(Math.min(control.remainingNanos(),
+        while (!gate.readLock().tryLock(StrictMathWrapper.min(control.remainingNanos(),
             java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(50)),
             java.util.concurrent.TimeUnit.NANOSECONDS)) {
           control.checkActive();

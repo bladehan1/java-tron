@@ -7,6 +7,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
+import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.db2.core.CommonCheckpointTarget;
 
 /** Exact 672-byte publication-ready tail for one Common-bound V5 archive prefix. */
@@ -153,7 +154,7 @@ final class StateArchiveTailV5 {
     require(lanes.size() == laneIds.length, "tail lane count");
     long frameCount;
     try {
-      frameCount = Math.addExact(Math.subtractExact(commonBlockNumber, firstBlockNumber), 1);
+      frameCount = StrictMathWrapper.addExact(StrictMathWrapper.subtractExact(commonBlockNumber, firstBlockNumber), 1);
     } catch (ArithmeticException failure) {
       throw invalid("tail block range", failure);
     }

@@ -9,6 +9,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.db2.archive.StateArchiveCataloglessFormatV4.FileDescriptor;
 import org.tron.core.db2.archive.StateArchiveTailV4.LaneTerminal;
 
@@ -83,7 +84,7 @@ final class StateArchiveCataloglessMetadataV4 implements Closeable {
   private static void validateTerminal(LaneTerminal terminal,
       List<FileDescriptor> sealed) {
     int expectedCount = terminal.getFlags() == StateArchiveTailV4.TERMINAL_SEALED
-        ? Math.toIntExact(terminal.getFileId() + 1) : Math.toIntExact(terminal.getFileId());
+        ? StrictMathWrapper.toIntExact(terminal.getFileId() + 1) : StrictMathWrapper.toIntExact(terminal.getFileId());
     require(sealed.size() == expectedCount,
         "Archive terminal differs from files.meta committed prefix");
     if (terminal.getFlags() == StateArchiveTailV4.TERMINAL_SEALED) {
