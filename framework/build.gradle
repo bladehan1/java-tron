@@ -116,6 +116,7 @@ def configureTestTask = { Task t ->
     }
     t.testLogging {
         exceptionFormat = 'full'
+        events 'started', 'passed', 'failed', 'skipped'
     }
     if (isWindows()) {
         t.exclude '**/ShieldedTransferActuatorTest.class'
