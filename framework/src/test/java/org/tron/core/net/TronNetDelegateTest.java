@@ -105,7 +105,7 @@ public class TronNetDelegateTest {
     }
 
     Assert.assertTrue(tronNetDelegate.isHitDown());
-    Mockito.verify(dbManager, Mockito.never()).pushBlock(Mockito.any());
+    Mockito.verify(dbManager, Mockito.never()).pushBlock(Mockito.any(), Mockito.anyBoolean());
   }
 
   /**
@@ -131,7 +131,7 @@ public class TronNetDelegateTest {
     tronNetDelegate.pushVerifiedBlock(block);
 
     Assert.assertTrue(block.generatedByMyself);
-    Mockito.verify(dbManager, Mockito.times(1)).pushBlock(Mockito.any());
+    Mockito.verify(dbManager, Mockito.times(1)).pushBlock(Mockito.any(), Mockito.eq(true));
   }
 
   private static void setField(Object obj, String name, Object value) throws Exception {
