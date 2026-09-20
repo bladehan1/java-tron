@@ -55,8 +55,8 @@ public class StateArchiveFiveLaneRecoveryIntentV3Test {
     assertEquals(
         "524944330003000000000020030000a000050030000006500001000100010001"
             + ":e19713bb16c631eafb76b4fdd82101440de0e842e6c70e369f289934402e364b"
-            + ":96b41889b66df5ab9c3e3db807b05725c3ac870fed53af7dfdf0a913cc26aed0"
-            + ":c54508a804866bc302df10211ca9cf2859a22e13d000067f70ca46df7cdef801",
+            + ":c5464d3c1c3b2ee2d5622dabd83169db2140ac05d7fe995866bd294524b8f6a4"
+            + ":6399bb2ce2bdf435c2fd5b080c2eaade83e4fdd1ba00970495da96b41e186463",
         Hex.toHexString(StateArchiveFileFormatV3.recoveryIntentLayoutDescriptor()) + ":"
             + Hex.toHexString(StateArchiveFileFormatV3.recoveryIntentLayoutDigest()) + ":"
             + Hex.toHexString(StateArchiveFileFormatV3.compositeFormatDigest()) + ":"

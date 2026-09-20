@@ -21,12 +21,12 @@ public class StateArchiveSegmentFormatV3Test {
   @Test
   public void freezesSegmentLayoutAndCompositeFormatIdentity() {
     assertEquals(
-        "534c44330003000000000040000202000140008000200100003000c00000000080000000"
+        "534c44330003000000000040000202000140008000200100003000c00000000077359400"
             + "00000000040000000000040000010001000000000000000000000000",
         Hex.toHexString(StateArchiveFileFormatV3.segmentLayoutDescriptor()));
-    assertEquals("f204bf8975ba5956d26de9ffa213882130e587c1d0eaa9ee74f8b4d49d4a7cee",
+    assertEquals("d0d9c2111ddb5a30b2a97632e9c776da7eadbf81c1d08ec56ddaacab7a3ccddf",
         Hex.toHexString(StateArchiveFileFormatV3.segmentLayoutDigest()));
-    assertEquals("96b41889b66df5ab9c3e3db807b05725c3ac870fed53af7dfdf0a913cc26aed0",
+    assertEquals("c5464d3c1c3b2ee2d5622dabd83169db2140ac05d7fe995866bd294524b8f6a4",
         Hex.toHexString(StateArchiveFileFormatV3.compositeFormatDigest()));
   }
 
@@ -163,8 +163,8 @@ public class StateArchiveSegmentFormatV3Test {
     byte[] chain = StateArchiveSegmentFormatV3.segmentChainDigest(0, 0,
         hash(6), decoded.getSegmentContentDigest(), decoded.getEncodedFrameDigest());
     assertEquals(
-        "88d57d51cdc45cfffd4d1cadd99c07e809af3de05670021f39ce30e9f8d5e825"
-            + ":eb2d1d2d179d94e7428b0e863ae05c5203b5c16e9829907a57a6dfd4ac5fa51d"
+        "3147cb009a99874675be38717a31e10655fe0be89fe5278bcb2503caa9385d2a"
+            + ":8f19c3370ce7750bcfad451d7d14de70cef356f1dd84a1ffda8c826cf2f70ae8"
             + ":8a34caee97c24ec70adf60393672986423070d506935d9593e000594310a6798"
             + ":a33fecda61e5cf29483fe4df26defa471ce3e5e6e0905c9ebfebeffe8932e0e8",
         Hex.toHexString(StateArchiveSegmentFormatV3.laneBaselineDigest(0)) + ":"
