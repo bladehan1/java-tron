@@ -761,9 +761,9 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
     private final Path directory;
     private final Engine engine;
     private final StateArchiveIndexDatabase.Writer writer;
-    private Descriptor descriptor;
-    private boolean failed;
-    private boolean closed;
+    private volatile Descriptor descriptor;
+    private volatile boolean failed;
+    private volatile boolean closed;
 
     MutableIndex(Path directory, Engine engine) throws IOException {
       this.directory = directory;
@@ -944,7 +944,14 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
       }
     }
 
-    synchronized PersistentServingKeyIndexGeneration pin() throws IOException {
+    /**
+     * Lock-free lease capture (P04 pattern extended to the serving-index build side): pages and
+     * the descriptor commit as one atomic sync batch, so a request-owned snapshot reader never
+     * observes a torn state, and pinning never waits behind {@link #append}'s write I/O.
+     * Only volatile fields and the request-owned snapshot are touched; a concurrent close()
+     * may still fail this call closed, which callers must treat as unavailable.
+     */
+    PersistentServingKeyIndexGeneration pin() throws IOException {
       requireHealthy();
       StateArchiveIndexDatabase.Reader reader =
           StateArchiveIndexDatabase.openReader(directory.resolve(DATABASE), engine);

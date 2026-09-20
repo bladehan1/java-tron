@@ -28,6 +28,7 @@ public final class StateArchiveServingIndexBuildCoordinatorV3 implements AutoClo
   private long syncSession;
   private Mode mode = Mode.RECOVERING;
   private boolean closed;
+  private boolean flushInProgress;
 
   public StateArchiveServingIndexBuildCoordinatorV3(Path archiveRoot, Engine engine,
       int bulkStartBlocks) throws IOException {
@@ -49,92 +50,111 @@ public final class StateArchiveServingIndexBuildCoordinatorV3 implements AutoClo
   }
 
   /** Accepts only a Common-published contiguous range; bulk flushes at the configured threshold. */
-  public synchronized BuildProgress offerCommittedRange(List<BlockReverseDiff> diffs,
+  public BuildProgress offerCommittedRange(List<BlockReverseDiff> diffs,
       CommonCheckpointTarget target) throws IOException {
-    requireOpen();
-    if (mode != Mode.BULK_CATCH_UP) {
-      throw new IllegalStateException("Serving bulk input is closed after handoff");
+    synchronized (this) {
+      requireOpen();
+      if (mode != Mode.BULK_CATCH_UP) {
+        throw new IllegalStateException("Serving bulk input is closed after handoff");
+      }
+      admit(diffs, target);
+      if (pending.size() < bulkStartBlocks) {
+        return progress();
+      }
     }
-    admit(diffs, target);
-    if (pending.size() >= bulkStartBlocks) {
-      flushPending();
+    flushPending();
+    synchronized (this) {
+      requireOpen();
+      return progress();
     }
-    return progress();
   }
 
-  synchronized void recoverCommittedRange(List<BlockReverseDiff> supplied,
+  void recoverCommittedRange(List<BlockReverseDiff> supplied,
       CommonCheckpointTarget publishedHead, boolean finalRange) throws IOException {
-    requireOpen();
-    if (mode != Mode.BULK_CATCH_UP) {
-      throw new IllegalStateException("Serving recovery requires bulk mode");
-    }
-    List<BlockReverseDiff> diffs = new ArrayList<>(Objects.requireNonNull(supplied, "diffs"));
-    if (diffs.isEmpty()) {
+    synchronized (this) {
+      requireOpen();
+      if (mode != Mode.BULK_CATCH_UP) {
+        throw new IllegalStateException("Serving recovery requires bulk mode");
+      }
+      List<BlockReverseDiff> diffs = new ArrayList<>(Objects.requireNonNull(supplied, "diffs"));
+      if (diffs.isEmpty()) {
+        if (finalRange) {
+          CommonCheckpointTarget target = Objects.requireNonNull(publishedHead, "publishedHead");
+          if (indexedThrough != target.getLastBlock().getBlockNumber()
+              || !Arrays.equals(indexedHash, target.getLastBlock().getBlockHash())) {
+            throw new IOException("Serving recovery zero-action boundary mismatch");
+          }
+          committedHead = target;
+        }
+        return;
+      }
+      BlockSnapshotMeta previous = pending.isEmpty() ? null
+          : pending.get(pending.size() - 1).getMeta();
+      if (previous == null && indexedThrough >= 0) {
+        BlockSnapshotMeta first = diffs.get(0).getMeta();
+        if (first.getBlockNumber() != indexedThrough + 1
+            || !Arrays.equals(first.getParentHash(), indexedHash)) {
+          throw new IOException("Serving recovery suffix does not extend durable I");
+        }
+      }
+      for (BlockReverseDiff diff : diffs) {
+        if (previous != null && (diff.getMeta().getBlockNumber()
+            != previous.getBlockNumber() + 1
+            || !Arrays.equals(diff.getMeta().getParentHash(), previous.getBlockHash()))) {
+          throw new IOException("Serving recovery suffix has a gap");
+        }
+        previous = diff.getMeta();
+      }
+      pending.addAll(diffs);
+      // Intermediate batches use the exact same final-block digest computed by the plan.
+      latestSourceIdentity = null;
       if (finalRange) {
         CommonCheckpointTarget target = Objects.requireNonNull(publishedHead, "publishedHead");
-        if (indexedThrough != target.getLastBlock().getBlockNumber()
-            || !Arrays.equals(indexedHash, target.getLastBlock().getBlockHash())) {
-          throw new IOException("Serving recovery zero-action boundary mismatch");
+        if (!previous.equals(target.getLastBlock())) {
+          throw new IOException("Serving recovery suffix differs from published W");
         }
         committedHead = target;
+        latestSourceIdentity = target.getPayloadDigest();
       }
-      return;
-    }
-    BlockSnapshotMeta previous = pending.isEmpty() ? null
-        : pending.get(pending.size() - 1).getMeta();
-    if (previous == null && indexedThrough >= 0) {
-      BlockSnapshotMeta first = diffs.get(0).getMeta();
-      if (first.getBlockNumber() != indexedThrough + 1
-          || !Arrays.equals(first.getParentHash(), indexedHash)) {
-        throw new IOException("Serving recovery suffix does not extend durable I");
+      if (pending.size() < bulkStartBlocks && !finalRange) {
+        return;
       }
     }
-    for (BlockReverseDiff diff : diffs) {
-      if (previous != null && (diff.getMeta().getBlockNumber()
-          != previous.getBlockNumber() + 1
-          || !Arrays.equals(diff.getMeta().getParentHash(), previous.getBlockHash()))) {
-        throw new IOException("Serving recovery suffix has a gap");
-      }
-      previous = diff.getMeta();
-    }
-    pending.addAll(diffs);
-    // Intermediate batches use the exact same final-block digest computed by the plan.
-    latestSourceIdentity = null;
-    if (finalRange) {
-      CommonCheckpointTarget target = Objects.requireNonNull(publishedHead, "publishedHead");
-      if (!previous.equals(target.getLastBlock())) {
-        throw new IOException("Serving recovery suffix differs from published W");
-      }
-      committedHead = target;
-      latestSourceIdentity = target.getPayloadDigest();
-    }
-    if (pending.size() >= bulkStartBlocks || finalRange) {
-      flushPending();
-    }
+    flushPending();
   }
 
   /** Drains through the exact Common boundary and returns a background-owner session handle. */
-  public synchronized LiveServingIndexer completeInitialSync(CommonCheckpointTarget boundary)
+  public LiveServingIndexer completeInitialSync(CommonCheckpointTarget boundary)
       throws IOException {
-    requireOpen();
-    if (mode != Mode.BULK_CATCH_UP || committedHead == null
-        || !committedHead.equals(Objects.requireNonNull(boundary, "boundary"))) {
-      throw new IllegalArgumentException("Serving handoff boundary is not the committed head");
+    synchronized (this) {
+      requireOpen();
+      if (mode != Mode.BULK_CATCH_UP || committedHead == null
+          || !committedHead.equals(Objects.requireNonNull(boundary, "boundary"))) {
+        throw new IllegalArgumentException("Serving handoff boundary is not the committed head");
+      }
+      mode = Mode.HANDOFF_DRAINING;
     }
-    mode = Mode.HANDOFF_DRAINING;
     try {
       flushPending();
+    } catch (IOException | RuntimeException failure) {
+      synchronized (this) {
+        if (!closed) {
+          mode = Mode.CATCH_UP_REQUIRED;
+        }
+      }
+      throw failure;
+    }
+    synchronized (this) {
+      requireOpen();
       if (indexedThrough != boundary.getLastBlock().getBlockNumber()
           || !Arrays.equals(indexedHash, boundary.getLastBlock().getBlockHash())) {
+        mode = Mode.CATCH_UP_REQUIRED;
         throw new IOException("Serving handoff did not reach the exact Common boundary");
       }
       mode = Mode.LIVE_BACKGROUND;
       syncSession++;
       return new LiveServingIndexer(syncSession, buildSequence,
           index.identity());
-    } catch (IOException | RuntimeException failure) {
-      mode = Mode.CATCH_UP_REQUIRED;
-      throw failure;
     }
   }
 
@@ -143,8 +163,7 @@ public final class StateArchiveServingIndexBuildCoordinatorV3 implements AutoClo
     return progress();
   }
 
-  synchronized void flushRecoveryBatch() throws IOException {
-    requireOpen();
+  void flushRecoveryBatch() throws IOException {
     flushPending();
   }
 
@@ -190,35 +209,111 @@ public final class StateArchiveServingIndexBuildCoordinatorV3 implements AutoClo
     latestSourceIdentity = admittedTarget.getPayloadDigest();
   }
 
+  /**
+   * P04 locking pattern extended to the build side: the monitor only swaps the pending range
+   * into an in-flight capture and publishes the immutable result; plan/append I/O runs without
+   * this monitor, so {@link #pinIndexed} keeps its short-lock capture during live flushes.
+   * Only one flush may be in flight (single builder thread); a concurrent close() fails the
+   * in-flight flush closed instead of blocking shutdown.
+   */
   private void flushPending() throws IOException {
-    if (pending.isEmpty()) {
+    FlushCapture capture;
+    synchronized (this) {
+      requireOpen();
+      capture = captureFlush();
+    }
+    if (capture == null) {
       return;
     }
+    ServingIndexIncrementalPlan plan;
+    try {
+      plan = runFlush(capture);
+    } catch (IOException | RuntimeException failure) {
+      synchronized (this) {
+        abortFlush(capture);
+      }
+      throw failure;
+    }
+    synchronized (this) {
+      requireOpen();
+      commitFlush(capture, plan);
+    }
+  }
+
+  private FlushCapture captureFlush() {
+    if (pending.isEmpty()) {
+      return null;
+    }
+    if (flushInProgress) {
+      throw new IllegalStateException("Serving flush already in progress");
+    }
+    flushInProgress = true;
     long base = indexedThrough >= 0 ? indexedThrough
         : pending.get(0).getMeta().getBlockNumber() - 1;
     byte[] baseHash = indexedHash == null ? pending.get(0).getMeta().getParentHash() : indexedHash;
-    long through = pending.get(pending.size() - 1).getMeta().getBlockNumber();
-    try (ServingIndexTiming timing = new ServingIndexTiming(mode.name(), base, through)) {
+    FlushCapture capture = new FlushCapture(base, baseHash, latestSourceIdentity, buildSequence,
+        new ArrayList<>(pending), mode.name());
+    pending.clear();
+    return capture;
+  }
+
+  private ServingIndexIncrementalPlan runFlush(FlushCapture capture) throws IOException {
+    long through = capture.diffs.get(capture.diffs.size() - 1).getMeta().getBlockNumber();
+    try (ServingIndexTiming timing = new ServingIndexTiming(capture.modeName, capture.base,
+        through)) {
       long planStarted = System.nanoTime();
       ServingIndexIncrementalPlan plan;
       try {
-        plan = ServingIndexIncrementalPlan.planCommittedDiffs(base, baseHash, pending);
+        plan = ServingIndexIncrementalPlan.planCommittedDiffs(capture.base, capture.baseHash,
+            capture.diffs);
       } finally {
         ServingIndexTiming.record(ServingIndexTiming.Stage.PLAN, planStarted);
       }
       List<byte[]> steps = plan.getSourceStepDigests();
-      byte[] sourceIdentity = latestSourceIdentity == null
-          ? steps.get(steps.size() - 1) : latestSourceIdentity;
-      String generationId = generationId(plan.getIndexedThrough(), plan.getHeadHash());
+      byte[] sourceIdentity = capture.sourceIdentity == null
+          ? steps.get(steps.size() - 1) : capture.sourceIdentity;
+      String generationId = generationId(plan.getIndexedThrough(), plan.getHeadHash(),
+          capture.sequence);
       index.append(generationId, plan, sourceIdentity, () -> { }, () -> { });
-      indexedThrough = plan.getIndexedThrough();
-      indexedHash = plan.getHeadHash();
-      buildSequence++;
-      pending.clear();
       timing.succeeded();
-    } catch (IOException | RuntimeException failure) {
+      return plan;
+    }
+  }
+
+  private void commitFlush(FlushCapture capture, ServingIndexIncrementalPlan plan) {
+    if (!flushInProgress || buildSequence != capture.sequence) {
+      throw new IllegalStateException("Serving flush commit lost its in-flight identity");
+    }
+    indexedThrough = plan.getIndexedThrough();
+    indexedHash = plan.getHeadHash();
+    buildSequence++;
+    flushInProgress = false;
+  }
+
+  private void abortFlush(FlushCapture capture) {
+    pending.addAll(0, capture.diffs);
+    flushInProgress = false;
+    if (!closed) {
       mode = Mode.CATCH_UP_REQUIRED;
-      throw failure;
+    }
+  }
+
+  private static final class FlushCapture {
+    private final long base;
+    private final byte[] baseHash;
+    private final byte[] sourceIdentity;
+    private final long sequence;
+    private final List<BlockReverseDiff> diffs;
+    private final String modeName;
+
+    private FlushCapture(long base, byte[] baseHash, byte[] sourceIdentity, long sequence,
+        List<BlockReverseDiff> diffs, String modeName) {
+      this.base = base;
+      this.baseHash = baseHash;
+      this.sourceIdentity = sourceIdentity;
+      this.sequence = sequence;
+      this.diffs = diffs;
+      this.modeName = modeName;
     }
   }
 
@@ -264,9 +359,9 @@ public final class StateArchiveServingIndexBuildCoordinatorV3 implements AutoClo
     return index.archiveTailV5(target);
   }
 
-  private String generationId(long blockNumber, byte[] hash) {
+  private String generationId(long blockNumber, byte[] hash, long sequence) {
     return String.format("append-v3-%020d-%s-%08d", blockNumber,
-        Hex.toHexString(Arrays.copyOf(hash, 6)), buildSequence + 1);
+        Hex.toHexString(Arrays.copyOf(hash, 6)), sequence + 1);
   }
 
   private BuildProgress progress() {
@@ -362,23 +457,33 @@ public final class StateArchiveServingIndexBuildCoordinatorV3 implements AutoClo
             || sequence != buildSequence || !generation.equals(index.identity())) {
           throw new IllegalStateException("Serving live handle is stale");
         }
-        List<BlockReverseDiff> admitted = new ArrayList<>(Objects.requireNonNull(diffs, "diffs"));
-        boolean rangeAccepted = false;
         try {
-          admit(admitted, target);
-          rangeAccepted = true;
-          flushPending();
-          sequence = buildSequence;
-          generation = index.identity();
-          return progress();
-        } catch (IOException | RuntimeException failure) {
-          if (rangeAccepted) {
-            pending.clear();
-          }
+          admit(new ArrayList<>(Objects.requireNonNull(diffs, "diffs")), target);
+        } catch (RuntimeException failure) {
           valid = false;
-          mode = Mode.CATCH_UP_REQUIRED;
+          if (!closed) {
+            mode = Mode.CATCH_UP_REQUIRED;
+          }
           throw failure;
         }
+      }
+      try {
+        flushPending();
+      } catch (IOException | RuntimeException failure) {
+        synchronized (StateArchiveServingIndexBuildCoordinatorV3.this) {
+          pending.clear();
+          valid = false;
+          if (!closed) {
+            mode = Mode.CATCH_UP_REQUIRED;
+          }
+        }
+        throw failure;
+      }
+      synchronized (StateArchiveServingIndexBuildCoordinatorV3.this) {
+        requireOpen();
+        sequence = buildSequence;
+        generation = index.identity();
+        return progress();
       }
     }
   }
