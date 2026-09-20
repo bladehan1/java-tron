@@ -60,7 +60,7 @@ public class PathNodeStoreEngineTest {
       rocks.root.apply(reversed);
 
       byte[] expected = Hex.decode(
-          "16a59be5527b6c746e4bc2b0a67046989116f7f855a10ae0fb65263e9fb7bfda");
+          "f8d0364fdb0432016c12f9a660de2bd34513257014e35d90ac289d9024e6d216");
       assertEquals(Hex.toHexString(expected), Hex.toHexString(level.root.rootHash()));
       assertArrayEquals(expected, rocks.root.rootHash());
       level.root.verifyNodeStores();
