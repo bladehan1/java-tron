@@ -69,7 +69,8 @@ public class StateArchiveIndexDatabaseTest {
         StandardCharsets.US_ASCII);
     assertTrue(nativeOptions.contains("write_buffer_size=67108864"));
     assertTrue(nativeOptions.contains("block_size=4096"));
-    assertTrue(nativeOptions.contains("filter_policy=rocksdb.BuiltinBloomFilter"));
+    assertTrue(nativeOptions, nativeOptions.contains("filter_policy=rocksdb.BuiltinBloomFilter")
+        || nativeOptions.contains("filter_policy=bloomfilter"));
   }
 
   @Test
