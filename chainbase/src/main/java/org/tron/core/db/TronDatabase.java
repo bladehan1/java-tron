@@ -64,6 +64,13 @@ public abstract class TronDatabase<T> implements ITronChainBase<T> {
     this.dbSource.updateByBatch(rows, writeOptions);
   }
 
+  /** Writes one checkpoint batch with sync enabled regardless of the ordinary DB setting. */
+  public void updateByBatchSynced(Map<byte[], byte[]> rows) {
+    try (WriteOptionsWrapper synced = WriteOptionsWrapper.getInstance().sync(true)) {
+      this.dbSource.updateByBatch(rows, synced);
+    }
+  }
+
   /**
    * reset the database.
    */

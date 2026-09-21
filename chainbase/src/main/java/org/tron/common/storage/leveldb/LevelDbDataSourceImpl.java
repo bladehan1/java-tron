@@ -18,8 +18,10 @@ package org.tron.common.storage.leveldb;
 import static org.fusesource.leveldbjni.JniDBFactory.factory;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
 import com.google.common.primitives.Bytes;
+import com.google.common.primitives.UnsignedBytes;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -37,6 +39,7 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.concurrent.locks.StampedLock;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
@@ -46,10 +49,12 @@ import org.iq80.leveldb.DB;
 import org.iq80.leveldb.DBIterator;
 import org.iq80.leveldb.Options;
 import org.iq80.leveldb.ReadOptions;
+import org.iq80.leveldb.Snapshot;
 import org.iq80.leveldb.WriteBatch;
 import org.iq80.leveldb.WriteOptions;
 import org.tron.common.es.ExecutorServiceManager;
 import org.tron.common.parameter.CommonParameter;
+import org.tron.common.storage.EngineSourceIdentityFile;
 import org.tron.common.storage.WriteOptionsWrapper;
 import org.tron.common.storage.metric.DbStat;
 import org.tron.common.utils.FileUtil;
@@ -77,6 +82,8 @@ public class LevelDbDataSourceImpl extends DbStat implements DbSourceInter<byte[
   private Options options;
   private WriteOptions writeOptions;
   private ReadWriteLock resetDbLock = new ReentrantReadWriteLock();
+  private final StampedLock snapshotLifecycleLock = new StampedLock();
+  private volatile String snapshotSourceIdentity;
 
 
   /**
@@ -141,6 +148,8 @@ public class LevelDbDataSourceImpl extends DbStat implements DbSourceInter<byte[
     try {
       DbSourceInter.checkOrInitEngine(getEngine(), dbPath.toString(),
           TronError.ErrCode.LEVELDB_INIT);
+      snapshotSourceIdentity = EngineSourceIdentityFile.loadOrCreate(dbPath, "LEVELDB",
+          dataBaseName);
       database = factory.open(dbPath.toFile(), dbOptions);
       if (!this.getDBName().startsWith("checkpoint")) {
         logger
@@ -189,13 +198,18 @@ public class LevelDbDataSourceImpl extends DbStat implements DbSourceInter<byte[
    * reset database.
    */
   public void resetDb() {
-    resetDbLock.writeLock().lock();
+    long lifecycleStamp = snapshotLifecycleLock.writeLock();
     try {
-      closeDB();
-      FileUtil.recursiveDelete(getDbPath().toString());
-      initDB();
+      resetDbLock.writeLock().lock();
+      try {
+        closeDbUnderLifecycleLock();
+        FileUtil.recursiveDelete(getDbPath().toString());
+        initDB();
+      } finally {
+        resetDbLock.writeLock().unlock();
+      }
     } finally {
-      resetDbLock.writeLock().unlock();
+      snapshotLifecycleLock.unlockWrite(lifecycleStamp);
     }
   }
 
@@ -450,7 +464,20 @@ public class LevelDbDataSourceImpl extends DbStat implements DbSourceInter<byte[
 
   @Override
   public void closeDB() {
-    resetDbLock.writeLock().lock();
+    long lifecycleStamp = snapshotLifecycleLock.writeLock();
+    try {
+      resetDbLock.writeLock().lock();
+      try {
+        closeDbUnderLifecycleLock();
+      } finally {
+        resetDbLock.writeLock().unlock();
+      }
+    } finally {
+      snapshotLifecycleLock.unlockWrite(lifecycleStamp);
+    }
+  }
+
+  private void closeDbUnderLifecycleLock() {
     try {
       if (!isAlive()) {
         return;
@@ -459,8 +486,117 @@ public class LevelDbDataSourceImpl extends DbStat implements DbSourceInter<byte[
       alive = false;
     } catch (IOException e) {
       logger.error("Failed to find the dbStore file on the closeDB: {}.", dataBaseName, e);
+    }
+  }
+
+  /** Pins a native point-read snapshot and prevents close/reset until release. */
+  public PinnedSnapshot pinSnapshot() {
+    long lifecycleStamp = snapshotLifecycleLock.readLock();
+    resetDbLock.readLock().lock();
+    DB pinnedDatabase = null;
+    Snapshot snapshot = null;
+    try {
+      if (!isAlive()) {
+        throw new org.iq80.leveldb.DBException("DB " + getDBName() + " is closed");
+      }
+      pinnedDatabase = database;
+      snapshot = pinnedDatabase.getSnapshot();
+      if (snapshot == null) {
+        throw new org.iq80.leveldb.DBException(
+            "Failed to pin LevelDB snapshot: " + dataBaseName);
+      }
+      ReadOptions readOptions = new ReadOptions().fillCache(false).snapshot(snapshot);
+      return new PinnedSnapshot(pinnedDatabase, snapshot, readOptions, lifecycleStamp,
+          snapshotSourceIdentity);
+    } catch (RuntimeException failure) {
+      if (snapshot != null) {
+        try {
+          snapshot.close();
+        } catch (IOException closeFailure) {
+          failure.addSuppressed(closeFailure);
+        }
+      }
+      snapshotLifecycleLock.unlockRead(lifecycleStamp);
+      throw failure;
     } finally {
-      resetDbLock.writeLock().unlock();
+      resetDbLock.readLock().unlock();
+    }
+  }
+
+  public String getSnapshotSourceIdentity() {
+    return snapshotSourceIdentity;
+  }
+
+  /** Cross-thread-closeable native snapshot lease. */
+  public final class PinnedSnapshot implements java.io.Closeable {
+    private final DB pinnedDatabase;
+    private final Snapshot snapshot;
+    private final ReadOptions readOptions;
+    private final long lifecycleStamp;
+    private final String sourceIdentity;
+    private boolean closed;
+
+    private PinnedSnapshot(DB pinnedDatabase, Snapshot snapshot, ReadOptions readOptions,
+        long lifecycleStamp, String sourceIdentity) {
+      this.pinnedDatabase = pinnedDatabase;
+      this.snapshot = snapshot;
+      this.readOptions = readOptions;
+      this.lifecycleStamp = lifecycleStamp;
+      this.sourceIdentity = sourceIdentity;
+    }
+
+    public synchronized byte[] get(byte[] key) {
+      if (closed) {
+        throw new IllegalStateException("LevelDB snapshot lease is closed");
+      }
+      return pinnedDatabase.get(key, readOptions);
+    }
+
+    /** Returns at most {@code maxEntries} rows from this pinned lexical range. */
+    public synchronized List<Map.Entry<byte[], byte[]>> range(byte[] lowerInclusive,
+        byte[] upperExclusive, int maxEntries) {
+      if (closed) {
+        throw new IllegalStateException("LevelDB snapshot lease is closed");
+      }
+      if (lowerInclusive == null || maxEntries <= 0) {
+        throw new IllegalArgumentException("Invalid LevelDB snapshot range");
+      }
+      List<Map.Entry<byte[], byte[]>> result = new ArrayList<>();
+      try (DBIterator iterator = pinnedDatabase.iterator(readOptions)) {
+        iterator.seek(lowerInclusive);
+        while (iterator.hasNext() && result.size() < maxEntries) {
+          Map.Entry<byte[], byte[]> entry = iterator.next();
+          if (upperExclusive != null
+              && UnsignedBytes.lexicographicalComparator().compare(entry.getKey(),
+              upperExclusive) >= 0) {
+            break;
+          }
+          result.add(Maps.immutableEntry(
+              Arrays.copyOf(entry.getKey(), entry.getKey().length),
+              Arrays.copyOf(entry.getValue(), entry.getValue().length)));
+        }
+      } catch (IOException failure) {
+        throw new RuntimeException("Failed to read pinned LevelDB range " + dataBaseName,
+            failure);
+      }
+      return Collections.unmodifiableList(result);
+    }
+
+    public String getSourceIdentity() {
+      return sourceIdentity;
+    }
+
+    @Override
+    public synchronized void close() throws IOException {
+      if (closed) {
+        return;
+      }
+      closed = true;
+      try {
+        snapshot.close();
+      } finally {
+        snapshotLifecycleLock.unlockRead(lifecycleStamp);
+      }
     }
   }
 

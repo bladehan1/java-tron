@@ -187,6 +187,24 @@ public class SanitizeUnknownFieldsTest {
   }
 
   @Test
+  public void blockMessageSanitizePreservesKnownStateRoot() throws Exception {
+    ByteString stateRoot = ByteString.copyFrom(new byte[32]);
+    BlockHeader header = sampleBlock().getBlockHeader().toBuilder()
+        .setStateRoot(stateRoot)
+        .setUnknownFields(PADDING)
+        .build();
+    Block padded = sampleBlock().toBuilder().setBlockHeader(header).build();
+    BlockMessage message = new BlockMessage(padded.toByteArray());
+
+    message.sanitize();
+
+    assertEquals(stateRoot,
+        message.getBlockCapsule().getInstance().getBlockHeader().getStateRoot());
+    assertTrue(message.getBlockCapsule().getInstance().getBlockHeader()
+        .getUnknownFields().asMap().isEmpty());
+  }
+
+  @Test
   public void blockMessageSanitizeSkipsDataRewriteOnCleanBlock() throws Exception {
     byte[] cleanBytes = sampleBlock().toByteArray();
     BlockMessage msg = new BlockMessage(cleanBytes);

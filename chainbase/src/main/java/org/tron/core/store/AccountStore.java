@@ -2,6 +2,10 @@ package org.tron.core.store;
 
 import com.google.protobuf.ByteString;
 import com.typesafe.config.ConfigObject;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.OptionalLong;
 import org.apache.commons.lang3.ArrayUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
@@ -12,14 +16,13 @@ import org.tron.core.capsule.AccountCapsule;
 import org.tron.core.capsule.BlockCapsule;
 import org.tron.core.db.TronStoreWithRevoking;
 import org.tron.core.db.accountstate.AccountStateCallBackUtils;
+import org.tron.core.db2.core.ExecutionAttribution;
+import org.tron.core.db2.core.ExecutionAttribution.ReadScope;
+import org.tron.core.db2.core.ExecutionAttribution.ReadSite;
 import org.tron.core.exception.TronError;
 import org.tron.protos.contract.BalanceContract.TransactionBalanceTrace;
 import org.tron.protos.contract.BalanceContract.TransactionBalanceTrace.Operation;
 
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.OptionalLong;
 
 @Component
 public class AccountStore extends TronStoreWithRevoking<AccountCapsule> {
@@ -61,13 +64,19 @@ public class AccountStore extends TronStoreWithRevoking<AccountCapsule> {
   @Override
   public AccountCapsule get(byte[] key) {
     byte[] value = revokingDB.getUnchecked(key);
-    return ArrayUtils.isEmpty(value) ? null : new AccountCapsule(value);
+    long started = ExecutionAttribution.sample("account", "decode");
+    AccountCapsule result = ArrayUtils.isEmpty(value) ? null : new AccountCapsule(value);
+    ExecutionAttribution.sampled("account", "decode", started, 0, false);
+    return result;
   }
 
   @Override
   public void put(byte[] key, AccountCapsule item) {
     if (CommonParameter.getInstance().isHistoryBalanceLookup()) {
-      AccountCapsule old = super.getUnchecked(key);
+      AccountCapsule old;
+      try (ReadScope ignored = ExecutionAttribution.readSite(ReadSite.BALANCE_HISTORY)) {
+        old = super.getUnchecked(key);
+      }
       if (old == null) {
         if (item.getBalance() != 0) {
           recordBalance(item, item.getBalance());
@@ -91,7 +100,10 @@ public class AccountStore extends TronStoreWithRevoking<AccountCapsule> {
   @Override
   public void delete(byte[] key) {
     if (CommonParameter.getInstance().isHistoryBalanceLookup()) {
-      AccountCapsule old = super.getUnchecked(key);
+      AccountCapsule old;
+      try (ReadScope ignored = ExecutionAttribution.readSite(ReadSite.BALANCE_HISTORY)) {
+        old = super.getUnchecked(key);
+      }
       if (old != null) {
         recordBalance(old, -old.getBalance());
       }
