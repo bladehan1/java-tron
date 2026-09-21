@@ -380,7 +380,7 @@ public class StateArchiveJsonRpcIntegrationTest {
     private final Wallet wallet = mock(Wallet.class);
     private final StorageRowStore storage = mock(StorageRowStore.class);
     private final Manager manager = new Manager();
-    private final StateArchiveAppendCheckpointMaterializerV3 archive;
+    private final StateArchiveAppendCheckpointMaterializerV5 archive;
     private final CommonCheckpointRuntimeAttachment attachment;
     private final CommonCheckpointRuntimeOwner owner;
     private final CommonCheckpointPayload payload;
@@ -487,8 +487,16 @@ public class StateArchiveJsonRpcIntegrationTest {
                     new Entry(callOldSlot, OldValue.present(digest(7)))),
                 new DbGroup("properties", historicalVmProperties()))));
       }
-      archive = new StateArchiveAppendCheckpointMaterializerV3(root.resolve("archive"),
-          digest(77), engine, digest(87), StateArchiveFileFormatV3.COMPRESSION_NONE, 1500);
+      archive = new StateArchiveAppendCheckpointMaterializerV5(root.resolve("archive"),
+          digest(77), engine, 11,
+          StateArchiveAppendCheckpointMaterializerV5.baselineHistoryDigest(11,
+              blocks.get(10L).getBlockId().getBytes()),
+          1500, number -> {
+        BlockCapsule block = blocks.get(number);
+        return block == null ? null : BlockSnapshotMeta.forBlock(number,
+            block.getBlockId().getBytes(),
+            blocks.get(number - 1).getBlockId().getBytes(), number * 3000L);
+      });
       StateArchiveHotBatchDescriptor descriptor = archive.planCheckpoint(diffs);
       payload = payload(diffs, descriptor);
       target = archive.prepare(CommonCheckpointCapture.create(payload, diffs, descriptor));

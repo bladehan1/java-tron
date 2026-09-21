@@ -15,7 +15,6 @@ import org.tron.common.TestConstants;
 import org.tron.core.ChainBaseManager;
 import org.tron.core.config.args.StorageConfig.StateArchiveAppendFileConfig;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
-import org.tron.core.db2.archive.StateArchiveAppendCheckpointMaterializerV4;
 import org.tron.core.db2.archive.StateArchiveAppendCheckpointMaterializerV5;
 import org.tron.core.db2.archive.StateArchiveAppendFileRuntime;
 import org.tron.core.db2.core.CommonCheckpointBaseline;
@@ -33,7 +32,7 @@ public class ManagerStateArchiveAppendFormatTest {
   }
 
   @Test
-  public void factoryKeepsV4DefaultAndRequiresExplicitV5() throws Exception {
+  public void factoryAlwaysCreatesV5() throws Exception {
     Manager manager = new Manager();
     ChainBaseManager chainBase = mock(ChainBaseManager.class);
     when(chainBase.getDynamicPropertiesStore()).thenReturn(mock(DynamicPropertiesStore.class));
@@ -42,13 +41,6 @@ public class ManagerStateArchiveAppendFormatTest {
         BlockSnapshotMeta.forBlock(99, hash(99), hash(98), 3_000L), hash(40));
 
     StateArchiveAppendFileConfig config = new StateArchiveAppendFileConfig();
-    Path v4Root = temporaryFolder.newFolder("manager-v4").toPath();
-    try (StateArchiveAppendFileRuntime runtime = ReflectionTestUtils.invokeMethod(manager,
-        "createAppendMaterializer", v4Root, hash(70), Engine.LEVELDB, baseline, config)) {
-      assertTrue(runtime instanceof StateArchiveAppendCheckpointMaterializerV4);
-    }
-
-    config.setFormatVersion(5);
     Path v5Root = temporaryFolder.newFolder("manager-v5").toPath();
     try (StateArchiveAppendFileRuntime runtime = ReflectionTestUtils.invokeMethod(manager,
         "createAppendMaterializer", v5Root, hash(70), Engine.LEVELDB, baseline, config)) {

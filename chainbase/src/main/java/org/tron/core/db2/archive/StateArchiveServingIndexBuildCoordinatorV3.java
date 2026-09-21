@@ -331,17 +331,6 @@ public final class StateArchiveServingIndexBuildCoordinatorV3 implements AutoClo
     return index.pin();
   }
 
-  synchronized void publishArchiveTail(StateArchiveTailV4 tail) throws IOException {
-    requireOpen();
-    index.publishArchiveTail(tail);
-  }
-
-  synchronized StateArchiveTailV4 archiveTail(CommonCheckpointTarget target)
-      throws IOException {
-    requireOpen();
-    return index.archiveTail(target);
-  }
-
   synchronized void publishArchiveTailV5(StateArchiveTailV5 tail) throws IOException {
     publishArchiveTailV5(tail, () -> { });
   }

@@ -114,20 +114,6 @@ final class StateArchiveServingWorkerV3 implements AutoCloseable {
     }
   }
 
-  void publishArchiveTail(StateArchiveTailV4 tail) throws IOException {
-    synchronized (dispatch) {
-      awaitCoordinator();
-      coordinator.publishArchiveTail(tail);
-    }
-  }
-
-  StateArchiveTailV4 archiveTail(CommonCheckpointTarget target) throws IOException {
-    synchronized (dispatch) {
-      awaitCoordinator();
-      return coordinator.archiveTail(target);
-    }
-  }
-
   void publishArchiveTailV5(StateArchiveTailV5 tail,
       PersistentServingKeyIndexGeneration.ExactWriteFaultHook beforeWrite)
       throws IOException {

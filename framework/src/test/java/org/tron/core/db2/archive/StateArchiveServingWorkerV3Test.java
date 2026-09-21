@@ -8,6 +8,8 @@ import static org.junit.Assert.assertTrue;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import org.junit.Rule;
@@ -35,9 +37,11 @@ public class StateArchiveServingWorkerV3Test {
         new java.util.concurrent.atomic.AtomicBoolean();
     java.util.concurrent.atomic.AtomicReference<Thread> buildThread =
         new java.util.concurrent.atomic.AtomicReference<>();
-    try (StateArchiveFiveLaneSegmentWriterV3 source = source(root)) {
-      append(source, 1);
-      StateArchiveServingWorkerV3 worker = worker(root, source, () -> {
+    Fixture fixture = new Fixture(root, 1);
+    try (StateArchiveFiveLaneWriterV5 writer = fixture.writer) {
+      fixture.append(1);
+      fixture.publishThrough(1);
+      StateArchiveServingWorkerV3 worker = worker(root, fixture.source, () -> {
         buildThread.set(Thread.currentThread());
         boolean first = firstBuild.getAndSet(false);
         if (!first && !blockLiveBuild.get()) {
@@ -58,7 +62,8 @@ public class StateArchiveServingWorkerV3Test {
       try {
         worker.offer(target(1, 1));
         assertTrue(entered.await(5, TimeUnit.SECONDS));
-        append(source, 2);
+        fixture.append(2);
+        fixture.publishThrough(2);
         worker.offer(target(2, 2));
         assertEquals(2, worker.status().getCommittedThrough());
         assertEquals(-1, worker.status().getIndexedThrough());
@@ -69,8 +74,9 @@ public class StateArchiveServingWorkerV3Test {
         blockLiveBuild.set(true);
         long sequence = worker.status().getBuildSequence();
         for (int block = 3; block <= 12; block++) {
-          append(source, block);
+          fixture.append(block);
         }
+        fixture.publishThrough(12);
         worker.offer(target(3, 12));
         assertTrue(liveEntered.await(5, TimeUnit.SECONDS));
         assertTrue(buildThread.get() != Thread.currentThread());
@@ -92,9 +98,11 @@ public class StateArchiveServingWorkerV3Test {
   @Test(timeout = 15000)
   public void failedOwnerIsObservableAndRestartReplaysLostNotification() throws Exception {
     Path root = temporaryFolder.newFolder().toPath();
-    try (StateArchiveFiveLaneSegmentWriterV3 source = source(root)) {
-      append(source, 1);
-      try (StateArchiveServingWorkerV3 failed = worker(root, source, () -> {
+    Fixture fixture = new Fixture(root, 1);
+    try (StateArchiveFiveLaneWriterV5 writer = fixture.writer) {
+      fixture.append(1);
+      fixture.publishThrough(1);
+      try (StateArchiveServingWorkerV3 failed = worker(root, fixture.source, () -> {
         throw new IllegalStateException("injected builder failure");
       })) {
         failed.offer(target(1, 1));
@@ -104,12 +112,12 @@ public class StateArchiveServingWorkerV3Test {
         assertEquals(-1, failed.status().getIndexedThrough());
       }
       // No volatile mailbox survives. The recovered Common target is sufficient.
-      try (StateArchiveServingWorkerV3 recovered = worker(root, source, () -> { })) {
+      try (StateArchiveServingWorkerV3 recovered = worker(root, fixture.source, () -> { })) {
         recovered.offer(target(1, 1));
         recovered.completeInitialSync(target(1, 1));
         assertEquals(1, recovered.status().getIndexedThrough());
       }
-      try (StateArchiveServingWorkerV3 again = worker(root, source, () -> { })) {
+      try (StateArchiveServingWorkerV3 again = worker(root, fixture.source, () -> { })) {
         again.offer(target(1, 1));
         again.completeInitialSync(target(1, 1));
         assertEquals(0, again.status().getBuildSequence());
@@ -120,10 +128,11 @@ public class StateArchiveServingWorkerV3Test {
   @Test(timeout = 15000)
   public void indexOpenFailureDoesNotThrowOnConstruction() throws Exception {
     Path root = temporaryFolder.newFolder().toPath();
-    try (StateArchiveFiveLaneSegmentWriterV3 source = source(root);
+    Fixture fixture = new Fixture(root, 1);
+    try (StateArchiveFiveLaneWriterV5 writer = fixture.writer;
         StateArchiveServingWorkerV3 worker = new StateArchiveServingWorkerV3(() -> {
           throw new IOException("injected index open failure");
-        }, source, () -> { })) {
+        }, fixture.source, () -> { })) {
       assertThrows(IOException.class, () -> {
         worker.offer(target(1, 1));
         worker.completeInitialSync(target(1, 1));
@@ -135,28 +144,31 @@ public class StateArchiveServingWorkerV3Test {
   @Test
   public void readBudgetRejectsBeforeAllocatingAnOversizedFrame() throws Exception {
     Path root = temporaryFolder.newFolder().toPath();
-    try (StateArchiveFiveLaneSegmentWriterV3 source = source(root)) {
-      append(source, 1);
-      assertThrows(StateArchiveFiveLaneSegmentWriterV3.ServingReadBudgetException.class,
-          () -> source.readCommittedDiffs(0, 1, 1));
-      assertEquals(0, source.getServingReadBytes());
-      assertEquals(1, source.readCommittedDiffs(0, 1).size());
+    Fixture fixture = new Fixture(root, 1);
+    try (StateArchiveFiveLaneWriterV5 writer = fixture.writer) {
+      fixture.append(1);
+      fixture.publishThrough(1);
+      assertThrows(StateArchiveServingSource.ReadBudgetException.class,
+          () -> fixture.source.readCommittedDiffs(0, 1, 1));
+      assertEquals(1, fixture.source.readCommittedDiffs(0, 1, Long.MAX_VALUE).size());
     }
   }
 
   @Test(timeout = 15000)
   public void workerStartsFromAvailableHistoryInsteadOfGenesis() throws Exception {
     Path root = temporaryFolder.newFolder().toPath();
-    try (StateArchiveFiveLaneSegmentWriterV3 source = source(root)) {
-      append(source, 101);
-      append(source, 102);
-      try (StateArchiveServingWorkerV3 worker = worker(root, source, () -> { })) {
+    Fixture fixture = new Fixture(root, 101);
+    try (StateArchiveFiveLaneWriterV5 writer = fixture.writer) {
+      fixture.append(101);
+      fixture.append(102);
+      fixture.publishThrough(102);
+      try (StateArchiveServingWorkerV3 worker = worker(root, fixture.source, () -> { })) {
         worker.offer(target(101, 102));
         worker.completeInitialSync(target(101, 102));
         assertEquals(100, worker.status().getIndexedFrom());
         assertEquals(102, worker.status().getIndexedThrough());
       }
-      try (StateArchiveServingWorkerV3 worker = worker(root, source, () -> { })) {
+      try (StateArchiveServingWorkerV3 worker = worker(root, fixture.source, () -> { })) {
         worker.offer(target(101, 102));
         worker.completeInitialSync(target(101, 102));
         assertEquals(100, worker.status().getIndexedFrom());
@@ -166,7 +178,7 @@ public class StateArchiveServingWorkerV3Test {
   }
 
   private StateArchiveServingWorkerV3 worker(Path root,
-      StateArchiveFiveLaneSegmentWriterV3 source, Runnable hook) {
+      StateArchiveServingSourceV5 source, Runnable hook) {
     return new StateArchiveServingWorkerV3(
         () -> new StateArchiveServingIndexBuildCoordinatorV3(root, Engine.ROCKSDB, 1000),
         source, hook, 10);
@@ -179,16 +191,6 @@ public class StateArchiveServingWorkerV3Test {
       Thread.sleep(10);
     }
     assertEquals(block, worker.status().getIndexedThrough());
-  }
-
-  private StateArchiveFiveLaneSegmentWriterV3 source(Path root) throws IOException {
-    return new StateArchiveFiveLaneSegmentWriterV3(root, hash(90),
-        StateArchiveFileFormatV3.COMPRESSION_NONE, 1500);
-  }
-
-  private void append(StateArchiveFiveLaneSegmentWriterV3 source, int block) throws IOException {
-    source.append(new StateArchiveFiveLaneBlockCodecV3().encode(diff(block),
-        source.getResultHistoryDigest(), StateArchiveFileFormatV3.COMPRESSION_NONE));
   }
 
   private static BlockReverseDiff diff(int block) {
@@ -205,5 +207,31 @@ public class StateArchiveServingWorkerV3Test {
     byte[] hash = new byte[32];
     hash[31] = (byte) value;
     return hash;
+  }
+
+  private static final class Fixture {
+
+    private final StateArchiveFiveLaneWriterV5 writer;
+    private final StateArchiveServingSourceV5 source;
+    private final Map<Long, BlockSnapshotMeta> metas = new HashMap<>();
+    private int publishedThrough;
+
+    private Fixture(Path root, int firstBlock) throws IOException {
+      writer = new StateArchiveFiveLaneWriterV5(root, firstBlock, hash(90), 1500);
+      source = new StateArchiveServingSourceV5(root, firstBlock, hash(90), metas::get);
+      publishedThrough = firstBlock - 1;
+    }
+
+    private void append(int block) throws IOException {
+      BlockReverseDiff diff = diff(block);
+      metas.put((long) block, diff.getMeta());
+      writer.append(diff);
+    }
+
+    private void publishThrough(int last) throws IOException {
+      CommonCheckpointTarget target = target(publishedThrough + 1, last);
+      source.updatePublished(writer.forceTailReady(target), target);
+      publishedThrough = last;
+    }
   }
 }

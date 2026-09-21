@@ -36,11 +36,9 @@ import org.tron.core.db2.archive.BlockReverseDiff.Entry;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
 import org.tron.core.db2.archive.HistoricalRangeOverlay;
 import org.tron.core.db2.archive.OldValue;
-import org.tron.core.db2.archive.StateArchiveAppendCheckpointMaterializerV3;
+import org.tron.core.db2.archive.StateArchiveAppendCheckpointMaterializerV5;
 import org.tron.core.db2.archive.StateArchiveCheckpointMaterializer;
 import org.tron.core.db2.archive.StateArchiveCheckpointReadSnapshot;
-import org.tron.core.db2.archive.StateArchiveFileFormatV3;
-import org.tron.core.db2.archive.StateArchiveFiveLaneDurabilityProofV3;
 import org.tron.core.db2.archive.StateArchiveHotCheckpointMaterializer;
 import org.tron.core.db2.archive.StateArchiveHotStore;
 import org.tron.core.db2.common.DB;
@@ -508,16 +506,19 @@ public class ChainbaseCheckpointMaterializerTest {
   }
 
   @Test
-  public void appendRuntimePreparesSap3BeforeWalAndReopensPublishedTarget() throws Exception {
+  public void appendRuntimePreparesV5BeforeWalAndReopensPublishedTarget() throws Exception {
     TestConstants.assumeLevelDbAvailable();
-    java.nio.file.Path root = temporaryFolder.newFolder("append-runtime-v3").toPath();
+    java.nio.file.Path root = temporaryFolder.newFolder("append-runtime-v5").toPath();
     java.nio.file.Path history = root.resolve("history");
     byte[] format = hash(96);
-    byte[] baselineHistory = hash(70);
+    byte[] baselineHistory = StateArchiveAppendCheckpointMaterializerV5
+        .baselineHistoryDigest(1, hash(0));
     V2Snapshots snapshots = new V2Snapshots();
-    StateArchiveAppendCheckpointMaterializerV3 append =
-        new StateArchiveAppendCheckpointMaterializerV3(history, format, Engine.LEVELDB,
-            baselineHistory, StateArchiveFileFormatV3.COMPRESSION_NONE, 10_000);
+    StateArchiveAppendCheckpointMaterializerV5 append =
+        new StateArchiveAppendCheckpointMaterializerV5(history, format, Engine.LEVELDB,
+            1, baselineHistory, 10_000,
+            block -> block == 1 ? BlockSnapshotMeta.forBlock(1, hash(1), hash(0), 3_000L)
+                : null);
     CommonCheckpointRedoCoordinator coordinator = new CommonCheckpointRedoCoordinator(
         new CommonCheckpointFile(root.resolve("wal")),
         new ChainbaseCheckpointMaterializer(root.resolve("chainbase"), format,
@@ -539,8 +540,6 @@ public class ChainbaseCheckpointMaterializerTest {
     assertEquals(snapshots.meta, target.getLastBlock());
     assertEquals(1, target.getArchiveBinding().getBlockCount());
     assertEquals(Status.PUBLISHED, append.inspect(target));
-    assertEquals(760, java.nio.file.Files.size(
-        history.resolve(StateArchiveFiveLaneDurabilityProofV3.FILE_NAME)));
     assertFalse(java.nio.file.Files.exists(
         root.resolve("wal").resolve(CommonCheckpointFile.FILE_NAME)));
     assertSame(snapshots.codeDatabase.getHead().getRoot(), snapshots.codeDatabase.getHead());
@@ -551,9 +550,11 @@ public class ChainbaseCheckpointMaterializerTest {
     assertThrows(IOException.class, () -> runtime.pinPoint(1));
     runtime.close();
 
-    try (StateArchiveAppendCheckpointMaterializerV3 reopened =
-        new StateArchiveAppendCheckpointMaterializerV3(history, format, Engine.LEVELDB,
-            baselineHistory, StateArchiveFileFormatV3.COMPRESSION_NONE, 10_000)) {
+    try (StateArchiveAppendCheckpointMaterializerV5 reopened =
+        new StateArchiveAppendCheckpointMaterializerV5(history, format, Engine.LEVELDB,
+            1, baselineHistory, 10_000,
+            block -> block == 1 ? BlockSnapshotMeta.forBlock(1, hash(1), hash(0), 3_000L)
+                : null)) {
       assertEquals(Status.PUBLISHED, reopened.inspect(target));
     }
   }

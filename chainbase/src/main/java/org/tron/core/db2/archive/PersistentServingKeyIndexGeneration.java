@@ -43,7 +43,6 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
   private static final byte KEY_META_PREFIX = 3;
   private static final byte KEY_PAGE_PREFIX = 4;
   private static final byte STORE_COVERAGE_PREFIX = 5;
-  private static final byte[] ARCHIVE_TAIL_KEY_V4 = new byte[]{0x7f, 'S', 'A', 4};
   private static final byte[] ARCHIVE_TAIL_KEY_V5 = StateArchiveTailV5.key();
   private static final int INLINE_EPOCH_LIMIT = 4;
   private static final int EPOCHS_PER_PAGE = 512;
@@ -654,17 +653,6 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
     return firstChange(readPage(dbName, rawKey, low), targetBlock, upperBound);
   }
 
-  StateArchiveTailV4 archiveTail(CommonCheckpointTarget target) throws IOException {
-    ensureOpen();
-    byte[] encoded = database.get(ARCHIVE_TAIL_KEY_V4);
-    if (encoded == null) {
-      throw new ArchivePersistenceException("Serving index has no committed Archive tail");
-    }
-    StateArchiveTailV4 tail = StateArchiveTailV4.decode(encoded);
-    tail.requireTarget(target);
-    return tail;
-  }
-
   StateArchiveTailV5 archiveTailV5(CommonCheckpointTarget target) throws IOException {
     ensureOpen();
     byte[] encoded = database.get(ARCHIVE_TAIL_KEY_V5);
@@ -788,9 +776,7 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
             cursor.seek(new byte[0]);
             StateArchiveIndexDatabase.KeyValue entry;
             while ((entry = cursor.next()) != null) {
-              if (Arrays.equals(entry.getKey(), ARCHIVE_TAIL_KEY_V4)) {
-                StateArchiveTailV4.decode(entry.getValue());
-              } else if (Arrays.equals(entry.getKey(), ARCHIVE_TAIL_KEY_V5)) {
+              if (Arrays.equals(entry.getKey(), ARCHIVE_TAIL_KEY_V5)) {
                 StateArchiveTailV5.decode(entry.getValue());
               } else {
                 throw new IOException("Serving data exists without atomic progress");
@@ -820,48 +806,6 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
 
     String identity() {
       return descriptor == null ? "empty" : descriptor.generationId;
-    }
-
-    synchronized void publishArchiveTail(StateArchiveTailV4 tail) throws IOException {
-      requireHealthy();
-      StateArchiveTailV4 replacement = Objects.requireNonNull(tail, "tail");
-      byte[] encoded = replacement.encode();
-      byte[] existing;
-      try {
-        existing = writer.get(ARCHIVE_TAIL_KEY_V4);
-      } catch (IOException | RuntimeException failure) {
-        failed = true;
-        throw failure;
-      }
-      if (Arrays.equals(existing, encoded)) {
-        return;
-      }
-      if (existing != null) {
-        StateArchiveTailV4 current = StateArchiveTailV4.decode(existing);
-        if (replacement.getCheckpointSequence() <= current.getCheckpointSequence()
-            || replacement.getCommonBlockNumber() <= current.getCommonBlockNumber()) {
-          throw new ArchivePersistenceException("Archive tail publication is not monotonic");
-        }
-      }
-      try {
-        writer.write(Collections.singletonList(
-            StateArchiveIndexDatabase.put(ARCHIVE_TAIL_KEY_V4, encoded)), true);
-      } catch (IOException | RuntimeException failure) {
-        failed = true;
-        throw failure;
-      }
-    }
-
-    synchronized StateArchiveTailV4 archiveTail(CommonCheckpointTarget target)
-        throws IOException {
-      requireHealthy();
-      byte[] encoded = writer.get(ARCHIVE_TAIL_KEY_V4);
-      if (encoded == null) {
-        throw new ArchivePersistenceException("Serving index has no committed Archive tail");
-      }
-      StateArchiveTailV4 tail = StateArchiveTailV4.decode(encoded);
-      tail.requireTarget(target);
-      return tail;
     }
 
     synchronized void publishArchiveTailV5(StateArchiveTailV5 tail) throws IOException {

@@ -136,12 +136,10 @@ import org.tron.core.db2.archive.LatestStateGenerationAdapter;
 import org.tron.core.db2.archive.LatestStateGenerationCoordinatorFactory;
 import org.tron.core.db2.archive.OldValue;
 import org.tron.core.db2.archive.SnapshotOldValueCollector;
-import org.tron.core.db2.archive.StateArchiveAppendCheckpointMaterializerV4;
 import org.tron.core.db2.archive.StateArchiveAppendCheckpointMaterializerV5;
 import org.tron.core.db2.archive.StateArchiveAppendFileRuntime;
 import org.tron.core.db2.archive.StateArchiveCheckpointMaterializer;
 import org.tron.core.db2.archive.StateArchiveCheckpointReadSnapshot;
-import org.tron.core.db2.archive.StateArchiveFileFormatV3;
 import org.tron.core.db2.archive.StateArchiveHotCheckpointMaterializer;
 import org.tron.core.db2.archive.StateArchiveHotStore;
 import org.tron.core.db2.archive.StateArchiveRuntimeOwner;
@@ -789,9 +787,7 @@ public class Manager {
     org.tron.core.config.args.StorageConfig.StateArchiveAppendFileConfig appendConfig =
         storage.getStateArchiveAppendFileSettings();
     boolean appendEnabled = appendConfig != null && appendConfig.isEnabled();
-    int appendFormatVersion = appendEnabled ? appendConfig.getFormatVersion() : 4;
-    Path appendDirectory = archiveDirectory.resolve("history")
-        .resolve("v" + appendFormatVersion);
+    Path appendDirectory = archiveDirectory.resolve("history").resolve("v5");
     PathStatePhysicalOverlayHead pathOwner = null;
     CommonCheckpointRuntimeAttachment attachment = null;
     StateArchiveHotStore hotStore = null;
@@ -1098,15 +1094,6 @@ public class Manager {
       CommonCheckpointBaseline baseline,
       org.tron.core.config.args.StorageConfig.StateArchiveAppendFileConfig appendConfig)
       throws java.io.IOException {
-    if (appendConfig.getFormatVersion() == 4) {
-      return new StateArchiveAppendCheckpointMaterializerV4(
-          appendDirectory, formatIdentity, archiveEngine, baseline.getStateRoot(),
-          StateArchiveFileFormatV3.COMPRESSION_NONE, appendConfig.getSegmentTargetBytes());
-    }
-    if (appendConfig.getFormatVersion() != 5) {
-      throw new java.io.IOException("Unsupported State Archive append-file format version: "
-          + appendConfig.getFormatVersion());
-    }
     final long firstBlockNumber;
     try {
       firstBlockNumber = StrictMathWrapper.addExact(baseline.getHead().getBlockNumber(), 1L);

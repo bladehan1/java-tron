@@ -177,22 +177,21 @@ public class StorageConfig {
     }
   }
 
-  /** Independent, default-off five-lane append-file v3 prototype settings. */
+  /** Independent, default-off append-file V5 settings. */
   @Getter
   @Setter
   public static class StateArchiveAppendFileConfig {
 
     private boolean enabled = false;
     private boolean testOnlyForceServingHandoff = false;
-    private int formatVersion = 4;
     private int appendBufferBytes = 2097152;
     private int maxBlockFrameBytes = 67108864;
     private long segmentTargetBytes = 2L * 1024 * 1024 * 1024;
     private int shardMaxSegments = 1024;
 
     void postProcess() {
-      if ((formatVersion != 4 && formatVersion != 5) || appendBufferBytes != 2097152
-          || maxBlockFrameBytes != 67108864 || shardMaxSegments != 1024) {
+      if (appendBufferBytes != 2097152 || maxBlockFrameBytes != 67108864
+          || shardMaxSegments != 1024) {
         throw new IllegalArgumentException(
             "stateArchive.appendFile fixed format settings differ");
       }
@@ -200,7 +199,7 @@ public class StorageConfig {
         throw new IllegalArgumentException(
             "stateArchive.appendFile.segmentTargetBytes must exceed the segment header");
       }
-      if (formatVersion == 5 && segmentTargetBytes != 2L * 1024 * 1024 * 1024) {
+      if (segmentTargetBytes != 2L * 1024 * 1024 * 1024) {
         throw new IllegalArgumentException(
             "stateArchive.appendFile v5 segmentTargetBytes must equal 2 GiB");
       }

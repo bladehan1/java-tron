@@ -4,8 +4,6 @@ import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertThrows;
 
-import java.io.IOException;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -19,7 +17,6 @@ import org.tron.common.TestConstants;
 import org.tron.core.db2.archive.BlockReverseDiff.DbGroup;
 import org.tron.core.db2.archive.BlockReverseDiff.Entry;
 import org.tron.core.db2.archive.PersistentServingKeyIndexGeneration.MutableIndex;
-import org.tron.core.db2.archive.StateArchiveFiveLaneRecoveryIntentV3.RecoveryPoint;
 import org.tron.core.db2.archive.StateArchiveServingIndexBuildCoordinatorV3.LiveServingIndexer;
 import org.tron.core.db2.core.CommonCheckpointTarget;
 import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
@@ -126,76 +123,6 @@ public class StateArchiveCatalogAndServingCornerCaseTest {
       assertThrows(IllegalStateException.class,
           () -> live.indexNow(successor, target(successor, 2)));
     }
-  }
-
-  @Test
-  public void catalogIgnoresOrphanButRejectsCorruptCurrentAndMissingManifest() throws Exception {
-    Path root = temporaryFolder.newFolder("catalog-corners").toPath();
-    byte[] baseline = hash(0);
-    StateArchiveFiveLaneBlockCodecV3 codec = new StateArchiveFiveLaneBlockCodecV3();
-    BlockReverseDiff first = diff(1, 0, 1_400);
-    StateArchiveFiveLaneBlockCodecV3.EncodedBundle firstBundle = codec.encode(first, baseline,
-        StateArchiveFileFormatV3.COMPRESSION_NONE);
-    StateArchiveFiveLaneBlockCodecV3.EncodedBundle secondBundle = codec.encode(
-        diff(2, 1, 0), firstBundle.getResultHistoryDigest(),
-        StateArchiveFileFormatV3.COMPRESSION_NONE);
-    Path current = root.resolve(StateArchiveHistoryCatalogV3.DIRECTORY)
-        .resolve(StateArchiveHistoryCatalogV3.CURRENT);
-    byte[] preRotationCurrent;
-    try (StateArchiveFiveLaneSegmentWriterV3 writer =
-        new StateArchiveFiveLaneSegmentWriterV3(root, baseline,
-            StateArchiveFileFormatV3.COMPRESSION_NONE, 1_500)) {
-      writer.appendForCheckpoint(firstBundle, 1, hash(60));
-      preRotationCurrent = Files.readAllBytes(current);
-      writer.appendForCheckpoint(secondBundle, 1, hash(60));
-      // The normal reopen takes the fast path, which requires the persisted proof boundary.
-      StateArchiveFiveLaneDurabilityProofV3.publish(root,
-          writer.sync(1, point(secondBundle), hash(60)));
-    }
-    Path generations = root.resolve(StateArchiveHistoryCatalogV3.DIRECTORY)
-        .resolve("generations");
-    Files.write(generations.resolve("catalog-99999999999999999999.bin"), new byte[]{1});
-    try (StateArchiveFiveLaneSegmentWriterV3 reopened =
-        new StateArchiveFiveLaneSegmentWriterV3(root, baseline,
-            StateArchiveFileFormatV3.COMPRESSION_NONE, 1_500)) {
-      assertEquals(2, reopened.getAppendHead().getBlockNumber());
-    }
-    Path manifest;
-    try (java.util.stream.Stream<Path> paths = Files.walk(root.resolve("segments"))) {
-      manifest = paths.filter(path -> path.getFileName().toString().endsWith(".manifest"))
-          .findFirst().orElseThrow(AssertionError::new);
-    }
-    Files.delete(manifest);
-    Files.write(current, preRotationCurrent);
-    // The rewound generation number republishes during the healing scan; drop its stale file.
-    Files.deleteIfExists(generations.resolve(String.format("catalog-%020d.bin", 1)));
-    // A rewound Catalog diverges from the proof boundary: the normal open fails closed, so the
-    // manifest republication and rotation promotion heal through the explicit recovery scan.
-    try (StateArchiveFiveLaneSegmentWriterV3 recoveredPublication =
-        StateArchiveFiveLaneSegmentWriterV3.recover(root, baseline,
-            StateArchiveFileFormatV3.COMPRESSION_NONE, 1_500, 2)) {
-      assertEquals(2, recoveredPublication.getAppendHead().getBlockNumber());
-    }
-
-    byte[] validCurrent = Files.readAllBytes(current);
-    byte[] corruptCurrent = validCurrent.clone();
-    corruptCurrent[20] ^= 1;
-    Files.write(current, corruptCurrent);
-    assertThrows(IOException.class, () -> new StateArchiveFiveLaneSegmentWriterV3(root,
-        baseline, StateArchiveFileFormatV3.COMPRESSION_NONE, 1_500));
-    Files.write(current, validCurrent);
-
-    Files.delete(manifest);
-    assertThrows(IOException.class,
-        () -> new StateArchiveFiveLaneSegmentWriterV3(root, baseline,
-            StateArchiveFileFormatV3.COMPRESSION_NONE, 1_500));
-  }
-
-  private static RecoveryPoint point(
-      StateArchiveFiveLaneBlockCodecV3.EncodedBundle bundle) {
-    BlockSnapshotMeta meta = bundle.getDiff().getMeta();
-    return new RecoveryPoint(meta.getEpoch(), meta.getBlockNumber(), meta.getTimestamp(),
-        meta.getBlockHash(), meta.getParentHash(), bundle.getResultHistoryDigest());
   }
 
   private static List<BlockReverseDiff> diffs(int first, int count, int parent) {
