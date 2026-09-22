@@ -70,7 +70,7 @@ public class ChainbaseCheckpointMaterializerTest {
   }
 
   @Test
-  public void appliesEachStoreWithSyncBeforePublishingCurrentAndReopens() throws Exception {
+  public void appliesEachStoreUnsyncedBeforePublishingCurrentAndReopens() throws Exception {
     Fixture fixture = fixture("normal", null);
     fixture.code.put(new byte[]{9}, new byte[]{9});
 
@@ -83,11 +83,18 @@ public class ChainbaseCheckpointMaterializerTest {
     assertArrayEquals(new byte[]{2}, fixture.code.get(new byte[]{1}));
     assertNull(fixture.code.get(new byte[]{9}));
     assertArrayEquals(new byte[]{4}, fixture.storage.get(new byte[]{3}));
-    assertEquals(1, fixture.code.syncedFlushes);
-    assertEquals(1, fixture.storage.syncedFlushes);
+    assertEquals(0, fixture.code.syncedFlushes);
+    assertEquals(1, fixture.code.unsyncedFlushes);
+    assertEquals(0, fixture.storage.syncedFlushes);
+    assertEquals(1, fixture.storage.unsyncedFlushes);
+    // Every registered Store records the checkpoint head, even without mutations.
+    assertEquals(1L, (long) ((SnapshotRoot) fixture.databases.get(0).getHead().getRoot())
+        .getCheckpointHead());
+    assertEquals(1L, (long) ((SnapshotRoot) fixture.databases.get(1).getHead().getRoot())
+        .getCheckpointHead());
 
     fixture.materializer.materialize(fixture.payload, fixture.target);
-    assertEquals(1, fixture.code.syncedFlushes);
+    assertEquals(1, fixture.code.unsyncedFlushes);
     fixture.materializer.publish(fixture.target);
     assertEquals(Status.PUBLISHED, fixture.materializer.inspect(fixture.target));
 
@@ -332,12 +339,12 @@ public class ChainbaseCheckpointMaterializerTest {
         format, databases);
     materializer.materialize(payload, target);
     materializer.publish(target);
-    assertEquals(1, code.syncedFlushes);
-    assertEquals(1, storage.syncedFlushes);
+    assertEquals(0, code.syncedFlushes);
+    assertEquals(0, storage.syncedFlushes);
 
     new CommonCheckpointSnapshotRebaser().rebase(databases, target, 2);
-    assertEquals(1, code.syncedFlushes);
-    assertEquals(1, storage.syncedFlushes);
+    assertEquals(0, code.syncedFlushes);
+    assertEquals(0, storage.syncedFlushes);
     assertArrayEquals(new byte[]{2}, code.get(new byte[]{1}));
     assertArrayEquals(new byte[]{2}, storage.get(new byte[]{3}));
     assertArrayEquals(new byte[]{3}, codeChainbase.getUnchecked(new byte[]{1}));
@@ -399,8 +406,7 @@ public class ChainbaseCheckpointMaterializerTest {
         });
 
     runtime.recoverBeforeServing();
-    runtime.checkpointAndRebase(1);
-    IOException failure = assertThrows(IOException.class, runtime::awaitQuiescent);
+    IOException failure = assertThrows(IOException.class, () -> runtime.checkpointAndRebase(1));
     assertEquals("injected memory rebase prepare failure", failure.getMessage());
     assertSame(layer, database.getHead());
     assertSame(layer.getRoot(), layer.getPrevious());
@@ -447,24 +453,19 @@ public class ChainbaseCheckpointMaterializerTest {
     assertThrows(IllegalStateException.class, target::getArchiveBinding);
     assertEquals(1, timings.size());
     CommonCheckpointRuntime.Timing timing = timings.get(0);
-    assertFalse(timing.isRebase());
     assertEquals(1, timing.getHead());
     assertEquals(1, timing.getBlocks());
     assertEquals(1, timing.getPayloadCaptureUs());
     assertEquals(0, timing.getHotPrepareUs());
     assertTrue(timing.getOwnerApplyUs() > 0);
+    assertEquals(1, timing.getChainbaseRebasePrepareUs());
+    assertEquals(1, timing.getPathStateRebasePrepareUs());
+    assertEquals(1, timing.getChainbaseRebaseApplyUs());
+    assertEquals(1, timing.getPathStateRebaseApplyUs());
     assertTrue(timing.getTotalUs() >= timing.getOwnerApplyUs());
-    runtime.awaitQuiescent();
-    assertEquals(2, timings.size());
-    CommonCheckpointRuntime.Timing rebase = timings.get(1);
-    assertTrue(rebase.isRebase());
-    assertEquals(1, rebase.getHead());
-    assertEquals(1, rebase.getChainbaseRebasePrepareUs());
-    assertEquals(1, rebase.getPathStateRebasePrepareUs());
-    assertEquals(1, rebase.getChainbaseRebaseApplyUs());
-    assertEquals(1, rebase.getPathStateRebaseApplyUs());
     assertSame(database.getHead().getRoot(), database.getHead());
-    assertEquals(1, code.syncedFlushes);
+    assertEquals(0, code.syncedFlushes);
+    assertEquals(1, code.unsyncedFlushes);
     try (StateArchiveCheckpointReadSnapshot snapshot = runtime.pinPoint(0)) {
       assertArrayEquals(new byte[]{0}, snapshot.get("code", new byte[]{1}).getValue());
     }
@@ -499,9 +500,6 @@ public class ChainbaseCheckpointMaterializerTest {
 
     assertEquals(snapshots.meta, target.getLastBlock());
     assertEquals(1, target.getArchiveBinding().getBlockCount());
-    assertEquals(1, timings.size());
-    assertEquals(1, timings.get(0).getHotPrepareUs());
-    runtime.awaitQuiescent();
     assertEquals(1, hotStore.getMaterializedHead());
     assertEquals(1, hotStore.getCommittedHead());
     assertFalse(java.nio.file.Files.exists(root.resolve("wal")
@@ -509,7 +507,8 @@ public class ChainbaseCheckpointMaterializerTest {
     assertSame(snapshots.codeDatabase.getHead().getRoot(), snapshots.codeDatabase.getHead());
     assertSame(snapshots.propertiesDatabase.getHead().getRoot(),
         snapshots.propertiesDatabase.getHead());
-    assertEquals(2, timings.size());
+    assertEquals(1, timings.size());
+    assertEquals(1, timings.get(0).getHotPrepareUs());
     assertThrows(IOException.class, () -> runtime.pinPoint(1));
     runtime.close();
   }
@@ -548,16 +547,14 @@ public class ChainbaseCheckpointMaterializerTest {
 
     assertEquals(snapshots.meta, target.getLastBlock());
     assertEquals(1, target.getArchiveBinding().getBlockCount());
-    assertEquals(1, timings.size());
-    assertEquals(1, timings.get(0).getHotPrepareUs());
-    runtime.awaitQuiescent();
     assertEquals(Status.PUBLISHED, append.inspect(target));
     assertFalse(java.nio.file.Files.exists(
         root.resolve("wal").resolve(CommonCheckpointFile.FILE_NAME)));
     assertSame(snapshots.codeDatabase.getHead().getRoot(), snapshots.codeDatabase.getHead());
     assertSame(snapshots.propertiesDatabase.getHead().getRoot(),
         snapshots.propertiesDatabase.getHead());
-    assertEquals(2, timings.size());
+    assertEquals(1, timings.size());
+    assertEquals(1, timings.get(0).getHotPrepareUs());
     assertThrows(IOException.class, () -> runtime.pinPoint(1));
     runtime.close();
 
@@ -611,7 +608,6 @@ public class ChainbaseCheckpointMaterializerTest {
 
     CommonCheckpointTarget target = recovered.checkpointAndRebase(1);
     assertEquals(snapshots.meta, target.getLastBlock());
-    recovered.awaitQuiescent();
     assertEquals(1, recoveredHot.getCommittedHead());
     assertFalse(java.nio.file.Files.exists(root.resolve("wal")
         .resolve(CommonCheckpointFile.TEMPORARY_FILE_NAME)));
@@ -896,6 +892,7 @@ public class ChainbaseCheckpointMaterializerTest {
     private final String name;
     private final Map<WrappedByteArray, byte[]> values = new LinkedHashMap<>();
     private int syncedFlushes;
+    private int unsyncedFlushes;
     private int getCalls;
 
     private MemoryDb(String name) {
@@ -955,6 +952,7 @@ public class ChainbaseCheckpointMaterializerTest {
 
     @Override
     public void flush(Map<WrappedByteArray, WrappedByteArray> batch) {
+      unsyncedFlushes++;
       apply(batch);
     }
 

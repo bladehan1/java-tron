@@ -28,7 +28,7 @@ public class PathStateCheckpointMaterializerTest {
   public final TemporaryFolder temporaryFolder = new TemporaryFolder();
 
   @Test
-  public void separatesSyncedMaterializationFromCurrentPublicationAcrossReopen()
+  public void separatesUnsyncedMaterializationFromCurrentPublicationAcrossReopen()
       throws Exception {
     Fixture fixture = fixture("normal", null);
     try {
@@ -44,12 +44,14 @@ public class PathStateCheckpointMaterializerTest {
           .nodeStore().get(new byte[]{3}));
       assertArrayEquals(new byte[]{6}, fixture.stores.superStore().nodeStore()
           .get(new byte[]{5}));
-      long accountBatches = fixture.stores.participant("account").getSyncedWriteBatchCalls();
-      long superBatches = fixture.stores.superStore().getSyncedWriteBatchCalls();
+      // Business stores never fsync; durability is anchored by the version store.
+      assertEquals(0, fixture.stores.participant("account").getSyncedWriteBatchCalls());
+      long accountBatches = fixture.stores.participant("account").getUnsyncedWriteBatchCalls();
+      long superBatches = fixture.stores.superStore().getUnsyncedWriteBatchCalls();
       fixture.materializer.materialize(fixture.payload, fixture.target);
       assertEquals(accountBatches,
-          fixture.stores.participant("account").getSyncedWriteBatchCalls());
-      assertEquals(superBatches, fixture.stores.superStore().getSyncedWriteBatchCalls());
+          fixture.stores.participant("account").getUnsyncedWriteBatchCalls());
+      assertEquals(superBatches, fixture.stores.superStore().getUnsyncedWriteBatchCalls());
       fixture.materializer.publish(fixture.target);
       assertEquals(Status.PUBLISHED, fixture.materializer.inspect(fixture.target));
     } finally {

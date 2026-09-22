@@ -363,7 +363,6 @@ public class PathStateManagerStartupIntegrationTest {
     }
     setSnapshotField(snapshots, "flushCount", 1);
     snapshots.flush();
-    manager.getCommonCheckpointRuntime().awaitQuiescent();
     assertTrue(Files.isRegularFile(output.resolve("path-state-root/CURRENT")));
     assertTrue(Files.isRegularFile(output.resolve("state-archive/READABLE")));
     assertFalse(Files.exists(output.resolve("common-checkpoint/COMMON_CHECKPOINT")));
@@ -637,12 +636,29 @@ public class PathStateManagerStartupIntegrationTest {
     SnapshotCapableStore capable = (SnapshotCapableStore) database;
     when(database.getDbName()).thenReturn(dbName);
     when(database.iterator()).thenReturn(Collections.emptyIterator());
+    // Back the mock with a real map so the per-Store checkpoint head record survives the
+    // simulated restart and the startup replay check sees a consistent store.
+    java.util.Map<org.tron.core.db2.common.WrappedByteArray, byte[]> rows =
+        new java.util.LinkedHashMap<>();
     if ("properties".equals(dbName)) {
-      when(database.get(org.mockito.ArgumentMatchers.any(byte[].class)))
-          .thenAnswer(invocation -> Arrays.equals((byte[]) invocation.getArgument(0),
-              "ALLOW_ASSET_OPTIMIZATION".getBytes(java.nio.charset.StandardCharsets.UTF_8))
-              ? java.nio.ByteBuffer.allocate(Long.BYTES).putLong(1L).array() : null);
+      rows.put(org.tron.core.db2.common.WrappedByteArray.of(
+          "ALLOW_ASSET_OPTIMIZATION".getBytes(java.nio.charset.StandardCharsets.UTF_8)),
+          java.nio.ByteBuffer.allocate(Long.BYTES).putLong(1L).array());
     }
+    when(database.get(org.mockito.ArgumentMatchers.any(byte[].class)))
+        .thenAnswer(invocation -> rows.get(org.tron.core.db2.common.WrappedByteArray.of(
+            (byte[]) invocation.getArgument(0))));
+    org.mockito.Mockito.doAnswer(invocation -> {
+      rows.put(org.tron.core.db2.common.WrappedByteArray.of(
+          (byte[]) invocation.getArgument(0)), (byte[]) invocation.getArgument(1));
+      return null;
+    }).when(database).put(org.mockito.ArgumentMatchers.any(byte[].class),
+        org.mockito.ArgumentMatchers.any(byte[].class));
+    org.mockito.Mockito.doAnswer(invocation -> {
+      rows.remove(org.tron.core.db2.common.WrappedByteArray.of(
+          (byte[]) invocation.getArgument(0)));
+      return null;
+    }).when(database).remove(org.mockito.ArgumentMatchers.any(byte[].class));
     when(capable.getDbName()).thenReturn(dbName);
     when(capable.getSourceIdentity()).thenReturn("source-" + dbName);
     StoreSnapshot snapshot = mock(StoreSnapshot.class);
