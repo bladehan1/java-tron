@@ -40,7 +40,15 @@ import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
  *   <li>{@code v:<head>:c:<dbName>} → encoded Chainbase Store mutations of that version;
  *   <li>{@code v:<head>:p:<storeId>} → encoded PathState participant flat+node mutations
  *   (storeId 0 is the super store);
- *   <li>{@code v:<head>:m} → the 64-byte PathState per-store checkpoint marker of that version.
+ *   <li>{@code v:<head>:m} → the 64-byte PathState per-store checkpoint marker of that version;
+ *   <li>{@code h:<head>:c:<dbName>} / {@code h:<head>:p:<storeId>} → 8-byte head journal of
+ *   every store anchored by that version, pruned together with it. This is a progress JOURNAL
+ *   only: it is written with the version batch (before the business stores are touched), so it
+ *   can never prove what an unsynced business store actually persisted across a power loss —
+ *   replay progress is instead derived from per-store content (Chainbase) or in-store markers
+ *   (PathState internal stores). Business databases never carry internal keys: several of them
+ *   self-iterate and parse every entry (TxCacheDB over recent-transaction, WitnessStore over
+ *   witness).
  * </ul>
  */
 public final class CommonCheckpointVersionStore implements AutoCloseable {
@@ -106,16 +114,22 @@ public final class CommonCheckpointVersionStore implements AutoCloseable {
       batch.add(PathStateNativeNodeStore.BatchMutation.put(
           chainbaseShardKey(head, storeMutations.getDbName()),
           encodeMutations(storeMutations.getMutations())));
+      batch.add(PathStateNativeNodeStore.BatchMutation.put(
+          progressKey(head, "c:" + storeMutations.getDbName()), encodeHead(head)));
     }
     for (CommonCheckpointPayload.PathStoreTarget pathStore : payload.getPathStores()) {
       batch.add(PathStateNativeNodeStore.BatchMutation.put(
           pathStoreShardKey(head, pathStore.getStoreId()),
           encodePathShard(pathStore.getFlatMutations(), pathStore.getNodeMutations())));
+      batch.add(PathStateNativeNodeStore.BatchMutation.put(
+          progressKey(head, "p:" + pathStore.getStoreId()), encodeHead(head)));
     }
     if (!payload.getSuperNodeMutations().isEmpty()) {
       batch.add(PathStateNativeNodeStore.BatchMutation.put(pathStoreShardKey(head, 0),
           encodePathShard(Collections.emptyList(), payload.getSuperNodeMutations())));
     }
+    batch.add(PathStateNativeNodeStore.BatchMutation.put(progressKey(head, "p:0"),
+        encodeHead(head)));
     batch.add(PathStateNativeNodeStore.BatchMutation.put(versionMarkerKey(head),
         pathStoreMarker(target)));
     batch.add(PathStateNativeNodeStore.BatchMutation.put(indexKey(head), INDEX_VALUE));
@@ -226,6 +240,18 @@ public final class CommonCheckpointVersionStore implements AutoCloseable {
     return marker;
   }
 
+  /** Returns the journaled applied head of one store for one version, or null when absent. */
+  public synchronized Long progressHead(long version, String storeKey) {
+    byte[] value = store.get(progressKey(version, Objects.requireNonNull(storeKey, "storeKey")));
+    if (value == null) {
+      return null;
+    }
+    if (value.length != HEAD_LENGTH) {
+      throw new IllegalStateException("common checkpoint progress journal entry is corrupt");
+    }
+    return ByteBuffer.wrap(value).getLong();
+  }
+
   /** Returns whether the retained window has grown beyond the configured block count. */
   public synchronized boolean needsPrune() {
     long latest = latestHead();
@@ -264,6 +290,7 @@ public final class CommonCheckpointVersionStore implements AutoCloseable {
       List<PathStateNativeNodeStore.KeyValue> entries;
       try {
         entries = store.scanPrefix(versionPrefix(head));
+        entries.addAll(store.scanPrefix(progressPrefix(head)));
       } catch (IOException failure) {
         throw new IOException("common checkpoint version prune cannot scan " + head, failure);
       }
@@ -403,6 +430,14 @@ public final class CommonCheckpointVersionStore implements AutoCloseable {
 
   private static byte[] versionMarkerKey(long head) {
     return bytes("v:" + pad(head) + ":m");
+  }
+
+  private static byte[] progressKey(long head, String storeKey) {
+    return bytes("h:" + pad(head) + ":" + storeKey);
+  }
+
+  private static byte[] progressPrefix(long head) {
+    return bytes("h:" + pad(head) + ":");
   }
 
   private static byte[] versionPrefix(long head) {
