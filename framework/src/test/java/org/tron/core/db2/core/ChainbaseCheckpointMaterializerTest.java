@@ -399,7 +399,8 @@ public class ChainbaseCheckpointMaterializerTest {
         });
 
     runtime.recoverBeforeServing();
-    IOException failure = assertThrows(IOException.class, () -> runtime.checkpointAndRebase(1));
+    runtime.checkpointAndRebase(1);
+    IOException failure = assertThrows(IOException.class, runtime::awaitQuiescent);
     assertEquals("injected memory rebase prepare failure", failure.getMessage());
     assertSame(layer, database.getHead());
     assertSame(layer.getRoot(), layer.getPrevious());
@@ -446,16 +447,22 @@ public class ChainbaseCheckpointMaterializerTest {
     assertThrows(IllegalStateException.class, target::getArchiveBinding);
     assertEquals(1, timings.size());
     CommonCheckpointRuntime.Timing timing = timings.get(0);
+    assertFalse(timing.isRebase());
     assertEquals(1, timing.getHead());
     assertEquals(1, timing.getBlocks());
     assertEquals(1, timing.getPayloadCaptureUs());
     assertEquals(0, timing.getHotPrepareUs());
     assertTrue(timing.getOwnerApplyUs() > 0);
-    assertEquals(1, timing.getChainbaseRebasePrepareUs());
-    assertEquals(1, timing.getPathStateRebasePrepareUs());
-    assertEquals(1, timing.getChainbaseRebaseApplyUs());
-    assertEquals(1, timing.getPathStateRebaseApplyUs());
     assertTrue(timing.getTotalUs() >= timing.getOwnerApplyUs());
+    runtime.awaitQuiescent();
+    assertEquals(2, timings.size());
+    CommonCheckpointRuntime.Timing rebase = timings.get(1);
+    assertTrue(rebase.isRebase());
+    assertEquals(1, rebase.getHead());
+    assertEquals(1, rebase.getChainbaseRebasePrepareUs());
+    assertEquals(1, rebase.getPathStateRebasePrepareUs());
+    assertEquals(1, rebase.getChainbaseRebaseApplyUs());
+    assertEquals(1, rebase.getPathStateRebaseApplyUs());
     assertSame(database.getHead().getRoot(), database.getHead());
     assertEquals(1, code.syncedFlushes);
     try (StateArchiveCheckpointReadSnapshot snapshot = runtime.pinPoint(0)) {
@@ -492,6 +499,9 @@ public class ChainbaseCheckpointMaterializerTest {
 
     assertEquals(snapshots.meta, target.getLastBlock());
     assertEquals(1, target.getArchiveBinding().getBlockCount());
+    assertEquals(1, timings.size());
+    assertEquals(1, timings.get(0).getHotPrepareUs());
+    runtime.awaitQuiescent();
     assertEquals(1, hotStore.getMaterializedHead());
     assertEquals(1, hotStore.getCommittedHead());
     assertFalse(java.nio.file.Files.exists(root.resolve("wal")
@@ -499,8 +509,7 @@ public class ChainbaseCheckpointMaterializerTest {
     assertSame(snapshots.codeDatabase.getHead().getRoot(), snapshots.codeDatabase.getHead());
     assertSame(snapshots.propertiesDatabase.getHead().getRoot(),
         snapshots.propertiesDatabase.getHead());
-    assertEquals(1, timings.size());
-    assertEquals(1, timings.get(0).getHotPrepareUs());
+    assertEquals(2, timings.size());
     assertThrows(IOException.class, () -> runtime.pinPoint(1));
     runtime.close();
   }
@@ -539,14 +548,16 @@ public class ChainbaseCheckpointMaterializerTest {
 
     assertEquals(snapshots.meta, target.getLastBlock());
     assertEquals(1, target.getArchiveBinding().getBlockCount());
+    assertEquals(1, timings.size());
+    assertEquals(1, timings.get(0).getHotPrepareUs());
+    runtime.awaitQuiescent();
     assertEquals(Status.PUBLISHED, append.inspect(target));
     assertFalse(java.nio.file.Files.exists(
         root.resolve("wal").resolve(CommonCheckpointFile.FILE_NAME)));
     assertSame(snapshots.codeDatabase.getHead().getRoot(), snapshots.codeDatabase.getHead());
     assertSame(snapshots.propertiesDatabase.getHead().getRoot(),
         snapshots.propertiesDatabase.getHead());
-    assertEquals(1, timings.size());
-    assertEquals(1, timings.get(0).getHotPrepareUs());
+    assertEquals(2, timings.size());
     assertThrows(IOException.class, () -> runtime.pinPoint(1));
     runtime.close();
 
@@ -600,6 +611,7 @@ public class ChainbaseCheckpointMaterializerTest {
 
     CommonCheckpointTarget target = recovered.checkpointAndRebase(1);
     assertEquals(snapshots.meta, target.getLastBlock());
+    recovered.awaitQuiescent();
     assertEquals(1, recoveredHot.getCommittedHead());
     assertFalse(java.nio.file.Files.exists(root.resolve("wal")
         .resolve(CommonCheckpointFile.TEMPORARY_FILE_NAME)));

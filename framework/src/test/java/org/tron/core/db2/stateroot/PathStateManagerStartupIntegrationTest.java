@@ -363,6 +363,7 @@ public class PathStateManagerStartupIntegrationTest {
     }
     setSnapshotField(snapshots, "flushCount", 1);
     snapshots.flush();
+    manager.getCommonCheckpointRuntime().awaitQuiescent();
     assertTrue(Files.isRegularFile(output.resolve("path-state-root/CURRENT")));
     assertTrue(Files.isRegularFile(output.resolve("state-archive/READABLE")));
     assertFalse(Files.exists(output.resolve("common-checkpoint/COMMON_CHECKPOINT")));
