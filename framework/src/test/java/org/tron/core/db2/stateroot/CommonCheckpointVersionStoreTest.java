@@ -78,6 +78,12 @@ public class CommonCheckpointVersionStoreTest {
       assertArrayEquals(target.getPayloadDigest(), Arrays.copyOf(marker, 32));
       assertArrayEquals(target.getStateRoot(), Arrays.copyOfRange(marker, 32, 64));
 
+      // Every anchored store appears in the h: progress journal of that version.
+      assertEquals(10L, (long) versions.progressHead(10, "c:code"));
+      assertEquals(10L, (long) versions.progressHead(10, "p:4"));
+      assertEquals(10L, (long) versions.progressHead(10, "p:0"));
+      assertNull(versions.progressHead(10, "c:storage-row"));
+
       // Re-publish is an idempotent same-key retry.
       versions.publish(payload);
       assertEquals(10, versions.latestHead());
@@ -108,6 +114,10 @@ public class CommonCheckpointVersionStoreTest {
       assertNull(versions.chainbaseShard(10, "code"));
       assertNull(versions.chainbaseShard(20, "code"));
       assertTrue(versions.chainbaseShard(30, "code") != null);
+      // The h: progress journal is pruned together with its version.
+      assertNull(versions.progressHead(10, "c:code"));
+      assertNull(versions.progressHead(20, "c:code"));
+      assertEquals(30L, (long) versions.progressHead(30, "c:code"));
       assertEquals(-1, versions.pruneIfNeeded());
       // The retained boundary anchor can span slightly more than retainedBlocks.
       assertTrue(versions.latestHead() - versions.firstHead() >= 0);

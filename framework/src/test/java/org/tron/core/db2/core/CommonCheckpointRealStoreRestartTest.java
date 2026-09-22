@@ -54,6 +54,7 @@ public class CommonCheckpointRealStoreRestartTest {
       boolean appendMode) throws Exception {
     try {
       Manager manager = context.getBean(Manager.class);
+      ChainBaseManager chainBase = context.getBean(ChainBaseManager.class);
       SnapshotManager snapshots = context.getBean(SnapshotManager.class);
       snapshots.setMaxFlushCount(1);
       for (int number = 1; number <= blocks; number++) {
@@ -68,7 +69,9 @@ public class CommonCheckpointRealStoreRestartTest {
       }
 
       // No internal checkpoint key may leak into business stores: every value in
-      // recent-transaction must remain the JSON we wrote (TxCacheDB parses them at startup).
+      // recent-transaction must remain the JSON we wrote (TxCacheDB parses them at startup),
+      // and the witness store's full-scan paths (payReward per block) must see only valid
+      // WitnessCapsule protos — ARM-001 Bug A was a getVoteCount() NPE on the binary key.
       Chainbase recentTransactions = store(snapshots, "recent-transaction");
       java.util.Iterator<java.util.Map.Entry<byte[], byte[]>> iterator =
           recentTransactions.iterator();
@@ -81,6 +84,14 @@ public class CommonCheckpointRealStoreRestartTest {
         assertTrue(Longs.fromByteArray(entry.getKey()) >= 1);
       }
       assertEquals(blocks, entries);
+      java.util.List<org.tron.core.capsule.WitnessCapsule> witnesses =
+          chainBase.getWitnessStore().getAllWitnesses();
+      // Genesis seeds its own witnesses; ours are added on top. The regression signal is that
+      // the full scan and vote-count sort run at all (no binary internal keys to parse).
+      assertTrue(witnesses.size() >= blocks);
+      // The exact ARM-001 Bug A call chain: full scan + proto sort by vote count.
+      org.tron.core.store.WitnessStore.sortWitnesses(witnesses, false);
+      chainBase.getWitnessStore().getWitnessStandby(false);
     } finally {
       context.close();
       Args.clearParam();
@@ -102,6 +113,9 @@ public class CommonCheckpointRealStoreRestartTest {
       store(snapshots, "account").put(accountKey(number), accountValue(number));
       store(snapshots, "recent-transaction").put(Longs.toByteArray(number), jsonValue(number));
       store(snapshots, "trans-cache").put(Longs.toByteArray(number), Longs.toByteArray(number));
+      chainBase.getWitnessStore().put(accountKey(number),
+          new org.tron.core.capsule.WitnessCapsule(
+              com.google.protobuf.ByteString.copyFrom(accountKey(number)), "url-" + number));
       chainBase.getBlockStore().put(blockHash, block);
       chainBase.getBlockIndexStore().put(block.getBlockId());
       session.commit(meta);

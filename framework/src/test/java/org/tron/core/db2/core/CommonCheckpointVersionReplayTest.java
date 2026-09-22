@@ -131,6 +131,36 @@ public class CommonCheckpointVersionReplayTest {
   }
 
   @Test
+  public void legacyInStoreHeadKeyIsIgnoredAndLeftUntouched() throws Exception {
+    TestConstants.assumeLevelDbAvailable();
+    Path root = temporaryFolder.newFolder("legacy-key").toPath();
+    Fixture fixture = new Fixture(root);
+    // Pre-fix versions (a0889a0e55 and earlier) wrote this binary progress key into every
+    // business Store. New code never reads it; operators may delete it at their own pace
+    // (ARM-001 was cleaned by hand). The checkpoint and replay machinery must ignore it.
+    byte[] legacyKey = ("\0" + "common-checkpoint-head-v1").getBytes(
+        java.nio.charset.StandardCharsets.US_ASCII);
+    fixture.code.put(legacyKey, new byte[8]);
+
+    CommonCheckpointRuntime runtime = fixture.runtime();
+    runtime.recoverBeforeServing();
+    fixture.appendBlock(1, hash(0), hash(1), new byte[]{2});
+    runtime.checkpointAndRebase(1);
+    runtime.close();
+
+    CommonCheckpointRuntime recovered = fixture.runtime();
+    try {
+      assertEquals(CommonCheckpointRedoCoordinator.RecoveryAction.NO_CHECKPOINT,
+          recovered.recoverBeforeServing());
+      assertArrayEquals(new byte[]{2}, fixture.code.get(new byte[]{1}));
+      // The legacy key is untouched and never consulted.
+      assertArrayEquals(new byte[8], fixture.code.get(legacyKey));
+    } finally {
+      recovered.close();
+    }
+  }
+
+  @Test
   public void replayFailsClosedWhenVersionStoreDisagreesWithPublishedTarget()
       throws Exception {
     TestConstants.assumeLevelDbAvailable();
