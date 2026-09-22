@@ -98,9 +98,13 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
 
   /**
    * Startup repair after a power loss: replays every retained version that an authority store
-   * missed (its unsynced tail) from the version store, in version order. Fails closed when the
-   * version store disagrees with the published target or no longer covers a store's head.
-   * {@code published} may be null for runtimes without a legacy published target (Hot DB mode).
+   * missed (its unsynced tail) from the version store, in version order. Three cases: an empty
+   * store is a no-op (upgrade from pre-version-store code); a store BEHIND the published target
+   * means the missing checkpoints were completed by old code with synced business-store writes
+   * (rollback gap), so the store is re-baselined to the published target without replay; a store
+   * AHEAD of the published target, a digest mismatch at the same head, or an unreplayable or
+   * missing version fails closed. {@code published} may be null for runtimes without a legacy
+   * published target (Hot DB mode).
    */
   synchronized void replayVersions(CommonCheckpointTarget published) throws IOException {
     requireOpen();
@@ -112,12 +116,22 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
       return;
     }
     if (published != null) {
-      if (published.getLastBlock().getBlockNumber() != latest
-          || !java.util.Arrays.equals(published.getPayloadDigest(),
+      long publishedHead = published.getLastBlock().getBlockNumber();
+      if (latest > publishedHead) {
+        throw new IOException("common checkpoint version store latest " + latest
+            + " is ahead of the published target " + publishedHead);
+      }
+      if (latest < publishedHead) {
+        // Rollback gap: old code (no version store) completed these checkpoints with synced
+        // writes, so the business stores are durable at the published target. Re-anchor the
+        // version store instead of rejecting the startup.
+        versionStore.rebaseline(publishedHead, published.getPayloadDigest());
+        return;
+      }
+      if (!java.util.Arrays.equals(published.getPayloadDigest(),
           versionStore.latestDigest())) {
         throw new IOException("common checkpoint version store latest " + latest
-            + " differs from the published target "
-            + published.getLastBlock().getBlockNumber());
+            + " digest differs from the published target " + publishedHead);
       }
     }
     for (Authority authority : new Authority[]{Authority.CHAINBASE, Authority.PATH_STATE}) {

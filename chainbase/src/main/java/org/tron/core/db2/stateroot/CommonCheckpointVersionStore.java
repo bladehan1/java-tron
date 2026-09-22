@@ -240,6 +240,52 @@ public final class CommonCheckpointVersionStore implements AutoCloseable {
     return marker;
   }
 
+  /**
+   * Advances the store's baseline to {@code head}: deletes every version at or below it and
+   * writes {@code latest} (synced) and {@code first} for the published target. Used at startup
+   * when the published authorities are AHEAD of this store — that can only mean the missing
+   * checkpoints were written by old code with synced business-store writes (no power-loss gap),
+   * so no replay is needed and the store simply starts over from the published target.
+   */
+  public synchronized void rebaseline(long head, byte[] digest) throws IOException {
+    long latest = latestHead();
+    if (latest >= head) {
+      throw new IOException("common checkpoint version store rebaseline must move forward: "
+          + "latest=" + latest + ", head=" + head);
+    }
+    Objects.requireNonNull(digest, "digest");
+    if (digest.length != DIGEST_LENGTH) {
+      throw new IllegalArgumentException("digest must be exactly 32 bytes");
+    }
+    int removed = 0;
+    for (long version : versions()) {
+      List<PathStateNativeNodeStore.KeyValue> entries;
+      try {
+        entries = store.scanPrefix(versionPrefix(version));
+        entries.addAll(store.scanPrefix(progressPrefix(version)));
+      } catch (IOException failure) {
+        throw new IOException("common checkpoint version rebaseline cannot scan " + version,
+            failure);
+      }
+      List<PathStateNativeNodeStore.BatchMutation> deletes = new ArrayList<>(entries.size() + 1);
+      for (PathStateNativeNodeStore.KeyValue entry : entries) {
+        deletes.add(PathStateNativeNodeStore.BatchMutation.delete(entry.getKey()));
+      }
+      deletes.add(PathStateNativeNodeStore.BatchMutation.delete(indexKey(version)));
+      store.writeBatchUnsynced(deletes);
+      removed++;
+    }
+    store.writeBatchUnsynced(Collections.singletonList(
+        PathStateNativeNodeStore.BatchMutation.put(FIRST_KEY, encodeHead(head))));
+    ByteBuffer newLatest = ByteBuffer.allocate(HEAD_LENGTH + DIGEST_LENGTH);
+    newLatest.putLong(head);
+    newLatest.put(digest);
+    store.writeBatch(Collections.singletonList(
+        PathStateNativeNodeStore.BatchMutation.put(LATEST_KEY, newLatest.array())));
+    logger.info("Common checkpoint version store: rebaseline to head={}, removedVersions={}",
+        head, removed);
+  }
+
   /** Returns the journaled applied head of one store for one version, or null when absent. */
   public synchronized Long progressHead(long version, String storeKey) {
     byte[] value = store.get(progressKey(version, Objects.requireNonNull(storeKey, "storeKey")));
