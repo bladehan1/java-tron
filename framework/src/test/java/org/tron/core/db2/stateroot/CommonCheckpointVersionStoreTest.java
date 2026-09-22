@@ -133,6 +133,43 @@ public class CommonCheckpointVersionStoreTest {
   }
 
   @Test
+  public void rebaselineDeletesOldVersionsAndReanchorsFirstAndLatest() throws Exception {
+    TestConstants.assumeLevelDbAvailable();
+    CommonCheckpointVersionStore versions = CommonCheckpointVersionStore.open(
+        temporaryFolder.newFolder("rebaseline").toPath(), Engine.LEVELDB);
+    try {
+      for (long head = 10; head <= 50; head += 10) {
+        versions.publish(payload(head, hash((int) head - 1), hash((int) head),
+            hash(10), hash(11), new byte[]{1}, new byte[]{(byte) head}));
+      }
+      byte[] digest45 = versions.latestDigest(); // placeholder replaced below
+      // Re-baseline forward to a target old code reached without this store.
+      CommonCheckpointTarget target60 = CommonCheckpointTarget.from(
+          payload(60, hash(49), hash(50), hash(11), hash(12), new byte[]{1}, new byte[]{60}));
+      versions.rebaseline(60, target60.getPayloadDigest());
+      assertEquals(60, versions.latestHead());
+      assertEquals(60, versions.firstHead());
+      assertArrayEquals(target60.getPayloadDigest(), versions.latestDigest());
+      assertTrue(versions.versions().isEmpty());
+      assertNull(versions.chainbaseShard(10, "code"));
+      assertNull(versions.progressHead(10, "c:code"));
+
+      // New checkpoints build cleanly on the new baseline.
+      versions.publish(payload(70, hash(59), hash(60), hash(12), hash(13), new byte[]{2},
+          new byte[]{70}));
+      assertEquals(70, versions.latestHead());
+      assertEquals(60, versions.firstHead());
+      assertEquals(Arrays.asList(70L), versions.versions());
+      assertEquals(70L, (long) versions.progressHead(70, "c:code"));
+
+      // Re-baseline never moves backwards.
+      assertThrows(IOException.class, () -> versions.rebaseline(60, digest45));
+    } finally {
+      versions.close();
+    }
+  }
+
+  @Test
   public void pathStateReplayRestoresLostUnsyncedTail() throws Exception {
     Path root = temporaryFolder.newFolder("path-replay").toPath();
     PathStateParticipantScope scope = new PathStateCanonicalizer().participantScope();

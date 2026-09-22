@@ -161,6 +161,64 @@ public class CommonCheckpointVersionReplayTest {
   }
 
   @Test
+  public void rollbackGapRebaselinesVersionStoreInsteadOfFailingClosed() throws Exception {
+    TestConstants.assumeLevelDbAvailable();
+    Path root = temporaryFolder.newFolder("rollback-gap").toPath();
+    Fixture fixture = new Fixture(root);
+    CommonCheckpointRuntime runtime = fixture.runtime();
+    runtime.recoverBeforeServing();
+    fixture.appendBlock(1, hash(0), hash(1), new byte[]{1});
+    runtime.checkpointAndRebase(1);
+    fixture.appendBlock(2, hash(1), hash(2), new byte[]{2});
+    runtime.checkpointAndRebase(1);
+    assertEquals(2, fixture.versions.latestHead());
+    runtime.close();
+
+    // Old code (no version store) runs for a while: checkpoints 3..5 complete with synced
+    // business-store writes and advance every authority's published marker, but record nothing
+    // in the version store.
+    StateArchiveCheckpointMaterializer archive =
+        new StateArchiveCheckpointMaterializer(root.resolve("archive"), fixture.format, null,
+            Engine.LEVELDB);
+    for (int number = 3; number <= 5; number++) {
+      CommonCheckpointPayload payload = fixture.payload(number, hash(number - 1), hash(number),
+          new byte[]{(byte) number});
+      CommonCheckpointTarget target = CommonCheckpointTarget.from(payload);
+      fixture.chainbase.materialize(payload, target);
+      fixture.chainbase.publish(target);
+      archive.materialize(payload, target);
+      archive.publish(target);
+      fixture.pathState.publish(target);
+    }
+    archive.close();
+
+    // New code starts again: the version store lags the published target, so it re-baselines
+    // instead of failing closed — no replay is needed (old-code writes were synced).
+    CommonCheckpointRuntime recovered = fixture.runtime();
+    try {
+      assertEquals(CommonCheckpointRedoCoordinator.RecoveryAction.NO_CHECKPOINT,
+          recovered.recoverBeforeServing());
+      assertEquals(CommonCheckpointRuntimeOwner.State.READY, recovered.getState());
+      assertEquals(5, fixture.versions.latestHead());
+      assertEquals(5, fixture.versions.firstHead());
+      assertTrue(fixture.versions.versions().isEmpty());
+
+      // Checkpoints, replay and pruning keep working on top of the new baseline.
+      fixture.appendBlock(6, hash(5), hash(6), new byte[]{6});
+      CommonCheckpointTarget sixth = recovered.checkpointAndRebase(1);
+      assertEquals(6, sixth.getLastBlock().getBlockNumber());
+      assertArrayEquals(new byte[]{6}, fixture.code.get(new byte[]{1}));
+      assertEquals(6, fixture.versions.latestHead());
+      assertEquals(java.util.Arrays.asList(6L), fixture.versions.versions());
+      assertEquals(5, fixture.versions.firstHead());
+      assertEquals(6L, (long) fixture.versions.progressHead(6, "c:code"));
+      assertFalse(fixture.versions.needsPrune());
+    } finally {
+      recovered.close();
+    }
+  }
+
+  @Test
   public void replayFailsClosedWhenVersionStoreDisagreesWithPublishedTarget()
       throws Exception {
     TestConstants.assumeLevelDbAvailable();
