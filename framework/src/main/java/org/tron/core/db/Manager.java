@@ -158,6 +158,7 @@ import org.tron.core.db2.core.CommonCheckpointRuntimeAttachment;
 import org.tron.core.db2.core.CommonCheckpointRuntimeOwner;
 import org.tron.core.db2.core.ExecutionAttribution;
 import org.tron.core.db2.core.SnapshotManager;
+import org.tron.core.db2.stateroot.CommonCheckpointVersionStore;
 import org.tron.core.db2.stateroot.PathStateBlockTransition;
 import org.tron.core.db2.stateroot.PathStateCanonicalizer;
 import org.tron.core.db2.stateroot.PathStateCanonicalizer.P66Phase;
@@ -841,7 +842,8 @@ public class Manager {
       recoverPendingCommonCheckpoint(snapshots, checkpointDirectory, archiveDirectory,
           pathDirectory, pathEngine, servingIndexEngine,
           storage.getPathStateRootNodeCacheBytes(), formatIdentity, baselineFile, baselineExists,
-          modeAdmitted, appendEnabled, appendDirectory, appendConfig);
+          modeAdmitted, appendEnabled, appendDirectory, appendConfig,
+          configuredAuxiliaryEngine(null, storage.getDbEngine()));
       chainBaseManager.getAccountAssetStore().finishSnapshotRecovery(snapshots);
       BlockSnapshotMeta canonical = currentCanonicalBlockMeta();
       P66Phase phase = currentPathStatePhase();
@@ -906,6 +908,10 @@ public class Manager {
         }
       }
       CommonCheckpointFile checkpointFile = new CommonCheckpointFile(checkpointDirectory);
+      // The single fsync anchor of every checkpoint; authority stores only write unsynced.
+      CommonCheckpointVersionStore versionStore = CommonCheckpointVersionStore.open(
+          checkpointDirectory.resolve("versions"),
+          configuredAuxiliaryEngine(null, storage.getDbEngine()));
       StateArchiveHotCheckpointMaterializer hotMaterializer = null;
       org.tron.core.db2.core.CommonCheckpointMaterializer archiveMaterializer;
       if (appendEnabled) {
@@ -925,7 +931,7 @@ public class Manager {
           checkpointFile,
           new ChainbaseCheckpointMaterializer(checkpointDirectory, formatIdentity,
               snapshots.getDbs(), baseline, materializedStore),
-          pathMaterializer, archiveMaterializer);
+          pathMaterializer, archiveMaterializer, versionStore);
       PathStatePhysicalOverlayHead admittedOwner = pathOwner;
       StateArchiveHotCheckpointMaterializer admittedHotMaterializer = hotMaterializer;
       StateArchiveHotStore admittedHotStore = hotStore;
@@ -1055,7 +1061,8 @@ public class Manager {
       PathStateStoreManifest.Engine archiveEngine, long residentNodeCacheBytes,
       byte[] formatIdentity, CommonCheckpointBaselineFile baselineFile, boolean baselineExists,
       boolean modeAdmitted, boolean appendEnabled, Path appendDirectory,
-      org.tron.core.config.args.StorageConfig.StateArchiveAppendFileConfig appendConfig)
+      org.tron.core.config.args.StorageConfig.StateArchiveAppendFileConfig appendConfig,
+      PathStateStoreManifest.Engine versionEngine)
       throws java.io.IOException {
     CommonCheckpointFile checkpointFile = new CommonCheckpointFile(checkpointDirectory);
     if (!checkpointFile.isPresent()) {
@@ -1073,16 +1080,20 @@ public class Manager {
             appendConfig)
         : new StateArchiveCheckpointMaterializer(archiveDirectory, formatIdentity, baseline,
             archiveEngine, materializedStore);
+    // The recovered version must land in the version store (the durability anchor) before the
+    // WAL is retired, exactly like the runtime's own recover path.
     try (PathStateCheckpointMaterializer.RecoverySession pathRecovery =
         PathStateCheckpointMaterializer.openRecovery(pathDirectory, pathEngine,
             residentNodeCacheBytes, formatIdentity, baseline, materializedStore);
         org.tron.core.db2.core.CommonCheckpointMaterializer admittedArchive = archiveRecovery;
+        CommonCheckpointVersionStore versionStore = CommonCheckpointVersionStore.open(
+            checkpointDirectory.resolve("versions"), versionEngine);
         CommonCheckpointRedoCoordinator coordinator = new CommonCheckpointRedoCoordinator(
             checkpointFile,
             new ChainbaseCheckpointMaterializer(checkpointDirectory, formatIdentity,
                 snapshots.getDbs(), baseline, materializedStore),
             pathRecovery.getMaterializer(),
-            admittedArchive)) {
+            admittedArchive, versionStore)) {
       CommonCheckpointRedoCoordinator.RecoveryAction action = coordinator.recover();
       logger.info("Common checkpoint startup redo completed before PathState open: action={}",
           action);

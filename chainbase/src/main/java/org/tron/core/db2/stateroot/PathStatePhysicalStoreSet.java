@@ -4,6 +4,7 @@ import com.google.common.hash.Hasher;
 import com.google.common.hash.Hashing;
 import java.io.Closeable;
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
@@ -87,8 +88,10 @@ public final class PathStatePhysicalStoreSet implements Closeable {
       'g', 'e', 'n', 'e', 'r', 'a', 't', 'i', 'o', 'n'};
   private static final byte[] SUPER_GENERATION_METADATA = new byte[]{'s', 'u', 'p', 'e', 'r', '-',
       'g', 'e', 'n', 'e', 'r', 'a', 't', 'i', 'o', 'n'};
-  private static final byte[] CHECKPOINT_TARGET_METADATA = new byte[]{'c', 'h', 'e', 'c', 'k',
+  static final byte[] CHECKPOINT_TARGET_METADATA = new byte[]{'c', 'h', 'e', 'c', 'k',
       'p', 'o', 'i', 'n', 't', '-', 't', 'a', 'r', 'g', 'e', 't', '-', 'v', '1'};
+  static final byte[] CHECKPOINT_HEAD_METADATA = new byte[]{'c', 'h', 'e', 'c', 'k',
+      'p', 'o', 'i', 'n', 't', '-', 'h', 'e', 'a', 'd', '-', 'v', '1'};
 
   private final Path directory;
   private final PathStatePhysicalStoreManifest manifest;
@@ -1837,21 +1840,29 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     /**
      * Applies one participant's checkpoint mutations as chunked unsynced batches (releasing the
      * native-store monitor between chunks so foreground trie reads are not starved), then one
-     * synced marker batch as this store's durability barrier. Safe to run on a checkpoint writer
-     * thread: the native store synchronizes its own writes and the resident node cache is
-     * internally synchronized.
+     * final unsynced batch with the checkpoint target marker and head. Durability is anchored by
+     * the common checkpoint version store, so this store never fsyncs; because the marker/head
+     * batch is the last write in WAL order, a surviving marker always implies surviving data
+     * after a power-loss WAL replay. Safe to run on a checkpoint writer thread: the native store
+     * synchronizes its own writes and the resident node cache is internally synchronized.
      */
     void applyCheckpointParticipant(CommonCheckpointPayload.PathStoreTarget target,
-        byte[] marker) {
+        byte[] marker, long head) {
+      applyCheckpointParticipant(target.getFlatMutations(), target.getNodeMutations(), marker,
+          head);
+    }
+
+    void applyCheckpointParticipant(List<CommonCheckpointPayload.Mutation> flatMutations,
+        List<CommonCheckpointPayload.Mutation> nodeMutations, byte[] marker, long head) {
       List<PathStateNativeNodeStore.BatchMutation> mutations = new ArrayList<>();
-      for (CommonCheckpointPayload.Mutation mutation : target.getFlatMutations()) {
+      for (CommonCheckpointPayload.Mutation mutation : flatMutations) {
         byte[] key = prefixed(FLAT_STATE_PREFIX, mutation.getKey(), "secureKey");
         mutations.add(mutation.isDelete()
             ? PathStateNativeNodeStore.BatchMutation.delete(key)
             : PathStateNativeNodeStore.BatchMutation.put(key, mutation.getValue()));
       }
       List<NodeMutation> cacheMutations = new ArrayList<>();
-      for (CommonCheckpointPayload.Mutation mutation : target.getNodeMutations()) {
+      for (CommonCheckpointPayload.Mutation mutation : nodeMutations) {
         byte[] path = mutation.getKey();
         byte[] value = mutation.getValue();
         mutations.add(mutation.isDelete()
@@ -1862,11 +1873,12 @@ public final class PathStatePhysicalStoreSet implements Closeable {
                 value));
         cacheMutations.add(new NodeMutation(path, value));
       }
-      writeCheckpointMutations(mutations, marker);
+      writeCheckpointMutations(mutations, marker, head);
       nodeStore.apply(cacheMutations);
     }
 
-    void applyCheckpointSuper(List<CommonCheckpointPayload.Mutation> supplied, byte[] marker) {
+    void applyCheckpointSuper(List<CommonCheckpointPayload.Mutation> supplied, byte[] marker,
+        long head) {
       List<PathStateNativeNodeStore.BatchMutation> mutations = new ArrayList<>();
       List<NodeMutation> cacheMutations = new ArrayList<>();
       for (CommonCheckpointPayload.Mutation mutation : supplied) {
@@ -1880,24 +1892,45 @@ public final class PathStatePhysicalStoreSet implements Closeable {
                 value));
         cacheMutations.add(new NodeMutation(path, value));
       }
-      writeCheckpointMutations(mutations, marker);
+      writeCheckpointMutations(mutations, marker, head);
       nodeStore.apply(cacheMutations);
     }
 
     /**
+     * Advances only the checkpoint marker and head of one store that has no mutations in this
+     * version, keeping its replay head aligned with the newest checkpoint.
+     */
+    void writeCheckpointMarker(byte[] marker, long head) {
+      writeCheckpointMutations(java.util.Collections.emptyList(), marker, head);
+    }
+
+    /**
      * Writes data mutations in unsynced chunks of at most CHECKPOINT_WRITE_CHUNK_SIZE and ends
-     * with one synced batch carrying the checkpoint target marker. LevelDB/RocksDB append to a
-     * single sequential WAL, so fsync of the final marker batch also covers every preceding
-     * unsynced chunk of this store; the common redo WAL covers any residual crash gap.
+     * with one unsynced batch carrying the checkpoint target marker and head.
      */
     private void writeCheckpointMutations(
-        List<PathStateNativeNodeStore.BatchMutation> mutations, byte[] marker) {
+        List<PathStateNativeNodeStore.BatchMutation> mutations, byte[] marker, long head) {
       for (int from = 0; from < mutations.size(); from += CHECKPOINT_WRITE_CHUNK_SIZE) {
         nativeStore.writeBatchUnsynced(new ArrayList<>(mutations.subList(from,
             StrictMathWrapper.min(from + CHECKPOINT_WRITE_CHUNK_SIZE, mutations.size()))));
       }
-      nativeStore.writeBatch(java.util.Collections.singletonList(
-          metadataMutation(CHECKPOINT_TARGET_METADATA, marker)));
+      nativeStore.writeBatchUnsynced(Arrays.asList(
+          metadataMutation(CHECKPOINT_TARGET_METADATA, marker),
+          metadataMutation(CHECKPOINT_HEAD_METADATA,
+              ByteBuffer.allocate(Long.BYTES).putLong(head).array())));
+    }
+
+    /** Returns the newest applied common-checkpoint head, or null when never recorded. */
+    Long checkpointHead() {
+      byte[] value = getMetadata(CHECKPOINT_HEAD_METADATA);
+      if (value == null) {
+        return null;
+      }
+      if (value.length != Long.BYTES) {
+        throw new IllegalStateException("common checkpoint head record is corrupt in store "
+            + nativeStore.getDirectory());
+      }
+      return ByteBuffer.wrap(value).getLong();
     }
 
     byte[] checkpointTargetMarker() {

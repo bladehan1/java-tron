@@ -91,17 +91,16 @@ public final class CommonCheckpointRuntimeOwner implements AutoCloseable {
   }
 
   /**
-   * Phase A of an async checkpoint on the caller thread: moves READY to CHECKPOINTING (read
-   * leases keep their current behavior) and forces the redo WAL. Returns the WAL publication
-   * cost in microseconds, which the caller must hand to {@link #completeAsyncCheckpoint}.
+   * Startup repair after a power loss: replays retained versions that authority stores missed
+   * into them, before the first read lease is served. {@code published} may be null for
+   * runtimes without a legacy published target (Hot DB mode).
    */
-  long beginAsyncCheckpoint(CommonCheckpointPayload payload) throws IOException {
+  void replayVersionStore(CommonCheckpointTarget published) throws IOException {
     gate.writeLock().lock();
     try {
-      requireState(State.READY, "common checkpoint runtime is not ready to flush");
-      state = State.CHECKPOINTING;
+      requireState(State.READY, "common checkpoint startup recovery is not complete");
       try {
-        return coordinator.publishWal(Objects.requireNonNull(payload, "payload"));
+        coordinator.replayVersions(published);
       } catch (IOException | RuntimeException failure) {
         state = State.FAILED;
         closeAfterFailure(failure);
@@ -112,28 +111,14 @@ public final class CommonCheckpointRuntimeOwner implements AutoCloseable {
     }
   }
 
-  /**
-   * Phase B of an async checkpoint on the background materialize thread: redoes the durable WAL
-   * under the write gate (which first waits for outstanding read leases), publishes the target,
-   * then returns to READY. Fail-closed exactly like the synchronous path.
-   */
-  void completeAsyncCheckpoint(CommonCheckpointTarget target, long walPublishUs)
-      throws IOException {
-    gate.writeLock().lock();
-    try {
-      requireState(State.CHECKPOINTING, "common checkpoint runtime is not checkpointing");
-      try {
-        coordinator.redoPublished(walPublishUs);
-        state = State.READY;
-        coordinator.notifyCommitted(Objects.requireNonNull(target, "target"));
-      } catch (IOException | RuntimeException failure) {
-        state = State.FAILED;
-        closeAfterFailure(failure);
-        throw failure;
-      }
-    } finally {
-      gate.writeLock().unlock();
-    }
+  /** Returns whether the version store retained window exceeds its configured block count. */
+  boolean versionStoreNeedsPrune() {
+    return coordinator.versionStoreNeedsPrune();
+  }
+
+  /** Prunes expired checkpoint versions; runs on the background prune thread. */
+  void pruneVersionStore() throws IOException {
+    coordinator.pruneVersionStore();
   }
 
   /** Runs one query only while no startup redo or checkpoint publication can interleave. */

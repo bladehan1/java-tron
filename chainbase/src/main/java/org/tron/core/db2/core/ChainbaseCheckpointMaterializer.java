@@ -17,19 +17,26 @@ import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
 import org.tron.core.db2.common.WrappedByteArray;
+import org.tron.core.db2.stateroot.CommonCheckpointVersionStore;
 
 /** Chainbase participant for common-checkpoint idempotent materialization and publication. */
 public final class ChainbaseCheckpointMaterializer implements CommonCheckpointMaterializer {
+
+  private static final Logger logger = LoggerFactory.getLogger("DB");
 
   static final String CURRENT_FILE = "CHAINBASE_CURRENT";
   static final String MATERIALIZED_DIRECTORY = "chainbase-checkpoint-materialized";
@@ -122,9 +129,12 @@ public final class ChainbaseCheckpointMaterializer implements CommonCheckpointMa
   /**
    * Materializes every registered Store in parallel on a bounded daemon executor. Store lookups
    * and payload validation happen on the calling thread; each Store is written by exactly one
-   * task (chunked unsynced data with one synced final chunk, see
-   * {@link SnapshotRoot#applyCheckpointMutations}), and the central materialized marker is
-   * recorded only after every Store write has completed. Fault hooks may fire on worker threads.
+   * task (chunked unsynced data, see {@link SnapshotRoot#applyCheckpointMutations}) and ends
+   * with the unsynced per-Store checkpoint head record. Durability is anchored by the common
+   * checkpoint version store, so Stores never fsync. Stores without mutations in this version
+   * still advance their checkpoint head so the startup replay window stays aligned. The central
+   * materialized marker is recorded only after every Store write has completed. Fault hooks may
+   * fire on worker threads.
    */
   @Override
   public synchronized void materialize(CommonCheckpointPayload payload,
@@ -138,24 +148,18 @@ public final class ChainbaseCheckpointMaterializer implements CommonCheckpointMa
     if (status != Status.NEEDS_MATERIALIZATION) {
       return;
     }
+    long head = admittedTarget.getLastBlock().getBlockNumber();
+    Set<String> withMutations = new HashSet<>();
     List<Runnable> writes = new ArrayList<>();
     for (CommonCheckpointPayload.StoreMutations store
         : admittedPayload.getChainbaseStores()) {
-      Chainbase database = databases.get(store.getDbName());
-      if (database == null) {
-        throw new IOException("Chainbase checkpoint Store is not registered: "
-            + store.getDbName());
-      }
-      Snapshot root = database.getHead().getRoot();
-      if (!(root instanceof SnapshotRoot)) {
-        throw new IOException("Chainbase checkpoint Store has no SnapshotRoot: "
-            + store.getDbName());
-      }
-      SnapshotRoot rootSnapshot = (SnapshotRoot) root;
+      SnapshotRoot rootSnapshot = requireRoot(store.getDbName());
+      withMutations.add(store.getDbName());
       writes.add(() -> {
         boolean observe = Boolean.getBoolean("tron.chainbase.executionAttribution");
         long started = observe ? System.nanoTime() : 0;
         rootSnapshot.applyCheckpointMutations(batch(store));
+        rootSnapshot.applyCheckpointHead(head);
         if (observe) {
           ExecutionAttribution.checkpoint(admittedTarget, store.getDbName(),
               store.getMutations().size(), System.nanoTime() - started);
@@ -163,9 +167,73 @@ public final class ChainbaseCheckpointMaterializer implements CommonCheckpointMa
         afterHook(Stage.AFTER_STORE_BATCH, store.getDbName());
       });
     }
+    for (String dbName : databases.keySet()) {
+      if (withMutations.contains(dbName)) {
+        continue;
+      }
+      SnapshotRoot rootSnapshot = requireRoot(dbName);
+      writes.add(() -> rootSnapshot.applyCheckpointHead(head));
+    }
     awaitStoreWrites(writes);
     recordMaterialized(admittedTarget, encode(admittedTarget));
     faultHook.after(Stage.AFTER_MATERIALIZED_TARGET, null);
+  }
+
+  /**
+   * Re-applies every checkpoint version each Store missed (unsynced tail lost after a power
+   * loss) from the version store, in version order, in parallel across Stores. Versions outside
+   * the retained window fail closed via
+   * {@link CommonCheckpointVersionStore#versionsBetween}.
+   */
+  @Override
+  public synchronized void replayFromVersionStore(CommonCheckpointVersionStore versions,
+      long latestHead) throws IOException {
+    List<Runnable> replays = new ArrayList<>();
+    for (Map.Entry<String, Chainbase> entry : databases.entrySet()) {
+      SnapshotRoot rootSnapshot = requireRoot(entry.getKey());
+      Long applied = rootSnapshot.getCheckpointHead();
+      if (applied != null && applied >= latestHead) {
+        continue;
+      }
+      long from = applied == null ? 0 : applied;
+      replays.add(() -> replayStore(entry.getKey(), rootSnapshot, versions, from, latestHead));
+    }
+    awaitStoreWrites(replays);
+  }
+
+  private void replayStore(String dbName, SnapshotRoot rootSnapshot,
+      CommonCheckpointVersionStore versions, long from, long latestHead) {
+    try {
+      for (long version : versions.versionsBetween(from, latestHead)) {
+        byte[] shard = versions.chainbaseShard(version, dbName);
+        if (shard != null) {
+          Map<WrappedByteArray, WrappedByteArray> batch = new LinkedHashMap<>();
+          for (CommonCheckpointPayload.Mutation mutation
+              : CommonCheckpointVersionStore.decodeMutations(shard)) {
+            batch.put(WrappedByteArray.of(mutation.getKey()),
+                WrappedByteArray.of(mutation.getValue()));
+          }
+          rootSnapshot.applyCheckpointMutations(batch);
+        }
+        rootSnapshot.applyCheckpointHead(version);
+      }
+    } catch (IOException failure) {
+      throw new java.io.UncheckedIOException(failure);
+    }
+    logger.info("Chainbase checkpoint replay: store={}, from={}, to={}", dbName, from,
+        latestHead);
+  }
+
+  private SnapshotRoot requireRoot(String dbName) throws IOException {
+    Chainbase database = databases.get(dbName);
+    if (database == null) {
+      throw new IOException("Chainbase checkpoint Store is not registered: " + dbName);
+    }
+    Snapshot root = database.getHead().getRoot();
+    if (!(root instanceof SnapshotRoot)) {
+      throw new IOException("Chainbase checkpoint Store has no SnapshotRoot: " + dbName);
+    }
+    return (SnapshotRoot) root;
   }
 
   /** Waits for every parallel Store write and propagates the first failure, if any. */

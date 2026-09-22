@@ -33,6 +33,17 @@ public interface CommonCheckpointMaterializer extends AutoCloseable {
   /** Idempotently publishes this authority's already-materialized exact target. */
   void publish(CommonCheckpointTarget target) throws IOException;
 
+  /**
+   * Re-applies every retained checkpoint version this authority's stores missed after a power
+   * loss (their unsynced tails), in version order. Only CHAINBASE and PATH_STATE implement it;
+   * the STATE_ARCHIVE authority forces its own files. Must fail closed when the retained window
+   * no longer covers a store's applied head.
+   */
+  default void replayFromVersionStore(
+      org.tron.core.db2.stateroot.CommonCheckpointVersionStore versions, long latestHead)
+      throws IOException {
+  }
+
   /** Best-effort derived work, invoked only after durable redo and WAL retirement complete. */
   default void afterCommit(CommonCheckpointTarget target) {
   }

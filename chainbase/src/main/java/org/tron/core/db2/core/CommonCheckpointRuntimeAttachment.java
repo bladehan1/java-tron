@@ -52,20 +52,6 @@ public final class CommonCheckpointRuntimeAttachment implements AutoCloseable {
     }
   }
 
-  /**
-   * Drains the asynchronous checkpoint pipeline: awaits any in-flight background materialize
-   * and runs its deferred in-memory rebase. Exposed for tests and operational drains.
-   */
-  public synchronized void awaitQuiescent() throws IOException {
-    requireReady();
-    try {
-      runtime.awaitQuiescent();
-    } catch (IOException | RuntimeException failure) {
-      state = State.FAILED;
-      throw failure;
-    }
-  }
-
   public synchronized void appendFinalizedHistory(int flushCount) throws IOException {
     requireReady();
     try {

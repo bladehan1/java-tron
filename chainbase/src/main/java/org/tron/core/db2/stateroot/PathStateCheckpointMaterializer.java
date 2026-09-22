@@ -12,8 +12,10 @@ import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
@@ -26,6 +28,9 @@ import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
 
 /** Next-format PathState participant for the common-checkpoint two-barrier protocol. */
 public final class PathStateCheckpointMaterializer implements CommonCheckpointMaterializer {
+
+  private static final org.slf4j.Logger logger =
+      org.slf4j.LoggerFactory.getLogger("DB");
 
   public static final String CURRENT_FILE = "CURRENT";
   static final String LEGACY_BASELINE_FILE = "LEGACY_BASELINE";
@@ -197,9 +202,11 @@ public final class PathStateCheckpointMaterializer implements CommonCheckpointMa
   /**
    * Materializes every participant and the super store in parallel on the store set's
    * checkpoint write executor. Validation happens on the calling thread; each store is written
-   * by exactly one task (chunked unsynced data plus one synced marker batch), and the central
-   * materialized marker is recorded only after every store write has completed. Fault hooks may
-   * fire on worker threads.
+   * by exactly one task (chunked unsynced data plus one unsynced marker/head batch — durability
+   * is anchored by the common checkpoint version store, so stores never fsync). Stores without
+   * mutations in this version still advance their checkpoint marker and head so the startup
+   * replay window stays aligned. The central materialized marker is recorded only after every
+   * store write has completed. Fault hooks may fire on worker threads.
    */
   @Override
   public synchronized void materialize(CommonCheckpointPayload payload,
@@ -214,8 +221,9 @@ public final class PathStateCheckpointMaterializer implements CommonCheckpointMa
       return;
     }
     byte[] marker = marker(admittedTarget);
+    long head = admittedTarget.getLastBlock().getBlockNumber();
     Set<Integer> seen = new HashSet<>();
-    List<Runnable> writes = new ArrayList<>();
+    Map<Integer, CommonCheckpointPayload.PathStoreTarget> byStoreId = new HashMap<>();
     for (CommonCheckpointPayload.PathStoreTarget pathStore
         : admittedPayload.getPathStores()) {
       PathStateParticipant participant = scope.require(pathStore.getDbName());
@@ -223,18 +231,28 @@ public final class PathStateCheckpointMaterializer implements CommonCheckpointMa
           || !seen.add(pathStore.getStoreId())) {
         throw new IOException("PathState checkpoint participant identity differs");
       }
-      PathStatePhysicalStoreSet.PhysicalStore store = stores.participant(pathStore.getDbName());
+      byStoreId.put(pathStore.getStoreId(), pathStore);
+    }
+    List<Runnable> writes = new ArrayList<>();
+    for (PathStateParticipant participant : scope.getParticipants()) {
+      PathStatePhysicalStoreSet.PhysicalStore store =
+          stores.participant(participant.getDbName());
+      CommonCheckpointPayload.PathStoreTarget pathStore = byStoreId.get(participant.getStoreId());
       writes.add(() -> {
         if (!Arrays.equals(marker, store.checkpointTargetMarker())) {
-          store.applyCheckpointParticipant(pathStore, marker);
-          afterHook(Stage.AFTER_PARTICIPANT_BATCH, pathStore.getStoreId());
+          if (pathStore == null) {
+            store.writeCheckpointMarker(marker, head);
+          } else {
+            store.applyCheckpointParticipant(pathStore, marker, head);
+          }
+          afterHook(Stage.AFTER_PARTICIPANT_BATCH, participant.getStoreId());
         }
       });
     }
     PathStatePhysicalStoreSet.PhysicalStore superStore = stores.superStore();
     writes.add(() -> {
       if (!Arrays.equals(marker, superStore.checkpointTargetMarker())) {
-        superStore.applyCheckpointSuper(admittedPayload.getSuperNodeMutations(), marker);
+        superStore.applyCheckpointSuper(admittedPayload.getSuperNodeMutations(), marker, head);
         afterHook(Stage.AFTER_SUPER_BATCH, 0);
       }
     });
@@ -242,6 +260,49 @@ public final class PathStateCheckpointMaterializer implements CommonCheckpointMa
     byte[] encoded = encode(admittedTarget);
     recordMaterialized(admittedTarget, encoded);
     faultHook.after(Stage.AFTER_MATERIALIZED_TARGET, 0);
+  }
+
+  /**
+   * Re-applies every checkpoint version the store missed (unsynced tail lost after a power
+   * loss) from the version store, in version order, ending with the version's marker and head.
+   * Versions outside the retained window fail closed via
+   * {@link CommonCheckpointVersionStore#versionsBetween}.
+   */
+  @Override
+  public synchronized void replayFromVersionStore(CommonCheckpointVersionStore versions,
+      long latestHead) throws IOException {
+    for (PathStateParticipant participant : scope.getParticipants()) {
+      replayStore(stores.participant(participant.getDbName()), participant.getStoreId(),
+          versions, latestHead);
+    }
+    replayStore(stores.superStore(), 0, versions, latestHead);
+  }
+
+  private void replayStore(PathStatePhysicalStoreSet.PhysicalStore store, int storeId,
+      CommonCheckpointVersionStore versions, long latestHead) throws IOException {
+    Long applied = store.checkpointHead();
+    if (applied != null && applied >= latestHead) {
+      return;
+    }
+    long from = applied == null ? 0 : applied;
+    for (long version : versions.versionsBetween(from, latestHead)) {
+      byte[] marker = versions.versionMarker(version);
+      byte[] shard = versions.pathStoreShard(version, storeId);
+      if (shard == null) {
+        store.writeCheckpointMarker(marker, version);
+      } else {
+        CommonCheckpointVersionStore.PathShard decoded =
+            CommonCheckpointVersionStore.decodePathShard(shard);
+        if (storeId == 0) {
+          store.applyCheckpointSuper(decoded.getNodeMutations(), marker, version);
+        } else {
+          store.applyCheckpointParticipant(decoded.getFlatMutations(),
+              decoded.getNodeMutations(), marker, version);
+        }
+      }
+    }
+    logger.info("PathState checkpoint replay: storeId={}, from={}, to={}", storeId,
+        applied == null ? -1 : applied, latestHead);
   }
 
   private void afterHook(Stage stage, int storeId) {

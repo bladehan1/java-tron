@@ -20,6 +20,7 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
 
   private final CommonCheckpointFile checkpointFile;
   private final Map<Authority, CommonCheckpointMaterializer> materializers;
+  private final org.tron.core.db2.stateroot.CommonCheckpointVersionStore versionStore;
   private final FaultHook faultHook;
   private final LongSupplier nanoTime;
   private final TimingSink timingSink;
@@ -29,6 +30,15 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
       CommonCheckpointMaterializer chainbase, CommonCheckpointMaterializer pathState,
       CommonCheckpointMaterializer stateArchive) {
     this(checkpointFile, chainbase, pathState, stateArchive, stage -> { });
+  }
+
+  /** Admits the durable version store that replaces per-store fsync barriers. */
+  public CommonCheckpointRedoCoordinator(CommonCheckpointFile checkpointFile,
+      CommonCheckpointMaterializer chainbase, CommonCheckpointMaterializer pathState,
+      CommonCheckpointMaterializer stateArchive,
+      org.tron.core.db2.stateroot.CommonCheckpointVersionStore versionStore) {
+    this(checkpointFile, chainbase, pathState, stateArchive, stage -> { }, System::nanoTime,
+        CommonCheckpointRedoCoordinator::logTiming, versionStore);
   }
 
   CommonCheckpointRedoCoordinator(CommonCheckpointFile checkpointFile,
@@ -42,6 +52,15 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
       CommonCheckpointMaterializer chainbase, CommonCheckpointMaterializer pathState,
       CommonCheckpointMaterializer stateArchive, FaultHook faultHook, LongSupplier nanoTime,
       TimingSink timingSink) {
+    this(checkpointFile, chainbase, pathState, stateArchive, faultHook, nanoTime, timingSink,
+        null);
+  }
+
+  private CommonCheckpointRedoCoordinator(CommonCheckpointFile checkpointFile,
+      CommonCheckpointMaterializer chainbase, CommonCheckpointMaterializer pathState,
+      CommonCheckpointMaterializer stateArchive, FaultHook faultHook, LongSupplier nanoTime,
+      TimingSink timingSink,
+      org.tron.core.db2.stateroot.CommonCheckpointVersionStore versionStore) {
     this.checkpointFile = Objects.requireNonNull(checkpointFile, "checkpointFile");
     this.materializers = new EnumMap<>(Authority.class);
     admit(Authority.CHAINBASE, chainbase);
@@ -50,6 +69,7 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
     this.faultHook = Objects.requireNonNull(faultHook, "faultHook");
     this.nanoTime = Objects.requireNonNull(nanoTime, "nanoTime");
     this.timingSink = Objects.requireNonNull(timingSink, "timingSink");
+    this.versionStore = versionStore;
   }
 
   /** Durably publishes the redo payload before applying it to any authority. */
@@ -61,7 +81,61 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
 
   synchronized RecoveryAction applyDurable(CommonCheckpointPayload payload) throws IOException {
     long walPublishUs = publishWal(payload);
+    publishVersions(payload);
     return redoPublished(walPublishUs);
+  }
+
+  /**
+   * Anchors one checkpoint's durability: after the WAL is forced, the payload's per-store
+   * mutation shards land in the version store with a single synced {@code latest} write — the
+   * only fsync point of the checkpoint — before any authority store is written unsynced.
+   */
+  private void publishVersions(CommonCheckpointPayload payload) throws IOException {
+    if (versionStore != null) {
+      versionStore.publish(Objects.requireNonNull(payload, "payload"));
+    }
+  }
+
+  /**
+   * Startup repair after a power loss: replays every retained version that an authority store
+   * missed (its unsynced tail) from the version store, in version order. Fails closed when the
+   * version store disagrees with the published target or no longer covers a store's head.
+   * {@code published} may be null for runtimes without a legacy published target (Hot DB mode).
+   */
+  synchronized void replayVersions(CommonCheckpointTarget published) throws IOException {
+    requireOpen();
+    if (versionStore == null) {
+      return;
+    }
+    long latest = versionStore.latestHead();
+    if (latest < 0) {
+      return;
+    }
+    if (published != null) {
+      if (published.getLastBlock().getBlockNumber() != latest
+          || !java.util.Arrays.equals(published.getPayloadDigest(),
+          versionStore.latestDigest())) {
+        throw new IOException("common checkpoint version store latest " + latest
+            + " differs from the published target "
+            + published.getLastBlock().getBlockNumber());
+      }
+    }
+    for (Authority authority : new Authority[]{Authority.CHAINBASE, Authority.PATH_STATE}) {
+      materializers.get(authority).replayFromVersionStore(versionStore, latest);
+    }
+  }
+
+  /** Returns whether the retained version window exceeds its configured block count. */
+  synchronized boolean versionStoreNeedsPrune() {
+    return versionStore != null && versionStore.needsPrune();
+  }
+
+  /** Prunes expired versions; intended for the background prune thread. */
+  synchronized void pruneVersionStore() throws IOException {
+    requireOpen();
+    if (versionStore != null) {
+      versionStore.pruneIfNeeded();
+    }
   }
 
   /**
@@ -105,6 +179,9 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
     Timing timing = new Timing("recover", CommonCheckpointTarget.from(loaded.value),
         loaded.value.getBlocks().size());
     timing.walLoadUs = loadUs;
+    // Anchor the recovered version in the version store BEFORE redoing it into the authority
+    // stores, so a crash after WAL retirement cannot leave a completed but unrecorded version.
+    publishVersions(loaded.value);
     RecoveryAction action = redo(loaded.value, timing);
     timing.totalUs = elapsedUs(totalStart);
     emitTiming(timing);
@@ -154,6 +231,17 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
       CommonCheckpointMaterializer materializer = materializers.get(ORDER[index]);
       try {
         materializer.close();
+      } catch (IOException | RuntimeException closing) {
+        if (failure == null) {
+          failure = closing;
+        } else {
+          failure.addSuppressed(closing);
+        }
+      }
+    }
+    if (versionStore != null) {
+      try {
+        versionStore.close();
       } catch (IOException | RuntimeException closing) {
         if (failure == null) {
           failure = closing;
