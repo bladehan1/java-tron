@@ -2,7 +2,6 @@ package org.tron.core.db2.core;
 
 import com.google.common.collect.Maps;
 import com.google.common.collect.Streams;
-import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -36,8 +35,6 @@ public class SnapshotRoot extends AbstractSnapshot<byte[], byte[]> {
 
   private TronCache<WrappedByteArray, WrappedByteArray> cache;
   private static final int CHECKPOINT_FLUSH_CHUNK_SIZE = 4096;
-  private static final byte[] CHECKPOINT_HEAD_KEY = ("\0" + "common-checkpoint-head-v1")
-      .getBytes(java.nio.charset.StandardCharsets.US_ASCII);
   private static final List<String> CACHE_DBS = CommonParameter.getInstance()
       .getStorage().getCacheDbs();
 
@@ -152,11 +149,10 @@ public class SnapshotRoot extends AbstractSnapshot<byte[], byte[]> {
   /**
    * Applies a fully coalesced common-checkpoint Store batch as unsynced chunks of at most 4096
    * entries (releasing the underlying Store between chunks). Checkpoint durability is anchored
-   * by the common checkpoint version store, so business databases never fsync; the per-Store
-   * checkpoint head key written last (still unsynced, hence after every data chunk in WAL order)
-   * records exactly how much of the checkpoint survived a power loss. The legacy
-   * Account-to-AccountAsset migration path keeps its single synced flush because it also writes
-   * a second Store that is not covered by the version store in that mode.
+   * by the common checkpoint version store, so business databases never fsync. No internal keys
+   * are written into business databases: some of them (e.g. recent-transaction via TxCacheDB)
+   * iterate and parse every entry at startup. The legacy Account-to-AccountAsset migration path
+   * keeps its single synced flush because it also writes a second Store.
    */
   void applyCheckpointMutations(Map<WrappedByteArray, WrappedByteArray> batch) {
     if (needOptAsset()) {
@@ -183,28 +179,6 @@ public class SnapshotRoot extends AbstractSnapshot<byte[], byte[]> {
       chunk.put(entry.getKey(), entry.getValue());
     }
     ((Flusher) db).flush(chunk);
-  }
-
-  /**
-   * Records the newest applied common-checkpoint head inside the Store itself, unsynced. The
-   * NUL-prefixed internal key cannot collide with any business key and is read back only by the
-   * startup replay check.
-   */
-  void applyCheckpointHead(long head) {
-    db.put(CHECKPOINT_HEAD_KEY, ByteBuffer.allocate(Long.BYTES).putLong(head).array());
-  }
-
-  /** Returns the newest applied common-checkpoint head, or null when never recorded. */
-  Long getCheckpointHead() {
-    byte[] value = db.get(CHECKPOINT_HEAD_KEY);
-    if (value == null) {
-      return null;
-    }
-    if (value.length != Long.BYTES) {
-      throw new IllegalStateException("common checkpoint head record is corrupt in "
-          + db.getDbName());
-    }
-    return ByteBuffer.wrap(value).getLong();
   }
 
   private void processAccount(Map<WrappedByteArray, WrappedByteArray> batch) {

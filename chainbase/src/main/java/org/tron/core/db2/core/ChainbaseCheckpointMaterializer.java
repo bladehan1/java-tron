@@ -127,14 +127,13 @@ public final class ChainbaseCheckpointMaterializer implements CommonCheckpointMa
   }
 
   /**
-   * Materializes every registered Store in parallel on a bounded daemon executor. Store lookups
-   * and payload validation happen on the calling thread; each Store is written by exactly one
-   * task (chunked unsynced data, see {@link SnapshotRoot#applyCheckpointMutations}) and ends
-   * with the unsynced per-Store checkpoint head record. Durability is anchored by the common
-   * checkpoint version store, so Stores never fsync. Stores without mutations in this version
-   * still advance their checkpoint head so the startup replay window stays aligned. The central
-   * materialized marker is recorded only after every Store write has completed. Fault hooks may
-   * fire on worker threads.
+   * Materializes every payload Store in parallel on a bounded daemon executor. Store lookups and
+   * payload validation happen on the calling thread; each Store is written by exactly one task
+   * (chunked unsynced data, see {@link SnapshotRoot#applyCheckpointMutations}). Durability is
+   * anchored by the common checkpoint version store, so Stores never fsync, and no internal keys
+   * are written into business databases (some self-iterate at startup, e.g. TxCacheDB over
+   * recent-transaction). The central materialized marker is recorded only after every Store
+   * write has completed. Fault hooks may fire on worker threads.
    */
   @Override
   public synchronized void materialize(CommonCheckpointPayload payload,
@@ -148,18 +147,14 @@ public final class ChainbaseCheckpointMaterializer implements CommonCheckpointMa
     if (status != Status.NEEDS_MATERIALIZATION) {
       return;
     }
-    long head = admittedTarget.getLastBlock().getBlockNumber();
-    Set<String> withMutations = new HashSet<>();
     List<Runnable> writes = new ArrayList<>();
     for (CommonCheckpointPayload.StoreMutations store
         : admittedPayload.getChainbaseStores()) {
       SnapshotRoot rootSnapshot = requireRoot(store.getDbName());
-      withMutations.add(store.getDbName());
       writes.add(() -> {
         boolean observe = Boolean.getBoolean("tron.chainbase.executionAttribution");
         long started = observe ? System.nanoTime() : 0;
         rootSnapshot.applyCheckpointMutations(batch(store));
-        rootSnapshot.applyCheckpointHead(head);
         if (observe) {
           ExecutionAttribution.checkpoint(admittedTarget, store.getDbName(),
               store.getMutations().size(), System.nanoTime() - started);
@@ -167,23 +162,23 @@ public final class ChainbaseCheckpointMaterializer implements CommonCheckpointMa
         afterHook(Stage.AFTER_STORE_BATCH, store.getDbName());
       });
     }
-    for (String dbName : databases.keySet()) {
-      if (withMutations.contains(dbName)) {
-        continue;
-      }
-      SnapshotRoot rootSnapshot = requireRoot(dbName);
-      writes.add(() -> rootSnapshot.applyCheckpointHead(head));
-    }
     awaitStoreWrites(writes);
     recordMaterialized(admittedTarget, encode(admittedTarget));
     faultHook.after(Stage.AFTER_MATERIALIZED_TARGET, null);
   }
 
   /**
-   * Re-applies every checkpoint version each Store missed (unsynced tail lost after a power
-   * loss) from the version store, in version order, in parallel across Stores. Versions outside
-   * the retained window fail closed via
-   * {@link CommonCheckpointVersionStore#versionsBetween}.
+   * Repairs Stores whose unsynced tail was lost in a power loss. Business databases carry no
+   * internal progress keys, so the durable boundary of each Store is verified by CONTENT:
+   * checkpoint writes are the only root-level writes of a Store, so its WAL is a sequence of
+   * per-version runs and a power loss can only truncate a suffix. Walking versions newest-first,
+   * a version is fully applied iff every shard key still holds the expected post-version value
+   * (keys rewritten by a later version are excluded — their current values reflect the later
+   * write). The newest content-matching version is the durable boundary; every newer retained
+   * version is re-applied in order (same-key idempotent puts). When no version can be confirmed,
+   * every retained version is re-applied; this stays sound because the retained window (1000
+   * blocks) is far longer than any OS dirty-page horizon a power loss can truncate. A version
+   * store that cannot provide a complete window fails closed.
    */
   @Override
   public synchronized void replayFromVersionStore(CommonCheckpointVersionStore versions,
@@ -191,20 +186,27 @@ public final class ChainbaseCheckpointMaterializer implements CommonCheckpointMa
     List<Runnable> replays = new ArrayList<>();
     for (Map.Entry<String, Chainbase> entry : databases.entrySet()) {
       SnapshotRoot rootSnapshot = requireRoot(entry.getKey());
-      Long applied = rootSnapshot.getCheckpointHead();
-      if (applied != null && applied >= latestHead) {
-        continue;
-      }
-      long from = applied == null ? 0 : applied;
-      replays.add(() -> replayStore(entry.getKey(), rootSnapshot, versions, from, latestHead));
+      replays.add(() -> replayStore(entry.getKey(), rootSnapshot, versions, latestHead));
     }
     awaitStoreWrites(replays);
   }
 
   private void replayStore(String dbName, SnapshotRoot rootSnapshot,
-      CommonCheckpointVersionStore versions, long from, long latestHead) {
+      CommonCheckpointVersionStore versions, long latestHead) {
     try {
-      for (long version : versions.versionsBetween(from, latestHead)) {
+      List<Long> retained = versions.versions();
+      if (!retained.isEmpty() && retained.get(retained.size() - 1) != latestHead) {
+        throw new IOException("common checkpoint version store window does not end at "
+            + latestHead);
+      }
+      long applied = verifyAppliedHead(dbName, rootSnapshot, versions, latestHead);
+      if (applied >= latestHead) {
+        return;
+      }
+      for (long version : retained) {
+        if (version <= applied) {
+          continue;
+        }
         byte[] shard = versions.chainbaseShard(version, dbName);
         if (shard != null) {
           Map<WrappedByteArray, WrappedByteArray> batch = new LinkedHashMap<>();
@@ -215,13 +217,57 @@ public final class ChainbaseCheckpointMaterializer implements CommonCheckpointMa
           }
           rootSnapshot.applyCheckpointMutations(batch);
         }
-        rootSnapshot.applyCheckpointHead(version);
       }
+      logger.info("Chainbase checkpoint replay: store={}, from={}, to={}", dbName,
+          applied, latestHead);
     } catch (IOException failure) {
       throw new java.io.UncheckedIOException(failure);
     }
-    logger.info("Chainbase checkpoint replay: store={}, from={}, to={}", dbName, from,
-        latestHead);
+  }
+
+  /**
+   * Returns the newest version whose writes to this Store verifiably survived, latestHead when
+   * the Store has no checkpoint writes in the window (nothing to replay), or -1 when a loss is
+   * detected but no version matches (the caller then re-applies the whole retained window).
+   */
+  private long verifyAppliedHead(String dbName, SnapshotRoot rootSnapshot,
+      CommonCheckpointVersionStore versions, long latestHead) throws IOException {
+    List<Long> all = versions.versions();
+    Set<WrappedByteArray> shadowed = new HashSet<>();
+    boolean hadShards = false;
+    for (int index = all.size() - 1; index >= 0; index--) {
+      long version = all.get(index);
+      if (version > latestHead) {
+        continue;
+      }
+      byte[] shard = versions.chainbaseShard(version, dbName);
+      if (shard == null) {
+        continue;
+      }
+      hadShards = true;
+      List<CommonCheckpointPayload.Mutation> mutations =
+          CommonCheckpointVersionStore.decodeMutations(shard);
+      boolean matches = true;
+      boolean checked = false;
+      for (CommonCheckpointPayload.Mutation mutation : mutations) {
+        WrappedByteArray key = WrappedByteArray.of(mutation.getKey());
+        if (shadowed.contains(key)) {
+          continue;
+        }
+        checked = true;
+        if (!Arrays.equals(mutation.getValue(), rootSnapshot.get(mutation.getKey()))) {
+          matches = false;
+          break;
+        }
+      }
+      for (CommonCheckpointPayload.Mutation mutation : mutations) {
+        shadowed.add(WrappedByteArray.of(mutation.getKey()));
+      }
+      if (matches && checked) {
+        return version;
+      }
+    }
+    return hadShards ? -1 : latestHead;
   }
 
   private SnapshotRoot requireRoot(String dbName) throws IOException {
