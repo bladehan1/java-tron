@@ -3,7 +3,6 @@ package org.tron.core.db2.core;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
@@ -26,6 +25,7 @@ import org.tron.common.TestConstants;
 import org.tron.core.config.args.Args;
 import org.tron.core.db2.archive.BlockReverseDiff;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
+import org.tron.core.db2.archive.StateArchiveCheckpointMaterializer;
 import org.tron.core.db2.common.DB;
 import org.tron.core.db2.common.Flusher;
 import org.tron.core.db2.common.WrappedByteArray;
@@ -74,7 +74,6 @@ public class CommonCheckpointVersionReplayTest {
       assertFalse(Files.exists(root.resolve("wal").resolve(CommonCheckpointFile.FILE_NAME)));
       assertSame(fixture.database.getHead().getRoot(), fixture.database.getHead());
       assertArrayEquals(new byte[]{1}, fixture.code.get(new byte[]{1}));
-      assertEquals(1L, (long) fixture.rootSnapshot().getCheckpointHead());
       assertEquals(0, fixture.code.syncedFlushes);
       assertEquals(1, fixture.code.unsyncedFlushes);
       assertEquals(1, fixture.versions.latestHead());
@@ -85,7 +84,6 @@ public class CommonCheckpointVersionReplayTest {
       CommonCheckpointTarget second = runtime.checkpointAndRebase(1);
       assertEquals(2, second.getLastBlock().getBlockNumber());
       assertArrayEquals(new byte[]{2}, fixture.code.get(new byte[]{1}));
-      assertEquals(2L, (long) fixture.rootSnapshot().getCheckpointHead());
       assertEquals(2, fixture.versions.latestHead());
     } finally {
       runtime.close();
@@ -105,45 +103,50 @@ public class CommonCheckpointVersionReplayTest {
     runtime.checkpointAndRebase(1);
     runtime.close();
 
-    // Simulate a power loss: version 2's unsynced tail is gone from the business Store.
+    // Simulate a power loss: version 2's unsynced write is gone, version 1's content survived.
     fixture.code.put(new byte[]{1}, new byte[]{2});
-    fixture.rootSnapshot().applyCheckpointHead(1);
     assertArrayEquals(new byte[]{2}, fixture.code.get(new byte[]{1}));
+    fixture.newStoreGeneration();
 
     CommonCheckpointRuntime recovered = fixture.runtime();
     try {
       assertEquals(CommonCheckpointRedoCoordinator.RecoveryAction.NO_CHECKPOINT,
           recovered.recoverBeforeServing());
       assertArrayEquals(new byte[]{3}, fixture.code.get(new byte[]{1}));
-      assertEquals(2L, (long) fixture.rootSnapshot().getCheckpointHead());
       assertEquals(Status.PUBLISHED, fixture.chainbase.inspect(
           CommonCheckpointTarget.from(fixture.payload(2, hash(1), hash(2), new byte[]{3}))));
-      assertEquals(first.getLastBlock().getBlockNumber(), 1);
+      assertEquals(1, first.getLastBlock().getBlockNumber());
     } finally {
       recovered.close();
+    }
+    // A second restart with an intact Store verifies clean and replays nothing.
+    CommonCheckpointRuntime intact = fixture.runtime();
+    try {
+      assertEquals(CommonCheckpointRedoCoordinator.RecoveryAction.NO_CHECKPOINT,
+          intact.recoverBeforeServing());
+      assertArrayEquals(new byte[]{3}, fixture.code.get(new byte[]{1}));
+    } finally {
+      intact.close();
     }
   }
 
   @Test
-  public void replayFailsClosedWhenVersionWindowNoLongerCoversStore() throws Exception {
+  public void replayFailsClosedWhenVersionStoreDisagreesWithPublishedTarget()
+      throws Exception {
     TestConstants.assumeLevelDbAvailable();
     Path root = temporaryFolder.newFolder("replay-fail-closed").toPath();
     Fixture fixture = new Fixture(root, 2);
     CommonCheckpointRuntime runtime = fixture.runtime();
     runtime.recoverBeforeServing();
-    for (int number = 1; number <= 5; number++) {
+    for (int number = 1; number <= 2; number++) {
       fixture.appendBlock(number, hash(number - 1), hash(number), new byte[]{(byte) number});
       runtime.checkpointAndRebase(1);
     }
-    // Heads 1..5 with a 2-block window: boundary 3 is retained as anchor, 1..2 pruned.
-    assertEquals(3, fixture.versions.pruneIfNeeded());
-    assertEquals(3, fixture.versions.firstHead());
     runtime.close();
 
-    // The Store claims the bootstrap state (its head record is gone entirely): the versions it
-    // would need (1..3) are no longer fully replayable, so startup must fail closed.
-    fixture.code.remove(new byte[]{1});
-    fixture.rootSnapshot().applyCheckpointHead(0);
+    // A foreign version lands in the version store: its latest no longer matches the published
+    // authority target, so startup must fail closed instead of replaying an inconsistent window.
+    fixture.tamperVersionStore(fixture.payload(9, hash(8), hash(9), new byte[]{9}));
 
     CommonCheckpointRuntime recovered = fixture.runtime();
     try {
@@ -168,8 +171,9 @@ public class CommonCheckpointVersionReplayTest {
     private final long retainedBlocks;
     private final byte[] format = hash(80);
     private final MemoryDb code = new MemoryDb("code");
-    private final Chainbase database = new Chainbase(new SnapshotRoot(code));
-    private final ChainbaseCheckpointMaterializer chainbase;
+    private Chainbase database;
+    private ChainbaseCheckpointMaterializer chainbase;
+    private final CommonCheckpointMaterializer pathState = fake(Authority.PATH_STATE);
     private CommonCheckpointVersionStore versions;
 
     private Fixture(Path root) throws IOException {
@@ -179,12 +183,28 @@ public class CommonCheckpointVersionReplayTest {
     private Fixture(Path root, long retainedBlocks) throws IOException {
       this.root = root;
       this.retainedBlocks = retainedBlocks;
-      this.chainbase = new ChainbaseCheckpointMaterializer(root.resolve("chainbase"), format,
+      newStoreGeneration();
+    }
+
+    /**
+     * Simulates a process restart: a fresh SnapshotRoot over the same durable data has an empty
+     * read cache, so post-crash verification reads the database rather than stale cache entries.
+     */
+    private void newStoreGeneration() {
+      database = new Chainbase(new SnapshotRoot(code));
+      chainbase = new ChainbaseCheckpointMaterializer(root.resolve("chainbase"), format,
           Collections.singletonList(database));
     }
 
-    private SnapshotRoot rootSnapshot() {
-      return (SnapshotRoot) database.getHead().getRoot();
+    /** Publishes one foreign version into the closed runtime's version store, then closes it. */
+    private void tamperVersionStore(CommonCheckpointPayload foreign) throws IOException {
+      CommonCheckpointVersionStore handle = CommonCheckpointVersionStore.open(
+          root.resolve("versions"), Engine.LEVELDB, retainedBlocks);
+      try {
+        handle.publish(foreign);
+      } finally {
+        handle.close();
+      }
     }
 
     private SnapshotImpl appendBlock(long number, byte[] parentHash, byte[] blockHash,
@@ -233,8 +253,9 @@ public class CommonCheckpointVersionReplayTest {
       versions = CommonCheckpointVersionStore.open(root.resolve("versions"), Engine.LEVELDB,
           retainedBlocks);
       CommonCheckpointRedoCoordinator coordinator = new CommonCheckpointRedoCoordinator(
-          new CommonCheckpointFile(root.resolve("wal")), chainbase, fake(Authority.PATH_STATE),
-          fake(Authority.STATE_ARCHIVE), versions);
+          new CommonCheckpointFile(root.resolve("wal")), chainbase, pathState,
+          new StateArchiveCheckpointMaterializer(root.resolve("archive"), format, null,
+              Engine.LEVELDB), versions);
       return new CommonCheckpointRuntime(new CommonCheckpointRuntimeOwner(coordinator),
           Collections.singletonList(database), root.resolve("archive"), format, Engine.LEVELDB,
           (blockNumber, blockHash) -> {

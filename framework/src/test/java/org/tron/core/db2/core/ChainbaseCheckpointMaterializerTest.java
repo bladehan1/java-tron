@@ -87,11 +87,6 @@ public class ChainbaseCheckpointMaterializerTest {
     assertEquals(1, fixture.code.unsyncedFlushes);
     assertEquals(0, fixture.storage.syncedFlushes);
     assertEquals(1, fixture.storage.unsyncedFlushes);
-    // Every registered Store records the checkpoint head, even without mutations.
-    assertEquals(1L, (long) ((SnapshotRoot) fixture.databases.get(0).getHead().getRoot())
-        .getCheckpointHead());
-    assertEquals(1L, (long) ((SnapshotRoot) fixture.databases.get(1).getHead().getRoot())
-        .getCheckpointHead());
 
     fixture.materializer.materialize(fixture.payload, fixture.target);
     assertEquals(1, fixture.code.unsyncedFlushes);
