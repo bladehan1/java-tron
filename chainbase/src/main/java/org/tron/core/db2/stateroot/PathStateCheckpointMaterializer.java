@@ -10,8 +10,10 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Objects;
 import java.util.Set;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
@@ -192,6 +194,13 @@ public final class PathStateCheckpointMaterializer implements CommonCheckpointMa
     return Status.MATERIALIZED;
   }
 
+  /**
+   * Materializes every participant and the super store in parallel on the store set's
+   * checkpoint write executor. Validation happens on the calling thread; each store is written
+   * by exactly one task (chunked unsynced data plus one synced marker batch), and the central
+   * materialized marker is recorded only after every store write has completed. Fault hooks may
+   * fire on worker threads.
+   */
   @Override
   public synchronized void materialize(CommonCheckpointPayload payload,
       CommonCheckpointTarget target) throws IOException {
@@ -206,6 +215,7 @@ public final class PathStateCheckpointMaterializer implements CommonCheckpointMa
     }
     byte[] marker = marker(admittedTarget);
     Set<Integer> seen = new HashSet<>();
+    List<Runnable> writes = new ArrayList<>();
     for (CommonCheckpointPayload.PathStoreTarget pathStore
         : admittedPayload.getPathStores()) {
       PathStateParticipant participant = scope.require(pathStore.getDbName());
@@ -214,19 +224,32 @@ public final class PathStateCheckpointMaterializer implements CommonCheckpointMa
         throw new IOException("PathState checkpoint participant identity differs");
       }
       PathStatePhysicalStoreSet.PhysicalStore store = stores.participant(pathStore.getDbName());
-      if (!Arrays.equals(marker, store.checkpointTargetMarker())) {
-        store.applyCheckpointParticipant(pathStore, marker);
-        faultHook.after(Stage.AFTER_PARTICIPANT_BATCH, pathStore.getStoreId());
-      }
+      writes.add(() -> {
+        if (!Arrays.equals(marker, store.checkpointTargetMarker())) {
+          store.applyCheckpointParticipant(pathStore, marker);
+          afterHook(Stage.AFTER_PARTICIPANT_BATCH, pathStore.getStoreId());
+        }
+      });
     }
     PathStatePhysicalStoreSet.PhysicalStore superStore = stores.superStore();
-    if (!Arrays.equals(marker, superStore.checkpointTargetMarker())) {
-      superStore.applyCheckpointSuper(admittedPayload.getSuperNodeMutations(), marker);
-      faultHook.after(Stage.AFTER_SUPER_BATCH, 0);
-    }
+    writes.add(() -> {
+      if (!Arrays.equals(marker, superStore.checkpointTargetMarker())) {
+        superStore.applyCheckpointSuper(admittedPayload.getSuperNodeMutations(), marker);
+        afterHook(Stage.AFTER_SUPER_BATCH, 0);
+      }
+    });
+    stores.awaitCheckpointWrites(writes);
     byte[] encoded = encode(admittedTarget);
     recordMaterialized(admittedTarget, encoded);
     faultHook.after(Stage.AFTER_MATERIALIZED_TARGET, 0);
+  }
+
+  private void afterHook(Stage stage, int storeId) {
+    try {
+      faultHook.after(stage, storeId);
+    } catch (IOException failure) {
+      throw new java.io.UncheckedIOException(failure);
+    }
   }
 
   @Override

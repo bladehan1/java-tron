@@ -39,7 +39,15 @@ public final class CommonCheckpointRuntime implements AutoCloseable {
   private final CommonCheckpointPayloadFactory payloadFactory =
       new CommonCheckpointPayloadFactory();
   private final CommonCheckpointSnapshotRebaser rebaser = new CommonCheckpointSnapshotRebaser();
+  private final java.util.concurrent.ExecutorService materializeExecutor =
+      java.util.concurrent.Executors.newSingleThreadExecutor(task -> {
+        Thread thread = new Thread(task, "common-checkpoint-materialize");
+        thread.setDaemon(true);
+        return thread;
+      });
   private volatile CommonCheckpointTarget publishedTarget;
+  private java.util.concurrent.Future<?> inFlight;
+  private CommonCheckpointRuntimeOwner.CompletionAction pendingCompletion;
 
   public CommonCheckpointRuntime(CommonCheckpointRuntimeOwner owner, List<Chainbase> databases,
       Path archiveDirectory, byte[] formatIdentity, Engine engine,
@@ -164,22 +172,29 @@ public final class CommonCheckpointRuntime implements AutoCloseable {
   }
 
   /**
-   * Captures and applies the immutable Snapshot prefix, then rebases it without a second Store
-   * write. The caller must hold the SnapshotManager monitor for the whole call.
+   * Captures the immutable Snapshot prefix, forces the Archive history and the common redo WAL
+   * on the caller thread, then hands authority materialization to a background thread. The
+   * caller must hold the SnapshotManager monitor for the whole call.
    *
-   * <p>This is the durability side of the block-final pipeline.  The preceding commit stage has
-   * already attached one prepared artifact to each Store Snapshot.  Here the runtime captures a
-   * common payload and forces Archive history. The owner then forces Common redo WAL,
-   * materializes the authorities, publishes their common target and retires WAL. Only AFTER
-   * durable publication does the completion callback below rebase memory: Chainbase unlinks the
-   * flushed prefix; PathState rebuilds the retained suffix against the new durable baseline.
-   * Rebase does not write a checkpoint Store. Per-database materialization concurrency is a
-   * separate concern from this in-memory lifecycle operation.
+   * <p>This is the durability side of the block-final pipeline. The preceding commit stage has
+   * already attached one prepared artifact to each Store Snapshot. Here the runtime drains the
+   * previous checkpoint (awaiting its background materialize and running its deferred in-memory
+   * rebase while the SnapshotManager monitor is still held), captures a common payload, forces
+   * Archive history and the redo WAL, and returns as soon as the WAL is durable. The background
+   * thread then materializes the authorities, publishes their common target and retires the WAL;
+   * it never touches the SnapshotManager monitor. Only AFTER durable publication does the next
+   * call's deferred completion rebase memory: Chainbase unlinks the flushed prefix; PathState
+   * rebuilds the retained suffix against the new durable baseline. Rebase does not write a
+   * checkpoint Store. A background failure surfaces as an IOException here at the latest by the
+   * next checkpoint, keeping the fail-closed semantics of the synchronous path; restart recovery
+   * redoes the unretired WAL.
    */
   public synchronized CommonCheckpointTarget checkpointAndRebase(int flushCount)
       throws IOException {
     try {
       long totalStart = nanoTime.getAsLong();
+      drainInFlight();
+      runPendingCompletion();
       Timing timing = new Timing(flushCount);
       long captureStart = nanoTime.getAsLong();
       CommonCheckpointCapture capture = archivePlanner == null ? null
@@ -202,25 +217,45 @@ public final class CommonCheckpointRuntime implements AutoCloseable {
         }
       }
       long ownerApplyStart = nanoTime.getAsLong();
-      owner.apply(payload, () -> {
-        // Durable materialization/publication has completed. These are MEMORY plans only;
-        // prepare both before changing pointers so a failed prepare cannot partially unlink them.
+      long walPublishUs = owner.beginAsyncCheckpoint(payload);
+      timing.ownerApplyUs = elapsedUs(ownerApplyStart);
+      // Durable WAL publication has completed; the background thread owns materialization and
+      // publication. The deferred completion below rebase MEMORY only: prepare both plans before
+      // changing pointers so a failed prepare cannot partially unlink them. It runs at the next
+      // drain point, where the caller again holds the SnapshotManager monitor.
+      pendingCompletion = () -> {
+        Timing rebaseTiming = Timing.rebase(timing.head);
         long chainbasePrepareStart = nanoTime.getAsLong();
         CommonCheckpointSnapshotRebaser.Plan chainbasePlan =
             rebaser.prepare(databases, target, flushCount);
-        timing.chainbaseRebasePrepareUs = elapsedUs(chainbasePrepareStart);
+        rebaseTiming.chainbaseRebasePrepareUs = elapsedUs(chainbasePrepareStart);
         long pathStatePrepareStart = nanoTime.getAsLong();
         CommonCheckpointMemoryRebaser.RebasePlan pathStatePlan = memoryRebaser.prepare(target);
-        timing.pathStateRebasePrepareUs = elapsedUs(pathStatePrepareStart);
+        rebaseTiming.pathStateRebasePrepareUs = elapsedUs(pathStatePrepareStart);
         long chainbaseApplyStart = nanoTime.getAsLong();
         chainbasePlan.apply();
-        timing.chainbaseRebaseApplyUs = elapsedUs(chainbaseApplyStart);
+        rebaseTiming.chainbaseRebaseApplyUs = elapsedUs(chainbaseApplyStart);
         long pathStateApplyStart = nanoTime.getAsLong();
         pathStatePlan.apply();
-        timing.pathStateRebaseApplyUs = elapsedUs(pathStateApplyStart);
-        publishedTarget = target;
+        rebaseTiming.pathStateRebaseApplyUs = elapsedUs(pathStateApplyStart);
+        emitTiming(rebaseTiming);
+      };
+      CommonCheckpointTarget submitted = target;
+      inFlight = materializeExecutor.submit(() -> {
+        long materializeStart = nanoTime.getAsLong();
+        try {
+          owner.completeAsyncCheckpoint(submitted, walPublishUs);
+        } catch (IOException | RuntimeException failure) {
+          logger.error("Common checkpoint async materialize failed, head={}",
+              submitted.getLastBlock().getBlockNumber(), failure);
+          throw failure;
+        }
+        publishedTarget = submitted;
+        logger.info("Common checkpoint async materialize cost: {} ms, head={}",
+            (nanoTime.getAsLong() - materializeStart) / 1_000_000L,
+            submitted.getLastBlock().getBlockNumber());
+        return null;
       });
-      timing.ownerApplyUs = elapsedUs(ownerApplyStart);
       timing.totalUs = elapsedUs(totalStart);
       emitTiming(timing);
       return target;
@@ -228,6 +263,53 @@ public final class CommonCheckpointRuntime implements AutoCloseable {
       owner.fail(failure);
       throw failure;
     }
+  }
+
+  /**
+   * Drains one outstanding checkpoint: awaits its background materialize and runs the deferred
+   * in-memory rebase. Intended for tests and operational drains; callers that mutate Snapshot
+   * state afterwards must hold the SnapshotManager monitor, exactly like checkpointAndRebase.
+   */
+  public synchronized void awaitQuiescent() throws IOException {
+    try {
+      drainInFlight();
+      runPendingCompletion();
+    } catch (IOException | RuntimeException failure) {
+      owner.fail(failure);
+      throw failure;
+    }
+  }
+
+  private void drainInFlight() throws IOException {
+    java.util.concurrent.Future<?> pending = inFlight;
+    if (pending == null) {
+      return;
+    }
+    inFlight = null;
+    try {
+      pending.get();
+    } catch (InterruptedException failure) {
+      Thread.currentThread().interrupt();
+      throw new IOException("Common checkpoint materialize wait interrupted", failure);
+    } catch (java.util.concurrent.ExecutionException failure) {
+      Throwable cause = failure.getCause();
+      if (cause instanceof IOException) {
+        throw (IOException) cause;
+      }
+      if (cause instanceof RuntimeException) {
+        throw (RuntimeException) cause;
+      }
+      throw new IOException("Common checkpoint async materialize failed", cause);
+    }
+  }
+
+  private void runPendingCompletion() throws IOException {
+    CommonCheckpointRuntimeOwner.CompletionAction completion = pendingCompletion;
+    if (completion == null) {
+      return;
+    }
+    pendingCompletion = null;
+    completion.run();
   }
 
   /** Called only after SnapshotManager has selected a non-revocable prefix. */
@@ -305,9 +387,32 @@ public final class CommonCheckpointRuntime implements AutoCloseable {
     return owner.getState();
   }
 
+  /**
+   * Drains any in-flight background materialize before releasing authority resources. A failed
+   * background checkpoint is logged and close continues (the owner is already FAILED and the
+   * unretired WAL is redone on restart). The last deferred memory rebase is intentionally
+   * skipped: it is pure in-memory Snapshot bookkeeping that dies with the process.
+   */
   @Override
   public void close() {
-    owner.close();
+    java.util.concurrent.Future<?> pending = inFlight;
+    if (pending != null) {
+      inFlight = null;
+      try {
+        pending.get();
+      } catch (InterruptedException failure) {
+        Thread.currentThread().interrupt();
+        logger.warn("Common checkpoint close interrupted while draining materialize", failure);
+      } catch (java.util.concurrent.ExecutionException failure) {
+        logger.warn("Common checkpoint close discards a failed async materialize",
+            failure.getCause());
+      }
+    }
+    try {
+      owner.close();
+    } finally {
+      materializeExecutor.shutdown();
+    }
   }
 
   private static byte[] requireDigest(byte[] value) {
@@ -332,18 +437,23 @@ public final class CommonCheckpointRuntime implements AutoCloseable {
   }
 
   private static void logTiming(Timing timing) {
+    if (timing.rebase) {
+      logger.info("Common checkpoint rebase stages: head={}, chainbaseRebasePrepareUs={}, "
+              + "pathStateRebasePrepareUs={}, chainbaseRebaseApplyUs={}, "
+              + "pathStateRebaseApplyUs={}",
+          timing.head, timing.chainbaseRebasePrepareUs, timing.pathStateRebasePrepareUs,
+          timing.chainbaseRebaseApplyUs, timing.pathStateRebaseApplyUs);
+      return;
+    }
     logger.info("Common checkpoint runtime stages: head={}, blocks={}, payloadCaptureUs={}, "
-            + "hotPrepareUs={}, ownerApplyUs={}, chainbaseRebasePrepareUs={}, "
-            + "pathStateRebasePrepareUs={}, "
-            + "chainbaseRebaseApplyUs={}, pathStateRebaseApplyUs={}, totalUs={}",
+            + "hotPrepareUs={}, ownerApplyUs={}, totalUs={}",
         timing.head, timing.blocks, timing.payloadCaptureUs, timing.hotPrepareUs,
-        timing.ownerApplyUs,
-        timing.chainbaseRebasePrepareUs, timing.pathStateRebasePrepareUs,
-        timing.chainbaseRebaseApplyUs, timing.pathStateRebaseApplyUs, timing.totalUs);
+        timing.ownerApplyUs, timing.totalUs);
   }
 
   static final class Timing {
 
+    private final boolean rebase;
     private long head;
     private final int blocks;
     private long payloadCaptureUs;
@@ -356,7 +466,22 @@ public final class CommonCheckpointRuntime implements AutoCloseable {
     private long totalUs;
 
     private Timing(int blocks) {
+      this.rebase = false;
       this.blocks = blocks;
+    }
+
+    private static Timing rebase(long head) {
+      return new Timing(true, head);
+    }
+
+    private Timing(boolean rebase, long head) {
+      this.rebase = rebase;
+      this.blocks = 0;
+      this.head = head;
+    }
+
+    boolean isRebase() {
+      return rebase;
     }
 
     long getHead() {

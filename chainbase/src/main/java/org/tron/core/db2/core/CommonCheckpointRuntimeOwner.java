@@ -90,6 +90,52 @@ public final class CommonCheckpointRuntimeOwner implements AutoCloseable {
     }
   }
 
+  /**
+   * Phase A of an async checkpoint on the caller thread: moves READY to CHECKPOINTING (read
+   * leases keep their current behavior) and forces the redo WAL. Returns the WAL publication
+   * cost in microseconds, which the caller must hand to {@link #completeAsyncCheckpoint}.
+   */
+  long beginAsyncCheckpoint(CommonCheckpointPayload payload) throws IOException {
+    gate.writeLock().lock();
+    try {
+      requireState(State.READY, "common checkpoint runtime is not ready to flush");
+      state = State.CHECKPOINTING;
+      try {
+        return coordinator.publishWal(Objects.requireNonNull(payload, "payload"));
+      } catch (IOException | RuntimeException failure) {
+        state = State.FAILED;
+        closeAfterFailure(failure);
+        throw failure;
+      }
+    } finally {
+      gate.writeLock().unlock();
+    }
+  }
+
+  /**
+   * Phase B of an async checkpoint on the background materialize thread: redoes the durable WAL
+   * under the write gate (which first waits for outstanding read leases), publishes the target,
+   * then returns to READY. Fail-closed exactly like the synchronous path.
+   */
+  void completeAsyncCheckpoint(CommonCheckpointTarget target, long walPublishUs)
+      throws IOException {
+    gate.writeLock().lock();
+    try {
+      requireState(State.CHECKPOINTING, "common checkpoint runtime is not checkpointing");
+      try {
+        coordinator.redoPublished(walPublishUs);
+        state = State.READY;
+        coordinator.notifyCommitted(Objects.requireNonNull(target, "target"));
+      } catch (IOException | RuntimeException failure) {
+        state = State.FAILED;
+        closeAfterFailure(failure);
+        throw failure;
+      }
+    } finally {
+      gate.writeLock().unlock();
+    }
+  }
+
   /** Runs one query only while no startup redo or checkpoint publication can interleave. */
   public <T> T read(ReadableOperation<T> operation) throws IOException {
     try (ReadLease ignored = acquireReadLease()) {

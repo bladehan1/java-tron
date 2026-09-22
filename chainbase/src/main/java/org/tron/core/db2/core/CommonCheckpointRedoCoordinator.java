@@ -60,14 +60,33 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
   }
 
   synchronized RecoveryAction applyDurable(CommonCheckpointPayload payload) throws IOException {
+    long walPublishUs = publishWal(payload);
+    return redoPublished(walPublishUs);
+  }
+
+  /**
+   * Phase A of one checkpoint: forces the redo payload into the durable WAL and returns the
+   * publication cost in microseconds. The redo itself is deferred to {@link #redoPublished}.
+   */
+  synchronized long publishWal(CommonCheckpointPayload payload) throws IOException {
     requireOpen();
-    CommonCheckpointPayload admitted = Objects.requireNonNull(payload, "payload");
-    Timing timing = new Timing("apply", CommonCheckpointTarget.from(admitted),
-        admitted.getBlocks().size());
+    return timed(() -> checkpointFile.publish(Objects.requireNonNull(payload, "payload")));
+  }
+
+  /**
+   * Phase B of one checkpoint: reloads the durable WAL, redoes it across every authority and
+   * retires the WAL. {@code walPublishUs} carries the phase A cost so the redo timing log keeps
+   * its original fields; it may run on a background thread.
+   */
+  synchronized RecoveryAction redoPublished(long walPublishUs) throws IOException {
+    requireOpen();
     long totalStart = nanoTime.getAsLong();
-    timing.walPublishUs = timed(() -> checkpointFile.publish(admitted));
     Holder<CommonCheckpointPayload> loaded = new Holder<>();
-    timing.walLoadUs = timed(() -> loaded.value = checkpointFile.loadRequired());
+    long walLoadUs = timed(() -> loaded.value = checkpointFile.loadRequired());
+    Timing timing = new Timing("apply", CommonCheckpointTarget.from(loaded.value),
+        loaded.value.getBlocks().size());
+    timing.walPublishUs = walPublishUs;
+    timing.walLoadUs = walLoadUs;
     RecoveryAction action = redo(loaded.value, timing);
     timing.totalUs = elapsedUs(totalStart);
     emitTiming(timing);

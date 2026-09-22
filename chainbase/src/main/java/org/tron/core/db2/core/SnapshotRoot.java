@@ -2,6 +2,7 @@ package org.tron.core.db2.core;
 
 import com.google.common.collect.Maps;
 import com.google.common.collect.Streams;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
@@ -33,6 +34,7 @@ public class SnapshotRoot extends AbstractSnapshot<byte[], byte[]> {
   }
 
   private TronCache<WrappedByteArray, WrappedByteArray> cache;
+  private static final int CHECKPOINT_FLUSH_CHUNK_SIZE = 4096;
   private static final List<String> CACHE_DBS = CommonParameter.getInstance()
       .getStorage().getCacheDbs();
 
@@ -144,13 +146,44 @@ public class SnapshotRoot extends AbstractSnapshot<byte[], byte[]> {
     }
   }
 
-  /** Applies a fully coalesced common-checkpoint Store batch with an explicit sync barrier. */
+  /**
+   * Applies a fully coalesced common-checkpoint Store batch. Data rows are flushed in unsynced
+   * chunks of at most 4096 entries (releasing the underlying Store between chunks), and the
+   * final chunk is flushed with an explicit sync barrier: LevelDB/RocksDB append to a single
+   * sequential WAL, so syncing the last write also covers every preceding unsynced chunk. The
+   * common redo WAL covers any residual crash gap. The legacy Account-to-AccountAsset migration
+   * path keeps its single synced flush because it also writes a second Store.
+   */
   void applyCheckpointMutations(Map<WrappedByteArray, WrappedByteArray> batch) {
     if (needOptAsset()) {
       processAccount(batch, true);
+      return;
+    }
+    if (batch.isEmpty()) {
+      return;
+    }
+    List<Map.Entry<WrappedByteArray, WrappedByteArray>> entries = new ArrayList<>(
+        batch.entrySet());
+    int from = 0;
+    while (entries.size() - from > CHECKPOINT_FLUSH_CHUNK_SIZE) {
+      flushCheckpointChunk(entries, from, from + CHECKPOINT_FLUSH_CHUNK_SIZE, false);
+      from += CHECKPOINT_FLUSH_CHUNK_SIZE;
+    }
+    flushCheckpointChunk(entries, from, entries.size(), true);
+    putCache(batch);
+  }
+
+  private void flushCheckpointChunk(List<Map.Entry<WrappedByteArray, WrappedByteArray>> entries,
+      int from, int to, boolean synced) {
+    Map<WrappedByteArray, WrappedByteArray> chunk = new HashMap<>();
+    for (int index = from; index < to; index++) {
+      Map.Entry<WrappedByteArray, WrappedByteArray> entry = entries.get(index);
+      chunk.put(entry.getKey(), entry.getValue());
+    }
+    if (synced) {
+      ((Flusher) db).flushSynced(chunk);
     } else {
-      ((Flusher) db).flushSynced(batch);
-      putCache(batch);
+      ((Flusher) db).flush(chunk);
     }
   }
 

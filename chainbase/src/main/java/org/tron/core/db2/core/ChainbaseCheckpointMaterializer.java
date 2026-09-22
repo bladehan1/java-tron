@@ -15,12 +15,16 @@ import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
 import org.tron.core.db2.common.WrappedByteArray;
 
@@ -32,6 +36,7 @@ public final class ChainbaseCheckpointMaterializer implements CommonCheckpointMa
   private static final int MAGIC = 0x43424354; // CBCT
   private static final short VERSION = 1;
   private static final int DIGEST_LENGTH = 32;
+  private static final int MAX_PARALLEL_STORE_WRITES = 8;
   private static final int RECORD_LENGTH = Integer.BYTES + 2 * Short.BYTES
       + 4 * DIGEST_LENGTH + 2 * Long.BYTES + DIGEST_LENGTH;
 
@@ -41,6 +46,7 @@ public final class ChainbaseCheckpointMaterializer implements CommonCheckpointMa
   private final FaultHook faultHook;
   private final CommonCheckpointBaseline baseline;
   private final CommonCheckpointMaterializedStore materializedStore;
+  private ExecutorService storeWriteExecutor;
 
   public ChainbaseCheckpointMaterializer(Path directory, byte[] formatIdentity,
       List<Chainbase> databases) {
@@ -113,6 +119,13 @@ public final class ChainbaseCheckpointMaterializer implements CommonCheckpointMa
     return Status.MATERIALIZED;
   }
 
+  /**
+   * Materializes every registered Store in parallel on a bounded daemon executor. Store lookups
+   * and payload validation happen on the calling thread; each Store is written by exactly one
+   * task (chunked unsynced data with one synced final chunk, see
+   * {@link SnapshotRoot#applyCheckpointMutations}), and the central materialized marker is
+   * recorded only after every Store write has completed. Fault hooks may fire on worker threads.
+   */
   @Override
   public synchronized void materialize(CommonCheckpointPayload payload,
       CommonCheckpointTarget target) throws IOException {
@@ -125,6 +138,7 @@ public final class ChainbaseCheckpointMaterializer implements CommonCheckpointMa
     if (status != Status.NEEDS_MATERIALIZATION) {
       return;
     }
+    List<Runnable> writes = new ArrayList<>();
     for (CommonCheckpointPayload.StoreMutations store
         : admittedPayload.getChainbaseStores()) {
       Chainbase database = databases.get(store.getDbName());
@@ -137,17 +151,98 @@ public final class ChainbaseCheckpointMaterializer implements CommonCheckpointMa
         throw new IOException("Chainbase checkpoint Store has no SnapshotRoot: "
             + store.getDbName());
       }
-      boolean observe = Boolean.getBoolean("tron.chainbase.executionAttribution");
-      long started = observe ? System.nanoTime() : 0;
-      ((SnapshotRoot) root).applyCheckpointMutations(batch(store));
-      if (observe) {
-        ExecutionAttribution.checkpoint(admittedTarget, store.getDbName(),
-            store.getMutations().size(), System.nanoTime() - started);
-      }
-      faultHook.after(Stage.AFTER_STORE_BATCH, store.getDbName());
+      SnapshotRoot rootSnapshot = (SnapshotRoot) root;
+      writes.add(() -> {
+        boolean observe = Boolean.getBoolean("tron.chainbase.executionAttribution");
+        long started = observe ? System.nanoTime() : 0;
+        rootSnapshot.applyCheckpointMutations(batch(store));
+        if (observe) {
+          ExecutionAttribution.checkpoint(admittedTarget, store.getDbName(),
+              store.getMutations().size(), System.nanoTime() - started);
+        }
+        afterHook(Stage.AFTER_STORE_BATCH, store.getDbName());
+      });
     }
+    awaitStoreWrites(writes);
     recordMaterialized(admittedTarget, encode(admittedTarget));
     faultHook.after(Stage.AFTER_MATERIALIZED_TARGET, null);
+  }
+
+  /** Waits for every parallel Store write and propagates the first failure, if any. */
+  private void awaitStoreWrites(List<Runnable> writes) throws IOException {
+    List<java.util.concurrent.Future<?>> futures = new ArrayList<>();
+    for (Runnable write : writes) {
+      futures.add(storeWriteExecutor().submit(write));
+    }
+    IOException failure = null;
+    boolean interrupted = false;
+    for (java.util.concurrent.Future<?> future : futures) {
+      boolean complete = false;
+      while (!complete) {
+        try {
+          future.get();
+          complete = true;
+        } catch (InterruptedException interruptedFailure) {
+          interrupted = true;
+        } catch (ExecutionException writeFailure) {
+          complete = true;
+          Throwable cause = writeFailure.getCause();
+          if (cause instanceof java.io.UncheckedIOException) {
+            cause = cause.getCause();
+          }
+          IOException storeFailure = cause instanceof IOException
+              ? (IOException) cause
+              : new IOException("Chainbase checkpoint Store batch failed", cause);
+          if (failure == null) {
+            failure = storeFailure;
+          } else {
+            failure.addSuppressed(storeFailure);
+          }
+        }
+      }
+    }
+    if (interrupted) {
+      Thread.currentThread().interrupt();
+      IOException waitFailure = new IOException(
+          "Chainbase checkpoint Store batch wait was interrupted");
+      if (failure == null) {
+        failure = waitFailure;
+      } else {
+        failure.addSuppressed(waitFailure);
+      }
+    }
+    if (failure != null) {
+      throw failure;
+    }
+  }
+
+  private ExecutorService storeWriteExecutor() {
+    if (storeWriteExecutor == null) {
+      storeWriteExecutor = Executors.newFixedThreadPool(
+          Math.min(Math.max(databases.size(), 1), MAX_PARALLEL_STORE_WRITES), task -> {
+            Thread thread = new Thread(task, "chainbase-checkpoint-write");
+            thread.setDaemon(true);
+            return thread;
+          });
+    }
+    return storeWriteExecutor;
+  }
+
+  private void afterHook(Stage stage, String dbName) {
+    try {
+      faultHook.after(stage, dbName);
+    } catch (IOException failure) {
+      throw new java.io.UncheckedIOException(failure);
+    }
+  }
+
+  /** Shuts down the parallel Store writer; the Stores themselves are owned by the caller. */
+  @Override
+  public synchronized void close() {
+    if (storeWriteExecutor != null) {
+      storeWriteExecutor.shutdownNow();
+      storeWriteExecutor = null;
+    }
   }
 
   @Override

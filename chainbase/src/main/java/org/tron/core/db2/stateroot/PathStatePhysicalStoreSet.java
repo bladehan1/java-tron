@@ -53,6 +53,8 @@ public final class PathStatePhysicalStoreSet implements Closeable {
   private static final int MAX_PARALLEL_PARTICIPANT_WRITES = 4;
   private static final int MAX_PARALLEL_PARTICIPANT_PREPARES = 4;
   private static final int MAX_PARALLEL_TRIE_BRANCHES = 8;
+  private static final int MAX_PARALLEL_CHECKPOINT_WRITES = 8;
+  private static final int CHECKPOINT_WRITE_CHUNK_SIZE = 4096;
   private static final Set<String> LARGE_BOOTSTRAP_STORES = java.util.Collections.unmodifiableSet(
       new HashSet<>(Arrays.asList(
           "account", "account-asset", "delegation", "storage-row")));
@@ -96,6 +98,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
   private final ExecutorService participantWriteExecutor;
   private final ExecutorService participantPrepareExecutor;
   private final ExecutorService trieBranchExecutor;
+  private final ExecutorService checkpointWriteExecutor;
   private final ResidentNodeCache residentNodeCache;
   private Map<BytesKey, ReverseJournalIndexEntry> reverseJournalIndex;
   private byte[] cachedTrieTarget;
@@ -114,6 +117,8 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     this.participantPrepareExecutor = newTrieExecutor("participant-prepare",
         MAX_PARALLEL_PARTICIPANT_PREPARES);
     this.trieBranchExecutor = newTrieExecutor("branch-prepare", MAX_PARALLEL_TRIE_BRANCHES);
+    this.checkpointWriteExecutor = newTrieExecutor("checkpoint-write",
+        StrictMathWrapper.min(scope.getParticipants().size() + 1, MAX_PARALLEL_CHECKPOINT_WRITES));
     this.residentNodeCache = new ResidentNodeCache(residentNodeCacheBytes);
     try {
       for (PathStateParticipant participant : scope.getParticipants()) {
@@ -975,6 +980,15 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     awaitParallelWrites(participantWriteExecutor, writes);
   }
 
+  /**
+   * Runs one checkpoint write per store on the dedicated checkpoint executor and waits for all
+   * of them. Each store is touched by exactly one task, and every store ends with one synced
+   * marker batch as its per-store durability barrier.
+   */
+  void awaitCheckpointWrites(List<Runnable> writes) throws IOException {
+    awaitParallelWrites(checkpointWriteExecutor, writes);
+  }
+
   static void awaitParallelWrites(ExecutorService executor, List<Runnable> writes)
       throws IOException {
     List<Future<?>> futures = new ArrayList<>();
@@ -1581,6 +1595,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     participantWriteExecutor.shutdownNow();
     participantPrepareExecutor.shutdownNow();
     trieBranchExecutor.shutdownNow();
+    checkpointWriteExecutor.shutdownNow();
     IOException failure = null;
     for (PhysicalStore store : participants.values()) {
       try {
@@ -1603,6 +1618,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     participantWriteExecutor.shutdownNow();
     participantPrepareExecutor.shutdownNow();
     trieBranchExecutor.shutdownNow();
+    checkpointWriteExecutor.shutdownNow();
     for (PhysicalStore store : participants.values()) {
       try {
         store.close();
@@ -1818,6 +1834,13 @@ public final class PathStatePhysicalStoreSet implements Closeable {
       nodeStore.apply(nodeMutations);
     }
 
+    /**
+     * Applies one participant's checkpoint mutations as chunked unsynced batches (releasing the
+     * native-store monitor between chunks so foreground trie reads are not starved), then one
+     * synced marker batch as this store's durability barrier. Safe to run on a checkpoint writer
+     * thread: the native store synchronizes its own writes and the resident node cache is
+     * internally synchronized.
+     */
     void applyCheckpointParticipant(CommonCheckpointPayload.PathStoreTarget target,
         byte[] marker) {
       List<PathStateNativeNodeStore.BatchMutation> mutations = new ArrayList<>();
@@ -1839,8 +1862,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
                 value));
         cacheMutations.add(new NodeMutation(path, value));
       }
-      mutations.add(metadataMutation(CHECKPOINT_TARGET_METADATA, marker));
-      nativeStore.writeBatch(mutations);
+      writeCheckpointMutations(mutations, marker);
       nodeStore.apply(cacheMutations);
     }
 
@@ -1858,9 +1880,24 @@ public final class PathStatePhysicalStoreSet implements Closeable {
                 value));
         cacheMutations.add(new NodeMutation(path, value));
       }
-      mutations.add(metadataMutation(CHECKPOINT_TARGET_METADATA, marker));
-      nativeStore.writeBatch(mutations);
+      writeCheckpointMutations(mutations, marker);
       nodeStore.apply(cacheMutations);
+    }
+
+    /**
+     * Writes data mutations in unsynced chunks of at most CHECKPOINT_WRITE_CHUNK_SIZE and ends
+     * with one synced batch carrying the checkpoint target marker. LevelDB/RocksDB append to a
+     * single sequential WAL, so fsync of the final marker batch also covers every preceding
+     * unsynced chunk of this store; the common redo WAL covers any residual crash gap.
+     */
+    private void writeCheckpointMutations(
+        List<PathStateNativeNodeStore.BatchMutation> mutations, byte[] marker) {
+      for (int from = 0; from < mutations.size(); from += CHECKPOINT_WRITE_CHUNK_SIZE) {
+        nativeStore.writeBatchUnsynced(new ArrayList<>(mutations.subList(from,
+            StrictMathWrapper.min(from + CHECKPOINT_WRITE_CHUNK_SIZE, mutations.size()))));
+      }
+      nativeStore.writeBatch(java.util.Collections.singletonList(
+          metadataMutation(CHECKPOINT_TARGET_METADATA, marker)));
     }
 
     byte[] checkpointTargetMarker() {
