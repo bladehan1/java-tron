@@ -567,8 +567,42 @@ public class Manager {
     ExecutorServiceManager.shutdownAndAwaitTermination(validateSignService, "validate-sign");
   }
 
+  private org.tron.common.setting.ArchiveDiskRedLine archiveDiskRedLine;
+  private java.util.concurrent.ScheduledExecutorService archiveDiskMonitor;
+
+  private void initArchiveDiskRedLine(org.tron.core.config.args.Storage storage) {
+    java.nio.file.Path output = java.nio.file.Paths.get(Args.getInstance().getOutputDirectory());
+    archiveDiskRedLine = new org.tron.common.setting.ArchiveDiskRedLine(
+        java.util.Arrays.asList(output.resolve(storage.getDbDirectory()),
+            output.resolve(storage.getCommonCheckpointDirectory()),
+            output.resolve(storage.getPathStateRootDirectory()),
+            output.resolve(storage.getStateArchiveDirectory())),
+        org.tron.common.setting.ArchiveDiskRedLine::usableBytes,
+        () -> {
+          historicalQueryAdmission.stop();
+          org.tron.common.exit.ExitManager.logAndExit(new org.tron.core.exception.TronError(
+              "Archive disk redline: refusing new work and shutting down",
+              org.tron.core.exception.TronError.ErrCode.STATE_ARCHIVE_INIT));
+        });
+    archiveDiskRedLine.check();
+    ((SnapshotManager) revokingStore).setArchiveWriteAdmission(archiveDiskRedLine::check);
+    archiveDiskMonitor = java.util.concurrent.Executors.newSingleThreadScheduledExecutor(task -> {
+      Thread thread = new Thread(task, "archive-disk-redline");
+      thread.setDaemon(true);
+      return thread;
+    });
+    archiveDiskMonitor.scheduleWithFixedDelay(() -> {
+      try {
+        archiveDiskRedLine.check();
+      } catch (IllegalStateException failure) {
+        logger.error(failure.getMessage());
+      }
+    }, 30, 30, java.util.concurrent.TimeUnit.SECONDS);
+  }
+
   @PostConstruct
   public void init() {
+    org.tron.core.config.args.ArchiveRocksDbPolicy.validate(Args.getInstance().getStorage());
     ChainBaseManager.init(chainBaseManager);
     Message.setDynamicPropertiesStore(this.getDynamicPropertiesStore());
     mortgageService
@@ -581,6 +615,14 @@ public class Manager {
     // checkpoint that already contains account-asset redo); form OFF is the upstream path.
     org.tron.core.config.args.Storage startupStorage = Args.getInstance().getStorage();
     archiveFeaturesEnabled = startupStorage.isArchiveFeaturesEnabled();
+    if (archiveFeaturesEnabled) {
+      org.tron.common.setting.RocksDbThreadBudget.activate(
+          org.tron.common.setting.RocksDbSettings.getSettings().getCompactThreads(), 1,
+          org.tron.common.setting.RocksDbSettings.getSettings().getCompactThreads(), true);
+      initArchiveDiskRedLine(startupStorage);
+      NativeMemoryBudget.checkAtStartup(startupStorage, java.nio.file.Paths.get(
+          Args.getInstance().getOutputDirectory()));
+    }
     P66LaneStartup.Mode p66LaneMode = P66LaneStartup.beforeLegacyCheck(revokingStore,
         chainBaseManager.getAccountAssetStore(), archiveFeaturesEnabled);
     revokingStore.check();
@@ -2437,6 +2479,9 @@ public class Manager {
       DupTransactionException, TransactionExpirationException,
       BadNumberBlockException, BadBlockException, NonCommonBlockException,
       ReceiptCheckErrException, VMIllegalException, ZksnarkException, EventBloomException {
+    if (archiveDiskRedLine != null) {
+      archiveDiskRedLine.check();
+    }
     setBlockWaitLock(true);
     try {
       synchronized (this) {
@@ -3907,6 +3952,9 @@ public class Manager {
   }
 
   public void close() {
+    if (archiveDiskMonitor != null) {
+      archiveDiskMonitor.shutdownNow();
+    }
     historicalQueryAdmission.stop();
     stopRePushThread();
     stopRePushTriggerThread();

@@ -62,7 +62,8 @@ public class CommonCheckpointManagerLifecycleTest {
   }
 
   private void open(File output) {
-    Args.setParam(new String[]{"--output-directory", output.toString()}, TestConstants.TEST_CONF);
+    Args.setParam(new String[]{"--output-directory", output.toString(),
+        "--storage-db-engine", "ROCKSDB"}, TestConstants.TEST_CONF);
     Storage storage = Args.getInstance().getStorage();
     storage.setStateArchiveEnabled(true);
     storage.setCommonCheckpointEnabled(true);

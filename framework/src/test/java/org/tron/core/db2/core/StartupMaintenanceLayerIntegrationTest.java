@@ -72,6 +72,44 @@ public class StartupMaintenanceLayerIntegrationTest {
     }
   }
 
+  @Test
+  public void diskAdmissionStopsNormalFlushButAllowsShutdownFlush() throws Exception {
+    Path path = temporary.newFolder().toPath();
+    Args.setParam(new String[]{"--output-directory", path.toString()}, "config-test.conf");
+    org.tron.core.store.CheckTmpStore checkpoint = new org.tron.core.store.CheckTmpStore(null);
+    SnapshotManager manager = new SnapshotManager("");
+    manager.setCheckTmpStore(checkpoint);
+    Chainbase properties = new Chainbase(new SnapshotRoot(new LevelDB(
+        new LevelDbDataSourceImpl(path.toString(), "properties"))));
+    try {
+      manager.add(properties);
+      manager.check();
+      manager.enable();
+      byte[] key = new byte[]{1};
+      try (ISession session = manager.buildSession()) {
+        properties.put(key, new byte[]{7});
+        session.commit();
+      }
+      manager.setMaxFlushCount(10);
+      manager.setMaxSize(0);
+      try (ISession ignored = manager.buildSession()) {
+        // Stage the finalized layer below the normal checkpoint threshold.
+      }
+      manager.setMaxFlushCount(1);
+      manager.setArchiveWriteAdmission(() -> {
+        throw new IllegalStateException("disk redline");
+      });
+      assertThrows(IllegalStateException.class, manager::buildSession);
+      assertThrows(IllegalStateException.class, manager::flush);
+      manager.flushPending();
+      assertEquals(7, properties.getHead().getRoot().get(key)[0]);
+    } finally {
+      manager.shutdown();
+      properties.close();
+      checkpoint.close();
+    }
+  }
+
   private static byte[] hash(int value) {
     byte[] bytes = new byte[32];
     bytes[31] = (byte) value;

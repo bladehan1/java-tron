@@ -555,6 +555,7 @@ public class SnapshotManager implements RevokingDatabase {
   }
 
   public synchronized ISession buildSession(boolean forceEnable) {
+    archiveWriteAdmission.run();
     requireNoBlockFinalization();
     if (disabled && !forceEnable) {
       return new Session(this);
@@ -1377,12 +1378,21 @@ public class SnapshotManager implements RevokingDatabase {
     flush(true);
   }
 
+  private Runnable archiveWriteAdmission = () -> { };
+
+  public synchronized void setArchiveWriteAdmission(Runnable admission) {
+    archiveWriteAdmission = Objects.requireNonNull(admission, "admission");
+  }
+
   private synchronized void flush(boolean force) {
     if (unChecked || (force && flushCount == 0)) {
       return;
     }
 
     if (force || shouldBeRefreshed()) {
+      if (!force) {
+        archiveWriteAdmission.run();
+      }
       try {
         long start = System.currentTimeMillis();
         if (commonCheckpointRuntimeAttachment != null) {

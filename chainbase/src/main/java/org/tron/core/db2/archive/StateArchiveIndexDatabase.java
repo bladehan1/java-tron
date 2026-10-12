@@ -260,6 +260,8 @@ final class StateArchiveIndexDatabase {
       NativeDbConfig config) throws IOException {
     SharedRocksDatabase shared = ROCKS_DATABASES.get(directory);
     if (shared == null) {
+      org.tron.common.setting.RocksDbThreadBudget.beforeAuxiliaryOpen(
+          config.getBackgroundCompactions(), config.getBackgroundFlushes());
       RocksResources resources = new RocksResources(config, create);
       try {
         shared = new SharedRocksDatabase(directory,
@@ -268,6 +270,7 @@ final class StateArchiveIndexDatabase {
         resources.close();
         throw new IOException("Failed to open RocksDB Archive serving index", failure);
       }
+      org.tron.common.setting.RocksDbThreadBudget.afterAuxiliaryOpen();
       ROCKS_DATABASES.put(directory, shared);
       logger.info("Archive native database opened: directory={}, engine=ROCKSDB, blockBytes={}, "
               + "writeBufferBytes={}, cacheBytes={}, maxOpenFiles={}", directory,
@@ -282,6 +285,8 @@ final class StateArchiveIndexDatabase {
       NativeDbConfig config) throws IOException {
     SharedRocksDatabase shared = IMMUTABLE_ROCKS_DATABASES.get(directory);
     if (shared == null) {
+      org.tron.common.setting.RocksDbThreadBudget.beforeAuxiliaryOpen(
+          config.getBackgroundCompactions(), config.getBackgroundFlushes());
       RocksResources resources = new RocksResources(config, false);
       try {
         shared = new SharedRocksDatabase(directory,
@@ -291,6 +296,7 @@ final class StateArchiveIndexDatabase {
         resources.close();
         throw new IOException("Failed to open immutable RocksDB Archive serving index", failure);
       }
+      org.tron.common.setting.RocksDbThreadBudget.afterAuxiliaryOpen();
       IMMUTABLE_ROCKS_DATABASES.put(directory, shared);
       logger.info("Immutable Archive native database opened: directory={}, engine=ROCKSDB, "
               + "blockBytes={}, cacheBytes={}, maxOpenFiles={}", directory,
@@ -626,8 +632,11 @@ final class StateArchiveIndexDatabase {
         descriptors.add(new org.rocksdb.ColumnFamilyDescriptor(
             name.getBytes(StandardCharsets.UTF_8), options));
       }
+      org.tron.common.setting.RocksDbThreadBudget.beforeAuxiliaryOpen(
+          config.getBackgroundCompactions(), config.getBackgroundFlushes());
       database = org.rocksdb.RocksDB.open(databaseOptions, directory.toString(), descriptors,
           handles);
+      org.tron.common.setting.RocksDbThreadBudget.afterAuxiliaryOpen();
       if (handles.size() != expected.size()) {
         throw new ArchivePersistenceException("Hot Archive RocksDB did not open every column");
       }
