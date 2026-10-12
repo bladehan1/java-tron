@@ -187,7 +187,7 @@ public class P66SnapshotPipelineTest {
   public void rejectsOutOfOrderAndEscapedStagesAndRevokesFailedSession() throws Exception {
     try (Fixture f = fixture()) {
       byte[] before = account(false, 5).toByteArray();
-      f.accounts.getHead().put(ADDRESS, before);
+      ((SnapshotRoot) f.accounts.getHead()).getDb().put(ADDRESS, before);
       AtomicReference<ISession.BlockFinalization> escaped = new AtomicReference<>();
       try (ISession block = f.manager.buildSession()) {
         f.accounts.put(ADDRESS, account(false, 9).toByteArray());
@@ -237,7 +237,7 @@ public class P66SnapshotPipelineTest {
   public void migratesOnceBeforeFreezeAndBothConsumersSeeExactPhysicalValues() throws Exception {
     try (Fixture f = fixture()) {
       Account before = account(false, 5);
-      f.accounts.getHead().put(ADDRESS, before.toByteArray());
+      ((SnapshotRoot) f.accounts.getHead()).getDb().put(ADDRESS, before.toByteArray());
       AtomicReference<BlockChangeView> archiveView = new AtomicReference<>();
       AtomicReference<BlockChangeView> pathView = new AtomicReference<>();
       AtomicInteger pathCaptures = new AtomicInteger();
@@ -283,7 +283,7 @@ public class P66SnapshotPipelineTest {
   public void activationWithoutChangedAccountsDoesNotScanOrMigrate() throws Exception {
     try (Fixture f = fixture()) {
       f.properties.getHead().put(FLAG, Longs.toByteArray(0));
-      f.accounts.getHead().put(ADDRESS, account(false, 7).toByteArray());
+      ((SnapshotRoot) f.accounts.getHead()).getDb().put(ADDRESS, account(false, 7).toByteArray());
       try (ISession block = f.manager.buildSession()) {
         f.properties.put(FLAG, Longs.toByteArray(1));
         P66CoupledMutationMaterializer.Statistics stats = f.materialize();
@@ -297,7 +297,7 @@ public class P66SnapshotPipelineTest {
   }
 
   @Test
-  public void offEmptyAndOptimizedUnrelatedWritesDoNotQueryAssets() throws Exception {
+  public void offSkipsAndOnlyOptimizedEmptyAccountsSkipPrefixQueries() throws Exception {
     try (Fixture f = fixture()) {
       f.properties.getHead().put(FLAG, Longs.toByteArray(0));
       try (ISession block = f.manager.buildSession()) {
@@ -313,7 +313,7 @@ public class P66SnapshotPipelineTest {
               .setBalance(77).build().toByteArray());
           P66CoupledMutationMaterializer.Statistics stats = f.materialize();
           assertEquals(1, stats.emptyAssetSkips);
-          assertEquals(0, stats.prefixQueries);
+          assertEquals(optimized ? 0 : 1, stats.prefixQueries);
           assertEquals(0, stats.assetPuts);
           assertEquals(0, stats.assetDeletes);
         }
@@ -324,7 +324,8 @@ public class P66SnapshotPipelineTest {
   @Test
   public void zeroDeleteAndAccountDeleteRevokeAlongsideNestedTransactionWrites() throws Exception {
     try (Fixture f = fixture()) {
-      f.accounts.getHead().put(ADDRESS, account(true, 0).toBuilder().clearAssetV2()
+      ((SnapshotRoot) f.accounts.getHead()).getDb().put(ADDRESS,
+          account(true, 0).toBuilder().clearAssetV2()
           .build().toByteArray());
       f.assets.getHead().put(ASSET, Longs.toByteArray(11));
       try (ISession block = f.manager.buildSession()) {
@@ -551,7 +552,7 @@ public class P66SnapshotPipelineTest {
             Engine.LEVELDB, new PathStateLayerLimits(16, 16L << 20))) {
       if (seeded) {
         for (int i = 2; i < 130; i++) {
-          f.accounts.getHead().put(address(i), baselineAccount(i));
+          ((SnapshotRoot) f.accounts.getHead()).getDb().put(address(i), baselineAccount(i));
         }
       }
       head.admitFreshCommonBaseline(baseline);
@@ -681,6 +682,8 @@ public class P66SnapshotPipelineTest {
     return delta;
   }
 
+  // Baseline seeds represent bytes already on disk, before the block materializer runs.
+  // They bypass the production direct-root migration hook, which needs a live ChainBaseManager.
   private Fixture fixture() throws Exception {
     return new Fixture(temporaryFolder.newFolder().toPath());
   }

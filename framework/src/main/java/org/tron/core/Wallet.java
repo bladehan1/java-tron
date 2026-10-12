@@ -3205,6 +3205,11 @@ public class Wallet {
       if (session != null) {
         session.checkActive();
       }
+    } catch (RuntimeException failure) {
+      if (session != null) {
+        session.checkActive();
+      }
+      throw failure;
     } finally {
       // constant call runs on a pooled RPC worker; drop its thread-local VM config view so it
       // can never leak into a later (block/broadcast) execution on the same thread.

@@ -287,7 +287,7 @@ public class VMActuator implements Actuator2 {
           }
 
         }
-      } else {
+      } else if (!rootRepository.isHistorical()) {
         rootRepository.commit();
       }
       for (DataWord account : result.getDeleteAccounts()) {
@@ -310,6 +310,11 @@ public class VMActuator implements Actuator2 {
       result.setRuntimeError(result.getException().getMessage());
       logger.info("timeout: {}", result.getException().getMessage());
     } catch (Throwable e) {
+      if (rootRepository != null && rootRepository.isHistorical()
+          && (e instanceof org.tron.core.vm.HistoricalCapabilityException
+              || e instanceof org.tron.core.db2.archive.ArchivePersistenceException)) {
+        throw rootRepository.markHistoricalFailure((RuntimeException) e);
+      }
       if (!(e instanceof TransferException)) {
         program.spendAllEnergy();
       }

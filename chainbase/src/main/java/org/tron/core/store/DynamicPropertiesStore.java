@@ -70,6 +70,7 @@ public class DynamicPropertiesStore extends TronStoreWithRevoking<BytesCapsule> 
     defaults.put("ALLOW_HARDEN_RESOURCE_CALCULATION", () -> 0L);
     defaults.put("ALLOW_HARDEN_EXCHANGE_CALCULATION", () -> 0L);
     defaults.put("TURKISH_KEY_MIGRATION_DONE", () -> 0L);
+    defaults.put("ALLOW_OPTIMIZE_TVM_STORAGE", () -> 0L);
     return Collections.unmodifiableMap(defaults);
   }
 

@@ -103,6 +103,7 @@ public class ConfigLoader {
     snapshot.allowTvmOsaka = enabled(repository, "ALLOW_TVM_OSAKA");
     snapshot.allowHardenResourceCalculation =
         enabled(repository, "ALLOW_HARDEN_RESOURCE_CALCULATION");
+    snapshot.allowOptimizeTvmStorage = enabled(repository, "ALLOW_OPTIMIZE_TVM_STORAGE");
     VMConfig.setLocalSnapshot(snapshot);
   }
 

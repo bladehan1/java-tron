@@ -534,6 +534,10 @@ public class ArchiveReadSnapshotTest {
     }
     properties.add(new Entry(bytes("latest_block_header_number"),
         OldValue.present(ByteArray.fromLong(Long.MAX_VALUE))));
+    properties.add(new Entry(bytes("latest_block_header_timestamp"),
+        OldValue.present(ByteArray.fromLong(1_000_000L))));
+    properties.add(new Entry(bytes("MAINTENANCE_TIME_INTERVAL"),
+        OldValue.present(ByteArray.fromLong(21_600_000L))));
     String[] values = {
         "UNFREEZE_DELAY_DAYS", "DYNAMIC_ENERGY_THRESHOLD",
         "DYNAMIC_ENERGY_INCREASE_FACTOR", "DYNAMIC_ENERGY_MAX_FACTOR", "ENERGY_FEE",
@@ -556,7 +560,7 @@ public class ArchiveReadSnapshotTest {
         "ALLOW_TVM_BLOB", "ALLOW_TVM_SELFDESTRUCT_RESTRICTION", "PROPOSAL_EXPIRE_TIME",
         "ALLOW_TVM_OSAKA", "ALLOW_TVM_PRAGUE", "BLOCK_HASH_HISTORY_INSTALLED",
         "ALLOW_HARDEN_RESOURCE_CALCULATION", "ALLOW_HARDEN_EXCHANGE_CALCULATION",
-        "TURKISH_KEY_MIGRATION_DONE"));
+        "TURKISH_KEY_MIGRATION_DONE", "ALLOW_OPTIMIZE_TVM_STORAGE"));
     assertEquals(expectedKeys, defaults.keySet());
 
     List<Entry> requiredProperties = historicalVmProperties().stream()
