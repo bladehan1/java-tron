@@ -2698,6 +2698,11 @@ public class Manager {
         .saveLatestBlockHeaderNumber(block.getNum());
     chainBaseManager.getDynamicPropertiesStore()
         .saveLatestBlockHeaderTimestamp(block.getTimeStamp());
+    if (archiveFeaturesEnabled && Args.getInstance().isSolidityNode()) {
+      // TrustNode supplies solid blocks. Capture this property before block finalization,
+      // so RD, PathState and Common all include it and session rollback restores it.
+      chainBaseManager.getDynamicPropertiesStore().saveLatestSolidifiedBlockNum(block.getNum());
+    }
     revokingStore.setMaxSize((int) (
         chainBaseManager.getDynamicPropertiesStore().getLatestBlockHeaderNumber()
             - chainBaseManager.getDynamicPropertiesStore().getLatestSolidifiedBlockNum()
