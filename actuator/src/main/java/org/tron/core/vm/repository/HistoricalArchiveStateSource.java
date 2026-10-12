@@ -5,6 +5,7 @@ import org.tron.core.capsule.BytesCapsule;
 import org.tron.core.capsule.ContractCapsule;
 import org.tron.core.capsule.ContractStateCapsule;
 import org.tron.core.capsule.StorageRowCapsule;
+import org.tron.core.config.Parameter.ForkBlockVersionEnum;
 import org.tron.core.db2.archive.HistoricalQuerySession;
 
 /** Exact historical state reads backed only by one request-owned Archive session. */
@@ -51,6 +52,16 @@ final class HistoricalArchiveStateSource implements RepositoryStateSource {
   @Override
   public void checkActive() {
     session.checkActive();
+  }
+
+  @Override
+  public boolean passesFork(ForkBlockVersionEnum version) {
+    return session.passesFork(version);
+  }
+
+  @Override
+  public RuntimeException markFailure(RuntimeException failure) {
+    return session.markTerminal(failure);
   }
 
   @Override

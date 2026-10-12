@@ -10,6 +10,10 @@ import org.tron.protos.Protocol;
 
 public interface Repository {
 
+  default RuntimeException markHistoricalFailure(RuntimeException failure) {
+    return failure;
+  }
+
   default void checkHistoricalQueryActive() {
   }
 

@@ -127,6 +127,21 @@ public final class HistoricalQuerySession implements AutoCloseable {
     }
   }
 
+  static HistoricalQuerySession openPoint(ArchivePointSnapshot snapshot, byte[] targetBlockHash,
+      Limits limits, HistoricalQueryControl control, Runnable releaseAdmission) throws IOException {
+    ArchiveReadContext context = ArchiveReadContext.openPoint(snapshot, EXACT_ADAPTERS);
+    try {
+      return new HistoricalQuerySession(context, targetBlockHash, limits, control, releaseAdmission);
+    } catch (RuntimeException failure) {
+      try {
+        context.close();
+      } catch (IOException closeFailure) {
+        failure.addSuppressed(closeFailure);
+      }
+      throw failure;
+    }
+  }
+
   public long getTargetBlock() {
     ensureOpen();
     return context.getTargetBlock();
@@ -143,73 +158,176 @@ public final class HistoricalQuerySession implements AutoCloseable {
   }
 
   public Optional<Account> getAccount(byte[] address) {
-    byte[] key = copyKey(address, "address");
-    Optional<byte[]> encoded = getExact("account", key);
-    if (!encoded.isPresent()) {
-      return Optional.empty();
+    try {
+      byte[] key = copyKey(address, "address");
+      Optional<byte[]> encoded = getExact("account", key);
+      if (!encoded.isPresent()) {
+        return Optional.empty();
+      }
+      Account account = decodeAccount(encoded.get());
+      if (!account.getAddress().equals(com.google.protobuf.ByteString.copyFrom(key))) {
+        throw new ArchivePersistenceException(
+            "Historical Account address does not match the physical key");
+      }
+      return Optional.of(account);
+
+    } catch (RuntimeException failure) {
+      throw markTerminal(failure);
     }
-    Account account = decodeAccount(encoded.get());
-    if (!account.getAddress().equals(com.google.protobuf.ByteString.copyFrom(key))) {
-      throw new ArchivePersistenceException(
-          "Historical Account address does not match the physical key");
-    }
-    return Optional.of(account);
   }
 
   public Optional<SmartContract> getContract(byte[] address) {
-    Optional<byte[]> encoded = getExact("contract", copyKey(address, "address"));
-    return encoded.map(HistoricalQuerySession::decodeContract);
+    try {
+      Optional<byte[]> encoded = getExact("contract", copyKey(address, "address"));
+      return encoded.map(HistoricalQuerySession::decodeContract);
+
+    } catch (RuntimeException failure) {
+      throw markTerminal(failure);
+    }
   }
 
   public Optional<byte[]> getCode(byte[] address) {
-    return getExact("code", copyKey(address, "address"));
+    try {
+      return getExact("code", copyKey(address, "address"));
+
+    } catch (RuntimeException failure) {
+      throw markTerminal(failure);
+    }
   }
 
   public Optional<ContractState> getContractState(byte[] address) {
-    Optional<byte[]> encoded = getExact("contract-state", copyKey(address, "address"));
-    return encoded.map(HistoricalQuerySession::decodeContractState);
+    try {
+      Optional<byte[]> encoded = getExact("contract-state", copyKey(address, "address"));
+      return encoded.map(HistoricalQuerySession::decodeContractState);
+
+    } catch (RuntimeException failure) {
+      throw markTerminal(failure);
+    }
   }
 
   /** Contract metadata and storage-row lookup are resolved by the same request context. */
   public Optional<byte[]> getStorage(byte[] contractAddress, byte[] logicalSlot) {
-    ensureOpen();
-    byte[] address = copyKey(contractAddress, "contractAddress");
-    byte[] slot = copyKey(logicalSlot, "logicalSlot");
-    SmartContract contract = getContract(address).orElseThrow(() ->
-        new ArchivePersistenceException(
-            "Historical Contract is required to derive storage-row key"));
-    byte[] transactionHash = contract.getTrxHash().isEmpty()
-        ? null : contract.getTrxHash().toByteArray();
-    byte[] physicalKey = StorageRowKeyCodec.physicalKey(address, slot,
-        contract.getVersion(), transactionHash);
-    return getExact("storage-row", physicalKey);
+    try {
+      ensureOpen();
+      byte[] address = copyKey(contractAddress, "contractAddress");
+      byte[] slot = copyKey(logicalSlot, "logicalSlot");
+      Optional<SmartContract> metadata = getContract(address);
+      if (!metadata.isPresent()) {
+        return Optional.empty();
+      }
+      SmartContract contract = metadata.get();
+      byte[] transactionHash = contract.getTrxHash().toByteArray();
+      if (dynamicLong("ALLOW_OPTIMIZE_TVM_STORAGE", 0L) == 1L) {
+        Optional<byte[]> optimized = getExact("storage-row",
+            StorageRowKeyCodec.optimizedKey(address, slot, transactionHash));
+        // PRESENT zero is authoritative; only ABSENT falls back to the legacy row.
+        if (optimized.isPresent()) {
+          return optimized;
+        }
+      }
+      return getExact("storage-row", StorageRowKeyCodec.physicalKey(address, slot,
+          contract.getVersion(), transactionHash));
+    } catch (RuntimeException failure) {
+      throw markTerminal(failure);
+    }
   }
 
   public Optional<byte[]> getExact(String dbName, byte[] physicalRawKey) {
-    ensureOpen();
-    requireReadBudget();
     try {
-      OldValue value = context.getExact(dbName, copyKey(physicalRawKey, "physicalRawKey"));
-      control.checkActive();
-      if (value.isPresent()) {
-        accountBytes(value.getValue().length);
+      ensureOpen();
+      requireReadBudget();
+      try {
+        OldValue value = context.getExact(dbName, copyKey(physicalRawKey, "physicalRawKey"));
+        control.checkActive();
+        if (value.isPresent()) {
+          accountBytes(value.getValue().length);
+        }
+        return value.isPresent() ? Optional.of(value.getValue()) : Optional.empty();
+      } catch (IOException failure) {
+        throw new HistoricalQueryException(HistoricalQueryException.Reason.DATA_ACCESS,
+            "Failed to read historical Store " + dbName, failure);
       }
-      return value.isPresent() ? Optional.of(value.getValue()) : Optional.empty();
-    } catch (IOException failure) {
-      throw new HistoricalQueryException(HistoricalQueryException.Reason.DATA_ACCESS,
-          "Failed to read historical Store " + dbName, failure);
+
+    } catch (RuntimeException failure) {
+      throw markTerminal(failure);
     }
   }
 
   public void requirePinnedIdentity() {
-    ensureOpen();
-    context.requirePinnedIdentity();
+    try {
+      ensureOpen();
+      context.requirePinnedIdentity();
+
+    } catch (RuntimeException failure) {
+      throw markTerminal(failure);
+    }
   }
 
   /** Also called for pure-compute VM execution, which may perform no Store reads. */
   public void checkActive() {
-    ensureOpen();
-    control.checkActive();
+    try {
+      ensureOpen();
+      control.checkActive();
+
+    } catch (RuntimeException failure) {
+      throw markTerminal(failure);
+    }
+  }
+
+  /** Evaluate fork activation using the same rule as latest, with inputs pinned at S(T). */
+  public boolean passesFork(org.tron.core.config.Parameter.ForkBlockVersionEnum version) {
+    try {
+      ensureOpen();
+      return org.tron.common.utils.ForkController.evaluate(version.getValue(),
+          new org.tron.common.utils.ForkStateSource() {
+            @Override
+            public long latestBlockHeaderTimestamp() {
+              return dynamicLong("latest_block_header_timestamp", null);
+            }
+
+            @Override
+            public long maintenanceTimeInterval() {
+              return dynamicLong("MAINTENANCE_TIME_INTERVAL", null);
+            }
+
+            @Override
+            public byte[] statsByVersion(int forkVersion) {
+              return getExact("properties", ("FORK_VERSION_" + forkVersion)
+                  .getBytes(java.nio.charset.StandardCharsets.UTF_8)).orElse(null);
+            }
+
+            @Override
+            public boolean disableJavaLangMath() {
+              return dynamicLong("CONSENSUS_LOGIC_OPTIMIZATION", 0L) == 1L;
+            }
+
+            @Override
+            public long latestBlockHeaderNumber() {
+              return dynamicLong("latest_block_header_number", null);
+            }
+          });
+    } catch (RuntimeException failure) {
+      throw markTerminal(failure);
+    }
+  }
+
+  private long dynamicLong(String key, Long defaultValue) {
+    Optional<byte[]> value = getExact("properties",
+        key.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    if (!value.isPresent()) {
+      if (defaultValue != null) {
+        return defaultValue;
+      }
+      throw new ArchivePersistenceException("Missing historical fork input: " + key);
+    }
+    if (value.get().length != Long.BYTES) {
+      throw new ArchivePersistenceException("Invalid historical property: " + key);
+    }
+    return com.google.common.primitives.Longs.fromByteArray(value.get());
+  }
+
+  public RuntimeException markTerminal(RuntimeException failure) {
+    return control.markTerminal(failure);
   }
 
   public void cancel() {

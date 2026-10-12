@@ -67,6 +67,16 @@ public final class ArchiveReadContext implements Closeable {
     }
   }
 
+  static ArchiveReadContext openPoint(ArchivePointSnapshot snapshot,
+      Collection<StoreAdapter<?>> adapters) throws IOException {
+    try {
+      return new ArchiveReadContext(snapshot, adapters, snapshot);
+    } catch (RuntimeException failure) {
+      closeAfterFailedOpen(snapshot, failure);
+      throw failure;
+    }
+  }
+
   public synchronized <T> HistoricalStore<T> store(StoreAdapter<T> adapter) {
     ensureOpen();
     Objects.requireNonNull(adapter, "adapter");
@@ -136,6 +146,21 @@ public final class ArchiveReadContext implements Closeable {
     } catch (InvalidProtocolBufferException e) {
       throw new ArchivePersistenceException(
           "Historical Contract metadata cannot be decoded", e);
+    }
+    OldValue optimize = snapshot.get("properties",
+        "ALLOW_OPTIMIZE_TVM_STORAGE".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    if (optimize.isPresent()) {
+      byte[] flag = optimize.getValue();
+      if (flag.length != Long.BYTES) {
+        throw new ArchivePersistenceException("Invalid historical storage optimization flag");
+      }
+      if (com.google.common.primitives.Longs.fromByteArray(flag) == 1L) {
+        OldValue optimized = snapshot.get("storage-row", StorageRowKeyCodec.optimizedKey(
+            contractAddress, logicalSlot, contract.getTrxHash().toByteArray()));
+        if (optimized.isPresent()) {
+          return Optional.of(optimized.getValue());
+        }
+      }
     }
     byte[] physicalKey = StorageRowKeyCodec.physicalKey(contractAddress, logicalSlot,
         contract.getVersion(), contract.getTrxHash().toByteArray());

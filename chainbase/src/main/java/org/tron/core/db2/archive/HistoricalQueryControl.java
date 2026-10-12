@@ -10,6 +10,7 @@ public final class HistoricalQueryControl {
   private final Thread owner = Thread.currentThread();
   private final long deadlineNanos;
   private volatile boolean cancelled;
+  private volatile RuntimeException terminal;
 
   public HistoricalQueryControl(long timeoutMillis) {
     if (timeoutMillis <= 0 || timeoutMillis > TimeUnit.DAYS.toMillis(1)) {
@@ -23,9 +24,20 @@ public final class HistoricalQueryControl {
     cancelled = true;
   }
 
+  public synchronized RuntimeException markTerminal(RuntimeException failure) {
+    requireOwner();
+    if (terminal == null) {
+      terminal = java.util.Objects.requireNonNull(failure, "failure");
+    }
+    return terminal;
+  }
+
   public void checkActive() {
     if (Thread.currentThread() != owner) {
       throw new IllegalStateException("Historical request changed owner threads");
+    }
+    if (terminal != null) {
+      throw terminal;
     }
     if (cancelled || owner.isInterrupted()) {
       throw new HistoricalQueryException(Reason.CANCELLED, "Historical request cancelled");

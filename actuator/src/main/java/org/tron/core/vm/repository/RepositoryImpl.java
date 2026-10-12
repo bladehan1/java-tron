@@ -42,6 +42,7 @@ import org.tron.core.capsule.DelegatedResourceCapsule;
 import org.tron.core.capsule.VotesCapsule;
 import org.tron.core.capsule.WitnessCapsule;
 import org.tron.core.config.Parameter;
+import org.tron.core.config.Parameter.ForkBlockVersionEnum;
 import org.tron.core.db.BlockIndexStore;
 import org.tron.core.db.BlockStore;
 import org.tron.core.db.KhaosDatabase;
@@ -235,8 +236,8 @@ public class RepositoryImpl implements Repository {
 
   private <T> T currentStore(T store, String capability) {
     if (readOnlyRoot) {
-      throw new HistoricalCapabilityException(
-          "Direct " + capability + " access is not supported by historical execution");
+      throw markHistoricalFailure(new HistoricalCapabilityException(
+          "Direct " + capability + " access is not supported by historical execution"));
     }
     return store;
   }
@@ -270,6 +271,11 @@ public class RepositoryImpl implements Repository {
       delegatedResourceAccountIndexStore = manager.getDelegatedResourceAccountIndexStore();
     }
     this.parent = parent;
+  }
+
+  @Override
+  public RuntimeException markHistoricalFailure(RuntimeException failure) {
+    return stateSource.markFailure(failure);
   }
 
   @Override
@@ -838,8 +844,17 @@ public class RepositoryImpl implements Repository {
         storage = parentStorage;
       }
     } else {
-      StorageRowStore persistenceStore = stateSource.isReadOnly() ? null : getStorageRowStore();
-      storage = new Storage(address, persistenceStore, stateSource::getStorageRow);
+      if (stateSource.isReadOnly()) {
+        // Historical execution: both switches are resolved at S(T) and every row read goes
+        // through the request's session. The fork-38 storage check only applies to the
+        // 32-byte key path, so it is evaluated only when #99 is inactive at S(T).
+        boolean optimize = getDynamicPropertyLong("ALLOW_OPTIMIZE_TVM_STORAGE") == 1L;
+        storage = new Storage(address, null, stateSource::getStorageRow, optimize,
+            !optimize && stateSource.passesFork(ForkBlockVersionEnum.VERSION_4_8_2_3));
+      } else {
+        storage = new Storage(address, getStorageRowStore(),
+            VMConfig.allowOptimizeTvmStorage());
+      }
     }
     ContractCapsule contract = getContract(address);
     if (contract != null) {
