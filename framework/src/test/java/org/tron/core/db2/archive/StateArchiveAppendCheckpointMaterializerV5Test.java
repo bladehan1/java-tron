@@ -85,6 +85,111 @@ public class StateArchiveAppendCheckpointMaterializerV5Test {
   }
 
   @Test
+  public void restartUsesCommonTargetRatherThanNewestPreparedTail() throws Exception {
+    Path root = temporaryFolder.newFolder("v5-common-tail-restart").toPath();
+    byte[] format = hash(70);
+    CommonCheckpointTarget committed;
+    CommonCheckpointTarget pending;
+    try (StateArchiveAppendCheckpointMaterializerV5 archive =
+        new StateArchiveAppendCheckpointMaterializerV5(root, format, Engine.LEVELDB,
+            100, hash(99), StateArchiveGethFormatV5.SEGMENT_TARGET_BYTES,
+            number -> null)) {
+      List<BlockReverseDiff> first = Collections.singletonList(diff(100));
+      StateArchiveHotBatchDescriptor binding = archive.planCheckpoint(first);
+      CommonCheckpointPayload payload = payload(format, first, binding);
+      committed = archive.prepare(CommonCheckpointCapture.create(payload, first, binding));
+      archive.publish(committed);
+      List<BlockReverseDiff> second = Collections.singletonList(diff(101));
+      binding = archive.planCheckpoint(second);
+      payload = payload(format, second, binding);
+      pending = archive.prepare(CommonCheckpointCapture.create(payload, second, binding));
+    }
+    // The second prepared Tail is durable, but the caller's Common commit is still block 100.
+    try (StateArchiveAppendCheckpointMaterializerV5 archive =
+        StateArchiveAppendCheckpointMaterializerV5.openForCommon(root, format, Engine.LEVELDB,
+            100, hash(99), StateArchiveGethFormatV5.SEGMENT_TARGET_BYTES,
+            number -> null, committed)) {
+      assertEquals(Status.PUBLISHED, archive.inspect(committed));
+      assertEquals(Status.NEEDS_MATERIALIZATION, archive.inspect(pending));
+      List<BlockReverseDiff> second = Collections.singletonList(diff(101));
+      StateArchiveHotBatchDescriptor binding = archive.planCheckpoint(second);
+      CommonCheckpointPayload payload = payload(format, second, binding);
+      CommonCheckpointTarget retry = archive.prepare(
+          CommonCheckpointCapture.create(payload, second, binding));
+      assertEquals(pending, retry);
+      archive.publish(retry);
+    }
+    try (StateArchiveAppendCheckpointMaterializerV5 archive =
+        StateArchiveAppendCheckpointMaterializerV5.openForCommon(root, format, Engine.LEVELDB,
+            100, hash(99), StateArchiveGethFormatV5.SEGMENT_TARGET_BYTES,
+            number -> null, pending)) {
+      assertEquals(Status.PUBLISHED, archive.inspect(pending));
+    }
+  }
+
+  @Test
+  public void committedRedoPublishesPreparedHistoryAfterRestart() throws Exception {
+    Path root = temporaryFolder.newFolder("v5-prepared-common-restart").toPath();
+    byte[] format = hash(70);
+    CommonCheckpointTarget pending;
+    try (StateArchiveAppendCheckpointMaterializerV5 archive =
+        new StateArchiveAppendCheckpointMaterializerV5(root, format, Engine.LEVELDB,
+            100, hash(99), StateArchiveGethFormatV5.SEGMENT_TARGET_BYTES,
+            number -> null)) {
+      List<BlockReverseDiff> first = Collections.singletonList(diff(100));
+      StateArchiveHotBatchDescriptor binding = archive.planCheckpoint(first);
+      CommonCheckpointPayload payload = payload(format, first, binding);
+      pending = archive.prepare(CommonCheckpointCapture.create(payload, first, binding));
+    }
+    try (StateArchiveAppendCheckpointMaterializerV5 archive =
+        StateArchiveAppendCheckpointMaterializerV5.openForCommon(root, format, Engine.LEVELDB,
+            100, hash(99), StateArchiveGethFormatV5.SEGMENT_TARGET_BYTES,
+            number -> null, pending)) {
+      assertEquals(Status.MATERIALIZED, archive.inspect(pending));
+      archive.publish(pending);
+      assertEquals(Status.PUBLISHED, archive.inspect(pending));
+    }
+  }
+
+  @Test
+  public void interruptedLegacyTailMigrationIsRetryableAndRetiresServingCopy() throws Exception {
+    for (boolean publishedTail : new boolean[]{false, true}) {
+      Path root = temporaryFolder.newFolder().toPath();
+      byte[] format = hash(70);
+      List<BlockReverseDiff> first = Collections.singletonList(diff(100));
+      StateArchiveHotBatchDescriptor binding = StateArchiveHotStore.planCheckpointDescriptor(
+          Engine.LEVELDB, 99, hash(99), new byte[32], first);
+      CommonCheckpointTarget target = CommonCheckpointTarget.from(payload(format, first, binding));
+      try (StateArchiveFiveLaneWriterV5 writer =
+          new StateArchiveFiveLaneWriterV5(root, 100, hash(99));
+          StateArchiveServingIndexBuildCoordinatorV3 coordinator =
+              new StateArchiveServingIndexBuildCoordinatorV3(root, Engine.LEVELDB, 1000)) {
+        writer.append(diff(100));
+        StateArchiveTailV5 tail = writer.forceTailReady(target);
+        coordinator.publishArchiveTailV5(tail);
+        StateArchiveCheckpointMaterializer.publishReadableTarget(root, target);
+        // Both interruption points keep the exact legacy Common-bound source until retirement.
+        try (HistoryTailStore control = new HistoryTailStore(root, format, 100, hash(99))) {
+          if (publishedTail) {
+            control.publish(tail, null, () -> { });
+          }
+        }
+      }
+      try (StateArchiveAppendCheckpointMaterializerV5 archive =
+          StateArchiveAppendCheckpointMaterializerV5.openForCommon(root, format, Engine.LEVELDB,
+              100, hash(99), StateArchiveGethFormatV5.SEGMENT_TARGET_BYTES,
+              number -> null, target)) {
+        assertEquals(Status.PUBLISHED, archive.inspect(target));
+      }
+      Path index = root.resolve(StateArchiveServingIndexBuildCoordinatorV3.DIRECTORY)
+          .resolve("single-v1");
+      try (MutableIndex reopened = new MutableIndex(index, Engine.LEVELDB)) {
+        assertThrows(ArchivePersistenceException.class, () -> reopened.archiveTailV5(target));
+      }
+    }
+  }
+
+  @Test
   public void tailSyncFailureNeverPublishesCommon() throws Exception {
     Path root = temporaryFolder.newFolder("v5-tail-sync-failure").toPath();
     byte[] format = hash(71);

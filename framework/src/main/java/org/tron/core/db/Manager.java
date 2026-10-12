@@ -151,12 +151,15 @@ import org.tron.core.db2.core.CommonCheckpointFile;
 import org.tron.core.db2.core.CommonCheckpointFormat;
 import org.tron.core.db2.core.CommonCheckpointHotRecovery;
 import org.tron.core.db2.core.CommonCheckpointMaterializedStore;
+import org.tron.core.db2.core.CommonCheckpointPayload;
 import org.tron.core.db2.core.CommonCheckpointRecoveryStateAdapter;
 import org.tron.core.db2.core.CommonCheckpointRedoCoordinator;
 import org.tron.core.db2.core.CommonCheckpointRuntime;
 import org.tron.core.db2.core.CommonCheckpointRuntimeAttachment;
 import org.tron.core.db2.core.CommonCheckpointRuntimeOwner;
+import org.tron.core.db2.core.CommonCheckpointTarget;
 import org.tron.core.db2.core.ExecutionAttribution;
+import org.tron.core.db2.core.P66LaneStartup;
 import org.tron.core.db2.core.SnapshotManager;
 import org.tron.core.db2.stateroot.PathStateBlockTransition;
 import org.tron.core.db2.stateroot.PathStateCanonicalizer;
@@ -260,6 +263,8 @@ public class Manager {
   private CommonCheckpointRuntimeAttachment commonCheckpointRuntime;
   private StateArchiveAppendFileRuntime stateArchiveAppendMaterializer;
   private boolean stateArchiveServingLive;
+  /** Form ON (07 §3.1): any archive feature switch; fixed at init. */
+  private boolean archiveFeaturesEnabled;
   private StateArchiveRuntimeOwner.ServingIndexFaultHook stateArchiveServingIndexFaultHook =
       stage -> { };
   private StateArchiveRuntimeOwner.ReadableStateFaultHook stateArchiveReadableStateFaultHook =
@@ -572,18 +577,23 @@ public class Manager {
     accountStateCallBack.setChainBaseManager(chainBaseManager);
     trieService.setChainBaseManager(chainBaseManager);
     revokingStore.disable();
-    if (!(revokingStore instanceof SnapshotManager)) {
-      throw new IllegalStateException("AccountAsset Snapshot requires SnapshotManager");
-    }
-    SnapshotManager snapshotManager = (SnapshotManager) revokingStore;
-    // The lane survives Manager re-creation inside the same context lifecycle.
-    if (!chainBaseManager.getAccountAssetStore().isSnapshotsAttached()) {
-      chainBaseManager.getAccountAssetStore().enableSnapshots(snapshotManager, true);
-    }
+    // D3 / 07-B / 07-C: the P66 lane exists only in form ON (or once, recovery-only, for a legacy
+    // checkpoint that already contains account-asset redo); form OFF is the upstream path.
+    org.tron.core.config.args.Storage startupStorage = Args.getInstance().getStorage();
+    archiveFeaturesEnabled = startupStorage.isArchiveFeaturesEnabled();
+    P66LaneStartup.Mode p66LaneMode = P66LaneStartup.beforeLegacyCheck(revokingStore,
+        chainBaseManager.getAccountAssetStore(), archiveFeaturesEnabled);
     revokingStore.check();
-    if (!Args.getInstance().getStorage().isCommonCheckpointEnabled()) {
-      chainBaseManager.getAccountAssetStore().finishSnapshotRecovery(snapshotManager);
+    boolean commonRecoveredEarly = startupStorage.isCommonCheckpointEnabled()
+        && java.nio.file.Files.isRegularFile(java.nio.file.Paths.get(
+            Args.getInstance().getOutputDirectory()).resolve(
+                startupStorage.getCommonCheckpointDirectory()).resolve("COMMON_BASELINE"));
+    if (commonRecoveredEarly) {
+      initCommonCheckpoint();
     }
+    P66LaneStartup.afterLegacyCheck(p66LaneMode, revokingStore,
+        chainBaseManager.getAccountAssetStore(), startupStorage.isCommonCheckpointEnabled());
+    openStartupMaintenanceLayer(commonRecoveredEarly);
     transactionCache.initCache();
     rewardViCalService.init();
     this.setProposalController(ProposalController.createInstance(this));
@@ -623,6 +633,7 @@ public class Manager {
     }
     getChainBaseManager().getForkController().init(this.chainBaseManager);
 
+    maintenanceWrites(true);
     if (Args.getInstance().isNeedToUpdateAsset() && needToUpdateAsset()) {
       new AssetUpdateHelper(chainBaseManager).doWork();
     }
@@ -649,12 +660,18 @@ public class Manager {
 
     //for test only
     chainBaseManager.getDynamicPropertiesStore().updateDynamicStoreByConfig();
+    if (startupStorage.isCommonCheckpointEnabled()) {
+      consensus.initGenesisSchedule();
+    }
+    maintenanceWrites(false);
 
     // init liteFullNode
     initLiteNode();
 
     if (Args.getInstance().getStorage().isCommonCheckpointEnabled()) {
-      initCommonCheckpoint();
+      if (!commonRecoveredEarly) {
+        initCommonCheckpoint();
+      }
     } else {
       initStateArchive();
       initPathStateRoot();
@@ -666,6 +683,9 @@ public class Manager {
     logger.info("Node type is: {}.", isLite ? "lite" : "full");
     if (isLite) {
       logger.info("Lite node lowestNum: {}", chainBaseManager.getLowestBlockNum());
+    }
+    if (revokingStore instanceof SnapshotManager) {
+      ((SnapshotManager) revokingStore).settleMaintenanceLayer();
     }
     revokingStore.enable();
     validateSignService = ExecutorServiceManager
@@ -792,6 +812,7 @@ public class Manager {
     CommonCheckpointRuntimeAttachment attachment = null;
     StateArchiveHotStore hotStore = null;
     StateArchiveAppendFileRuntime appendMaterializer = null;
+    CommonCheckpointFile openedCheckpointFile = null;
     try {
       PathStateStoreManifest.Engine pathEngine = configuredAuxiliaryEngine(
           storage.getPathStateRootEngine(), storage.getDbEngine());
@@ -871,6 +892,7 @@ public class Manager {
           canonical, initialHead.getStateRoot());
       CommonCheckpointBaseline baseline = baselineExists ? baselineFile.load()
           : baselineFile.openOrCreate(supplied);
+      org.tron.core.db2.core.OutOfBlockWriteGuard.markCommonEstablished(checkpointDirectory);
       if (!Arrays.equals(baseline.getFormatIdentity(), formatIdentity)) {
         throw new IllegalStateException("Common checkpoint baseline format differs");
       }
@@ -905,12 +927,15 @@ public class Manager {
               "State Archive Hot DB requires a fresh common checkpoint baseline");
         }
       }
-      CommonCheckpointFile checkpointFile = new CommonCheckpointFile(checkpointDirectory);
+      CommonCheckpointFile checkpointFile = CommonCheckpointFile.openDatabase(
+          checkpointDirectory, archiveRuntimeEngine);
+      openedCheckpointFile = checkpointFile;
       StateArchiveHotCheckpointMaterializer hotMaterializer = null;
       org.tron.core.db2.core.CommonCheckpointMaterializer archiveMaterializer;
       if (appendEnabled) {
         appendMaterializer = createAppendMaterializer(appendDirectory, formatIdentity,
-            archiveRuntimeEngine, baseline, appendConfig);
+            archiveRuntimeEngine, baseline, appendConfig,
+            checkpointFile.latestCommitted());
         archiveMaterializer = appendMaterializer;
       } else if (hotEnabled) {
         hotStore = StateArchiveHotStore.openOrCreate(hotDirectory, formatIdentity, hotEngine,
@@ -926,6 +951,7 @@ public class Manager {
           new ChainbaseCheckpointMaterializer(checkpointDirectory, formatIdentity,
               snapshots.getDbs(), baseline, materializedStore),
           pathMaterializer, archiveMaterializer);
+      coordinator.configureDurableBaseCadence(Math.max(1, storage.getMaxFlushCount()));
       PathStatePhysicalOverlayHead admittedOwner = pathOwner;
       StateArchiveHotCheckpointMaterializer admittedHotMaterializer = hotMaterializer;
       StateArchiveHotStore admittedHotStore = hotStore;
@@ -1045,7 +1071,38 @@ public class Manager {
           failure.addSuppressed(closeFailure);
         }
       }
+      if (openedCheckpointFile != null) {
+        try {
+          openedCheckpointFile.close();
+        } catch (java.io.IOException closeFailure) {
+          failure.addSuppressed(closeFailure);
+        }
+      }
       throw new IllegalStateException("Failed to recover common checkpoint startup", failure);
+    }
+  }
+
+  private void openStartupMaintenanceLayer(boolean recovered) {
+    DynamicPropertiesStore properties = getDynamicPropertiesStore();
+    if (recovered) {
+      ((SnapshotManager) revokingStore).openMaintenanceLayer();
+      maintenanceWrites(true);
+    }
+    try {
+      properties.applyDeferredConstructorDefaults();
+    } finally {
+      maintenanceWrites(false);
+    }
+  }
+
+  private void maintenanceWrites(boolean open) {
+    if (revokingStore instanceof SnapshotManager) {
+      SnapshotManager snapshots = (SnapshotManager) revokingStore;
+      if (open) {
+        snapshots.beginMaintenanceWrites();
+      } else {
+        snapshots.endMaintenanceWrites();
+      }
     }
   }
 
@@ -1057,42 +1114,49 @@ public class Manager {
       boolean modeAdmitted, boolean appendEnabled, Path appendDirectory,
       org.tron.core.config.args.StorageConfig.StateArchiveAppendFileConfig appendConfig)
       throws java.io.IOException {
-    CommonCheckpointFile checkpointFile = new CommonCheckpointFile(checkpointDirectory);
-    if (!checkpointFile.isPresent()) {
+    if (!Files.exists(checkpointDirectory.resolve("COMMON_CHECKPOINT"), LinkOption.NOFOLLOW_LINKS)
+        && !Files.exists(checkpointDirectory.resolve("redo"), LinkOption.NOFOLLOW_LINKS)) {
       return;
     }
-    if (!baselineExists || !modeAdmitted) {
-      throw new java.io.IOException(
-          "Common checkpoint WAL requires an admitted PathState baseline");
-    }
-    CommonCheckpointBaseline baseline = baselineFile.load();
-    CommonCheckpointMaterializedStore materializedStore =
-        new CommonCheckpointMaterializedStore(checkpointDirectory);
-    org.tron.core.db2.core.CommonCheckpointMaterializer archiveRecovery = appendEnabled
-        ? createAppendMaterializer(appendDirectory, formatIdentity, archiveEngine, baseline,
-            appendConfig)
-        : new StateArchiveCheckpointMaterializer(archiveDirectory, formatIdentity, baseline,
-            archiveEngine, materializedStore);
-    try (PathStateCheckpointMaterializer.RecoverySession pathRecovery =
-        PathStateCheckpointMaterializer.openRecovery(pathDirectory, pathEngine,
-            residentNodeCacheBytes, formatIdentity, baseline, materializedStore);
-        org.tron.core.db2.core.CommonCheckpointMaterializer admittedArchive = archiveRecovery;
-        CommonCheckpointRedoCoordinator coordinator = new CommonCheckpointRedoCoordinator(
-            checkpointFile,
-            new ChainbaseCheckpointMaterializer(checkpointDirectory, formatIdentity,
-                snapshots.getDbs(), baseline, materializedStore),
-            pathRecovery.getMaterializer(),
-            admittedArchive)) {
-      CommonCheckpointRedoCoordinator.RecoveryAction action = coordinator.recover();
-      logger.info("Common checkpoint startup redo completed before PathState open: action={}",
-          action);
+    try (CommonCheckpointFile checkpointFile = CommonCheckpointFile.openDatabase(
+        checkpointDirectory, archiveEngine)) {
+      if (!checkpointFile.isPresent() && checkpointFile.retained().isEmpty()) {
+        return;
+      }
+      if (!baselineExists || !modeAdmitted) {
+        throw new java.io.IOException(
+            "Common checkpoint WAL requires an admitted PathState baseline");
+      }
+      CommonCheckpointBaseline baseline = baselineFile.load();
+      CommonCheckpointMaterializedStore materializedStore =
+          new CommonCheckpointMaterializedStore(checkpointDirectory);
+      org.tron.core.db2.core.CommonCheckpointMaterializer archiveRecovery = appendEnabled
+          ? createAppendMaterializer(appendDirectory, formatIdentity, archiveEngine, baseline,
+              appendConfig, checkpointFile.latestCommitted())
+          : new StateArchiveCheckpointMaterializer(archiveDirectory, formatIdentity, baseline,
+              archiveEngine, materializedStore);
+      try (PathStateCheckpointMaterializer.RecoverySession pathRecovery =
+          PathStateCheckpointMaterializer.openRecovery(pathDirectory, pathEngine,
+              residentNodeCacheBytes, formatIdentity, baseline, materializedStore);
+          org.tron.core.db2.core.CommonCheckpointMaterializer admittedArchive = archiveRecovery;
+          CommonCheckpointRedoCoordinator coordinator = new CommonCheckpointRedoCoordinator(
+              checkpointFile,
+              new ChainbaseCheckpointMaterializer(checkpointDirectory, formatIdentity,
+                  snapshots.getDbs(), baseline, materializedStore),
+              pathRecovery.getMaterializer(),
+              admittedArchive)) {
+        CommonCheckpointRedoCoordinator.RecoveryAction action = coordinator.recover();
+        logger.info("Common checkpoint startup redo completed before PathState open: action={}",
+            action);
+      }
     }
   }
 
   private StateArchiveAppendFileRuntime createAppendMaterializer(Path appendDirectory,
       byte[] formatIdentity, PathStateStoreManifest.Engine archiveEngine,
       CommonCheckpointBaseline baseline,
-      org.tron.core.config.args.StorageConfig.StateArchiveAppendFileConfig appendConfig)
+      org.tron.core.config.args.StorageConfig.StateArchiveAppendFileConfig appendConfig,
+      CommonCheckpointPayload recoveryPayload)
       throws java.io.IOException {
     final long firstBlockNumber;
     try {
@@ -1104,9 +1168,10 @@ public class Manager {
         new CommonCheckpointRecoveryStateAdapter(getDynamicPropertiesStore(), chainBaseManager);
     byte[] baselineHistoryDigest = StateArchiveAppendCheckpointMaterializerV5
         .baselineHistoryDigest(firstBlockNumber, baseline.getHead().getBlockHash());
-    return new StateArchiveAppendCheckpointMaterializerV5(appendDirectory, formatIdentity,
+    return StateArchiveAppendCheckpointMaterializerV5.openForCommon(appendDirectory, formatIdentity,
         archiveEngine, firstBlockNumber, baselineHistoryDigest,
-        appendConfig.getSegmentTargetBytes(), canonical::loadIfPresent);
+        appendConfig.getSegmentTargetBytes(), canonical::loadIfPresent, recoveryPayload == null
+            ? null : CommonCheckpointTarget.from(recoveryPayload));
   }
 
   private BlockSnapshotMeta currentCanonicalBlockMeta()
@@ -2110,6 +2175,19 @@ public class Manager {
         .labelNames("stage").register();
   }
 
+  /**
+   * Ends a canonical block session. Form OFF is the upstream {@code ISession.commit()} (07-B, D3):
+   * no block metadata, no P66 materialization, no derived artifacts. Form ON runs the block-final
+   * pipeline.
+   */
+  private void commitBlockSession(ISession blockSession, BlockCapsule block) {
+    if (!archiveFeaturesEnabled) {
+      blockSession.commit();
+      return;
+    }
+    finalizeBlockSession(blockSession, block);
+  }
+
   private void finalizeBlockSession(ISession blockSession, BlockCapsule block) {
     blockSession.finalizeBlock(BlockSnapshotMeta.forBlock(
         block.getNum(), block.getBlockId().getBytes(), block.getParentHash().getBytes(),
@@ -2222,7 +2300,7 @@ public class Manager {
             tx.setVerified(false);
           }
           applyBlock(item.getBlk().setSwitch(true));
-          finalizeBlockSession(tmpSession, item.getBlk());
+          commitBlockSession(tmpSession, item.getBlk());
         } catch (AccountResourceInsufficientException
             | ValidateSignatureException
             | ContractValidateException
@@ -2260,7 +2338,7 @@ public class Manager {
               // todo  process the exception carefully later
               try (ISession tmpSession = revokingStore.buildSession()) {
                 applyBlock(khaosBlock.getBlk().setSwitch(true));
-                finalizeBlockSession(tmpSession, khaosBlock.getBlk());
+                commitBlockSession(tmpSession, khaosBlock.getBlk());
               } catch (AccountResourceInsufficientException
                   | ValidateSignatureException
                   | ContractValidateException
@@ -2476,7 +2554,7 @@ public class Manager {
               sessionOpenedNanos = System.nanoTime();
               applyBlock(newBlock, txs);
               appliedNanos = System.nanoTime();
-              finalizeBlockSession(tmpSession, newBlock);
+              commitBlockSession(tmpSession, newBlock);
               committedNanos = System.nanoTime();
             } catch (Throwable throwable) {
               logger.error(throwable.getMessage(), throwable);
@@ -2493,7 +2571,7 @@ public class Manager {
               BlockApplyMetrics.DURATION.labels("block_execute")
                   .observe((appliedNanos - sessionOpenedNanos) / 1e9);
             }
-            logger.info("PushBlock core stages: head={}, verifyMs={}, preApplyMs={}, applyMs={}, "
+            logger.debug("PushBlock core stages: head={}, verifyMs={}, preApplyMs={}, applyMs={}, "
                     + "commitMs={}, triggerMs={}, throughTriggerMs={}, sessionOpenMs={}, "
                     + "blockExecuteMs={}", newBlock.getNum(),
                 elapsedMillis(startedNanos, verifiedNanos),
@@ -3110,7 +3188,7 @@ public class Manager {
     chainBaseManager.getSectionBloomStore().write(block.getNum());
     block.setBloom(blockBloom);
     long completedNanos = System.nanoTime();
-    logger.info("ProcessBlock stages: head={}, preTxMs={}, txLoopMs={}, postTxMs={}, totalMs={}",
+    logger.debug("ProcessBlock stages: head={}, preTxMs={}, txLoopMs={}, postTxMs={}, totalMs={}",
         block.getNum(), elapsedMillis(startedNanos, transactionStartedNanos),
         elapsedMillis(transactionStartedNanos, transactionCompletedNanos),
         elapsedMillis(transactionCompletedNanos, completedNanos),

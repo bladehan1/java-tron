@@ -534,14 +534,12 @@ public class ArchiveReadSnapshotTest {
     }
     properties.add(new Entry(bytes("latest_block_header_number"),
         OldValue.present(ByteArray.fromLong(Long.MAX_VALUE))));
-    properties.add(new Entry(bytes("latest_block_header_timestamp"),
-        OldValue.present(ByteArray.fromLong(1_000_000L))));
-    properties.add(new Entry(bytes("MAINTENANCE_TIME_INTERVAL"),
-        OldValue.present(ByteArray.fromLong(21_600_000L))));
     String[] values = {
         "UNFREEZE_DELAY_DAYS", "DYNAMIC_ENERGY_THRESHOLD",
         "DYNAMIC_ENERGY_INCREASE_FACTOR", "DYNAMIC_ENERGY_MAX_FACTOR", "ENERGY_FEE",
-        "MAX_FEE_LIMIT", "MAX_CPU_TIME_OF_ONE_TX", "CURRENT_CYCLE_NUMBER"
+        "MAX_FEE_LIMIT", "MAX_CPU_TIME_OF_ONE_TX", "CURRENT_CYCLE_NUMBER",
+        // ForkView@S(T) inputs; every real DynamicPropertiesStore has them from genesis.
+        "latest_block_header_timestamp", "MAINTENANCE_TIME_INTERVAL"
     };
     for (String key : values) {
       properties.add(new Entry(bytes(key), OldValue.present(ByteArray.fromLong(100L))));
@@ -581,15 +579,17 @@ public class ArchiveReadSnapshotTest {
           assertEquals(defaultEntry.getKey(), defaultEntry.getValue().longValue(),
               root.getDynamicPropertyLong(defaultEntry.getKey()));
         }
-        assertThrows(IllegalArgumentException.class,
-            () -> root.getDynamicPropertyLong("UNKNOWN_REQUIRED_PROPERTY"));
-
         ConfigLoader.load(root);
         assertEquals(defaults.get("ALLOW_TVM_OSAKA").longValue(),
             VMConfig.allowTvmOsaka() ? 1L : 0L);
         assertEquals(defaults.get("ALLOW_HARDEN_RESOURCE_CALCULATION").longValue(),
             VMConfig.allowHardenResourceCalculation() ? 1L : 0L);
         VMConfig.clearLocalSnapshot();
+
+        // An unregistered ABSENT key fails closed and makes the request TERMINAL.
+        assertThrows(HistoricalQueryCapabilityException.class,
+            () -> root.getDynamicPropertyLong("UNKNOWN_REQUIRED_PROPERTY"));
+        assertTrue(session.isTerminal());
       }
       assertTrue(latest.closed);
       gate.close();

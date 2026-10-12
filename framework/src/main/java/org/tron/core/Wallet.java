@@ -3197,19 +3197,12 @@ public class Wallet {
         ? new VMActuator(true) : new VMActuator(true, HistoricalRepositoryProvider.INSTANCE);
 
     try {
-      if (session != null) {
-        session.checkActive();
+      if (session == null) {
+        vmActuator.validate(context);
+        vmActuator.execute(context);
+      } else {
+        org.tron.core.actuator.HistoricalConstantExecution.run(vmActuator, context);
       }
-      vmActuator.validate(context);
-      vmActuator.execute(context);
-      if (session != null) {
-        session.checkActive();
-      }
-    } catch (RuntimeException failure) {
-      if (session != null) {
-        session.checkActive();
-      }
-      throw failure;
     } finally {
       // constant call runs on a pooled RPC worker; drop its thread-local VM config view so it
       // can never leak into a later (block/broadcast) execution on the same thread.

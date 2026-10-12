@@ -65,8 +65,8 @@ public class ConfigLoader {
   /** Loads an isolated VM view exclusively from a Repository's request-owned state source. */
   public static void load(Repository repository) {
     if (disable) {
-      throw new HistoricalCapabilityException(
-          "Historical VM config loading cannot be disabled");
+      throw repository.markHistoricalFailure(new HistoricalCapabilityException(
+          "Historical VM config loading cannot be disabled"));
     }
     VMConfig.setVmTrace(CommonParameter.getInstance().isVmTrace());
     VMConfig.Snapshot snapshot = new VMConfig.Snapshot();

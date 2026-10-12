@@ -3,17 +3,19 @@ package org.tron.core.db2.archive;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.Objects;
+import java.util.concurrent.atomic.AtomicLong;
+import lombok.extern.slf4j.Slf4j;
 import org.tron.common.utils.ByteArray;
-import org.tron.core.db2.archive.BlockChangeView.PostValue;
-import org.tron.core.db2.archive.P66AccountAssetCodec.AssetRow;
 import org.tron.core.db2.archive.P66AccountAssetCodec.DecodedAssetRow;
 import org.tron.core.db2.archive.P66AccountAssetCodec.Phase;
 import org.tron.protos.Protocol.Account;
 
 /** Resolves one historical TRC10 balance through a request-owned archive accessor. */
+@Slf4j(topic = "DB")
 public final class HistoricalAccountAssetBalanceResolver {
+
+  private static final AtomicLong ORPHAN_DIRECT_ROWS = new AtomicLong();
 
   static final String PROPERTIES_DATABASE = "properties";
   static final String ACCOUNT_DATABASE = "account";
@@ -36,46 +38,88 @@ public final class HistoricalAccountAssetBalanceResolver {
     OldValue directValue = pinned.get(ACCOUNT_ASSET_DATABASE, directKey);
 
     pinned.requirePinnedIdentity();
+    return resolveValues(pinned.getTargetBlock(), address, tokenId, directKey, propertyValue,
+        accountValue, directValue);
+  }
+
+  /**
+   * Upstream {@code AssetUtil.importAsset} semantics over three already-read values at S(T)
+   * (chapter 05 section 3.11 point 1):
+   * <ul>
+   *   <li>Account ABSENT: balance 0; the direct row must also be ABSENT.</li>
+   *   <li>P66_OFF: {@code Account.assetV2[tokenId]} or 0; no direct row; the Account must not be
+   *   optimized.</li>
+   *   <li>P66_ON: the inline {@code assetV2} entry when present; otherwise the direct row for an
+   *   optimized Account (ABSENT = 0); otherwise (never re-written, unoptimized Account) 0. A direct
+   *   row under an unoptimized Account does not change the answer but is counted and logged.</li>
+   * </ul>
+   * The direct row itself is always validated (8 bytes, non-zero, address and token bound).
+   */
+  public Result resolveValues(long targetBlock, byte[] address, String tokenId,
+      byte[] directKey, OldValue propertyValue, OldValue accountValue, OldValue directValue) {
     Phase phase = decodeTargetPhase(propertyValue);
     if (!accountValue.isPresent()) {
       if (directValue.isPresent()) {
         throw new ArchivePersistenceException(
             "Historical AccountAsset row has no owning Account");
       }
-      return Result.absent(pinned.getTargetBlock(), address, tokenId, phase);
+      return Result.absent(targetBlock, address, tokenId, phase);
     }
 
-    Account account = codec.decodeCanonicalAccount(phase, address, accountValue.getValue());
     if (phase == Phase.P66_OFF) {
+      Account account = codec.decodeCanonicalAccount(phase, address, accountValue.getValue());
       if (directValue.isPresent()) {
         throw new ArchivePersistenceException("P66-off historical layout contains a direct row");
       }
       Long balance = account.getAssetV2Map().get(tokenId);
-      return Result.present(pinned.getTargetBlock(), address, tokenId, phase,
+      return Result.present(targetBlock, address, tokenId, phase,
           accountValue.getValue(), balance == null ? 0L : balance);
     }
 
-    long balance = 0L;
+    Account account = codec.decodeAccount(address, accountValue.getValue());
+    Long directBalance = null;
     if (directValue.isPresent()) {
-      AssetRow row = new AssetRow(directKey, PostValue.present(directValue.getValue()));
-      codec.requireCanonicalLayout(phase, address, accountValue.getValue(),
-          Collections.singletonList(row));
       DecodedAssetRow decoded = codec.decodePresentAssetRow(directKey, directValue.getValue());
       if (!Arrays.equals(address, decoded.getAccountAddress())
           || !tokenId.equals(decoded.getTokenId())) {
         throw new ArchivePersistenceException("Historical AccountAsset identity mismatch");
       }
-      balance = decoded.getBalance();
+      directBalance = decoded.getBalance();
     }
-    return Result.present(pinned.getTargetBlock(), address, tokenId, phase,
-        accountValue.getValue(), balance);
+    Long inline = account.getAssetV2Map().get(tokenId);
+    long balance;
+    if (inline != null) {
+      balance = inline;
+    } else if (account.getAssetOptimized()) {
+      balance = directBalance == null ? 0L : directBalance;
+    } else {
+      balance = 0L;
+    }
+    if (!account.getAssetOptimized() && directBalance != null) {
+      recordOrphanDirectRow(targetBlock, tokenId);
+    }
+    return Result.present(targetBlock, address, tokenId, phase, accountValue.getValue(), balance);
+  }
+
+  /** Direct rows found under unoptimized Accounts (expected 0; chapter 07 orphan-row audit). */
+  public static long getOrphanDirectRowCount() {
+    return ORPHAN_DIRECT_ROWS.get();
+  }
+
+  private static void recordOrphanDirectRow(long targetBlock, String tokenId) {
+    long count = ORPHAN_DIRECT_ROWS.incrementAndGet();
+    if (Long.bitCount(count) == 1) {
+      logger.warn("Historical AccountAsset direct row under an unoptimized Account at block {} "
+          + "(token {}); answered with upstream importAsset semantics; total={}",
+          targetBlock, tokenId, count);
+    }
   }
 
   static byte[] proposal66PhysicalKey() {
     return Arrays.copyOf(PROPOSAL_66_PHYSICAL_KEY, PROPOSAL_66_PHYSICAL_KEY.length);
   }
 
-  static Phase decodeTargetPhase(OldValue propertyValue) {
+  public static Phase decodeTargetPhase(OldValue propertyValue) {
     if (!propertyValue.isPresent()) {
       throw new ArchivePersistenceException("Historical proposal-66 property is absent");
     }

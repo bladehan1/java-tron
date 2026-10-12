@@ -129,6 +129,11 @@ public class Storage {
   @Setter
   private boolean pathStateRootEnabled;
 
+  /** Any existing Archive-related configuration enables the coupled AccountAsset lane. */
+  public boolean isArchiveFeaturesEnabled() {
+    return stateArchiveEnabled || pathStateRootEnabled || commonCheckpointEnabled;
+  }
+
   @Getter
   @Setter
   private String pathStateRootMode;

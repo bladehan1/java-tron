@@ -39,6 +39,7 @@ import org.springframework.test.util.ReflectionTestUtils;
 import org.tron.common.arch.Arch;
 import org.tron.common.runtime.vm.DataWord;
 import org.tron.common.utils.ByteArray;
+import org.tron.common.utils.ForkController;
 import org.tron.common.utils.Sha256Hash;
 import org.tron.core.ChainBaseManager;
 import org.tron.core.Wallet;
@@ -66,6 +67,7 @@ import org.tron.core.services.NodeInfoService;
 import org.tron.core.services.jsonrpc.JsonRpcErrorResolver;
 import org.tron.core.services.jsonrpc.TronJsonRpc;
 import org.tron.core.services.jsonrpc.TronJsonRpcImpl;
+import org.tron.core.store.DynamicPropertiesStore;
 import org.tron.core.store.StorageRowKeyCodec;
 import org.tron.core.store.StorageRowStore;
 import org.tron.protos.Protocol.Account;
@@ -392,6 +394,7 @@ public class StateArchiveJsonRpcIntegrationTest {
     private final long originalConstantCallTimeoutMs =
         Args.getInstance().getConstantCallTimeoutMs();
     private Runnable onPin = () -> { };
+    private Object originalForkManager;
     private volatile int pins;
     private volatile int releases;
 
@@ -511,6 +514,15 @@ public class StateArchiveJsonRpcIntegrationTest {
       ChainBaseManager chainbase = mock(ChainBaseManager.class);
       when(chainbase.getBlockByNum(anyLong())).thenAnswer(call -> blocks.get(call.getArgument(0)));
       when(chainbase.getStorageRowStore()).thenReturn(storage);
+      // The latest eth_getStorageAt path builds the upstream 4.8.2.3 Storage, which reads the
+      // optimized-storage switch and the fork-38 decision from latest state.
+      DynamicPropertiesStore latestProperties = mock(DynamicPropertiesStore.class);
+      when(latestProperties.allowOptimizeTvmStorage()).thenReturn(false);
+      when(latestProperties.getLatestBlockHeaderTimestamp()).thenReturn(0L);
+      when(latestProperties.getMaintenanceTimeInterval()).thenReturn(21_600_000L);
+      when(chainbase.getDynamicPropertiesStore()).thenReturn(latestProperties);
+      originalForkManager = ReflectionTestUtils.getField(ForkController.instance(), "manager");
+      ReflectionTestUtils.setField(ForkController.instance(), "manager", chainbase);
       ReflectionTestUtils.setField(manager, "chainBaseManager", chainbase);
       ReflectionTestUtils.setField(manager, "commonCheckpointRuntime", attachment);
       ReflectionTestUtils.setField(wallet, "chainBaseManager", chainbase);
@@ -619,6 +631,7 @@ public class StateArchiveJsonRpcIntegrationTest {
 
     @Override
     public void close() throws Exception {
+      ReflectionTestUtils.setField(ForkController.instance(), "manager", originalForkManager);
       Args.getInstance().supportConstant = originalSupportConstant;
       Args.getInstance().setConstantCallTimeoutMs(originalConstantCallTimeoutMs);
       rpc.close();
@@ -660,12 +673,20 @@ public class StateArchiveJsonRpcIntegrationTest {
     String[] values = {
         "UNFREEZE_DELAY_DAYS", "DYNAMIC_ENERGY_THRESHOLD",
         "DYNAMIC_ENERGY_INCREASE_FACTOR", "DYNAMIC_ENERGY_MAX_FACTOR", "ENERGY_FEE",
-        "MAX_FEE_LIMIT", "MAX_CPU_TIME_OF_ONE_TX", "CURRENT_CYCLE_NUMBER"
+        "MAX_FEE_LIMIT", "MAX_CPU_TIME_OF_ONE_TX", "CURRENT_CYCLE_NUMBER",
+        // ForkView@S(T) inputs; every real DynamicPropertiesStore has them from genesis.
+        "latest_block_header_timestamp", "MAINTENANCE_TIME_INTERVAL"
     };
     for (String property : values) {
       properties.add(new Entry(property.getBytes(StandardCharsets.UTF_8),
           OldValue.present(ByteArray.fromLong(100L))));
     }
+    // Fork 38 had no statistics and #99 was off at the historical blocks; both are answered
+    // from history, not from the latest baseline.
+    properties.add(new Entry("FORK_VERSION_38".getBytes(StandardCharsets.UTF_8),
+        OldValue.absent()));
+    properties.add(new Entry("ALLOW_OPTIMIZE_TVM_STORAGE".getBytes(StandardCharsets.UTF_8),
+        OldValue.present(ByteArray.fromLong(0L))));
     return properties;
   }
 

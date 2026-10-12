@@ -124,6 +124,13 @@ public class RocksDB implements DB<byte[], byte[]>, Flusher, SnapshotCapableStor
     }
   }
 
+  @Override
+  public void flushUnsynced(Map<WrappedByteArray, WrappedByteArray> batch) {
+    try (WriteOptionsWrapper unsynced = WriteOptionsWrapper.getInstance().sync(false)) {
+      flush(batch, unsynced);
+    }
+  }
+
   private void flush(Map<WrappedByteArray, WrappedByteArray> batch,
       WriteOptionsWrapper options) {
     Map<byte[], byte[]> rows = batch.entrySet().stream()

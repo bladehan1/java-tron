@@ -37,6 +37,18 @@ public interface CommonCheckpointMaterializer extends AutoCloseable {
   default void afterCommit(CommonCheckpointTarget target) {
   }
 
+  /** Use unsynced target writes only while the common database retains complete durable redo. */
+  default void useRetainedRedo(boolean enabled) {
+  }
+
+  /** Restore retained committed mutations before inspecting physical publication markers. */
+  default void replayRetained(java.util.List<CommonCheckpointPayload> payloads, boolean sync)
+      throws IOException {
+    if (!payloads.isEmpty()) {
+      throw new IOException("participant does not support retained redo");
+    }
+  }
+
   enum Authority {
     CHAINBASE,
     PATH_STATE,

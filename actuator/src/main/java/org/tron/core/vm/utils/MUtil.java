@@ -3,6 +3,7 @@ package org.tron.core.vm.utils;
 import org.tron.common.utils.ForkController;
 import org.tron.core.capsule.AccountCapsule;
 import org.tron.core.config.Parameter;
+import org.tron.core.db2.archive.HistoricalExecutionScope;
 import org.tron.core.exception.ContractValidateException;
 import org.tron.core.vm.VMUtils;
 import org.tron.core.vm.program.Program.OutOfTimeException;
@@ -59,45 +60,55 @@ public class MUtil {
     return !isNullOrEmpty(str);
   }
 
+  /**
+   * Fork gate for the static CPU-time checks. Inside a historical execution the decision is
+   * {@code ForkView@S(T)} from the request's scope; latest execution keeps ForkController
+   * (chapter 05 section 3.9.3).
+   */
+  private static boolean passFork(Parameter.ForkBlockVersionEnum version) {
+    HistoricalExecutionScope scope = HistoricalExecutionScope.current();
+    return scope != null ? scope.forks().pass(version) : ForkController.instance().pass(version);
+  }
+
   public static void checkCPUTimeForContractHashFields() {
-    if (ForkController.instance().pass(Parameter.ForkBlockVersionEnum.VERSION_4_8_2_2)) {
+    if (passFork(Parameter.ForkBlockVersionEnum.VERSION_4_8_2_2)) {
       throw new OutOfTimeException("CPU timeout for contract hash fields");
     }
   }
 
   public static void checkCPUTime() {
-    if (ForkController.instance().pass(Parameter.ForkBlockVersionEnum.VERSION_4_7_1)) {
+    if (passFork(Parameter.ForkBlockVersionEnum.VERSION_4_7_1)) {
       throw new OutOfTimeException("CPU timeout for 0x0a executing");
     }
   }
 
   public static void checkCPUTimeForCreate2() {
-    if (ForkController.instance().pass(Parameter.ForkBlockVersionEnum.VERSION_4_8_1_1)) {
+    if (passFork(Parameter.ForkBlockVersionEnum.VERSION_4_8_1_1)) {
       throw new OutOfTimeException("CPU timeout for create2 executing");
     }
   }
 
   public static void checkCPUTimeForModExp() {
-    if (ForkController.instance().pass(Parameter.ForkBlockVersionEnum.VERSION_4_8_1_1)) {
+    if (passFork(Parameter.ForkBlockVersionEnum.VERSION_4_8_1_1)) {
       throw new OutOfTimeException("CPU timeout for modExp executing");
     }
   }
 
   public static void checkCPUTimeForFreezeV2AfterSelfDestruct() {
-    if (ForkController.instance().pass(Parameter.ForkBlockVersionEnum.VERSION_4_8_2_2)) {
+    if (passFork(Parameter.ForkBlockVersionEnum.VERSION_4_8_2_2)) {
       throw new OutOfTimeException("CPU timeout for FreezeBalanceV2 after SELFDESTRUCT");
     }
   }
 
   public static void checkCPUTimeForSelfDestructedBeneficiary() {
-    if (ForkController.instance().pass(Parameter.ForkBlockVersionEnum.VERSION_4_8_2_2)) {
+    if (passFork(Parameter.ForkBlockVersionEnum.VERSION_4_8_2_2)) {
       throw new OutOfTimeException(
           "CPU timeout for SELFDESTRUCT with selfdestructed beneficiary");
     }
   }
 
   public static void checkCPUTimeForInvalidDelegatedV2Balance() {
-    if (ForkController.instance().pass(Parameter.ForkBlockVersionEnum.VERSION_4_8_2_2)) {
+    if (passFork(Parameter.ForkBlockVersionEnum.VERSION_4_8_2_2)) {
       throw new OutOfTimeException("CPU timeout for invalid delegated V2 balance");
     }
   }

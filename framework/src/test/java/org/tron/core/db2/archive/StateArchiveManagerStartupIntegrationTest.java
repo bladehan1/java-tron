@@ -466,8 +466,7 @@ public class StateArchiveManagerStartupIntegrationTest {
     assertP66History(manager, address, absentAddress, tokenId);
     assertThrows(ArchivePersistenceException.class,
         () -> manager.getArchiveAccountAssetBalance(10, orphanAddress, tokenId));
-    assertThrows(ArchivePersistenceException.class,
-        () -> manager.getArchiveAccountAssetBalance(10, mixedAddress, tokenId));
+    assertEquals(7L, manager.getArchiveAccountAssetBalance(10, mixedAddress, tokenId).getBalance());
     assertThrows(ArchivePersistenceException.class,
         () -> manager.getArchiveAccountAssets(10, orphanAddress, prefixLimits()));
     assertThrows(ArchivePersistenceException.class,
@@ -494,8 +493,8 @@ public class StateArchiveManagerStartupIntegrationTest {
     assertP66History(restartedManager, address, absentAddress, tokenId);
     assertThrows(ArchivePersistenceException.class,
         () -> restartedManager.getArchiveAccountAssetBalance(10, orphanAddress, tokenId));
-    assertThrows(ArchivePersistenceException.class,
-        () -> restartedManager.getArchiveAccountAssetBalance(10, mixedAddress, tokenId));
+    assertEquals(7L, restartedManager.getArchiveAccountAssetBalance(10, mixedAddress, tokenId)
+        .getBalance());
     assertThrows(ArchivePersistenceException.class,
         () -> restartedManager.getArchiveAccountAssets(10, orphanAddress, prefixLimits()));
     assertThrows(ArchivePersistenceException.class,
@@ -1488,6 +1487,7 @@ public class StateArchiveManagerStartupIntegrationTest {
     String oldDirectory = storage.getStateArchiveDirectory();
     String oldDbDirectory = storage.getDbDirectory();
     String oldEngine = storage.getDbEngine();
+    String oldServingEngine = storage.getStateArchiveServingIndexEngine();
     long oldSegmentSize = storage.getStateArchiveMaxSegmentSize();
     int oldQueueCapacity = storage.getStateArchiveQueueCapacity();
     boolean oldEnabled = storage.isStateArchiveEnabled();
@@ -1496,6 +1496,7 @@ public class StateArchiveManagerStartupIntegrationTest {
       storage.setStateArchiveDirectory("state-archive");
       storage.setDbDirectory("database");
       storage.setDbEngine(engine);
+      storage.setStateArchiveServingIndexEngine(engine);
       storage.setDefaultDbOptions(new StorageConfig());
       storage.setStateArchiveMaxSegmentSize(4096);
       storage.setStateArchiveQueueCapacity(4);
@@ -1506,6 +1507,7 @@ public class StateArchiveManagerStartupIntegrationTest {
       storage.setStateArchiveDirectory(oldDirectory);
       storage.setDbDirectory(oldDbDirectory);
       storage.setDbEngine(oldEngine);
+      storage.setStateArchiveServingIndexEngine(oldServingEngine);
       storage.setStateArchiveMaxSegmentSize(oldSegmentSize);
       storage.setStateArchiveQueueCapacity(oldQueueCapacity);
       storage.setStateArchiveEnabled(oldEnabled);

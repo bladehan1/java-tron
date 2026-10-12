@@ -55,6 +55,17 @@ public final class ArchiveReadContext implements Closeable {
     }
   }
 
+  /** Takes ownership of any point snapshot; package-private for request-owned test fakes. */
+  static ArchiveReadContext openPoint(ArchivePointSnapshot snapshot,
+      Collection<StoreAdapter<?>> adapters) throws IOException {
+    try {
+      return new ArchiveReadContext(snapshot, adapters, snapshot);
+    } catch (RuntimeException failure) {
+      closeAfterFailedOpen(snapshot, failure);
+      throw failure;
+    }
+  }
+
   /** Takes ownership of {@code lease} so closing this context also releases gate accounting. */
   public static ArchiveReadContext open(ArchiveRuntimeQueryGate.Lease lease,
       Collection<StoreAdapter<?>> adapters) throws IOException {
@@ -63,16 +74,6 @@ public final class ArchiveReadContext implements Closeable {
       return new ArchiveReadContext(lease.getSnapshot(), adapters, lease);
     } catch (RuntimeException failure) {
       closeAfterFailedOpen(lease, failure);
-      throw failure;
-    }
-  }
-
-  static ArchiveReadContext openPoint(ArchivePointSnapshot snapshot,
-      Collection<StoreAdapter<?>> adapters) throws IOException {
-    try {
-      return new ArchiveReadContext(snapshot, adapters, snapshot);
-    } catch (RuntimeException failure) {
-      closeAfterFailedOpen(snapshot, failure);
       throw failure;
     }
   }
@@ -129,7 +130,10 @@ public final class ArchiveReadContext implements Closeable {
     return accountAssetPrefixResolver.resolve(snapshot, address, limits);
   }
 
-  /** Resolves one logical contract slot using contract metadata from this request context. */
+  /**
+   * Resolves one logical contract slot using contract metadata from this request context. Not
+   * budgeted; diagnostics only. Request paths use {@link HistoricalQuerySession#storage}.
+   */
   public synchronized Optional<byte[]> getStorage(byte[] contractAddress, byte[] logicalSlot)
       throws IOException {
     ensureOpen();
@@ -147,24 +151,18 @@ public final class ArchiveReadContext implements Closeable {
       throw new ArchivePersistenceException(
           "Historical Contract metadata cannot be decoded", e);
     }
-    OldValue optimize = snapshot.get("properties",
-        "ALLOW_OPTIMIZE_TVM_STORAGE".getBytes(java.nio.charset.StandardCharsets.UTF_8));
-    if (optimize.isPresent()) {
-      byte[] flag = optimize.getValue();
-      if (flag.length != Long.BYTES) {
-        throw new ArchivePersistenceException("Invalid historical storage optimization flag");
-      }
-      if (com.google.common.primitives.Longs.fromByteArray(flag) == 1L) {
-        OldValue optimized = snapshot.get("storage-row", StorageRowKeyCodec.optimizedKey(
-            contractAddress, logicalSlot, contract.getTrxHash().toByteArray()));
-        if (optimized.isPresent()) {
-          return Optional.of(optimized.getValue());
-        }
-      }
+    // Same S(T) rule as HistoricalQuerySession.storage (chapter 05 section 3.12.3): the 48-byte
+    // key first, authoritative when PRESENT; otherwise the 32-byte key.
+    byte[] addressHash = StorageRowKeyCodec.addressHash(contractAddress,
+        contract.getTrxHash().toByteArray());
+    OldValue optimized = snapshot.get("storage-row",
+        StorageRowKeyCodec.optimizedKeyFromAddressHash(addressHash, logicalSlot));
+    if (optimized.isPresent()) {
+      return Optional.of(optimized.getValue());
     }
-    byte[] physicalKey = StorageRowKeyCodec.physicalKey(contractAddress, logicalSlot,
-        contract.getVersion(), contract.getTrxHash().toByteArray());
-    OldValue storageValue = snapshot.get("storage-row", physicalKey);
+    OldValue storageValue = snapshot.get("storage-row",
+        StorageRowKeyCodec.physicalKeyFromAddressHash(addressHash, logicalSlot,
+            contract.getVersion()));
     return storageValue.isPresent()
         ? Optional.of(storageValue.getValue()) : Optional.empty();
   }

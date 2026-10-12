@@ -5,13 +5,13 @@ import java.util.Arrays;
 import org.bouncycastle.util.encoders.Hex;
 import org.tron.common.parameter.CommonParameter;
 import org.tron.common.runtime.ProgramResult;
+import org.tron.core.actuator.HistoricalConstantExecution;
 import org.tron.core.actuator.VMActuator;
 import org.tron.core.capsule.BlockCapsule;
 import org.tron.core.capsule.TransactionCapsule;
 import org.tron.core.db.TransactionContext;
 import org.tron.core.db.TransactionContext.ExecutionMode;
 import org.tron.core.vm.Op;
-import org.tron.core.vm.config.ConfigLoader;
 import org.tron.core.vm.repository.HistoricalRepositoryProvider;
 import org.tron.protos.Protocol;
 import org.tron.protos.Protocol.Transaction.Contract.ContractType;
@@ -31,36 +31,21 @@ final class HistoricalVm {
 
   static ProgramResult call(HistoricalQuerySession session, byte[] owner, byte[] contract,
       byte[] data) throws Exception {
-    return call(session, owner, contract, data,
-        new BlockCapsule(Protocol.Block.newBuilder().build()));
-  }
-
-  /** Executes in the context of block {@code block} (NUMBER, TIMESTAMP, ... come from it). */
-  static ProgramResult call(HistoricalQuerySession session, byte[] owner, byte[] contract,
-      byte[] data, BlockCapsule block) throws Exception {
     TriggerSmartContract trigger = TriggerSmartContract.newBuilder()
         .setOwnerAddress(ByteString.copyFrom(owner))
         .setContractAddress(ByteString.copyFrom(contract))
         .setData(ByteString.copyFrom(data)).build();
     TransactionCapsule transaction = new TransactionCapsule(trigger,
         ContractType.TriggerSmartContract);
-    TransactionContext context = new TransactionContext(block, transaction, null, true, false,
+    TransactionContext context = new TransactionContext(
+        new BlockCapsule(Protocol.Block.newBuilder().build()), transaction, null, true, false,
         ExecutionMode.HISTORICAL_CONSTANT, session);
     VMActuator actuator = new VMActuator(true, HistoricalRepositoryProvider.INSTANCE);
     long previous = CommonParameter.getInstance().getConstantCallTimeoutMs();
-    // Other VM tests in the same JVM leave the ConfigLoader test switch on; historical loading
-    // refuses to run with it (fail closed), so pin it off for the call.
-    boolean previousDisable = ConfigLoader.disable;
-    CommonParameter.getInstance().setConstantCallTimeoutMs(60_000L);
-    ConfigLoader.disable = false;
+    CommonParameter.getInstance().setConstantCallTimeoutMs(5_000L);
     try {
-      session.checkActive();
-      actuator.validate(context);
-      actuator.execute(context);
-      session.checkActive();
+      HistoricalConstantExecution.run(actuator, context);
     } finally {
-      org.tron.core.vm.config.VMConfig.clearLocalSnapshot();
-      ConfigLoader.disable = previousDisable;
       CommonParameter.getInstance().setConstantCallTimeoutMs(previous);
     }
     return context.getProgramResult();

@@ -25,11 +25,21 @@ interface RepositoryStateSource {
   /** Whether the given fork version has passed at this source's state. */
   boolean passesFork(ForkBlockVersionEnum version);
 
-  default RuntimeException markFailure(RuntimeException failure) {
-    return failure;
+  /**
+   * One TRC10 balance at this source's state with upstream {@code AssetUtil.importAsset}
+   * semantics (chapter 05 section 3.11). Only historical sources answer it; current execution
+   * keeps the upstream AccountCapsule path.
+   */
+  default long getAccountAssetBalance(byte[] address, String tokenId) {
+    throw new IllegalStateException("AccountAsset balance is resolved by AccountCapsule here");
   }
 
   default void checkActive() {
+  }
+
+  /** Records a historical-class failure as TERMINAL (historical) and returns it. */
+  default RuntimeException markFailure(RuntimeException failure) {
+    return failure;
   }
 
   boolean isReadOnly();

@@ -808,6 +808,13 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
       return descriptor == null ? "empty" : descriptor.generationId;
     }
 
+    synchronized void retireLegacyArchiveTail() throws IOException {
+      if (writer.get(ARCHIVE_TAIL_KEY_V5) != null) {
+        writer.write(Collections.singletonList(
+            StateArchiveIndexDatabase.delete(ARCHIVE_TAIL_KEY_V5)), true);
+      }
+    }
+
     synchronized void publishArchiveTailV5(StateArchiveTailV5 tail) throws IOException {
       publishArchiveTailV5(tail, () -> { });
     }

@@ -422,7 +422,7 @@ public final class CommonCheckpointPayload {
     private final byte[] storeRoot;
     private final List<Mutation> nodeMutations;
 
-    PathStoreTarget(int storeId, String dbName, byte[] storeRoot,
+    public PathStoreTarget(int storeId, String dbName, byte[] storeRoot,
         List<Mutation> flatMutations, List<Mutation> nodeMutations) {
       super(dbName, flatMutations);
       if (storeId <= 0) {

@@ -99,6 +99,18 @@ public final class P66AccountAssetCodec {
     return account;
   }
 
+  /**
+   * Decodes an Account and checks only its address binding, without any P66 layout requirement.
+   * Used by the P66_ON balance resolver, where lazily migrated (never re-written) accounts keep
+   * their inline asset maps (chapter 05 section 3.11).
+   */
+  public Account decodeAccount(byte[] physicalAccountKey, byte[] accountValue) {
+    byte[] accountKey = requireAddress(physicalAccountKey);
+    Account account = parseAccount(accountValue);
+    requireAccountAddress(accountKey, account);
+    return account;
+  }
+
   /** Decodes a PRESENT direct row and rejects the non-canonical stored zero representation. */
   public DecodedAssetRow decodePresentAssetRow(byte[] physicalRawKey, byte[] rawValue) {
     KeyIdentity identity = decodeKey(physicalRawKey);

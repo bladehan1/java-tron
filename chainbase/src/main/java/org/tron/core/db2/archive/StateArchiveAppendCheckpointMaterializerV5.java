@@ -42,6 +42,7 @@ public final class StateArchiveAppendCheckpointMaterializerV5
   private final ReadObserver readObserver;
   private final PublicationObserver observer;
   private final ExactWriteFaultHook beforeTailSync;
+  private final HistoryTailStore historyTail;
   private StateArchiveReaderGenerationHolderV5 readerHolder;
   private CommonCheckpointTarget preparedTarget;
   private StateArchiveTailV5 preparedTail;
@@ -81,6 +82,28 @@ public final class StateArchiveAppendCheckpointMaterializerV5
       StateArchiveCanonicalBlockMetaSource canonical, ChannelOpener channelOpener,
       ReadObserver readObserver, PublicationObserver observer,
       ExactWriteFaultHook beforeTailSync) throws IOException {
+    this(directory, commonFormatIdentity, bindingEngine, firstBlockNumber, baselineHistoryDigest,
+        rotationTargetBytes, admission, canonical, channelOpener, readObserver, observer,
+        beforeTailSync, null, false);
+  }
+
+  public static StateArchiveAppendCheckpointMaterializerV5 openForCommon(Path directory,
+      byte[] format, Engine engine, long firstBlock, byte[] baselineDigest, long rotationBytes,
+      StateArchiveCanonicalBlockMetaSource canonical, CommonCheckpointTarget recoveryTarget)
+      throws IOException {
+    return new StateArchiveAppendCheckpointMaterializerV5(directory, format, engine, firstBlock,
+        baselineDigest, rotationBytes, StateArchiveProcessFdAdmissionV5.INSTANCE, canonical,
+        null, (path, position, length) -> { }, (stage, lane) -> { }, () -> { },
+        recoveryTarget, true);
+  }
+
+  private StateArchiveAppendCheckpointMaterializerV5(Path directory, byte[] commonFormatIdentity,
+      Engine bindingEngine, long firstBlockNumber, byte[] baselineHistoryDigest,
+      long rotationTargetBytes, ProcessFdAdmission admission,
+      StateArchiveCanonicalBlockMetaSource canonical, ChannelOpener channelOpener,
+      ReadObserver readObserver, PublicationObserver observer,
+      ExactWriteFaultHook beforeTailSync, CommonCheckpointTarget recoveryTarget,
+      boolean allowBaselineReset) throws IOException {
     this.directory = Objects.requireNonNull(directory, "directory");
     this.commonFormatIdentity = requireDigest(commonFormatIdentity, "Common format identity");
     this.bindingEngine = Objects.requireNonNull(bindingEngine, "bindingEngine");
@@ -97,27 +120,63 @@ public final class StateArchiveAppendCheckpointMaterializerV5
     this.beforeTailSync = Objects.requireNonNull(beforeTailSync, "beforeTailSync");
     StateArchiveServingIndexBuildCoordinatorV3 openedCoordinator = null;
     StateArchiveFiveLaneWriterV5 openedWriter = null;
+    HistoryTailStore openedTail = null;
     StateArchiveReaderGenerationV5 openedGeneration = null;
     StateArchiveServingWorkerV3 openedWorker = null;
     StateArchiveServingSourceV5 openedSource = new StateArchiveServingSourceV5(
         directory, firstBlockNumber, admittedBaseline,
         Objects.requireNonNull(canonical, "canonical"));
     try {
-      requireAdmittedRoot(directory);
+      if (recoveryTarget == null && !(allowBaselineReset
+          && Files.isRegularFile(directory.resolve(HistoryTailStore.FILE_NAME)))) {
+        requireAdmittedRoot(directory);
+      }
       openedCoordinator = new StateArchiveServingIndexBuildCoordinatorV3(
           directory, bindingEngine, 1_000);
       Optional<CommonCheckpointTarget> readable =
           StateArchiveCheckpointMaterializer.loadReadableTargetIfPresent(directory);
-      if (readable.isPresent()) {
-        CommonCheckpointTarget target = requireTarget(readable.get());
-        StateArchiveTailV5 tail = openedCoordinator.archiveTailV5(target);
+      boolean tailExisted = Files.isRegularFile(directory.resolve(HistoryTailStore.FILE_NAME));
+      openedTail = new HistoryTailStore(directory, this.commonFormatIdentity,
+          firstBlockNumber, admittedBaseline);
+      CommonCheckpointTarget selected = recoveryTarget == null ? readable.orElse(null)
+          : requireTarget(recoveryTarget);
+      if (selected != null) {
+        StateArchiveTailV5 tail;
+        if (tailExisted && !openedTail.hasOnlyBaseline()) {
+          tail = openedTail.require(selected);
+        } else {
+          // One-time migration: only a legacy tail proved by the exact Common target is accepted.
+          tail = openedCoordinator.archiveTailV5(selected);
+          tail.requireTarget(selected);
+          HistorySuffixRecovery.trim(directory, tail, selected);
+          openedTail.publish(tail, null, () -> { });
+        }
         if (tail.getFirstBlockNumber() != firstBlockNumber) {
           throw new IOException("Archive V5 configured first block differs from tail");
         }
-        openedWriter = StateArchiveFiveLaneWriterV5.reopen(directory, tail, target,
+        HistorySuffixRecovery.trim(directory, tail, selected);
+        openedCoordinator.retireLegacyArchiveTail();
+        openedWriter = StateArchiveFiveLaneWriterV5.reopen(directory, tail, selected,
             admittedBaseline, rotationTargetBytes, this.readObserver);
-        openedGeneration = openGeneration(tail, target);
-        openedSource.updatePublished(tail, target);
+        if (readable.isPresent()) {
+          StateArchiveTailV5 readableTail = openedTail.require(readable.get());
+          openedGeneration = openGeneration(readableTail, readable.get());
+          openedSource.updatePublished(readableTail, readable.get());
+        }
+        if (recoveryTarget != null && (!readable.isPresent()
+            || !readable.get().equals(selected))) {
+          preparedTarget = selected;
+          preparedTail = tail;
+        }
+      } else if (tailExisted) {
+        if (!allowBaselineReset || !openedTail.hasBaseline()) {
+          throw new IOException(
+              "History without Common target requires explicit baseline recovery");
+        }
+        HistorySuffixRecovery.resetUncommittedBaseline(
+            directory, firstBlockNumber, admittedBaseline);
+        openedWriter = StateArchiveFiveLaneWriterV5.reopenBaseline(directory, firstBlockNumber,
+            admittedBaseline, rotationTargetBytes);
       } else {
         openedWriter = new StateArchiveFiveLaneWriterV5(directory, firstBlockNumber,
             admittedBaseline, rotationTargetBytes);
@@ -126,6 +185,13 @@ public final class StateArchiveAppendCheckpointMaterializerV5
       openedWorker = new StateArchiveServingWorkerV3(() -> admittedCoordinator,
           openedSource, () -> { });
     } catch (IOException | RuntimeException failure) {
+      if (openedTail != null) {
+        try {
+          openedTail.close();
+        } catch (IOException closing) {
+          failure.addSuppressed(closing);
+        }
+      }
       if (openedWorker != null) {
         try {
           openedWorker.close();
@@ -157,6 +223,7 @@ public final class StateArchiveAppendCheckpointMaterializerV5
       throw failure;
     }
     writer = openedWriter;
+    historyTail = openedTail;
     servingSource = openedSource;
     servingWorker = openedWorker;
     if (openedGeneration != null) {
@@ -229,8 +296,10 @@ public final class StateArchiveAppendCheckpointMaterializerV5
         observer.completed(PublicationStage.LANE_INDEX_FORCED, laneId);
       }
     });
-    servingWorker.publishArchiveTailV5(tail, beforeTailSync);
-    servingWorker.archiveTailV5(target);
+    CommonCheckpointTarget previous =
+        StateArchiveCheckpointMaterializer.loadReadableTargetIfPresent(directory).orElse(null);
+    historyTail.publish(tail, previous, beforeTailSync);
+    historyTail.require(target);
     observer.completed(PublicationStage.TAIL_SYNCED, -1);
     preparedTarget = target;
     preparedTail = tail;
@@ -244,14 +313,14 @@ public final class StateArchiveAppendCheckpointMaterializerV5
     Optional<CommonCheckpointTarget> readable =
         StateArchiveCheckpointMaterializer.loadReadableTargetIfPresent(directory);
     if (readable.isPresent() && readable.get().equals(admitted)) {
-      servingWorker.archiveTailV5(admitted);
+      historyTail.require(admitted);
       return Status.PUBLISHED;
     }
     if (readable.isPresent()) {
       requireParent(readable.get(), admitted);
     }
     if (admitted.equals(preparedTarget)) {
-      servingWorker.archiveTailV5(admitted);
+      historyTail.require(admitted);
       return Status.MATERIALIZED;
     }
     return Status.NEEDS_MATERIALIZATION;
@@ -297,7 +366,7 @@ public final class StateArchiveAppendCheckpointMaterializerV5
         StateArchiveCheckpointMaterializer.loadReadableTargetIfPresent(directory);
     if (readable.isPresent()) {
       CommonCheckpointTarget target = requireTarget(readable.get());
-      StateArchiveTailV5 tail = servingWorker.archiveTailV5(target);
+      StateArchiveTailV5 tail = historyTail.require(target);
       servingSource.updatePublished(tail, target);
     }
     return readable;
@@ -391,6 +460,15 @@ public final class StateArchiveAppendCheckpointMaterializerV5
         failure.addSuppressed(closeFailure);
       }
     }
+    try {
+      historyTail.close();
+    } catch (IOException closing) {
+      if (failure == null) {
+        failure = closing;
+      } else {
+        failure.addSuppressed(closing);
+      }
+    }
     if (failure != null) {
       throw failure;
     }
@@ -402,7 +480,7 @@ public final class StateArchiveAppendCheckpointMaterializerV5
       return;
     }
     StateArchiveTailV5 tail = preparedTail == null
-        ? servingWorker.archiveTailV5(target) : preparedTail;
+        ? historyTail.require(target) : preparedTail;
     StateArchiveReaderGenerationV5 generation = openGeneration(tail, target);
     if (readerHolder == null) {
       readerHolder = new StateArchiveReaderGenerationHolderV5(generation);
@@ -413,7 +491,7 @@ public final class StateArchiveAppendCheckpointMaterializerV5
 
   private void installServingSource(CommonCheckpointTarget target) throws IOException {
     StateArchiveTailV5 tail = preparedTail == null
-        ? servingWorker.archiveTailV5(target) : preparedTail;
+        ? historyTail.require(target) : preparedTail;
     servingSource.updatePublished(tail, target);
   }
 

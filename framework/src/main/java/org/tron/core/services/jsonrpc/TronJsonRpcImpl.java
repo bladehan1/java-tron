@@ -686,7 +686,7 @@ public class TronJsonRpcImpl implements TronJsonRpc, Closeable {
         if (!session.getContract(addressByte).isPresent()) {
           return ByteArray.toJsonHex(new byte[32]);
         }
-        byte[] value = session.getStorage(addressByte, index.getData()).orElse(new byte[32]);
+        byte[] value = session.storage(addressByte, index.getData()).orElse(new byte[32]);
         return ByteArray.toJsonHex(new DataWord(value).getData());
       } catch (RuntimeException failure) {
         throw HistoricalRpcException.from(failure);

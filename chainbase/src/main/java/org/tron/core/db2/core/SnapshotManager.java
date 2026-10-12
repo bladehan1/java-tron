@@ -10,10 +10,12 @@ import com.google.common.util.concurrent.MoreExecutors;
 import java.io.Closeable;
 import java.io.File;
 import java.io.IOException;
+import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -77,6 +79,7 @@ public class SnapshotManager implements RevokingDatabase {
   private P66CoupledMutationMaterializer p66Materializer;
   private ExecutorService artifactExecutor;
   private boolean blockFinalizationActive;
+  private boolean synchronousLegacyRecovery;
 
   public synchronized void installP66SnapshotLane(Chainbase assets) {
     installP66SnapshotLane(assets, false);
@@ -106,6 +109,131 @@ public class SnapshotManager implements RevokingDatabase {
     }
     ((SnapshotRoot) requireDatabase("account").getHead().getRoot())
         .useMaterializedCoupledMutations();
+  }
+
+  /** Whether the P66 AccountAsset lane is registered (form ON, or startup RECOVERY_ONLY). */
+  public synchronized boolean isP66SnapshotLaneInstalled() {
+    return p66Materializer != null;
+  }
+
+  /**
+   * Removes a recovery-only lane (07-C, I-16): only with no layer and no session, only while the
+   * account root still uses upstream {@code processAccount} semantics, and without closing the
+   * native database the lane shares with {@code AccountAssetStore}.
+   */
+  public synchronized Chainbase uninstallP66SnapshotLane() {
+    if (size != 0 || activeSession != 0 || p66Materializer == null) {
+      throw new IllegalStateException("P66 Snapshot lane can only be uninstalled before sessions");
+    }
+    SnapshotRoot accountRoot = (SnapshotRoot) requireDatabase("account").getHead().getRoot();
+    if (accountRoot.isCoupledMutationsMaterialized()) {
+      throw new IllegalStateException("A materialized P66 Snapshot lane cannot be uninstalled");
+    }
+    Chainbase lane = requireDatabase("account-asset");
+    dbs.remove(lane);
+    ListeningExecutorService service = flushServices.remove(lane.getDbName());
+    if (service != null) {
+      ExecutorServiceManager.shutdownAndAwaitTermination(service,
+          "flush-service-" + lane.getDbName());
+    }
+    p66Materializer = null;
+    if (artifactExecutor != null && oldValueCollector == null
+        && pathStateRuntimeAttachment == null) {
+      ExecutorServiceManager.shutdownAndAwaitTermination(artifactExecutor, "block-final-archive");
+      artifactExecutor = null;
+    }
+    return lane;
+  }
+
+  /**
+   * RECOVERY_ONLY (07-C): legacy replay merges every root with a synchronous batch so the legacy
+   * redo can be retired right after {@link #check()}. The merged result is key-for-key the
+   * non-synchronous one; only the durability point moves.
+   */
+  public synchronized void setSynchronousLegacyRecovery(boolean synchronous) {
+    if (synchronous && p66Materializer == null) {
+      throw new IllegalStateException("Synchronous legacy recovery requires the P66 lane");
+    }
+    synchronousLegacyRecovery = synchronous;
+  }
+
+  /**
+   * Whether the legacy checkpoint set that {@link #check()} would replay contains entries of
+   * {@code dbName}: v1 {@code checkTmpStore}, or the v2 directories inside the two-minute replay
+   * window (falling back to tmp when there is none, as {@code checkV2} does).
+   */
+  public synchronized boolean legacyCheckpointContains(String dbName) {
+    if (hasDurableCommonCheckpointAuthority()) {
+      return false;
+    }
+    byte[] prefix = simpleEncode(Objects.requireNonNull(dbName, "dbName"));
+    List<String> checkpoints = getCheckpointList();
+    if (!isV2Open() || checkpoints == null || checkpoints.isEmpty()) {
+      if (!isV2Open() && checkpoints != null && !checkpoints.isEmpty()) {
+        return false; // check() rejects this layout with CHECKPOINT_VERSION
+      }
+      return checkTmpStore != null && containsPrefix(checkTmpStore, prefix);
+    }
+    long latestTimestamp = Long.parseLong(checkpoints.get(checkpoints.size() - 1));
+    for (String checkpoint : checkpoints) {
+      if (latestTimestamp - Long.parseLong(checkpoint) > ONE_MINUTE_MILLS * 2) {
+        continue;
+      }
+      TronDatabase<byte[]> store = getCheckpointDB(checkpoint);
+      try {
+        if (containsPrefix(store, prefix)) {
+          return true;
+        }
+      } finally {
+        store.close();
+      }
+    }
+    return false;
+  }
+
+  private static boolean containsPrefix(TronDatabase<byte[]> store, byte[] prefix) {
+    for (Map.Entry<byte[], byte[]> entry : store.getDbSource()) {
+      byte[] key = entry.getKey();
+      if (key.length >= prefix.length
+          && Arrays.equals(Arrays.copyOf(key, prefix.length), prefix)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Retires every legacy redo after a RECOVERY_ONLY replay (07-C, 02 §3.12.1 B6): clears tmp with
+   * a synchronous batch and deletes all v2 checkpoint directories oldest first (including those
+   * outside the {@code checkV2} replay window), then syncs the parent directory. A crash midway
+   * leaves only the newest suffix, whose content is already merged and replays idempotently.
+   */
+  public synchronized void retireLegacyRedo() {
+    if (checkTmpStore != null) {
+      Map<byte[], byte[]> deletes = new HashMap<>();
+      for (Map.Entry<byte[], byte[]> entry : checkTmpStore.getDbSource()) {
+        deletes.put(entry.getKey(), null);
+      }
+      if (!deletes.isEmpty()) {
+        checkTmpStore.updateByBatchSynced(deletes);
+      }
+    }
+    List<String> checkpoints = getCheckpointList();
+    if (checkpoints == null || checkpoints.isEmpty()) {
+      return;
+    }
+    Path directory = Paths.get(StorageUtils.getOutputDirectoryByDbName(CHECKPOINT_V2_DIR),
+        CommonParameter.getInstance().getStorage().getDbDirectory(), CHECKPOINT_V2_DIR);
+    for (String checkpoint : checkpoints) {
+      if (!FileUtil.recursiveDelete(directory.resolve(checkpoint).toString())) {
+        throw new TronDBException("Failed to retire legacy checkpoint " + checkpoint);
+      }
+    }
+    try (FileChannel channel = FileChannel.open(directory, StandardOpenOption.READ)) {
+      channel.force(true);
+    } catch (IOException e) {
+      throw new TronDBException(e);
+    }
   }
 
   private Chainbase requireDatabase(String name) {
@@ -199,6 +327,229 @@ public class SnapshotManager implements RevokingDatabase {
     return new String(value);
   }
 
+  // ------------------------------------------------------------------ maintenance layer
+  // Design v2 ch02 §3.11.3, WP-02-12 (X2-08 phase two); ch07 §3.6, open question 10.
+
+  /** One Store's maintenance layer; {@code carrier} is set once it is folded into a block. */
+  private static final class MaintenanceSlot {
+    private final Chainbase database;
+    private final SnapshotRoot root;
+    private final SnapshotImpl layer;
+    private SnapshotImpl carrier;
+
+    private MaintenanceSlot(Chainbase database, SnapshotRoot root, SnapshotImpl layer) {
+      this.database = database;
+      this.root = root;
+      this.layer = layer;
+    }
+  }
+
+  /** Open (unfolded) maintenance layer, linked right above every root; null when none. */
+  private List<MaintenanceSlot> maintenance;
+  /** Folded into the carrying block, kept detached until that block's target is published. */
+  private List<MaintenanceSlot> foldedMaintenance;
+
+  /**
+   * Opens the maintenance layer: one {@link SnapshotImpl} without block identity above every
+   * root, with its write window closed. Only on a node with a Common baseline, after
+   * {@code CommonStartupRecovery} and before any startup migration (§3.10), so its content can
+   * only come from the recovered state. It is not counted in {@code size}.
+   */
+  public synchronized void openMaintenanceLayer() {
+    if (size != 0 || activeSession != 0 || maintenance != null || foldedMaintenance != null) {
+      throw new IllegalStateException("The maintenance layer opens once, before any session");
+    }
+    for (Chainbase db : dbs) {
+      if (!Snapshot.isRoot(db.getHead())) {
+        throw new IllegalStateException("The maintenance layer requires root heads: "
+            + db.getDbName());
+      }
+    }
+    List<MaintenanceSlot> slots = new ArrayList<>(dbs.size());
+    for (Chainbase db : dbs) {
+      SnapshotRoot root = (SnapshotRoot) db.getHead();
+      SnapshotImpl layer = (SnapshotImpl) root.advance();
+      layer.markMaintenance();
+      db.setHead(layer);
+      slots.add(new MaintenanceSlot(db, root, layer));
+    }
+    maintenance = slots;
+    logger.info("Maintenance layer opened above {} roots (design v2 ch02 §3.11.3)",
+        slots.size());
+  }
+
+  /** Opens the write window of the registered startup writers (no-op without the layer). */
+  public synchronized void beginMaintenanceWrites() {
+    setMaintenanceWritesOpen(true);
+  }
+
+  /** Closes the write window; afterwards the phase-one rule applies to the layer. */
+  public synchronized void endMaintenanceWrites() {
+    setMaintenanceWritesOpen(false);
+  }
+
+  private void setMaintenanceWritesOpen(boolean open) {
+    if (maintenance != null) {
+      maintenance.forEach(slot -> slot.layer.setMaintenanceWritesOpen(open));
+    }
+  }
+
+  /**
+   * Whether {@code head} is an unfolded maintenance layer directly above its root. Its content
+   * is not part of the persisted state C (it rides with the carrying block), so readers of the
+   * root engine at C may treat such a head like the root.
+   */
+  public static boolean isMaintenanceLayerAboveRoot(Snapshot head) {
+    return Snapshot.isImpl(head) && ((SnapshotImpl) head).isMaintenance()
+        && Snapshot.isRoot(head.getPrevious());
+  }
+
+  /** Whether an unfolded maintenance layer is linked above the roots. */
+  public synchronized boolean hasMaintenanceLayer() {
+    return maintenance != null;
+  }
+
+  /** Whether a maintenance layer is open or folded into a block not yet published. */
+  public synchronized boolean hasPendingMaintenance() {
+    return maintenance != null || foldedMaintenance != null;
+  }
+
+  /**
+   * §3.11.3 defensive check: Common startup recovery writes the roots below any layer, so a
+   * maintenance layer that already exists then would hide the recovered values. Implementation
+   * defect: fail closed.
+   */
+  public synchronized void requireNoMaintenanceLayer() {
+    if (hasPendingMaintenance()) {
+      throw new IllegalStateException("Maintenance layer exists before Common startup recovery "
+          + "(design v2 ch02 §3.11.3): implementation defect");
+    }
+  }
+
+  /**
+   * Ends the startup part: closes the write window and drops the layer when it holds no
+   * effective change (every entry equals the root, e.g. the optimized copy of
+   * {@code properties} or a restated value), so such a start is the phase-one start. Returns the
+   * number of effective entries per Store that stays for the carrying block.
+   */
+  public synchronized Map<String, Integer> settleMaintenanceLayer() {
+    Map<String, Integer> effective = new java.util.TreeMap<>();
+    if (maintenance == null) {
+      return effective;
+    }
+    setMaintenanceWritesOpen(false);
+    for (MaintenanceSlot slot : maintenance) {
+      int count = 0;
+      for (Map.Entry<Key, Value> entry : slot.layer.getDb()) {
+        byte[] current = slot.root.get(entry.getKey().getBytes());
+        boolean delete = entry.getValue().getOperator() == Value.Operator.DELETE;
+        if (delete ? current != null
+            : current == null || !Arrays.equals(current, entry.getValue().getBytes())) {
+          count++;
+        }
+      }
+      if (count > 0) {
+        effective.put(slot.database.getDbName(), count);
+      }
+    }
+    if (effective.isEmpty()) {
+      discardMaintenanceLayer();
+      logger.info("Maintenance layer had no effective change and was closed");
+    } else {
+      logger.info("Maintenance layer kept for the carrying block: effective entries {}",
+          effective);
+    }
+    return effective;
+  }
+
+  /**
+   * Unlinks an unfolded maintenance layer without applying it, as a crash would: the root is
+   * unchanged and the next start recomputes the same content (§3.11.3). Startup rollback and
+   * tests only; requires that no session layer sits above it.
+   */
+  public synchronized void discardMaintenanceLayer() {
+    if (maintenance == null) {
+      return;
+    }
+    for (MaintenanceSlot slot : maintenance) {
+      if (slot.database.getHead() != slot.layer) {
+        throw new IllegalStateException("Cannot discard a maintenance layer below a session");
+      }
+    }
+    for (MaintenanceSlot slot : maintenance) {
+      slot.root.setNext(null);
+      slot.database.setHead(slot.root);
+    }
+    maintenance = null;
+  }
+
+  /**
+   * Folds the maintenance layer into the first block finalized above it, the carrying block
+   * (§3.11.3): the block layer takes every maintenance entry it did not overwrite itself and is
+   * relinked onto the root, so P66 materialization, {@code BlockChangeView} capture, RD(B), the
+   * PathState transition and the Common payload all see "maintenance ∪ block" with the root as
+   * previous, and every walker of the finalized chain sees only block layers. The detached layer
+   * is kept so a pop of the carrying block can restore it.
+   */
+  private void foldMaintenanceLayer(BlockSnapshotMeta meta) {
+    if (maintenance == null) {
+      return;
+    }
+    for (MaintenanceSlot slot : maintenance) {
+      Snapshot head = slot.database.getHead();
+      if (!Snapshot.isImpl(head) || head == slot.layer || head.getPrevious() != slot.layer) {
+        throw new IllegalStateException("The carrying block layer must lie directly above the "
+            + "maintenance layer: " + slot.database.getDbName());
+      }
+    }
+    for (MaintenanceSlot slot : maintenance) {
+      SnapshotImpl block = (SnapshotImpl) slot.database.getHead();
+      block.mergeAhead(slot.layer);
+      block.setPrevious(slot.root);
+      slot.root.setNext(block);
+      slot.layer.setNext(null);
+      slot.carrier = block;
+    }
+    foldedMaintenance = maintenance;
+    maintenance = null;
+    logger.info("Maintenance layer folded into carrying block {}", meta.getBlockNumber());
+  }
+
+  /** §3.11.3: the carrying block was popped before publication; the next block carries. */
+  private void restoreMaintenanceAfterCarrierPop() {
+    List<MaintenanceSlot> folded = foldedMaintenance;
+    if (folded == null) {
+      return;
+    }
+    for (MaintenanceSlot slot : folded) {
+      if (slot.database.getHead() != slot.root || slot.root.getNext() != slot.carrier) {
+        return;
+      }
+    }
+    for (MaintenanceSlot slot : folded) {
+      slot.layer.setPrevious(slot.root);
+      slot.root.setNext(slot.layer);
+      slot.database.setHead(slot.layer);
+      slot.carrier = null;
+    }
+    foldedMaintenance = null;
+    maintenance = folded;
+    logger.info("Carrying block popped; maintenance layer restored above the roots");
+  }
+
+  /** The carrying block left the chain through a published Common target: nothing to keep. */
+  private void releasePublishedMaintenance() {
+    List<MaintenanceSlot> folded = foldedMaintenance;
+    if (folded == null) {
+      return;
+    }
+    MaintenanceSlot first = folded.get(0);
+    if (first.root.getNext() != first.carrier && first.database.getHead() != first.carrier) {
+      foldedMaintenance = null;
+      logger.info("Maintenance layer published with its carrying block");
+    }
+  }
+
   public ISession buildSession() {
     return buildSession(false);
   }
@@ -214,7 +565,7 @@ public class SnapshotManager implements RevokingDatabase {
       disabled = false;
     }
 
-    if (size > maxSize.get() && !hitDown) {
+    if (size > maxSize.get() && !hitDown && maintenance == null) {
       flushCount = flushCount + (size - maxSize.get());
       updateSolidity(size - maxSize.get());
       size = maxSize.get();
@@ -263,6 +614,7 @@ public class SnapshotManager implements RevokingDatabase {
   private void retreat() {
     dbs.forEach(db -> db.setHead(db.getHead().retreat()));
     --size;
+    restoreMaintenanceAfterCarrierPop();
   }
 
   public synchronized void merge() {
@@ -354,6 +706,7 @@ public class SnapshotManager implements RevokingDatabase {
       throw new RevokingStoreIllegalStateException(activeSession);
     }
 
+    foldMaintenanceLayer(meta);
     validateBlockMeta(meta);
     for (Chainbase db : dbs) {
       Snapshot head = db.getHead();
@@ -1041,6 +1394,7 @@ public class SnapshotManager implements RevokingDatabase {
           } catch (IOException | RuntimeException failure) {
             throw new TronDBException("Common checkpoint publication failed", failure);
           }
+          releasePublishedMaintenance();
           flushCount = 0;
           logger.info("Common checkpoint flush cost: {} ms.",
               System.currentTimeMillis() - start);
@@ -1427,11 +1781,42 @@ public class SnapshotManager implements RevokingDatabase {
       }
     }
 
-    dbs.forEach(db -> db.getHead().getRoot().merge(db.getHead()));
+    for (Chainbase db : legacyRecoveryMergeOrder()) {
+      SnapshotRoot root = (SnapshotRoot) db.getHead().getRoot();
+      if (synchronousLegacyRecovery) {
+        root.mergeLegacyRecoverySynced(db.getHead());
+      } else {
+        root.merge(db.getHead());
+      }
+    }
     retreat();
     if (recoveredBinding != null) {
       recoveredArchiveWalBinding = recoveredBinding;
     }
+  }
+
+  /**
+   * Upstream order without the lane. With the lane, {@code account} must merge before
+   * {@code account-asset}: {@code processAccount} writes its rows into the lane's replay layer,
+   * which is only merged afterwards (I-15).
+   */
+  private List<Chainbase> legacyRecoveryMergeOrder() {
+    if (p66Materializer == null) {
+      return dbs;
+    }
+    List<Chainbase> ordered = new ArrayList<>(dbs.size());
+    Chainbase lane = null;
+    for (Chainbase db : dbs) {
+      if ("account-asset".equals(db.getDbName())) {
+        lane = db;
+      } else {
+        ordered.add(db);
+      }
+    }
+    if (lane != null) {
+      ordered.add(lane);
+    }
+    return ordered;
   }
 
   public ArchiveWalBinding getLatestArchiveWalBinding() {

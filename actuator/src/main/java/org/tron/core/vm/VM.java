@@ -117,9 +117,13 @@ public class VM {
     } catch (JVMStackOverFlowException | OutOfTimeException e) {
       throw e;
     } catch (RuntimeException e) {
-      if (historical && (e instanceof HistoricalCapabilityException
-          || e instanceof org.tron.core.db2.archive.ArchivePersistenceException)) {
-        throw program.getContractState().markHistoricalFailure(e);
+      if (historical) {
+        // Chapter 05 section 3.7 P3: historical-class failures (and an unexpected NPE) end the
+        // whole request instead of becoming a failed child frame the parent can ignore.
+        RuntimeException fatal = HistoricalFailures.escalate(program.getContractState(), e);
+        if (fatal != null) {
+          throw fatal;
+        }
       }
       // https://openjdk.org/jeps/358
       // https://bugs.openjdk.org/browse/JDK-8220715

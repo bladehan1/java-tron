@@ -26,6 +26,7 @@ import org.tron.core.db2.common.WrappedByteArray;
 
 /** Chainbase participant for common-checkpoint idempotent materialization and publication. */
 public final class ChainbaseCheckpointMaterializer implements CommonCheckpointMaterializer {
+  private boolean retainedRedo;
 
   static final String CURRENT_FILE = "CHAINBASE_CURRENT";
   static final String MATERIALIZED_DIRECTORY = "chainbase-checkpoint-materialized";
@@ -139,7 +140,7 @@ public final class ChainbaseCheckpointMaterializer implements CommonCheckpointMa
       }
       boolean observe = Boolean.getBoolean("tron.chainbase.executionAttribution");
       long started = observe ? System.nanoTime() : 0;
-      ((SnapshotRoot) root).applyCheckpointMutations(batch(store));
+      ((SnapshotRoot) root).applyCheckpointMutations(batch(store), !retainedRedo);
       if (observe) {
         ExecutionAttribution.checkpoint(admittedTarget, store.getDbName(),
             store.getMutations().size(), System.nanoTime() - started);
@@ -162,6 +163,37 @@ public final class ChainbaseCheckpointMaterializer implements CommonCheckpointMa
     }
     replace(directory.resolve(CURRENT_FILE), encode(admitted));
     faultHook.after(Stage.AFTER_CURRENT, null);
+  }
+
+  @Override
+  public void useRetainedRedo(boolean enabled) {
+    retainedRedo = enabled;
+  }
+
+  @Override
+  public synchronized void replayRetained(java.util.List<CommonCheckpointPayload> payloads,
+      boolean sync) throws IOException {
+    Map<String, Map<WrappedByteArray, WrappedByteArray>> batches = new LinkedHashMap<>();
+    for (CommonCheckpointPayload payload : payloads) {
+      requireTarget(CommonCheckpointTarget.from(payload));
+      for (CommonCheckpointPayload.StoreMutations store : payload.getChainbaseStores()) {
+        Chainbase database = databases.get(store.getDbName());
+        if (database == null || !(database.getHead().getRoot() instanceof SnapshotRoot)) {
+          throw new IOException("retained redo Store is not registered: " + store.getDbName());
+        }
+        batches.computeIfAbsent(store.getDbName(), ignored -> new LinkedHashMap<>())
+            .putAll(batch(store));
+      }
+    }
+    for (Map.Entry<String, Map<WrappedByteArray, WrappedByteArray>> entry : batches.entrySet()) {
+      ((SnapshotRoot) databases.get(entry.getKey()).getHead().getRoot())
+          .applyCheckpointMutations(entry.getValue(), sync);
+      faultHook.after(Stage.AFTER_STORE_BATCH, entry.getKey());
+    }
+    if (!payloads.isEmpty()) {
+      CommonCheckpointTarget last = CommonCheckpointTarget.from(payloads.get(payloads.size() - 1));
+      recordMaterialized(last, encode(last));
+    }
   }
 
   private CommonCheckpointTarget requireTarget(CommonCheckpointTarget target) throws IOException {

@@ -1071,7 +1071,7 @@ public class OperationActions {
 
   public static void suicideAction(Program program) {
     if (program.getContractState().isHistorical()) {
-      throw new HistoricalCapabilityException(
+      throw HistoricalFailures.capability(program.getContractState(),
           "SELFDESTRUCT is not supported by historical execution");
     }
     if (program.isStaticCall()) {
@@ -1090,7 +1090,7 @@ public class OperationActions {
 
   public static void suicideAction2(Program program) {
     if (program.getContractState().isHistorical()) {
-      throw new HistoricalCapabilityException(
+      throw HistoricalFailures.capability(program.getContractState(),
           "SELFDESTRUCT is not supported by historical execution");
     }
     if (program.isStaticCall()) {

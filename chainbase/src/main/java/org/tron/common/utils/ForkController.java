@@ -20,6 +20,7 @@ import org.tron.core.ChainBaseManager;
 import org.tron.core.capsule.BlockCapsule;
 import org.tron.core.config.Parameter.ForkBlockVersionConsts;
 import org.tron.core.config.Parameter.ForkBlockVersionEnum;
+import org.tron.core.db2.archive.HistoricalExecutionScope;
 import org.tron.core.store.DynamicPropertiesStore;
 
 @Slf4j(topic = "utils")
@@ -251,6 +252,10 @@ public class ForkController {
   }
 
   public static ForkController instance() {
+    if (HistoricalExecutionScope.isActive()) {
+      // Latest fork state must never answer a historical request (chapter 05 section 3.9.3).
+      throw HistoricalExecutionScope.trap("ForkController.instance()");
+    }
     return ForkControllerEnum.INSTANCE.getInstance();
   }
 

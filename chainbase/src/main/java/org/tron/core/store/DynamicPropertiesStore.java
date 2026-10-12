@@ -26,6 +26,7 @@ import org.tron.common.utils.Sha256Hash;
 import org.tron.core.capsule.BytesCapsule;
 import org.tron.core.config.Parameter.ChainConstant;
 import org.tron.core.db.TronStoreWithRevoking;
+import org.tron.core.db2.core.OutOfBlockWriteGuard;
 import org.tron.core.exception.BadItemException;
 import org.tron.core.exception.ItemNotFoundException;
 
@@ -321,10 +322,43 @@ public class DynamicPropertiesStore extends TronStoreWithRevoking<BytesCapsule> 
 
   private static final byte[] ALLOW_OPTIMIZE_TVM_STORAGE = "ALLOW_OPTIMIZE_TVM_STORAGE".getBytes();
 
+  /**
+   * Design v2 ch02 §3.11.3 (WP-02-12, X2-08): on a node with a Common baseline the defaults below
+   * are registered as one intent instead of being written here, at Spring construction, before
+   * Common startup recovery. {@code Manager} applies it inside the maintenance layer, against the
+   * recovered state, so a key the WAL rolls forward is never shadowed by a default computed from
+   * the pre-recovery state. In every other case the constructor writes them as upstream (D3).
+   */
+  private volatile boolean constructorDefaultsDeferred;
+
   @Autowired
   private DynamicPropertiesStore(@Value("properties") String dbName) {
     super(dbName);
+    if (OutOfBlockWriteGuard.defersConstructorDefaults()) {
+      constructorDefaultsDeferred = true;
+      return;
+    }
+    applyConstructorDefaults();
+  }
 
+  public boolean isConstructorDefaultsDeferred() {
+    return constructorDefaultsDeferred;
+  }
+
+  /**
+   * Applies the registered default intent once (no-op when none is registered): every key that
+   * is still missing in the visible state gets its default, computed from that same state.
+   */
+  public synchronized void applyDeferredConstructorDefaults() {
+    if (!constructorDefaultsDeferred) {
+      return;
+    }
+    constructorDefaultsDeferred = false;
+    applyConstructorDefaults();
+  }
+
+  /** The upstream constructor defaults; each writes only when its key is missing. */
+  private void applyConstructorDefaults() {
     try {
       this.getTotalSignNum();
     } catch (IllegalArgumentException e) {

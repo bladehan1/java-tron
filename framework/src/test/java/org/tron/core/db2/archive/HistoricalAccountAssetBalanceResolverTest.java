@@ -115,9 +115,6 @@ public class HistoricalAccountAssetBalanceResolverTest {
             .put("account-asset", directKey, ByteArray.fromLong(3L)),
         new Fixture()
             .put("properties", proposal66Key(), ByteArray.fromLong(1L))
-            .put("account", address, account(address, false, TOKEN_ID, 3L)),
-        new Fixture()
-            .put("properties", proposal66Key(), ByteArray.fromLong(1L))
             .put("account-asset", directKey, ByteArray.fromLong(3L)));
 
     for (Fixture fixture : invalid) {
@@ -126,6 +123,46 @@ public class HistoricalAccountAssetBalanceResolverTest {
             () -> new HistoricalAccountAssetBalanceResolver()
                 .resolve(snapshot, address, TOKEN_ID));
       }
+    }
+  }
+
+  /**
+   * Chapter 05 section 3.11 / T-3b: P66 migration is lazy, so a P66_ON block can hold accounts
+   * that were never re-written after activation. Their inline map answers exactly as upstream
+   * {@code AssetUtil.importAsset} does; they are not corrupt.
+   */
+  @Test
+  public void resolvesP66OnLazilyMigratedAccountsWithUpstreamImportAssetSemantics()
+      throws Exception {
+    byte[] address = address(16);
+    byte[] directKey = new P66AccountAssetCodec().assetPhysicalKey(address, TOKEN_ID);
+    // Unoptimized, token inline: the inline value.
+    assertBalance(new Fixture()
+        .put("properties", proposal66Key(), ByteArray.fromLong(1L))
+        .put("account", address, account(address, false, TOKEN_ID, 3L)), address, 3L);
+    // Unoptimized, other token inline: 0 (upstream never reads a row for it).
+    assertBalance(new Fixture()
+        .put("properties", proposal66Key(), ByteArray.fromLong(1L))
+        .put("account", address, account(address, false, "1000002", 3L)), address, 0L);
+    // Optimized with an inline entry: the inline entry wins over the row.
+    assertBalance(new Fixture()
+        .put("properties", proposal66Key(), ByteArray.fromLong(1L))
+        .put("account", address, account(address, true, TOKEN_ID, 4L))
+        .put("account-asset", directKey, ByteArray.fromLong(9L)), address, 4L);
+    // Orphan direct row under an unoptimized account: upstream answer (0), counted.
+    long orphans = HistoricalAccountAssetBalanceResolver.getOrphanDirectRowCount();
+    assertBalance(new Fixture()
+        .put("properties", proposal66Key(), ByteArray.fromLong(1L))
+        .put("account", address, account(address, false, null, 0L))
+        .put("account-asset", directKey, ByteArray.fromLong(9L)), address, 0L);
+    assertEquals(orphans + 1, HistoricalAccountAssetBalanceResolver.getOrphanDirectRowCount());
+  }
+
+  private static void assertBalance(Fixture fixture, byte[] address, long expected)
+      throws Exception {
+    try (ArchiveReadSnapshot snapshot = fixture.snapshot()) {
+      assertEquals(expected, new HistoricalAccountAssetBalanceResolver()
+          .resolve(snapshot, address, TOKEN_ID).getBalance());
     }
   }
 

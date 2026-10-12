@@ -120,7 +120,9 @@ public final class PathStateNativeSnapshotSource
         throw new IOException("duplicate path-state SnapshotManager Store: " + dbName);
       }
       Snapshot head = database.getHead();
-      if (!Snapshot.isRoot(head)) {
+      // ch02 §3.11.3: an unfolded maintenance layer is not part of C; it reaches PathState as
+      // part of the carrying block's transition, so the root engine is still the state at C.
+      if (!Snapshot.isRoot(head) && !SnapshotManager.isMaintenanceLayerAboveRoot(head)) {
         throw new IOException("path-state native snapshot requires a flushed Store: " + dbName);
       }
       Snapshot root = head.getRoot();

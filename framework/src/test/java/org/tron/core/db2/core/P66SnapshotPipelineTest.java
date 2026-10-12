@@ -607,15 +607,32 @@ public class P66SnapshotPipelineTest {
       assertArrayEquals(expected, attached.getStateRoot());
       CommonCheckpointPayload payload = new CommonCheckpointPayloadFactory().capture(format,
           f.manager.getDbs(), 1);
-      new CommonCheckpointFile(checkpoint).publish(payload);
+      try (CommonCheckpointFile redo = CommonCheckpointFile.openDatabase(checkpoint,
+          Engine.LEVELDB)) {
+        redo.publish(payload);
+      }
       target = CommonCheckpointTarget.from(payload);
       ChainbaseCheckpointMaterializer chain = new ChainbaseCheckpointMaterializer(
           checkpoint.resolve("chain"), format, f.manager.getDbs(), baseline);
       PathStateCheckpointMaterializer materializer = head.checkpointMaterializer(format, baseline);
+      chain.useRetainedRedo(true);
+      materializer.useRetainedRedo(true);
       chain.materialize(payload, target);
       materializer.materialize(payload, target);
+      // Rewrite the common redo synchronously before publishing and pruning its generation.
+      try (CommonCheckpointFile redo = CommonCheckpointFile.openDatabase(checkpoint,
+          Engine.LEVELDB)) {
+        chain.replayRetained(redo.retained(), true);
+        materializer.replayRetained(redo.retained(), true);
+      }
       chain.publish(target);
       materializer.publish(target);
+      try (CommonCheckpointFile redo = CommonCheckpointFile.openDatabase(checkpoint,
+          Engine.LEVELDB)) {
+        redo.retire();
+        redo.advanceDurableBase();
+        assertEquals(1, redo.retained().size());
+      }
       head.prepareCommonCheckpointRebase(target).apply();
       new CommonCheckpointSnapshotRebaser().prepare(f.manager.getDbs(), target, 1).apply();
       assertEquals(13, Longs.fromByteArray(f.assets.getHead().getRoot().get(ASSET)));
