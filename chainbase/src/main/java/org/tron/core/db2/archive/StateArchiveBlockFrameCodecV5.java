@@ -146,11 +146,12 @@ final class StateArchiveBlockFrameCodecV5 {
       if (laneId != targetLane) {
         continue;
       }
-      int keyWidth = StateArchiveFileFormatV3.fixedKeyWidth(laneId);
+      int keyWidth = laneId == 22 ? 0 : StateArchiveFileFormatV3.fixedKeyWidth(laneId);
       byte[] previous = null;
       for (Entry entry : group.getEntries()) {
         byte[] key = entry.getKey();
-        if (keyWidth != 0 && key.length != keyWidth) {
+        if ((keyWidth != 0 && key.length != keyWidth)
+            || (laneId == 22 && key.length != 32 && key.length != 48)) {
           throw new IllegalArgumentException("Invalid State Archive V5 fixed-width key");
         }
         if (previous != null && BlockReverseDiff.compareUnsigned(previous, key) >= 0) {
@@ -251,7 +252,7 @@ final class StateArchiveBlockFrameCodecV5 {
     }
     require(expectedLane == laneId, "Store lane");
     int expectedWidth = StateArchiveFileFormatV3.fixedKeyWidth(expectedLane);
-    require(keyWidth == expectedWidth
+    require((keyWidth == expectedWidth || (expectedLane == 22 && keyWidth == 0))
             && ((keyWidth == 0 && layout == VARIABLE_SECTION_LAYOUT)
                 || (keyWidth != 0 && layout == FIXED_SECTION_LAYOUT)),
         "section layout");
@@ -305,6 +306,8 @@ final class StateArchiveBlockFrameCodecV5 {
       int keyStart = keyWidth == 0 ? keyOffsets[index] : index * keyWidth;
       int keyEnd = keyWidth == 0 ? keyOffsets[index + 1] : keyStart + keyWidth;
       byte[] key = Arrays.copyOfRange(keys, keyStart, keyEnd);
+      require(StateArchiveFileFormatV3.laneId(storeId) != 22
+          || key.length == 32 || key.length == 48, "storage-row key width");
       require(previousKey == null || BlockReverseDiff.compareUnsigned(previousKey, key) < 0,
           "key order");
       previousKey = key;

@@ -27,6 +27,35 @@ public class StateArchiveBlockFrameCodecV5Test {
   private final StateArchiveBlockFrameCodecV5 codec = new StateArchiveBlockFrameCodecV5();
 
   @Test
+  public void readsFrozenLegacyFixedWidthStorageFrame() {
+    byte[] legacy = org.bouncycastle.util.encoders.Hex.decode(
+        "5341463500050000000000000000004d000000000000000000000000000000000000000000000000"
+            + "000000000000004d001600010000007b98f8dc880016000200000050000000010000002000000000"
+            + "000000200000000000000002000000000000007b0000000099804624f1a4cf8663651a286c532697"
+            + "b2587fc98ab58e47fe656ecb571e62227284bee10000000000000000000000000000000000000000"
+            + "0000000000000000000000040100000000000000020a0b6fab0d33e46cda0d0e5c2e0bbbf946f3a6"
+            + "0b6a0f8f5ed59dd08086383e527f9a93366ad7");
+    DecodedFrame decoded = codec.decode(legacy);
+    assertEquals(22, decoded.getLaneId());
+    assertEquals(77, decoded.getBlockNumber());
+    assertArrayEquals(fixedKey(32, 4), decoded.getGroups().get(0).getEntries().get(0).getKey());
+    assertEquals(OldValue.present(bytes(10, 11)),
+        decoded.getGroups().get(0).getEntries().get(0).getOldValue());
+  }
+
+  @Test
+  public void roundTripsMixedStorageWidthsAndThreeValueStates() {
+    BlockReverseDiff input = diff(77, Collections.singletonList(new DbGroup("storage-row",
+        Arrays.asList(new Entry(fixedKey(32, 1), OldValue.absent()),
+            new Entry(fixedKey(48, 2), OldValue.present(new byte[0])),
+            new Entry(fixedKey(48, 3), OldValue.present(bytes(9)))))));
+    assertGroups(input.getGroups(), codec.decode(codec.encode(input, 22).getBytes()).getGroups());
+    BlockReverseDiff invalid = diff(77, Collections.singletonList(new DbGroup("storage-row",
+        Collections.singletonList(new Entry(fixedKey(47, 1), OldValue.absent())))));
+    assertThrows(IllegalArgumentException.class, () -> codec.encode(invalid, 22));
+  }
+
+  @Test
   public void encodesUnifiedEmptyFrameWithGoldenBytes() {
     EncodedFrame encoded = codec.encode(diff(42, Collections.emptyList()), 0);
 

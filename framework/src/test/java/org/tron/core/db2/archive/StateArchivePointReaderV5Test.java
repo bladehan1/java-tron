@@ -46,6 +46,10 @@ public class StateArchivePointReaderV5Test {
           .readCommittedOldValue("delegation", bytes(13), 100));
       assertEquals(OldValue.present(bytes(22)), new StateArchivePointReaderV5(view)
           .readCommittedOldValue("storage-row", fixedKey(32, 22), 100));
+      assertEquals(OldValue.present(new byte[0]), new StateArchivePointReaderV5(view)
+          .readCommittedOldValue("storage-row", fixedKey(48, 23), 100));
+      assertEquals(OldValue.absent(), new StateArchivePointReaderV5(view)
+          .readCommittedOldValue("storage-row", fixedKey(48, 24), 100));
     }
   }
 
@@ -170,8 +174,10 @@ public class StateArchivePointReaderV5Test {
                 new Entry(bytes(5), OldValue.present(new byte[0])))),
             new DbGroup("delegation", Collections.singletonList(
                 new Entry(bytes(13), OldValue.present(bytes(13))))),
-            new DbGroup("storage-row", Collections.singletonList(
-                new Entry(fixedKey(32, 22), OldValue.present(bytes(22)))))));
+            new DbGroup("storage-row", Arrays.asList(
+                new Entry(fixedKey(32, 22), OldValue.present(bytes(22))),
+                new Entry(fixedKey(48, 23), OldValue.present(new byte[0])),
+                new Entry(fixedKey(48, 24), OldValue.absent())))));
   }
 
   private static List<Path[]> hideOtherLaneData(Path root, int retainedLane)
