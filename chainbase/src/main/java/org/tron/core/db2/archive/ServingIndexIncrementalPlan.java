@@ -102,8 +102,63 @@ public final class ServingIndexIncrementalPlan {
   }
 
   /** Plans an exact-27 increment directly from Common-committed captured reverse diffs. */
+  /** Domain of the per-block serving step digest (ch04 §3.5.2). */
+  static final byte[] STEP_DOMAIN =
+      "tron-state-archive/serving-step/v2".getBytes(StandardCharsets.US_ASCII);
+
+  /**
+   * Per-block step digest without re-encoding the block (ch04 §3.5.2, S4):
+   * {@code SHA-256(domain ‖ number ‖ hash ‖ parentHash ‖ timestamp ‖ frameDigest[lane]...)} over
+   * the History frame digests already verified by the frame decoder. Constant memory, no record
+   * size limit. Diagnostic only (S14); never compared on the query path.
+   */
+  static byte[] stepDigest(BlockSnapshotMeta meta, List<byte[]> laneFrameDigests) {
+    MessageDigest digest = sha256();
+    digest.update(STEP_DOMAIN);
+    updateLong(digest, meta.getBlockNumber());
+    digest.update(meta.getBlockHash());
+    digest.update(meta.getParentHash());
+    updateLong(digest, meta.getTimestamp());
+    for (byte[] frame : laneFrameDigests) {
+      digest.update(frame);
+    }
+    return digest.digest();
+  }
+
+  /** Rolling-digest seed of a serving index whose coverage starts at {@code base}. */
+  static byte[] sourceSeed(long base, byte[] baseHash, List<String> participants) {
+    MessageDigest seed = sha256();
+    updateLong(seed, base);
+    seed.update(baseHash);
+    updateParticipants(seed, exactParticipants(participants));
+    return seed.digest();
+  }
+
+  /**
+   * Plans an exact-27 increment from committed reverse diffs. Budgets are not enforced here:
+   * they only choose batch boundaries (ch04 S3, §3.5.3). Without frame digests the step digest
+   * retains the legacy complete-diff encoding (test and diagnostic callers).
+   */
   static ServingIndexIncrementalPlan planCommittedDiffs(long indexedThrough, byte[] headHash,
       List<BlockReverseDiff> committedDiffs) {
+    List<BlockReverseDiff> diffs = new ArrayList<>(Objects.requireNonNull(committedDiffs,
+        "committedDiffs"));
+    List<byte[]> steps = new ArrayList<>(diffs.size());
+    for (BlockReverseDiff diff : diffs) {
+      long started = System.nanoTime();
+      try {
+        steps.add(sha256().digest(new BlockHistoryCodec().encode(
+            Objects.requireNonNull(diff, "committedDiff"))));
+      } finally {
+        ServingIndexTiming.record(ServingIndexTiming.Stage.DIGEST, started);
+      }
+    }
+    return planCommittedDiffs(indexedThrough, headHash, diffs, steps);
+  }
+
+  /** Plans an exact-27 increment from committed reverse diffs with their step digests. */
+  static ServingIndexIncrementalPlan planCommittedDiffs(long indexedThrough, byte[] headHash,
+      List<BlockReverseDiff> committedDiffs, List<byte[]> stepDigests) {
     if (indexedThrough < 0) {
       throw new IllegalArgumentException("indexedThrough must not be negative");
     }
@@ -112,32 +167,19 @@ public final class ServingIndexIncrementalPlan {
         new ArrayList<>(ArchiveStoreScope.getStateDatabases()));
     List<BlockReverseDiff> diffs = new ArrayList<>(Objects.requireNonNull(committedDiffs,
         "committedDiffs"));
-    long entries = 0;
-    long inputBytes = 0;
-    for (BlockReverseDiff diff : diffs) {
-      for (BlockReverseDiff.DbGroup group : diff.getGroups()) {
-        for (BlockReverseDiff.Entry entry : group.getEntries()) {
-          inputBytes += entry.estimatedIndexInputBytes();
-          if (++entries > 250_000 || inputBytes > 128L * 1024 * 1024) {
-            throw new IllegalArgumentException("Serving plan input budget exceeded");
-          }
-        }
-      }
+    if (stepDigests == null || stepDigests.size() != diffs.size()) {
+      throw new IllegalArgumentException("Serving step digests differ from committed diffs");
     }
     Map<String, List<KeyChange>> changes = new LinkedHashMap<>();
     participants.forEach(database -> changes.put(database, new ArrayList<>()));
-    MessageDigest seed = sha256();
-    updateLong(seed, indexedThrough);
-    seed.update(headHash);
-    updateParticipants(seed, participants);
-    byte[] sourceSeed = seed.digest();
+    byte[] sourceSeed = sourceSeed(indexedThrough, headHash, participants);
     MessageDigest delta = sha256();
     delta.update(sourceSeed);
     List<byte[]> steps = new ArrayList<>();
     long previousBlock = indexedThrough;
     byte[] previousHash = Arrays.copyOf(headHash, headHash.length);
-    BlockHistoryCodec sourceCodec = new BlockHistoryCodec();
-    for (BlockReverseDiff diff : diffs) {
+    for (int index = 0; index < diffs.size(); index++) {
+      BlockReverseDiff diff = diffs.get(index);
       BlockSnapshotMeta meta = Objects.requireNonNull(diff, "committedDiff").getMeta();
       if (meta.getEpoch() != previousBlock + 1 || meta.getBlockNumber() != previousBlock + 1
           || !Arrays.equals(meta.getParentHash(), previousHash)) {
@@ -161,13 +203,8 @@ public final class ServingIndexIncrementalPlan {
         }
         previousDatabase = group.getDbName();
       }
-      long digestStarted = System.nanoTime();
-      byte[] step;
-      try {
-        step = sha256().digest(sourceCodec.encode(diff));
-      } finally {
-        ServingIndexTiming.record(ServingIndexTiming.Stage.DIGEST, digestStarted);
-      }
+      byte[] step = stepDigests.get(index);
+      requireHash(step, "stepDigest");
       steps.add(step);
       delta.update(step);
       previousBlock = meta.getBlockNumber();

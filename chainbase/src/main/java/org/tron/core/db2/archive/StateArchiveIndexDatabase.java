@@ -421,6 +421,10 @@ final class StateArchiveIndexDatabase {
   }
 
   interface Writer extends Closeable {
+    default Reader openSnapshot() throws IOException {
+      throw new UnsupportedOperationException("native writer snapshot is unavailable");
+    }
+
 
     default byte[] get(byte[] key) throws IOException {
       return get(DEFAULT_COLUMN_FAMILY, key);
@@ -761,6 +765,14 @@ final class StateArchiveIndexDatabase {
     }
 
     @Override
+    public Reader openSnapshot() throws IOException {
+      if (closed) {
+        throw new IOException("native writer is closed");
+      }
+      return openReader(shared.directory, Engine.LEVELDB);
+    }
+
+    @Override
     public byte[] get(String columnFamily, byte[] key) {
       requireColumnFamily(columnFamily);
       return shared.database.get(key);
@@ -902,6 +914,14 @@ final class StateArchiveIndexDatabase {
 
     private RocksWriter(SharedRocksDatabase shared) {
       this.shared = shared;
+    }
+
+    @Override
+    public Reader openSnapshot() throws IOException {
+      if (closed) {
+        throw new IOException("native writer is closed");
+      }
+      return openReader(shared.directory, Engine.ROCKSDB);
     }
 
     @Override

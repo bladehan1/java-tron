@@ -36,7 +36,7 @@ public final class StateArchiveAppendCheckpointMaterializerV5
   private final long firstBlockNumber;
   private final StateArchiveFiveLaneWriterV5 writer;
   private final StateArchiveServingSourceV5 servingSource;
-  private final StateArchiveServingWorkerV3 servingWorker;
+  private final ServingIndexService servingService;
   private final ProcessFdAdmission admission;
   private final ChannelOpener channelOpener;
   private final ReadObserver readObserver;
@@ -122,17 +122,16 @@ public final class StateArchiveAppendCheckpointMaterializerV5
     StateArchiveFiveLaneWriterV5 openedWriter = null;
     HistoryTailStore openedTail = null;
     StateArchiveReaderGenerationV5 openedGeneration = null;
-    StateArchiveServingWorkerV3 openedWorker = null;
+    ServingIndexService openedService = null;
     StateArchiveServingSourceV5 openedSource = new StateArchiveServingSourceV5(
-        directory, firstBlockNumber, admittedBaseline,
+        directory, firstBlockNumber,
+        baselineParentHash(canonical, firstBlockNumber, admittedBaseline),
         Objects.requireNonNull(canonical, "canonical"));
     try {
       if (recoveryTarget == null && !(allowBaselineReset
           && Files.isRegularFile(directory.resolve(HistoryTailStore.FILE_NAME)))) {
         requireAdmittedRoot(directory);
       }
-      openedCoordinator = new StateArchiveServingIndexBuildCoordinatorV3(
-          directory, bindingEngine, 1_000);
       Optional<CommonCheckpointTarget> readable =
           StateArchiveCheckpointMaterializer.loadReadableTargetIfPresent(directory);
       boolean tailExisted = Files.isRegularFile(directory.resolve(HistoryTailStore.FILE_NAME));
@@ -146,6 +145,8 @@ public final class StateArchiveAppendCheckpointMaterializerV5
           tail = openedTail.require(selected);
         } else {
           // One-time migration: only a legacy tail proved by the exact Common target is accepted.
+          openedCoordinator = new StateArchiveServingIndexBuildCoordinatorV3(
+              directory, bindingEngine, 1_000);
           tail = openedCoordinator.archiveTailV5(selected);
           tail.requireTarget(selected);
           HistorySuffixRecovery.trim(directory, tail, selected);
@@ -155,7 +156,11 @@ public final class StateArchiveAppendCheckpointMaterializerV5
           throw new IOException("Archive V5 configured first block differs from tail");
         }
         HistorySuffixRecovery.trim(directory, tail, selected);
-        openedCoordinator.retireLegacyArchiveTail();
+        if (openedCoordinator != null) {
+          openedCoordinator.retireLegacyArchiveTail();
+          openedCoordinator.close();
+          openedCoordinator = null;
+        }
         openedWriter = StateArchiveFiveLaneWriterV5.reopen(directory, tail, selected,
             admittedBaseline, rotationTargetBytes, this.readObserver);
         if (readable.isPresent()) {
@@ -181,22 +186,15 @@ public final class StateArchiveAppendCheckpointMaterializerV5
         openedWriter = new StateArchiveFiveLaneWriterV5(directory, firstBlockNumber,
             admittedBaseline, rotationTargetBytes);
       }
-      StateArchiveServingIndexBuildCoordinatorV3 admittedCoordinator = openedCoordinator;
-      openedWorker = new StateArchiveServingWorkerV3(() -> admittedCoordinator,
-          openedSource, () -> { });
+      openedService = ServingIndexService.forHistory(
+          directory.resolve(StateArchiveServingIndexBuildCoordinatorV3.DIRECTORY),
+          bindingEngine, openedSource);
     } catch (IOException | RuntimeException failure) {
       if (openedTail != null) {
         try {
           openedTail.close();
         } catch (IOException closing) {
           failure.addSuppressed(closing);
-        }
-      }
-      if (openedWorker != null) {
-        try {
-          openedWorker.close();
-        } catch (IOException closeFailure) {
-          failure.addSuppressed(closeFailure);
         }
       }
       if (openedGeneration != null) {
@@ -213,7 +211,7 @@ public final class StateArchiveAppendCheckpointMaterializerV5
           failure.addSuppressed(closeFailure);
         }
       }
-      if (openedWorker == null && openedCoordinator != null) {
+      if (openedCoordinator != null) {
         try {
           openedCoordinator.close();
         } catch (IOException closeFailure) {
@@ -225,10 +223,23 @@ public final class StateArchiveAppendCheckpointMaterializerV5
     writer = openedWriter;
     historyTail = openedTail;
     servingSource = openedSource;
-    servingWorker = openedWorker;
+    servingService = openedService;
     if (openedGeneration != null) {
       readerHolder = new StateArchiveReaderGenerationHolderV5(openedGeneration);
     }
+    if (preparedTarget == null) {
+      servingService.start();
+    }
+  }
+
+  private static byte[] baselineParentHash(StateArchiveCanonicalBlockMetaSource canonical,
+      long firstBlock, byte[] fallback) throws IOException {
+    BlockSnapshotMeta baseline = canonical.load(firstBlock - 1);
+    if (baseline != null) {
+      return baseline.getBlockHash();
+    }
+    BlockSnapshotMeta first = canonical.load(firstBlock);
+    return first == null ? fallback : first.getParentHash();
   }
 
   @Override
@@ -374,24 +385,41 @@ public final class StateArchiveAppendCheckpointMaterializerV5
 
   @Override
   public void afterCommit(CommonCheckpointTarget target) {
-    try {
-      servingWorker.offer(target);
-    } catch (IOException | RuntimeException failure) {
-      org.slf4j.LoggerFactory.getLogger("DB").error(
-          "Archive V5 serving degraded after Common commit at {}",
-          target.getLastBlock().getBlockNumber(), failure);
-    }
+    servingService.start();
+    servingService.onCommonPublished(target);
   }
 
   @Override
   public synchronized void completeServingInitialSync(CommonCheckpointTarget boundary)
       throws IOException {
     requireOpen();
-    servingWorker.completeInitialSync(requireTarget(boundary));
+    CommonCheckpointTarget admitted = requireTarget(boundary);
+    servingService.onCommonPublished(admitted);
+    if (!servingService.awaitIndexedThrough(admitted.getLastBlock().getBlockNumber(),
+        java.time.Duration.ofSeconds(30))) {
+      throw new IOException("Archive serving did not reach the requested boundary");
+    }
   }
 
   synchronized StateArchiveServingIndexBuildCoordinatorV3.BuildProgress servingIndexStatus() {
-    return servingWorker.status();
+    ServingView view = servingService.status();
+    StateArchiveServingIndexBuildCoordinatorV3.Mode mode;
+    switch (view.getState()) {
+      case LIVE:
+        mode = StateArchiveServingIndexBuildCoordinatorV3.Mode.LIVE_BACKGROUND;
+        break;
+      case CLOSED:
+        mode = StateArchiveServingIndexBuildCoordinatorV3.Mode.CLOSED;
+        break;
+      case DEGRADED:
+        mode = StateArchiveServingIndexBuildCoordinatorV3.Mode.DEGRADED;
+        break;
+      default:
+        mode = StateArchiveServingIndexBuildCoordinatorV3.Mode.BULK_CATCH_UP;
+    }
+    return new StateArchiveServingIndexBuildCoordinatorV3.BuildProgress(mode,
+        view.getIndexedThrough(), view.getCommittedThrough(), 0, view.getHandleSeq(),
+        view.getIndexedFrom());
   }
 
   @Override
@@ -401,11 +429,11 @@ public final class StateArchiveAppendCheckpointMaterializerV5
     CommonCheckpointTarget admitted = requireTarget(target);
     PinnedReader point = pinReader();
     try {
-      PersistentServingKeyIndexGeneration index = servingWorker.pinIndexed(
+      PersistentServingKeyIndexGeneration index = servingService.pinStrict(
           admitted.getLastBlock().getBlockNumber());
       try {
         return new OwnedPointHistory(new StateArchiveAppendReadAdapterV3(
-            index, servingSource, point, admitted), point);
+            index, servingSource, point, admitted, false), point);
       } catch (IOException | RuntimeException failure) {
         point.close();
         throw failure;
@@ -435,11 +463,7 @@ public final class StateArchiveAppendCheckpointMaterializerV5
     }
     closed = true;
     IOException failure = null;
-    try {
-      servingWorker.close();
-    } catch (IOException closeFailure) {
-      failure = closeFailure;
-    }
+    servingService.close();
     if (readerHolder != null) {
       try {
         readerHolder.close();
@@ -586,9 +610,7 @@ public final class StateArchiveAppendCheckpointMaterializerV5
   }
 
   private static StateArchiveCanonicalBlockMetaSource missingCanonical() {
-    return blockNumber -> {
-      throw new IOException("Archive V5 canonical metadata source is not configured");
-    };
+    return blockNumber -> null;
   }
 
   private static void requireAdmittedRoot(Path root) throws IOException {

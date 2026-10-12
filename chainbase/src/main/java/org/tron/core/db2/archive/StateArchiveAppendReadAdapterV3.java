@@ -26,13 +26,20 @@ final class StateArchiveAppendReadAdapterV3 implements CheckpointPointHistory {
   StateArchiveAppendReadAdapterV3(PersistentServingKeyIndexGeneration index,
       StateArchiveServingSource source, StateArchivePointSource pointSource,
       CommonCheckpointTarget target) throws IOException {
+    this(index, source, pointSource, target, true);
+  }
+
+  StateArchiveAppendReadAdapterV3(PersistentServingKeyIndexGeneration index,
+      StateArchiveServingSource source, StateArchivePointSource pointSource,
+      CommonCheckpointTarget target, boolean requirePayloadIdentity) throws IOException {
     this.index = index;
     this.source = source;
     this.pointSource = pointSource;
     try {
       if (index.getIndexedThrough() != target.getLastBlock().getBlockNumber()
           || !Arrays.equals(index.getHeadHash(), target.getLastBlock().getBlockHash())
-          || !Arrays.equals(index.getLatestSourceIdentityDigest(), target.getPayloadDigest())
+          || requirePayloadIdentity
+          && !Arrays.equals(index.getLatestSourceIdentityDigest(), target.getPayloadDigest())
           || index.getIndexedFrom() != source.getHistoryStartBlock() - 1
           || !new java.util.HashSet<>(index.getParticipatingDatabases())
               .equals(ArchiveStoreScope.getStateDatabases())) {

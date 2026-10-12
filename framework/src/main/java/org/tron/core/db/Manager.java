@@ -4001,25 +4001,8 @@ public class Manager {
   }
 
   private void updateStateArchiveServingMode(boolean syncSource) {
-    StateArchiveAppendFileRuntime materializer = stateArchiveAppendMaterializer;
-    if (materializer == null || syncSource || stateArchiveServingLive) {
-      return;
-    }
-    java.util.Optional<org.tron.core.db2.core.CommonCheckpointTarget> published;
-    try {
-      published = materializer.loadPublishedTargetIfPresent();
-    } catch (java.io.IOException failure) {
-      throw new IllegalStateException("State Archive authority verification failed", failure);
-    }
-    try {
-      if (published.isPresent()) {
-        materializer.completeServingInitialSync(published.get());
-        stateArchiveServingLive = true;
-      }
-    } catch (java.io.IOException failure) {
-      logger.error("State Archive serving-index handoff failed; historical queries unavailable",
-          failure);
-    }
+    // The serving worker now derives its lifecycle directly from committed History.
+    stateArchiveServingLive = !syncSource;
   }
 
   private void closePathStateRoot() {

@@ -36,14 +36,16 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
 
   private static final int MAGIC = 0x534b4947; // SKIG
   private static final short VERSION = 4;
-  private static final short EXACT_VERSION = 5;
+  static final short EXACT_VERSION = 5;
   private static final int MAX_MANIFEST_SIZE = 1024 * 1024;
   private static final byte DATA_PREFIX = 1;
   private static final byte RANGE_DATA_PREFIX = 2;
   private static final byte KEY_META_PREFIX = 3;
   private static final byte KEY_PAGE_PREFIX = 4;
   private static final byte STORE_COVERAGE_PREFIX = 5;
-  private static final byte[] ARCHIVE_TAIL_KEY_V5 = StateArchiveTailV5.key();
+  static final byte[] ARCHIVE_TAIL_KEY_V5 = StateArchiveTailV5.key();
+  /** Single-DB progress descriptor key (exact v5), ch04 §3.2.1. */
+  static final byte[] PROGRESS_KEY = new byte[]{0x7f, 'S', 'I', 1};
   private static final int INLINE_EPOCH_LIMIT = 4;
   private static final int EPOCHS_PER_PAGE = 512;
   private static final byte INLINE = 1;
@@ -158,7 +160,7 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
         previousEpoch,
         previousHash, sourceDigest.digest(), latestSourceIdentityDigest, participants, keyChanges);
     persistDescriptor(directory, descriptor);
-    HistorySegmentStore.syncDirectory(directory);
+    ArchiveDirectories.syncDirectory(directory);
     return open(directory, engine);
   }
 
@@ -227,7 +229,7 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
         plan.getIndexedThrough(), plan.getHeadHash(), sourceDigest, latestSourceIdentityDigest,
         plan.getParticipatingDatabases(), keyChanges);
     persistDescriptor(directory, descriptor);
-    HistorySegmentStore.syncDirectory(directory);
+    ArchiveDirectories.syncDirectory(directory);
     return open(directory, engine);
   }
 
@@ -272,7 +274,7 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
         sourceDigest, latestSourceIdentityDigest, descriptor.participants,
         descriptor.keyChanges + added);
     persistDescriptor(directory, replacement);
-    HistorySegmentStore.syncDirectory(directory);
+    ArchiveDirectories.syncDirectory(directory);
     return open(directory, engine);
   }
 
@@ -501,8 +503,11 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
   public synchronized void close() throws IOException {
     if (!closed) {
       closed = true;
-      database.close();
-      release.run();
+      try {
+        database.close();
+      } finally {
+        release.run();
+      }
     }
   }
 
@@ -699,7 +704,7 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
     List<StateArchiveIndexDatabase.Mutation> mutations = publication == null
         ? new ArrayList<>() : new BoundedMutations();
     for (Map.Entry<ExactKey, List<Long>> entry : changes.entrySet()) {
-      appendExactChanges(target, mutations, entry.getKey(), entry.getValue());
+      appendExactChanges(target, mutations, entry.getKey(), entry.getValue(), Long.MAX_VALUE);
     }
     for (String database : plan.getParticipatingDatabases()) {
       PersistentStoreCoverage coverage = new PersistentStoreCoverage(database,
@@ -745,7 +750,6 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
    * no filesystem generation or second database is involved in normal advancement.
    */
   static final class MutableIndex implements java.io.Closeable {
-    private static final byte[] PROGRESS_KEY = new byte[]{0x7f, 'S', 'I', 1};
     private final Path directory;
     private final Engine engine;
     private final StateArchiveIndexDatabase.Writer writer;
@@ -784,8 +788,8 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
             }
           }
         }
-        HistorySegmentStore.syncDirectory(directory);
-        HistorySegmentStore.syncDirectory(directory.getParent());
+        ArchiveDirectories.syncDirectory(directory);
+        ArchiveDirectories.syncDirectory(directory.getParent());
       } catch (IOException | RuntimeException failure) {
         writer.close();
         throw failure;
@@ -935,6 +939,12 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
     }
   }
 
+  /** A query generation over a caller-owned snapshot reader (serving lease, ch04 §3.10.1). */
+  static PersistentServingKeyIndexGeneration overSnapshot(Path directory, Descriptor descriptor,
+      Engine engine, StateArchiveIndexDatabase.Reader reader) {
+    return new PersistentServingKeyIndexGeneration(directory, descriptor, engine, reader);
+  }
+
   private PersistentServingKeyIndexGeneration(Path directory, Descriptor descriptor,
       Engine engine, StateArchiveIndexDatabase.Reader reader) {
     this.directory = directory;
@@ -942,6 +952,20 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
     this.engine = engine;
     this.database = reader;
     this.release = () -> { };
+  }
+
+  static PersistentServingKeyIndexGeneration overSnapshot(Path directory, Descriptor descriptor,
+      Engine engine, StateArchiveIndexDatabase.Reader reader, Runnable release) {
+    return new PersistentServingKeyIndexGeneration(directory, descriptor, engine, reader, release);
+  }
+
+  private PersistentServingKeyIndexGeneration(Path directory, Descriptor descriptor,
+      Engine engine, StateArchiveIndexDatabase.Reader reader, Runnable release) {
+    this.directory = directory;
+    this.descriptor = descriptor;
+    this.engine = engine;
+    this.database = reader;
+    this.release = release;
   }
 
   static final class RuntimeBuilder implements java.io.Closeable {
@@ -1013,7 +1037,7 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
       StateArchiveIndexDatabase.checkpoint(directory.resolve(DATABASE),
           shadow.resolve(DATABASE), engine);
       persistDescriptor(shadow, replacement);
-      HistorySegmentStore.syncDirectory(shadow);
+      ArchiveDirectories.syncDirectory(shadow);
       return PersistentServingKeyIndexGeneration.open(shadow, engine);
     }
 
@@ -1060,9 +1084,20 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
     }
   }
 
-  private static void appendExactChanges(StateArchiveIndexDatabase.Writer target,
+  /**
+   * Appends {@code appended} epochs of one key. All mutations of the key (its pages and its
+   * KeyMeta, KeyMeta last) are added to {@code batch} together (S-INV-13).
+   *
+   * <p>R-IDEM (ch04 §3.5.4): with durable progress {@code durableI}, a KeyMeta whose last epoch
+   * exceeds {@code durableI} can only be the residue of an interrupted solo batch of block
+   * {@code durableI + 1}; that epoch is then already durable together with its pages and is
+   * dropped from {@code appended}. Any other {@code lastEpoch > durableI} is INDEX_CORRUPT.
+   * {@code Long.MAX_VALUE} disables the rule (legacy generation builders).
+   */
+  static void appendExactChanges(StateArchiveIndexDatabase.Writer target,
       List<StateArchiveIndexDatabase.Mutation> batch, ExactKey key,
-      List<Long> appended) throws IOException {
+      List<Long> suppliedEpochs, long durableI) throws IOException {
+    List<Long> appended = suppliedEpochs;
     byte[] metaKey = keyMetaKey(key.dbName, key.rawKey);
     long metaStarted = System.nanoTime();
     byte[] existing;
@@ -1072,6 +1107,17 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
       ServingIndexTiming.record(ServingIndexTiming.Stage.META_GET, metaStarted);
     }
     KeyMeta meta = existing == null ? null : decodeKeyMeta(existing);
+    if (meta != null && meta.lastEpoch > durableI) {
+      if (durableI == Long.MAX_VALUE || meta.lastEpoch != durableI + 1 || appended.isEmpty()
+          || appended.get(0) != durableI + 1) {
+        throw new ArchivePersistenceException(
+            "Serving R-IDEM violated: KeyMeta last epoch is ahead of durable progress");
+      }
+      appended = appended.subList(1, appended.size());
+      if (appended.isEmpty()) {
+        return;
+      }
+    }
     if (meta == null) {
       requireStrictEpochs(appended, Long.MIN_VALUE);
       if (appended.size() <= INLINE_EPOCH_LIMIT) {
@@ -1131,7 +1177,7 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
     }
   }
 
-  private static byte[] keyMetaKey(String dbName, byte[] rawKey) {
+  static byte[] keyMetaKey(String dbName, byte[] rawKey) {
     return exactKey(KEY_META_PREFIX, dbName, rawKey, null);
   }
 
@@ -1154,7 +1200,7 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
     return key.array();
   }
 
-  private static byte[] storeCoverageKey(String dbName) {
+  static byte[] storeCoverageKey(String dbName) {
     int storeId = ArchiveParticipantDescriptor.current().getStoreId(dbName);
     return ByteBuffer.allocate(1 + Short.BYTES).put(STORE_COVERAGE_PREFIX)
         .putShort((short) storeId).array();
@@ -1242,7 +1288,7 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
     return epochs;
   }
 
-  private static byte[] encodeCoverage(PersistentStoreCoverage coverage) {
+  static byte[] encodeCoverage(PersistentStoreCoverage coverage) {
     try {
       ByteArrayOutputStream bytes = new ByteArrayOutputStream();
       DataOutputStream output = new DataOutputStream(bytes);
@@ -1260,7 +1306,7 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
     }
   }
 
-  private static PersistentStoreCoverage decodeCoverage(byte[] encoded) {
+  static PersistentStoreCoverage decodeCoverage(byte[] encoded) {
     byte[] payload = checkedPayload(encoded, "serving Store coverage");
     try {
       DataInputStream input = new DataInputStream(new ByteArrayInputStream(payload));
@@ -1284,7 +1330,7 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
     }
   }
 
-  private static void validateExactStoreCoverage(StateArchiveIndexDatabase.Reader database,
+  static void validateExactStoreCoverage(StateArchiveIndexDatabase.Reader database,
       Descriptor descriptor) throws IOException {
     for (String participant : descriptor.participants) {
       PersistentStoreCoverage coverage = decodeCoverage(database.get(
@@ -1369,7 +1415,7 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
     return digest.digest();
   }
 
-  private static byte[] rollSourceDigest(byte[] seed, List<byte[]> steps) {
+  static byte[] rollSourceDigest(byte[] seed, List<byte[]> steps) {
     byte[] result = Arrays.copyOf(seed, seed.length);
     for (byte[] step : steps) {
       result = rollingDigest(result, step);
@@ -1382,7 +1428,7 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
     return rollSourceDigest(plan.getSourceSeedDigest(), plan.getSourceStepDigests());
   }
 
-  private static String comparatorId(String dbName) {
+  static String comparatorId(String dbName) {
     return "market_pair_price_to_order".equals(dbName)
         ? "MARKET_PRICE_V1" : "UNSIGNED_RAW_V1";
   }
@@ -1628,7 +1674,7 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
     }
   }
 
-  private static byte[] encodeDescriptor(Descriptor descriptor) {
+  static byte[] encodeDescriptor(Descriptor descriptor) {
     try {
       ByteArrayOutputStream bytes = new ByteArrayOutputStream();
       DataOutputStream output = new DataOutputStream(bytes);
@@ -1657,7 +1703,7 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
     }
   }
 
-  private static Descriptor decodeDescriptor(byte[] encoded) {
+  static Descriptor decodeDescriptor(byte[] encoded) {
     if (encoded == null || encoded.length < 96 || encoded.length > MAX_MANIFEST_SIZE) {
       throw new IllegalArgumentException("Serving index manifest length is invalid");
     }
@@ -1710,7 +1756,7 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
     }
   }
 
-  private static final class Descriptor {
+  static final class Descriptor {
     private final short formatVersion;
     private final String scopeIdentity;
     private final String generationId;
@@ -1722,7 +1768,7 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
     private final List<String> participants;
     private final long keyChanges;
 
-    private Descriptor(short formatVersion, String scopeIdentity, String generationId,
+    Descriptor(short formatVersion, String scopeIdentity, String generationId,
         long indexedFrom,
         long indexedThrough,
         byte[] headHash, byte[] sourceDigest, byte[] latestSourceIdentityDigest,
@@ -1738,6 +1784,46 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
           latestSourceIdentityDigest.length);
       this.participants = participants;
       this.keyChanges = keyChanges;
+    }
+
+    short formatVersion() {
+      return formatVersion;
+    }
+
+    String scopeIdentity() {
+      return scopeIdentity;
+    }
+
+    String generationId() {
+      return generationId;
+    }
+
+    long indexedFrom() {
+      return indexedFrom;
+    }
+
+    long indexedThrough() {
+      return indexedThrough;
+    }
+
+    byte[] headHash() {
+      return Arrays.copyOf(headHash, headHash.length);
+    }
+
+    byte[] sourceDigest() {
+      return Arrays.copyOf(sourceDigest, sourceDigest.length);
+    }
+
+    byte[] latestSourceIdentityDigest() {
+      return Arrays.copyOf(latestSourceIdentityDigest, latestSourceIdentityDigest.length);
+    }
+
+    List<String> participants() {
+      return participants;
+    }
+
+    long keyChanges() {
+      return keyChanges;
     }
   }
 
@@ -1756,7 +1842,7 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
     private final String generationId;
     private final String comparatorId;
 
-    private PersistentStoreCoverage(String dbName, long indexedFrom, long indexedThrough,
+    PersistentStoreCoverage(String dbName, long indexedFrom, long indexedThrough,
         byte[] headHash, byte[] sourceDigest, String generationId, String comparatorId) {
       this.dbName = dbName;
       this.indexedFrom = indexedFrom;
@@ -2003,11 +2089,11 @@ public final class PersistentServingKeyIndexGeneration implements ServingKeyInde
     }
   }
 
-  private static final class ExactKey {
+  static final class ExactKey {
     private final String dbName;
     private final byte[] rawKey;
 
-    private ExactKey(String dbName, byte[] rawKey) {
+    ExactKey(String dbName, byte[] rawKey) {
       this.dbName = dbName;
       this.rawKey = Arrays.copyOf(rawKey, rawKey.length);
     }
