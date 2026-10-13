@@ -545,6 +545,184 @@ public class PathMerkleTrieTest {
     assertArrayEquals(referenceRoot(keys, values), next.rootHash());
   }
 
+  @Test
+  public void secondLevelSplitMatchesSequentialForLargeFirstNibbleGroup() {
+    List<byte[]> keys = new ArrayList<>();
+    List<byte[]> values = new ArrayList<>();
+    // 80 keys across 8 second nibbles under first nibble 0xA make the oversized group.
+    for (int second = 0; second < 8; second++) {
+      for (int index = 0; index < 10; index++) {
+        keys.add(nibbledKey(0x0a, second, second * 16 + index));
+        values.add(value("split-initial-" + second + "-" + index));
+      }
+    }
+    for (int first = 1; first <= 3; first++) {
+      for (int index = 0; index < 4; index++) {
+        keys.add(nibbledKey(first, 0, 0x100 + first * 16 + index));
+        values.add(value("split-initial-sibling-" + first + "-" + index));
+      }
+    }
+    InMemoryPathNodeStore sourceStore = new InMemoryPathNodeStore();
+    PathMerkleTrie source = new PathMerkleTrie(sourceStore);
+    for (int i = 0; i < keys.size(); i++) {
+      source.put(keys.get(i), values.get(i));
+    }
+    byte[] initialRoot = source.rootHash();
+    Map<String, byte[]> initialNodes = copyNodeMap(sourceStore.nodes);
+
+    List<byte[]> changeKeys = new ArrayList<>();
+    List<byte[]> changeValues = new ArrayList<>();
+    for (int second = 0; second < 8; second++) {
+      for (int index = 0; index < 10; index++) {
+        changeKeys.add(nibbledKey(0x0a, second, second * 16 + index));
+        changeValues.add(second == 7 && index < 2 ? null
+            : value("split-updated-" + second + "-" + index));
+      }
+    }
+    for (int index = 0; index < 6; index++) {
+      changeKeys.add(nibbledKey(0x0a, 9, 0x200 + index));
+      changeValues.add(value("split-inserted-" + index));
+    }
+    for (int first = 1; first <= 2; first++) {
+      for (int index = 0; index < 4; index++) {
+        changeKeys.add(nibbledKey(first, 0, 0x100 + first * 16 + index));
+        changeValues.add(value("split-sibling-" + first + "-" + index));
+      }
+    }
+
+    InMemoryPathNodeStore sequentialStore = new InMemoryPathNodeStore();
+    sequentialStore.nodes.putAll(copyNodeMap(initialNodes));
+    PathMerkleTrie sequential = new PathMerkleTrie(sequentialStore);
+    sequential.restoreRoot(initialRoot);
+    List<PathMerkleTrie.BatchMutation> changes = new ArrayList<>();
+    for (int i = 0; i < changeKeys.size(); i++) {
+      if (changeValues.get(i) == null) {
+        sequential.delete(changeKeys.get(i));
+      } else {
+        sequential.put(changeKeys.get(i), changeValues.get(i));
+      }
+      changes.add(new PathMerkleTrie.BatchMutation(changeKeys.get(i), changeValues.get(i)));
+    }
+    byte[] expectedRoot = sequential.rootHash();
+
+    InMemoryPathNodeStore parallelStore = new InMemoryPathNodeStore();
+    parallelStore.nodes.putAll(copyNodeMap(initialNodes));
+    PathMerkleTrie parallel = new PathMerkleTrie(parallelStore);
+    parallel.restoreRoot(initialRoot);
+    ExecutorService executor = Executors.newFixedThreadPool(4);
+    try {
+      parallel.applyBatch(changes, executor, true);
+      assertArrayEquals(expectedRoot, parallel.rootHash());
+      assertNodeMapsEqual(sequentialStore.nodes, parallelStore.nodes);
+      assertEquals(sequential.size(), parallel.size());
+      assertArrayEquals(value("split-updated-3-4"), parallel.get(nibbledKey(0x0a, 3, 0x34)));
+      assertArrayEquals(value("split-inserted-5"), parallel.get(nibbledKey(0x0a, 9, 0x205)));
+      assertNull(parallel.get(nibbledKey(0x0a, 7, 0x70)));
+    } finally {
+      executor.shutdownNow();
+    }
+  }
+
+  @Test
+  public void secondLevelSplitFallsBackWhenSurvivorsOrShapeBarSplit() {
+    List<byte[]> keys = new ArrayList<>();
+    List<byte[]> values = new ArrayList<>();
+    // First nibble 0xA: a branch with exactly two second-nibble children.
+    for (int index = 0; index < 70; index++) {
+      keys.add(nibbledKey(0x0a, 0, index));
+      values.add(value("fallback-initial-a0-" + index));
+    }
+    for (int index = 0; index < 10; index++) {
+      keys.add(nibbledKey(0x0a, 1, 0x100 + index));
+      values.add(value("fallback-initial-a1-" + index));
+    }
+    // First nibble 0xC: every key shares the second nibble, so the child is an extension.
+    for (int index = 0; index < 70; index++) {
+      keys.add(nibbledKey(0x0c, 5, 0x200 + index));
+      values.add(value("fallback-initial-c5-" + index));
+    }
+    for (int first = 1; first <= 2; first++) {
+      for (int index = 0; index < 4; index++) {
+        keys.add(nibbledKey(first, 0, 0x300 + first * 16 + index));
+        values.add(value("fallback-initial-sibling-" + first + "-" + index));
+      }
+    }
+    InMemoryPathNodeStore sourceStore = new InMemoryPathNodeStore();
+    PathMerkleTrie source = new PathMerkleTrie(sourceStore);
+    for (int i = 0; i < keys.size(); i++) {
+      source.put(keys.get(i), values.get(i));
+    }
+    byte[] initialRoot = source.rootHash();
+    Map<String, byte[]> initialNodes = copyNodeMap(sourceStore.nodes);
+
+    List<byte[]> changeKeys = new ArrayList<>();
+    List<byte[]> changeValues = new ArrayList<>();
+    // Deleting the whole second-nibble-0 subtree leaves a single guaranteed survivor.
+    for (int index = 0; index < 70; index++) {
+      changeKeys.add(nibbledKey(0x0a, 0, index));
+      changeValues.add(null);
+    }
+    for (int index = 0; index < 10; index++) {
+      changeKeys.add(nibbledKey(0x0a, 1, 0x100 + index));
+      changeValues.add(value("fallback-updated-a1-" + index));
+    }
+    // 70 inserts under an empty first nibble: the child is null, not a branch.
+    for (int index = 0; index < 70; index++) {
+      changeKeys.add(nibbledKey(0x0b, index & 0x0f, 0x400 + index));
+      changeValues.add(value("fallback-inserted-b-" + index));
+    }
+    for (int index = 0; index < 70; index++) {
+      changeKeys.add(nibbledKey(0x0c, 5, 0x200 + index));
+      changeValues.add(value("fallback-updated-c5-" + index));
+    }
+    for (int first = 1; first <= 2; first++) {
+      for (int index = 0; index < 4; index++) {
+        changeKeys.add(nibbledKey(first, 0, 0x300 + first * 16 + index));
+        changeValues.add(value("fallback-sibling-" + first + "-" + index));
+      }
+    }
+
+    InMemoryPathNodeStore sequentialStore = new InMemoryPathNodeStore();
+    sequentialStore.nodes.putAll(copyNodeMap(initialNodes));
+    PathMerkleTrie sequential = new PathMerkleTrie(sequentialStore);
+    sequential.restoreRoot(initialRoot);
+    List<PathMerkleTrie.BatchMutation> changes = new ArrayList<>();
+    for (int i = 0; i < changeKeys.size(); i++) {
+      if (changeValues.get(i) == null) {
+        sequential.delete(changeKeys.get(i));
+      } else {
+        sequential.put(changeKeys.get(i), changeValues.get(i));
+      }
+      changes.add(new PathMerkleTrie.BatchMutation(changeKeys.get(i), changeValues.get(i)));
+    }
+    byte[] expectedRoot = sequential.rootHash();
+
+    InMemoryPathNodeStore parallelStore = new InMemoryPathNodeStore();
+    parallelStore.nodes.putAll(copyNodeMap(initialNodes));
+    PathMerkleTrie parallel = new PathMerkleTrie(parallelStore);
+    parallel.restoreRoot(initialRoot);
+    ExecutorService executor = Executors.newFixedThreadPool(4);
+    try {
+      parallel.applyBatch(changes, executor, false);
+      assertArrayEquals(expectedRoot, parallel.rootHash());
+      assertNodeMapsEqual(sequentialStore.nodes, parallelStore.nodes);
+      assertEquals(sequential.size(), parallel.size());
+      assertNull(parallel.get(nibbledKey(0x0a, 0, 0)));
+      assertArrayEquals(value("fallback-updated-a1-3"), parallel.get(nibbledKey(0x0a, 1, 0x103)));
+      assertArrayEquals(value("fallback-inserted-b-9"), parallel.get(nibbledKey(0x0b, 9, 0x409)));
+      assertArrayEquals(value("fallback-updated-c5-8"), parallel.get(nibbledKey(0x0c, 5, 0x208)));
+    } finally {
+      executor.shutdownNow();
+    }
+  }
+
+  private static byte[] nibbledKey(int first, int second, int index) {
+    byte[] key = new byte[PathMerkleTrie.SECURE_KEY_LENGTH];
+    key[0] = (byte) (first << 4 | second);
+    ByteBuffer.wrap(key, key.length - Integer.BYTES, Integer.BYTES).putInt(index);
+    return key;
+  }
+
   private static byte[] referenceRoot(byte[][] keys, byte[][] values) {
     TrieImpl reference = new TrieImpl();
     reference.setAsync(false);
