@@ -4,6 +4,7 @@ import static org.mockito.Mockito.mock;
 
 import com.google.protobuf.ByteString;
 import java.lang.reflect.Field;
+import java.util.Collections;
 import org.junit.Assert;
 import org.junit.Test;
 import org.mockito.Mockito;
@@ -20,6 +21,7 @@ import org.tron.core.db.Manager;
 import org.tron.core.exception.P2pException;
 import org.tron.core.exception.P2pException.TypeEnum;
 import org.tron.core.store.DynamicPropertiesStore;
+import org.tron.core.store.WitnessScheduleStore;
 import org.tron.protos.Protocol.Transaction.Contract.ContractType;
 import org.tron.protos.contract.BalanceContract.TransferContract;
 
@@ -138,6 +140,193 @@ public class TronNetDelegateTest {
     Field f = obj.getClass().getDeclaredField(name);
     f.setAccessible(true);
     f.set(obj, value);
+  }
+
+  @Test
+  public void testValidSyncBlock() throws Exception {
+    Args.setParam(new String[] {}, TestConstants.TEST_CONF);
+    TronNetDelegate tronNetDelegate = new TronNetDelegate();
+
+    ByteString witness = ByteString.copyFrom(ByteArray.fromHexString(
+        Wallet.getAddressPreFixString() + "A389132D6639FBDA4FBC8B659264E6B7C90DB086"));
+    WitnessScheduleStore scheduleStore = mock(WitnessScheduleStore.class);
+    Mockito.when(scheduleStore.getActiveWitnesses())
+        .thenReturn(Collections.singletonList(witness));
+    setField(tronNetDelegate, "witnessScheduleStore", scheduleStore);
+
+    Manager dbManager = mock(Manager.class);
+    Mockito.when(dbManager.getDynamicPropertiesStore())
+        .thenReturn(mock(DynamicPropertiesStore.class));
+    setField(tronNetDelegate, "dbManager", dbManager);
+
+    ChainBaseManager chainBaseManager = mock(ChainBaseManager.class);
+    Mockito.when(chainBaseManager.getSolidBlockId())
+        .thenReturn(new BlockCapsule.BlockId(Sha256Hash.ZERO_HASH, 0L));
+    Mockito.when(chainBaseManager.getBlockById(Mockito.any()))
+        .thenReturn(new BlockCapsule(0, Sha256Hash.ZERO_HASH, 0L, witness));
+    setField(tronNetDelegate, "chainBaseManager", chainBaseManager);
+
+    // a sync block signed by a non-witness account is rejected as an attack
+    BlockCapsule nonWitnessBlock = new BlockCapsule(1, Sha256Hash.ZERO_HASH,
+        System.currentTimeMillis(), ByteString.copyFrom("not-a-witness".getBytes()));
+    try {
+      tronNetDelegate.validSyncBlock(nonWitnessBlock);
+      Assert.fail("Expected P2pException for non-witness block");
+    } catch (P2pException e) {
+      Assert.assertEquals(TypeEnum.NON_WITNESS_BLOCK, e.getType());
+    }
+
+    // an active witness passes the membership check; signature validation still applies
+    BlockCapsule witnessBlock = new BlockCapsule(1, Sha256Hash.ZERO_HASH,
+        System.currentTimeMillis(), witness);
+    try {
+      tronNetDelegate.validSyncBlock(witnessBlock);
+      Assert.fail("Expected P2pException for missing signature");
+    } catch (P2pException e) {
+      Assert.assertEquals(TypeEnum.BLOCK_SIGN_INVALID, e.getType());
+    }
+  }
+
+  @Test
+  public void testValidSyncBlockAcrossMaintenance() throws Exception {
+    Args.setParam(new String[] {}, TestConstants.TEST_CONF);
+    TronNetDelegate tronNetDelegate = new TronNetDelegate();
+
+    ByteString oldWitness = ByteString.copyFrom(ByteArray.fromHexString(
+        Wallet.getAddressPreFixString() + "A389132D6639FBDA4FBC8B659264E6B7C90DB086"));
+    ByteString newWitness = ByteString.copyFrom(ByteArray.fromHexString(
+        Wallet.getAddressPreFixString() + "B499132D6639FBDA4FBC8B659264E6B7C90DB086"));
+    ByteString stranger = ByteString.copyFrom(ByteArray.fromHexString(
+        Wallet.getAddressPreFixString() + "C599132D6639FBDA4FBC8B659264E6B7C90DB086"));
+
+    long interval = 21_600_000L;
+    long next = 1_000_000_000_000L;
+    long periodStart = next - interval;
+
+    DynamicPropertiesStore propertiesStore = mock(DynamicPropertiesStore.class);
+    Mockito.when(propertiesStore.getMaintenanceTimeInterval()).thenReturn(interval);
+    Mockito.when(propertiesStore.getNextMaintenanceTime()).thenReturn(next);
+    Manager dbManager = mock(Manager.class);
+    Mockito.when(dbManager.getDynamicPropertiesStore()).thenReturn(propertiesStore);
+    setField(tronNetDelegate, "dbManager", dbManager);
+
+    WitnessScheduleStore scheduleStore = mock(WitnessScheduleStore.class);
+    Mockito.when(scheduleStore.getActiveWitnesses())
+        .thenReturn(Collections.singletonList(oldWitness));
+    setField(tronNetDelegate, "witnessScheduleStore", scheduleStore);
+
+    ChainBaseManager chainBaseManager = mock(ChainBaseManager.class);
+    Mockito.when(chainBaseManager.getSolidBlockId())
+        .thenReturn(new BlockCapsule.BlockId(Sha256Hash.ZERO_HASH, 0L));
+    // solid block time is re-stubbed per phase below
+    Mockito.when(chainBaseManager.getBlockById(Mockito.any()))
+        .thenReturn(new BlockCapsule(0, Sha256Hash.ZERO_HASH, periodStart - 3000, oldWitness));
+    setField(tronNetDelegate, "chainBaseManager", chainBaseManager);
+
+    // current-period block from an active witness: membership passes,
+    // signature validation still applies
+    try {
+      tronNetDelegate.validSyncBlock(new BlockCapsule(1, Sha256Hash.ZERO_HASH,
+          periodStart + 6000, oldWitness));
+      Assert.fail("Expected P2pException for missing signature");
+    } catch (P2pException e) {
+      Assert.assertEquals(TypeEnum.BLOCK_SIGN_INVALID, e.getType());
+    }
+
+    // a maintenance transition replaces the witness set; solid has not reached
+    // the transition yet, so the current period is unsettled
+    Mockito.when(scheduleStore.getActiveWitnesses())
+        .thenReturn(Collections.singletonList(newWitness));
+    Mockito.when(propertiesStore.getNextMaintenanceTime()).thenReturn(next + interval);
+
+    // first block from the new witness is picked up by the live read
+    try {
+      tronNetDelegate.validSyncBlock(new BlockCapsule(2, Sha256Hash.ZERO_HASH,
+          next + 9000, newWitness));
+      Assert.fail("Expected P2pException for missing signature");
+    } catch (P2pException e) {
+      Assert.assertEquals(TypeEnum.BLOCK_SIGN_INVALID, e.getType());
+    }
+
+    // the maintenance block itself is produced by the previous period's witness
+    try {
+      tronNetDelegate.validSyncBlock(new BlockCapsule(3, Sha256Hash.ZERO_HASH,
+          next, oldWitness));
+      Assert.fail("Expected P2pException for missing signature");
+    } catch (P2pException e) {
+      Assert.assertEquals(TypeEnum.BLOCK_SIGN_INVALID, e.getType());
+    }
+
+    // while the transition is not solidified, the previous period's witnesses
+    // are still accepted for current-period blocks
+    try {
+      tronNetDelegate.validSyncBlock(new BlockCapsule(4, Sha256Hash.ZERO_HASH,
+          next + 12000, oldWitness));
+      Assert.fail("Expected P2pException for missing signature");
+    } catch (P2pException e) {
+      Assert.assertEquals(TypeEnum.BLOCK_SIGN_INVALID, e.getType());
+    }
+
+    // once the transition is solidified, the check is strict again
+    Mockito.when(chainBaseManager.getBlockById(Mockito.any()))
+        .thenReturn(new BlockCapsule(0, Sha256Hash.ZERO_HASH, next, newWitness));
+    try {
+      tronNetDelegate.validSyncBlock(new BlockCapsule(4, Sha256Hash.ZERO_HASH,
+          next + 12000, oldWitness));
+      Assert.fail("Expected P2pException for non-witness block");
+    } catch (P2pException e) {
+      Assert.assertEquals(TypeEnum.NON_WITNESS_BLOCK, e.getType());
+    }
+
+    // an account in neither period is rejected even with a previous-period timestamp
+    Mockito.when(chainBaseManager.getBlockById(Mockito.any()))
+        .thenReturn(new BlockCapsule(0, Sha256Hash.ZERO_HASH, next - 3000, newWitness));
+    try {
+      tronNetDelegate.validSyncBlock(new BlockCapsule(5, Sha256Hash.ZERO_HASH,
+          next, stranger));
+      Assert.fail("Expected P2pException for non-witness block");
+    } catch (P2pException e) {
+      Assert.assertEquals(TypeEnum.NON_WITNESS_BLOCK, e.getType());
+    }
+
+    // when solidification has genuinely stalled for two periods, blocks older
+    // than the tracked periods are let through (apply-time validation decides)
+    Mockito.when(chainBaseManager.getBlockById(Mockito.any()))
+        .thenReturn(new BlockCapsule(0, Sha256Hash.ZERO_HASH, periodStart - interval,
+            oldWitness));
+    try {
+      tronNetDelegate.validSyncBlock(new BlockCapsule(6, Sha256Hash.ZERO_HASH,
+          periodStart, stranger));
+      Assert.fail("Expected P2pException for missing signature");
+    } catch (P2pException e) {
+      Assert.assertEquals(TypeEnum.BLOCK_SIGN_INVALID, e.getType());
+    }
+
+    // but a block not newer than the solid block is always forged: backdating
+    // cannot bypass the check
+    try {
+      tronNetDelegate.validSyncBlock(new BlockCapsule(6, Sha256Hash.ZERO_HASH,
+          periodStart - interval, stranger));
+      Assert.fail("Expected P2pException for backdated block");
+    } catch (P2pException e) {
+      Assert.assertEquals(TypeEnum.NON_WITNESS_BLOCK, e.getType());
+    }
+
+    // a fork switch across the maintenance boundary rolls the store back to the
+    // old witness set; the live read picks it up on the very next block
+    Mockito.when(scheduleStore.getActiveWitnesses())
+        .thenReturn(Collections.singletonList(oldWitness));
+    Mockito.when(propertiesStore.getNextMaintenanceTime()).thenReturn(next);
+    Mockito.when(chainBaseManager.getBlockById(Mockito.any()))
+        .thenReturn(new BlockCapsule(0, Sha256Hash.ZERO_HASH, periodStart - 3000,
+            oldWitness));
+    try {
+      tronNetDelegate.validSyncBlock(new BlockCapsule(7, Sha256Hash.ZERO_HASH,
+          periodStart + 15000, oldWitness));
+      Assert.fail("Expected P2pException for missing signature");
+    } catch (P2pException e) {
+      Assert.assertEquals(TypeEnum.BLOCK_SIGN_INVALID, e.getType());
+    }
   }
 
   @Test
