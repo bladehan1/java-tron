@@ -2,6 +2,7 @@ package org.tron.core.db2.archive;
 
 import com.google.protobuf.InvalidProtocolBufferException;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -10,7 +11,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import org.tron.common.utils.ByteArray;
 import org.tron.core.db2.archive.ArchiveReadContext.StoreAdapter;
+import org.tron.core.store.DynamicPropertiesStore;
 import org.tron.core.store.StorageRowKeyCodec;
 import org.tron.protos.Protocol.Account;
 import org.tron.protos.contract.SmartContractOuterClass.ContractState;
@@ -45,6 +48,9 @@ public final class HistoricalQuerySession implements AutoCloseable {
 
   private static final Map<String, StoreAdapter<byte[]>> RAW_ADAPTERS = rawAdapters();
   private static final List<StoreAdapter<?>> EXACT_ADAPTERS = exactAdapters();
+  private static final P66AccountAssetCodec ASSET_CODEC = new P66AccountAssetCodec();
+  private static final HistoricalAccountAssetBalanceResolver ACCOUNT_ASSET_RESOLVER =
+      new HistoricalAccountAssetBalanceResolver();
 
   private final ArchiveReadContext context;
   private final byte[] targetBlockHash;
@@ -54,6 +60,8 @@ public final class HistoricalQuerySession implements AutoCloseable {
   private long reads;
   private long bytes;
   private boolean closed;
+  private HistoricalForkView forkView;
+  private boolean executionBound;
 
   private HistoricalQuerySession(ArchiveReadContext context, byte[] targetBlockHash,
       Limits limits, HistoricalQueryControl control, Runnable releaseAdmission) {
@@ -103,6 +111,28 @@ public final class HistoricalQuerySession implements AutoCloseable {
     }
   }
 
+  /**
+   * Opens a session over any point snapshot. Package-private: production code opens sessions only
+   * through the common-checkpoint snapshot or a gate lease; tests use this to bind request-owned
+   * fakes.
+   */
+  static HistoricalQuerySession openPoint(ArchivePointSnapshot snapshot, byte[] targetBlockHash,
+      Limits limits, HistoricalQueryControl control, Runnable releaseAdmission)
+      throws IOException {
+    ArchiveReadContext context = ArchiveReadContext.openPoint(snapshot, EXACT_ADAPTERS);
+    try {
+      return new HistoricalQuerySession(context, targetBlockHash, limits, control,
+          releaseAdmission);
+    } catch (RuntimeException failure) {
+      try {
+        context.close();
+      } catch (IOException closeFailure) {
+        failure.addSuppressed(closeFailure);
+      }
+      throw failure;
+    }
+  }
+
   /** Takes ownership of {@code lease}, including if session construction fails. */
   public static HistoricalQuerySession open(ArchiveRuntimeQueryGate.Lease lease,
       byte[] targetBlockHash, Limits limits) throws IOException {
@@ -128,88 +158,237 @@ public final class HistoricalQuerySession implements AutoCloseable {
   }
 
   public long getTargetBlock() {
-    ensureOpen();
-    return context.getTargetBlock();
+    return guarded(() -> {
+      ensureOpen();
+      return context.getTargetBlock();
+    });
   }
 
   public long getPinnedBlock() {
-    ensureOpen();
-    return context.getPinnedBlock();
+    return guarded(() -> {
+      ensureOpen();
+      return context.getPinnedBlock();
+    });
   }
 
   public byte[] getTargetBlockHash() {
-    ensureOpen();
-    return Arrays.copyOf(targetBlockHash, targetBlockHash.length);
+    return guarded(() -> {
+      ensureOpen();
+      return Arrays.copyOf(targetBlockHash, targetBlockHash.length);
+    });
   }
 
   public Optional<Account> getAccount(byte[] address) {
-    byte[] key = copyKey(address, "address");
-    Optional<byte[]> encoded = getExact("account", key);
-    if (!encoded.isPresent()) {
-      return Optional.empty();
-    }
-    Account account = decodeAccount(encoded.get());
-    if (!account.getAddress().equals(com.google.protobuf.ByteString.copyFrom(key))) {
-      throw new ArchivePersistenceException(
-          "Historical Account address does not match the physical key");
-    }
-    return Optional.of(account);
+    return guarded(() -> {
+      byte[] key = copyKey(address, "address");
+      Optional<byte[]> encoded = readExact("account", key);
+      if (!encoded.isPresent()) {
+        return Optional.<Account>empty();
+      }
+      Account account = decodeAccount(encoded.get());
+      if (!account.getAddress().equals(com.google.protobuf.ByteString.copyFrom(key))) {
+        throw new HistoricalQueryException(HistoricalQueryException.Reason.CORRUPT,
+            "Historical Account address does not match the physical key");
+      }
+      return Optional.of(account);
+    });
   }
 
   public Optional<SmartContract> getContract(byte[] address) {
-    Optional<byte[]> encoded = getExact("contract", copyKey(address, "address"));
-    return encoded.map(HistoricalQuerySession::decodeContract);
+    return guarded(() -> readExact("contract", copyKey(address, "address"))
+        .map(HistoricalQuerySession::decodeContract));
   }
 
   public Optional<byte[]> getCode(byte[] address) {
-    return getExact("code", copyKey(address, "address"));
+    return guarded(() -> readExact("code", copyKey(address, "address")));
   }
 
   public Optional<ContractState> getContractState(byte[] address) {
-    Optional<byte[]> encoded = getExact("contract-state", copyKey(address, "address"));
-    return encoded.map(HistoricalQuerySession::decodeContractState);
+    return guarded(() -> readExact("contract-state", copyKey(address, "address"))
+        .map(HistoricalQuerySession::decodeContractState));
   }
 
-  /** Contract metadata and storage-row lookup are resolved by the same request context. */
+  /**
+   * Point read of one logical contract slot at S(T) (chapter 05 section 3.12.3): the contract
+   * metadata and up to two storage rows are read through this session. An absent contract yields
+   * {@link Optional#empty()} (the RPC answers 32 zero bytes).
+   *
+   * <p>Rule: the 48-byte key {@code N(s)} first; when PRESENT it is authoritative (all-zero means
+   * zero); otherwise the 32-byte key {@code L(s)}. When S(T) predates the optimized format no
+   * 48-byte row exists, so the rule degenerates to the 32-byte read; the switch itself is not read.
+   */
+  public Optional<byte[]> storage(byte[] contractAddress, byte[] logicalSlot) {
+    return guarded(() -> {
+      byte[] address = copyKey(contractAddress, "contractAddress");
+      byte[] slot = copyKey(logicalSlot, "logicalSlot");
+      Optional<SmartContract> contract = getContract(address);
+      if (!contract.isPresent()) {
+        return Optional.<byte[]>empty();
+      }
+      return resolveStorageSlot(address, slot, contract.get());
+    });
+  }
+
+  /**
+   * Contract metadata and storage-row lookup are resolved by the same request context. Unlike
+   * {@link #storage}, a missing contract is a failure. Uses the same dual-key rule.
+   */
   public Optional<byte[]> getStorage(byte[] contractAddress, byte[] logicalSlot) {
-    ensureOpen();
-    byte[] address = copyKey(contractAddress, "contractAddress");
-    byte[] slot = copyKey(logicalSlot, "logicalSlot");
-    SmartContract contract = getContract(address).orElseThrow(() ->
-        new ArchivePersistenceException(
-            "Historical Contract is required to derive storage-row key"));
-    byte[] transactionHash = contract.getTrxHash().isEmpty()
-        ? null : contract.getTrxHash().toByteArray();
-    byte[] physicalKey = StorageRowKeyCodec.physicalKey(address, slot,
-        contract.getVersion(), transactionHash);
-    return getExact("storage-row", physicalKey);
+    return guarded(() -> {
+      byte[] address = copyKey(contractAddress, "contractAddress");
+      byte[] slot = copyKey(logicalSlot, "logicalSlot");
+      SmartContract contract = getContract(address).orElseThrow(() ->
+          new ArchivePersistenceException(
+              "Historical Contract is required to derive storage-row key"));
+      return resolveStorageSlot(address, slot, contract);
+    });
+  }
+
+  /**
+   * VM row loader: one exact storage-row read. Only the 32-byte and 48-byte key formats are
+   * understood; any other width fails closed as {@code CAPABILITY(UNSUPPORTED_STORAGE_KEY_FORMAT)}.
+   */
+  public Optional<byte[]> storageRow(byte[] physicalKey) {
+    return guarded(() -> {
+      byte[] key = copyKey(physicalKey, "physicalKey");
+      requireStorageRowKey(key);
+      return readExact("storage-row", key);
+    });
+  }
+
+  /**
+   * One TRC10 balance at S(T) with upstream {@code AssetUtil.importAsset} semantics (chapter 05
+   * section 3.11). Always charges exactly three point reads ({@code properties},
+   * {@code account}, {@code account-asset}); an absent Account answers 0. Integrity violations
+   * fail closed as {@code CORRUPT}.
+   */
+  public long accountAssetBalance(byte[] address, String tokenId) {
+    return guarded(() -> {
+      byte[] owner = copyKey(address, "address");
+      byte[] directKey;
+      try {
+        directKey = ASSET_CODEC.assetPhysicalKey(owner, tokenId);
+      } catch (ArchivePersistenceException invalid) {
+        throw new HistoricalQueryCapabilityException(
+            HistoricalQueryCapabilityException.UNSUPPORTED,
+            "Unsupported historical TRC10 identity: " + invalid.getMessage());
+      }
+      OldValue property = OldValue.fromNullable(readExact("properties",
+          HistoricalAccountAssetBalanceResolver.proposal66PhysicalKey()).orElse(null));
+      OldValue account = OldValue.fromNullable(readExact("account", owner).orElse(null));
+      OldValue direct = OldValue.fromNullable(readExact("account-asset", directKey)
+          .orElse(null));
+      if (!property.isPresent()) {
+        // A required (orElseThrow) property absent at S(T): section 3.10.1.
+        throw new HistoricalQueryCapabilityException(
+            HistoricalQueryCapabilityException.UNSUPPORTED_STATE,
+            "Dynamic property is missing at the historical block: ALLOW_ASSET_OPTIMIZATION");
+      }
+      HistoricalAccountAssetBalanceResolver.Result result;
+      try {
+        result = ACCOUNT_ASSET_RESOLVER.resolveValues(context.getTargetBlock(), owner, tokenId,
+            directKey, property, account, direct);
+      } catch (HistoricalQueryException typed) {
+        throw typed;
+      } catch (ArchivePersistenceException invalid) {
+        throw new HistoricalQueryException(HistoricalQueryException.Reason.CORRUPT,
+            invalid.getMessage(), invalid);
+      }
+      return result.isAccountPresent() ? result.getBalance() : 0L;
+    });
+  }
+
+  /** Raw dynamic-property read at S(T); ABSENT is {@link Optional#empty()}. */
+  public Optional<byte[]> dynamicProperty(byte[] key) {
+    return guarded(() -> readExact("properties", copyKey(key, "key")));
+  }
+
+  /**
+   * Typed long dynamic property at S(T) (chapter 05 section 3.10.1): PRESENT uses the stored value;
+   * ABSENT uses the typed getter's default when one exists; otherwise fails closed as
+   * {@code CAPABILITY(UNSUPPORTED_STATE)}. Never falls back to latest.
+   */
+  public long dynamicPropertyLong(String key) {
+    return guarded(() -> {
+      Optional<byte[]> value = readExact("properties",
+          Objects.requireNonNull(key, "key").getBytes(StandardCharsets.UTF_8));
+      if (value.isPresent()) {
+        return ByteArray.toLong(value.get());
+      }
+      Long defaultValue = DynamicPropertiesStore.getLongPropertyDefault(key);
+      if (defaultValue == null) {
+        throw new HistoricalQueryCapabilityException(
+            HistoricalQueryCapabilityException.UNSUPPORTED_STATE,
+            "Dynamic property is missing at the historical block: " + key);
+      }
+      return defaultValue;
+    });
+  }
+
+  /** Fork-activation decisions evaluated at S(T), cached for this request. */
+  public boolean passesFork(org.tron.core.config.Parameter.ForkBlockVersionEnum version) {
+    return forks().pass(version);
+  }
+
+  public org.tron.common.utils.ForkView forks() {
+    return guarded(() -> {
+      ensureOpen();
+      if (forkView == null) {
+        forkView = new HistoricalForkView(this);
+      }
+      return forkView;
+    });
   }
 
   public Optional<byte[]> getExact(String dbName, byte[] physicalRawKey) {
-    ensureOpen();
-    requireReadBudget();
-    try {
-      OldValue value = context.getExact(dbName, copyKey(physicalRawKey, "physicalRawKey"));
-      control.checkActive();
-      if (value.isPresent()) {
-        accountBytes(value.getValue().length);
-      }
-      return value.isPresent() ? Optional.of(value.getValue()) : Optional.empty();
-    } catch (IOException failure) {
-      throw new HistoricalQueryException(HistoricalQueryException.Reason.DATA_ACCESS,
-          "Failed to read historical Store " + dbName, failure);
-    }
+    return guarded(() -> readExact(dbName, physicalRawKey));
   }
 
   public void requirePinnedIdentity() {
-    ensureOpen();
-    context.requirePinnedIdentity();
+    guarded(() -> {
+      ensureOpen();
+      context.requirePinnedIdentity();
+      return null;
+    });
   }
 
   /** Also called for pure-compute VM execution, which may perform no Store reads. */
   public void checkActive() {
+    guarded(() -> {
+      ensureOpen();
+      control.checkActive();
+      return null;
+    });
+  }
+
+  /**
+   * Records {@code failure} as this request's TERMINAL cause (first cause wins) and returns it.
+   * Every later session method and {@link #checkActive()} rethrows the recorded cause.
+   */
+  public RuntimeException markTerminal(RuntimeException failure) {
+    return control.markTerminal(failure);
+  }
+
+  public boolean isTerminal() {
+    return control.isTerminal();
+  }
+
+  public Optional<RuntimeException> terminalFailure() {
+    return control.terminalFailure();
+  }
+
+  /** A session drives at most one VM execution; a second binding is a programming error. */
+  public synchronized void bindExecution() {
     ensureOpen();
-    control.checkActive();
+    if (executionBound) {
+      throw new IllegalStateException("Historical query session is already bound to an execution");
+    }
+    executionBound = true;
+  }
+
+  /** Number of logical point reads charged to this request so far. */
+  public synchronized long getReadCount() {
+    return reads;
   }
 
   public void cancel() {
@@ -229,6 +408,59 @@ public final class HistoricalQuerySession implements AutoCloseable {
       throw new ArchivePersistenceException("Failed to close historical query session", failure);
     } finally {
       releaseAdmission.run();
+    }
+  }
+
+  private Optional<byte[]> readExact(String dbName, byte[] physicalRawKey) {
+    ensureOpen();
+    requireReadBudget();
+    try {
+      OldValue value = context.getExact(dbName, copyKey(physicalRawKey, "physicalRawKey"));
+      control.checkActive();
+      if (value.isPresent()) {
+        accountBytes(value.getValue().length);
+      }
+      return value.isPresent() ? Optional.of(value.getValue()) : Optional.empty();
+    } catch (IOException failure) {
+      throw new HistoricalQueryException(HistoricalQueryException.Reason.DATA_ACCESS,
+          "Failed to read historical Store " + dbName, failure);
+    }
+  }
+
+  private Optional<byte[]> resolveStorageSlot(byte[] address, byte[] slot,
+      SmartContract contract) {
+    byte[] transactionHash = contract.getTrxHash().isEmpty()
+        ? null : contract.getTrxHash().toByteArray();
+    byte[] addressHash = StorageRowKeyCodec.addressHash(address, transactionHash);
+    Optional<byte[]> optimized = dynamicPropertyLong("ALLOW_OPTIMIZE_TVM_STORAGE") == 1L
+        ? readExact("storage-row",
+        StorageRowKeyCodec.optimizedKeyFromAddressHash(addressHash, slot)) : Optional.empty();
+    if (optimized.isPresent()) {
+      return optimized;
+    }
+    return readExact("storage-row", StorageRowKeyCodec.physicalKeyFromAddressHash(addressHash,
+        slot, contract.getVersion()));
+  }
+
+  static void requireStorageRowKey(byte[] key) {
+    if (key.length != StorageRowKeyCodec.KEY_BYTES
+        && key.length != StorageRowKeyCodec.OPTIMIZED_KEY_BYTES) {
+      throw new HistoricalQueryCapabilityException(
+          HistoricalQueryCapabilityException.UNSUPPORTED_STORAGE_KEY_FORMAT,
+          "Historical storage-row key must be 32 or 48 bytes, got " + key.length);
+    }
+  }
+
+  /**
+   * Chapter 05 section 3.7 P1: every failure escaping a session method is recorded as the
+   * request's TERMINAL cause before it is rethrown, so a VM frame that swallows it cannot let the
+   * request finish with a REVERT-shaped or success-shaped answer.
+   */
+  private <T> T guarded(java.util.function.Supplier<T> body) {
+    try {
+      return body.get();
+    } catch (RuntimeException failure) {
+      throw control.markTerminal(failure);
     }
   }
 
@@ -270,7 +502,8 @@ public final class HistoricalQuerySession implements AutoCloseable {
     try {
       return Account.parseFrom(value);
     } catch (InvalidProtocolBufferException failure) {
-      throw new ArchivePersistenceException("Historical Account cannot be decoded", failure);
+      throw new HistoricalQueryException(HistoricalQueryException.Reason.CORRUPT,
+          "Historical Account cannot be decoded", failure);
     }
   }
 
@@ -278,7 +511,8 @@ public final class HistoricalQuerySession implements AutoCloseable {
     try {
       return SmartContract.parseFrom(value);
     } catch (InvalidProtocolBufferException failure) {
-      throw new ArchivePersistenceException("Historical Contract cannot be decoded", failure);
+      throw new HistoricalQueryException(HistoricalQueryException.Reason.CORRUPT,
+          "Historical Contract cannot be decoded", failure);
     }
   }
 
@@ -286,7 +520,7 @@ public final class HistoricalQuerySession implements AutoCloseable {
     try {
       return ContractState.parseFrom(value);
     } catch (InvalidProtocolBufferException failure) {
-      throw new ArchivePersistenceException(
+      throw new HistoricalQueryException(HistoricalQueryException.Reason.CORRUPT,
           "Historical ContractState cannot be decoded", failure);
     }
   }

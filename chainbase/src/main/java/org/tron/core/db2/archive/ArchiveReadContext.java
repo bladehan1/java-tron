@@ -55,6 +55,17 @@ public final class ArchiveReadContext implements Closeable {
     }
   }
 
+  /** Takes ownership of any point snapshot; package-private for request-owned test fakes. */
+  static ArchiveReadContext openPoint(ArchivePointSnapshot snapshot,
+      Collection<StoreAdapter<?>> adapters) throws IOException {
+    try {
+      return new ArchiveReadContext(snapshot, adapters, snapshot);
+    } catch (RuntimeException failure) {
+      closeAfterFailedOpen(snapshot, failure);
+      throw failure;
+    }
+  }
+
   /** Takes ownership of {@code lease} so closing this context also releases gate accounting. */
   public static ArchiveReadContext open(ArchiveRuntimeQueryGate.Lease lease,
       Collection<StoreAdapter<?>> adapters) throws IOException {
@@ -119,7 +130,10 @@ public final class ArchiveReadContext implements Closeable {
     return accountAssetPrefixResolver.resolve(snapshot, address, limits);
   }
 
-  /** Resolves one logical contract slot using contract metadata from this request context. */
+  /**
+   * Resolves one logical contract slot using contract metadata from this request context. Not
+   * budgeted; diagnostics only. Request paths use {@link HistoricalQuerySession#storage}.
+   */
   public synchronized Optional<byte[]> getStorage(byte[] contractAddress, byte[] logicalSlot)
       throws IOException {
     ensureOpen();
@@ -137,9 +151,18 @@ public final class ArchiveReadContext implements Closeable {
       throw new ArchivePersistenceException(
           "Historical Contract metadata cannot be decoded", e);
     }
-    byte[] physicalKey = StorageRowKeyCodec.physicalKey(contractAddress, logicalSlot,
-        contract.getVersion(), contract.getTrxHash().toByteArray());
-    OldValue storageValue = snapshot.get("storage-row", physicalKey);
+    // Same S(T) rule as HistoricalQuerySession.storage (chapter 05 section 3.12.3): the 48-byte
+    // key first, authoritative when PRESENT; otherwise the 32-byte key.
+    byte[] addressHash = StorageRowKeyCodec.addressHash(contractAddress,
+        contract.getTrxHash().toByteArray());
+    OldValue optimized = snapshot.get("storage-row",
+        StorageRowKeyCodec.optimizedKeyFromAddressHash(addressHash, logicalSlot));
+    if (optimized.isPresent()) {
+      return Optional.of(optimized.getValue());
+    }
+    OldValue storageValue = snapshot.get("storage-row",
+        StorageRowKeyCodec.physicalKeyFromAddressHash(addressHash, logicalSlot,
+            contract.getVersion()));
     return storageValue.isPresent()
         ? Optional.of(storageValue.getValue()) : Optional.empty();
   }

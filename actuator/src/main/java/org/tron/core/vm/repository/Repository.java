@@ -17,6 +17,14 @@ public interface Repository {
     return false;
   }
 
+  /**
+   * Records a historical-class failure as the request's TERMINAL cause and returns it (chapter 05
+   * section 3.7 P1). Current execution has no session; the failure is returned unchanged.
+   */
+  default RuntimeException markHistoricalFailure(RuntimeException failure) {
+    return failure;
+  }
+
   AssetIssueCapsule getAssetIssue(byte[] tokenId);
 
   AssetIssueV2Store getAssetIssueV2Store();
@@ -35,16 +43,26 @@ public interface Repository {
 
   BytesCapsule getDynamicProperty(byte[] bytesKey);
 
+  /**
+   * Historical-only typed property read at S(T) (chapter 05 section 3.10.1): PRESENT value, else
+   * the typed getter's default, else {@code CAPABILITY(UNSUPPORTED_STATE)}. Current execution must
+   * use the DynamicPropertiesStore getters; calling this outside historical mode is a bug.
+   */
   default long getDynamicPropertyLong(String key) {
+    if (!isHistorical()) {
+      throw new IllegalStateException(
+          "getDynamicPropertyLong is reserved for historical execution: " + key);
+    }
     BytesCapsule value = getDynamicProperty(
         key.getBytes(java.nio.charset.StandardCharsets.UTF_8));
     if (value == null) {
-      Long defaultValue = isHistorical()
-          ? DynamicPropertiesStore.getLongPropertyDefault(key) : null;
+      Long defaultValue = DynamicPropertiesStore.getLongPropertyDefault(key);
       if (defaultValue != null) {
         return defaultValue;
       }
-      throw new IllegalArgumentException("Dynamic property is missing: " + key);
+      throw markHistoricalFailure(new org.tron.core.vm.HistoricalCapabilityException(
+          org.tron.core.db2.archive.HistoricalQueryCapabilityException.UNSUPPORTED_STATE,
+          "Dynamic property is missing at the historical block: " + key));
     }
     return ByteArray.toLong(value.getData());
   }

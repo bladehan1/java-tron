@@ -537,7 +537,9 @@ public class ArchiveReadSnapshotTest {
     String[] values = {
         "UNFREEZE_DELAY_DAYS", "DYNAMIC_ENERGY_THRESHOLD",
         "DYNAMIC_ENERGY_INCREASE_FACTOR", "DYNAMIC_ENERGY_MAX_FACTOR", "ENERGY_FEE",
-        "MAX_FEE_LIMIT", "MAX_CPU_TIME_OF_ONE_TX", "CURRENT_CYCLE_NUMBER"
+        "MAX_FEE_LIMIT", "MAX_CPU_TIME_OF_ONE_TX", "CURRENT_CYCLE_NUMBER",
+        // ForkView@S(T) inputs; every real DynamicPropertiesStore has them from genesis.
+        "latest_block_header_timestamp", "MAINTENANCE_TIME_INTERVAL"
     };
     for (String key : values) {
       properties.add(new Entry(bytes(key), OldValue.present(ByteArray.fromLong(100L))));
@@ -556,7 +558,7 @@ public class ArchiveReadSnapshotTest {
         "ALLOW_TVM_BLOB", "ALLOW_TVM_SELFDESTRUCT_RESTRICTION", "PROPOSAL_EXPIRE_TIME",
         "ALLOW_TVM_OSAKA", "ALLOW_TVM_PRAGUE", "BLOCK_HASH_HISTORY_INSTALLED",
         "ALLOW_HARDEN_RESOURCE_CALCULATION", "ALLOW_HARDEN_EXCHANGE_CALCULATION",
-        "TURKISH_KEY_MIGRATION_DONE"));
+        "TURKISH_KEY_MIGRATION_DONE", "ALLOW_OPTIMIZE_TVM_STORAGE"));
     assertEquals(expectedKeys, defaults.keySet());
 
     List<Entry> requiredProperties = historicalVmProperties().stream()
@@ -577,15 +579,17 @@ public class ArchiveReadSnapshotTest {
           assertEquals(defaultEntry.getKey(), defaultEntry.getValue().longValue(),
               root.getDynamicPropertyLong(defaultEntry.getKey()));
         }
-        assertThrows(IllegalArgumentException.class,
-            () -> root.getDynamicPropertyLong("UNKNOWN_REQUIRED_PROPERTY"));
-
         ConfigLoader.load(root);
         assertEquals(defaults.get("ALLOW_TVM_OSAKA").longValue(),
             VMConfig.allowTvmOsaka() ? 1L : 0L);
         assertEquals(defaults.get("ALLOW_HARDEN_RESOURCE_CALCULATION").longValue(),
             VMConfig.allowHardenResourceCalculation() ? 1L : 0L);
         VMConfig.clearLocalSnapshot();
+
+        // An unregistered ABSENT key fails closed and makes the request TERMINAL.
+        assertThrows(HistoricalQueryCapabilityException.class,
+            () -> root.getDynamicPropertyLong("UNKNOWN_REQUIRED_PROPERTY"));
+        assertTrue(session.isTerminal());
       }
       assertTrue(latest.closed);
       gate.close();

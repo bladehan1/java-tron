@@ -7,7 +7,9 @@ import static org.junit.Assert.assertThrows;
 import java.util.Arrays;
 import org.bouncycastle.util.encoders.Hex;
 import org.junit.Test;
+import org.tron.common.crypto.Hash;
 import org.tron.common.runtime.vm.DataWord;
+import org.tron.common.utils.ByteUtil;
 import org.tron.core.capsule.StorageRowCapsule;
 import org.tron.core.store.StorageRowKeyCodec;
 import org.tron.core.vm.program.Storage;
@@ -39,7 +41,7 @@ public class StorageRowKeyCodecTest {
 
   @Test
   public void latestVmStorageUsesTheSharedCodec() {
-    Storage storage = new Storage(ADDRESS, null, key -> null);
+    Storage storage = new Storage(ADDRESS, null, key -> null, false, false);
     storage.setContractVersion(1);
     storage.generateAddrHash(TRANSACTION_HASH);
     DataWord slot = new DataWord(SLOT);
@@ -47,6 +49,30 @@ public class StorageRowKeyCodecTest {
 
     StorageRowCapsule row = storage.getRowCache().get(slot);
     assertArrayEquals(StorageRowKeyCodec.physicalKey(ADDRESS, SLOT, 1, TRANSACTION_HASH),
+        row.getRowKey());
+  }
+
+  @Test
+  public void optimizedKeyMatchesTheGreatVoyage4823Layout() {
+    byte[] addressHash = Hash.sha3(ByteUtil.merge(ADDRESS, TRANSACTION_HASH));
+    byte[] expected = new byte[48];
+    System.arraycopy(addressHash, 0, expected, 0, 16);
+    System.arraycopy(Hash.sha3(ByteUtil.merge(addressHash, SLOT)), 0, expected, 16, 32);
+    assertArrayEquals(expected,
+        StorageRowKeyCodec.optimizedKey(ADDRESS, SLOT, TRANSACTION_HASH));
+    assertEquals(StorageRowKeyCodec.OPTIMIZED_KEY_BYTES,
+        StorageRowKeyCodec.optimizedKey(ADDRESS, SLOT, null).length);
+  }
+
+  @Test
+  public void optimizedVmStorageUsesTheSharedCodec() {
+    Storage storage = new Storage(ADDRESS, null, key -> null, true, false);
+    storage.generateAddrHash(TRANSACTION_HASH);
+    DataWord slot = new DataWord(SLOT);
+    storage.put(slot, new DataWord(1));
+
+    StorageRowCapsule row = storage.getRowCache().get(slot);
+    assertArrayEquals(StorageRowKeyCodec.optimizedKey(ADDRESS, SLOT, TRANSACTION_HASH),
         row.getRowKey());
   }
 

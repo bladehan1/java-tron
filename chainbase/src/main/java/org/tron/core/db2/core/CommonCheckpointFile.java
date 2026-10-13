@@ -13,7 +13,9 @@ import java.util.Arrays;
 import java.util.Objects;
 
 /** Standalone durable file lifecycle for one immutable common-checkpoint redo payload. */
-public final class CommonCheckpointFile {
+public final class CommonCheckpointFile implements java.io.Closeable {
+
+  private org.tron.core.db2.archive.SharedCheckpointDatabase shared;
 
   static final String FILE_NAME = "COMMON_CHECKPOINT";
   static final String TEMPORARY_FILE_NAME = ".COMMON_CHECKPOINT.tmp";
@@ -39,8 +41,52 @@ public final class CommonCheckpointFile {
     this.temporary = this.directory.resolve(TEMPORARY_FILE_NAME);
   }
 
+  public static CommonCheckpointFile openDatabase(Path directory,
+      org.tron.core.db2.stateroot.PathStateStoreManifest.Engine engine) throws IOException {
+    CommonCheckpointFile result = new CommonCheckpointFile(directory);
+    if (Files.exists(result.checkpoint, LinkOption.NOFOLLOW_LINKS)) {
+      // Finish the legacy durable WAL before opening a new shared authority.
+      if (Files.exists(directory.resolve("redo"), LinkOption.NOFOLLOW_LINKS)) {
+        throw new IOException("legacy and shared checkpoint authorities coexist");
+      }
+      return result;
+    }
+    result.shared = new org.tron.core.db2.archive.SharedCheckpointDatabase(
+        directory.resolve("redo"), engine);
+    return result;
+  }
+
+  public CommonCheckpointPayload latestCommitted() throws IOException {
+    return shared == null ? loadIfPresent() : shared.latest();
+  }
+
+  public boolean retainsGenerations() {
+    return shared != null;
+  }
+
+  public java.util.List<CommonCheckpointPayload> retained() throws IOException {
+    return shared == null ? java.util.Collections.emptyList() : shared.retained();
+  }
+
+  public void advanceDurableBase() throws IOException {
+    if (shared != null) {
+      shared.advanceDurableBase();
+    }
+  }
+
+  @Override
+  public void close() throws IOException {
+    if (shared != null) {
+      shared.close();
+    }
+  }
+
   /** Publishes once; an exact existing payload is an idempotent retry and seals its directory. */
   public synchronized void publish(CommonCheckpointPayload payload) throws IOException {
+    if (shared != null) {
+      shared.publish(payload);
+      return;
+    }
     byte[] encoded = codec.encode(Objects.requireNonNull(payload, "payload"));
     requireDirectory();
     if (Files.exists(checkpoint, LinkOption.NOFOLLOW_LINKS)) {
@@ -68,6 +114,13 @@ public final class CommonCheckpointFile {
   }
 
   public synchronized CommonCheckpointPayload loadRequired() throws IOException {
+    if (shared != null) {
+      CommonCheckpointPayload payload = shared.latest();
+      if (payload == null) {
+        throw new IOException("shared checkpoint is missing");
+      }
+      return payload;
+    }
     if (!Files.isRegularFile(checkpoint, LinkOption.NOFOLLOW_LINKS)) {
       throw new IOException("common checkpoint is missing or not a regular file");
     }
@@ -83,6 +136,9 @@ public final class CommonCheckpointFile {
   }
 
   public synchronized CommonCheckpointPayload loadIfPresent() throws IOException {
+    if (shared != null) {
+      return shared.isPending() ? shared.latest() : null;
+    }
     if (!Files.exists(checkpoint, LinkOption.NOFOLLOW_LINKS)) {
       return null;
     }
@@ -91,11 +147,23 @@ public final class CommonCheckpointFile {
 
   /** Returns whether startup must run redo before opening a published physical state. */
   public synchronized boolean isPresent() {
+    if (shared != null) {
+      try {
+        return shared.isPending();
+      } catch (IOException failure) {
+        throw new org.tron.core.db2.archive.ArchivePersistenceException(
+            "shared checkpoint cannot be inspected", failure);
+      }
+    }
     return Files.exists(checkpoint, LinkOption.NOFOLLOW_LINKS);
   }
 
   /** Retires only this checkpoint and its non-authoritative temporary file. */
   public synchronized void retire() throws IOException {
+    if (shared != null) {
+      shared.applied();
+      return;
+    }
     requireDirectory();
     boolean changed = Files.deleteIfExists(checkpoint);
     changed |= Files.deleteIfExists(temporary);

@@ -13,47 +13,63 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.db2.archive.BlockReverseDiff.DbGroup;
+import org.tron.core.db2.archive.ServingFailure.Reason;
+import org.tron.core.db2.archive.ServingFailure.ServingFaultException;
 import org.tron.core.db2.archive.StateArchiveBlockFrameCodecV5.DecodedFrame;
 import org.tron.core.db2.archive.StateArchiveCommittedViewV5.PointLocation;
 import org.tron.core.db2.core.CommonCheckpointTarget;
 
-/** Full five-lane V5 replay source for the existing single serving-index owner. */
-final class StateArchiveServingSourceV5 implements StateArchiveServingSource {
+/**
+ * Five-lane V5 replay source and the committed History view of serving (ch04 §3.3.1 rule 4).
+ *
+ * <p>The published boundary is an immutable {@link Committed} behind a volatile reference: the
+ * History participant replaces it in {@code afterCommit} (single writer, O(1)); the serving build
+ * thread and readers take it without any lock (L3). Canonical parent hashes and timestamps come
+ * from the Block Store; a missing block is SOURCE_UNAVAILABLE, a frame/canonical identity
+ * mismatch or an undecodable committed frame is SOURCE_CORRUPT (ch04 §5.1).
+ */
+final class StateArchiveServingSourceV5 implements ServingHistorySource, StateArchiveServingSource {
 
   static final long MAX_REPLAY_DATA_HANDLES = 5;
 
   private final Path root;
   private final long firstBlockNumber;
+  private final byte[] baselineParentHash;
   private final StateArchiveCanonicalBlockMetaSource canonical;
-  private final StateArchiveBlockFrameCodecV5 codec = new StateArchiveBlockFrameCodecV5();
-  private StateArchiveTailV5 tail;
-  private CommonCheckpointTarget target;
+  private volatile Committed published;
 
   StateArchiveServingSourceV5(Path root, StateArchiveTailV5 tail,
-      CommonCheckpointTarget target, byte[] baselineHistoryDigest,
+      CommonCheckpointTarget target, byte[] baselineParentHash,
       StateArchiveCanonicalBlockMetaSource canonical) {
     this(root, Objects.requireNonNull(tail, "tail").getFirstBlockNumber(),
-        baselineHistoryDigest, canonical);
+        baselineParentHash, canonical);
     updatePublishedUnchecked(tail, target);
   }
 
   StateArchiveServingSourceV5(Path root, long firstBlockNumber,
-      byte[] baselineHistoryDigest, StateArchiveCanonicalBlockMetaSource canonical) {
+      byte[] baselineParentHash, StateArchiveCanonicalBlockMetaSource canonical) {
     this.root = Objects.requireNonNull(root, "root");
     if (firstBlockNumber < 0) {
       throw new IllegalArgumentException("State Archive V5 first block is negative");
     }
     this.firstBlockNumber = firstBlockNumber;
-    requireHash(baselineHistoryDigest, "baseline history digest");
+    this.baselineParentHash = requireHash(baselineParentHash, "baseline parent hash");
     this.canonical = Objects.requireNonNull(canonical, "canonical");
+    this.published = new Committed(firstBlockNumber, this.baselineParentHash, null, null);
   }
 
-  @Override
-  public synchronized long getHistoryStartBlock() {
+  public long getHistoryStartBlock() {
     return firstBlockNumber;
   }
 
+  @Override
+  public Committed committed() {
+    return published;
+  }
+
+  /** Single writer (the History participant); readers never take this monitor. */
   synchronized void updatePublished(StateArchiveTailV5 replacement,
       CommonCheckpointTarget replacementTarget) throws IOException {
     StateArchiveTailV5 admittedTail = Objects.requireNonNull(replacement, "tail");
@@ -67,9 +83,11 @@ final class StateArchiveServingSourceV5 implements StateArchiveServingSource {
     if (admittedTail.getFirstBlockNumber() != firstBlockNumber) {
       throw invalid("published history start differs");
     }
+    Committed current = published;
+    CommonCheckpointTarget target = current.getTarget();
     if (target != null) {
       if (target.equals(admittedTarget)) {
-        if (!Arrays.equals(tail.encode(), admittedTail.encode())) {
+        if (!Arrays.equals(current.getTail().encode(), admittedTail.encode())) {
           throw invalid("same Common target has a different tail");
         }
         return;
@@ -81,84 +99,171 @@ final class StateArchiveServingSourceV5 implements StateArchiveServingSource {
         throw invalid("published target is not the current successor");
       }
     }
-    tail = admittedTail;
-    target = admittedTarget;
+    published = new Committed(firstBlockNumber, baselineParentHash, admittedTail,
+        admittedTarget);
   }
 
-  @Override
-  public synchronized List<BlockReverseDiff> readCommittedDiffs(long fromExclusive,
+  /** Decodes {@code (fromExclusive, through]} within an encoded-byte budget (tests, tools). */
+  public List<BlockReverseDiff> readCommittedDiffs(long fromExclusive,
       long through, long maxEncodedBytes) throws IOException {
-    requirePublished();
-    requireRange(fromExclusive, through);
     if (maxEncodedBytes < 0) {
       throw new IllegalArgumentException("State Archive V5 serving budget is negative");
     }
-    try (StateArchiveCommittedViewV5 view = StateArchiveCommittedViewV5.openServingPrefix(
-        root, tail, target)) {
-      requireBudget(view, fromExclusive + 1, through, maxEncodedBytes);
-      if (fromExclusive == through) {
-        return Collections.emptyList();
+    Committed view = published;
+    requireRange(view, fromExclusive, through);
+    if (fromExclusive == through) {
+      requirePublished(view);
+      return Collections.emptyList();
+    }
+    long[] sizes = bundleBytes(view, fromExclusive + 1, through);
+    long bytes = 0;
+    for (long size : sizes) {
+      if (size > maxEncodedBytes - bytes) {
+        throw new ReadBudgetException();
       }
-      List<BlockReverseDiff> result = new ArrayList<>();
-      try (ReplayHandles handles = new ReplayHandles()) {
-        for (long block = fromExclusive + 1; block <= through; block++) {
-          result.add(decodeBlock(view, handles, block, requireCanonical(block)));
+      bytes += size;
+    }
+    List<BlockReverseDiff> result = new ArrayList<>();
+    for (CommittedBlock block : read(view, fromExclusive + 1, through)) {
+      result.add(block.getDiff());
+    }
+    return Collections.unmodifiableList(result);
+  }
+
+  @Override
+  public long[] bundleBytes(Committed view, long first, long last) throws IOException {
+    requireRange(view, first - 1, last);
+    long[] sizes = new long[StrictMathWrapper.toIntExact(last - first + 1)];
+    try (StateArchiveCommittedViewV5 committed = open(view)) {
+      for (long block = first; block <= last; block++) {
+        long bytes = 0;
+        for (int laneId : StateArchiveGethFormatV5.laneIds()) {
+          PointLocation location = committed.capture(laneId, block);
+          bytes += location.getEndOffset() - location.getStartOffset();
+        }
+        sizes[(int) (block - first)] = bytes;
+      }
+    } catch (ServingFaultException fault) {
+      throw fault;
+    } catch (IOException unavailable) {
+      throw new ServingFaultException(Reason.SOURCE_UNAVAILABLE,
+          "History block index read failed", unavailable);
+    }
+    return sizes;
+  }
+
+  @Override
+  public List<CommittedBlock> read(Committed view, long first, long last) throws IOException {
+    requireRange(view, first - 1, last);
+    List<CommittedBlock> result = new ArrayList<>();
+    try (StateArchiveCommittedViewV5 committed = open(view);
+        ReplayHandles handles = new ReplayHandles()) {
+      for (long block = first; block <= last; block++) {
+        result.add(decodeBlock(committed, handles, block, requireCanonical(block)));
+      }
+    } catch (ServingFaultException fault) {
+      throw fault;
+    } catch (IOException unavailable) {
+      throw new ServingFaultException(Reason.SOURCE_UNAVAILABLE,
+          "History committed body read failed", unavailable);
+    }
+    return Collections.unmodifiableList(result);
+  }
+
+  @Override
+  public byte[] blockHash(Committed view, long block) throws IOException {
+    if (block == firstBlockNumber - 1) {
+      return Arrays.copyOf(baselineParentHash, baselineParentHash.length);
+    }
+    requireRange(view, block - 1, block);
+    try (StateArchiveCommittedViewV5 committed = open(view);
+        ReplayHandles handles = new ReplayHandles()) {
+      int smallest = -1;
+      long smallestBytes = Long.MAX_VALUE;
+      for (int laneId : StateArchiveGethFormatV5.laneIds()) {
+        PointLocation location = committed.capture(laneId, block);
+        long bytes = location.getEndOffset() - location.getStartOffset();
+        if (bytes < smallestBytes) {
+          smallestBytes = bytes;
+          smallest = laneId;
         }
       }
-      return Collections.unmodifiableList(result);
+      DecodedFrame frame = decodeFrame(committed, handles, smallest, block);
+      return frame.getBlockHash();
+    } catch (ServingFaultException fault) {
+      throw fault;
+    } catch (IOException unavailable) {
+      throw new ServingFaultException(Reason.SOURCE_UNAVAILABLE,
+          "History committed frame read failed", unavailable);
     }
   }
 
-  private BlockReverseDiff decodeBlock(StateArchiveCommittedViewV5 view,
+  private StateArchiveCommittedViewV5 open(Committed view) throws IOException {
+    requirePublished(view);
+    return StateArchiveCommittedViewV5.openServingPrefix(root, view.getTail(), view.getTarget());
+  }
+
+  private CommittedBlock decodeBlock(StateArchiveCommittedViewV5 view,
       ReplayHandles handles, long block, BlockSnapshotMeta meta) throws IOException {
     int[] laneIds = StateArchiveGethFormatV5.laneIds();
     List<DbGroup> groups = new ArrayList<>();
+    List<byte[]> frameDigests = new ArrayList<>(laneIds.length);
     for (int laneId : laneIds) {
-      PointLocation location = view.capture(laneId, block);
-      DecodedFrame frame;
-      try {
-        frame = codec.decode(handles.read(location));
-      } catch (IllegalArgumentException failure) {
-        throw invalid("frame decode failed at block " + block + " lane " + laneId, failure);
+      DecodedFrame frame = decodeFrame(view, handles, laneId, block);
+      if (!Arrays.equals(frame.getBlockHash(), meta.getBlockHash())) {
+        throw corrupt("lane bundle identity differs from canonical metadata at block " + block
+            + " lane " + laneId);
       }
-      if (frame.getLaneId() != laneId || frame.getBlockNumber() != block
-          || !Arrays.equals(frame.getBlockHash(), meta.getBlockHash())) {
-        throw invalid("lane bundle identity differs at block " + block + " lane " + laneId);
-      }
+      frameDigests.add(frame.getFrameDigest());
       groups.addAll(frame.getGroups());
     }
-    return new BlockReverseDiff(meta, groups);
+    return new CommittedBlock(new BlockReverseDiff(meta, groups),
+        ServingIndexIncrementalPlan.stepDigest(meta, frameDigests));
   }
 
-  private void requireBudget(StateArchiveCommittedViewV5 view, long first, long through,
-      long budget) throws IOException {
-    long bytes = 0;
-    for (long block = first; block <= through; block++) {
-      for (int laneId : StateArchiveGethFormatV5.laneIds()) {
-        PointLocation location = view.capture(laneId, block);
-        long length = location.getEndOffset() - location.getStartOffset();
-        if (length > budget - bytes) {
-          throw new ReadBudgetException();
-        }
-        bytes += length;
-      }
+  private DecodedFrame decodeFrame(StateArchiveCommittedViewV5 view, ReplayHandles handles,
+      int laneId, long block) throws IOException {
+    PointLocation location = view.capture(laneId, block);
+    DecodedFrame frame;
+    try {
+      frame = new StateArchiveBlockFrameCodecV5().decode(handles.read(location));
+    } catch (IllegalArgumentException failure) {
+      throw new ServingFaultException(Reason.SOURCE_CORRUPT,
+          "State Archive V5 serving source frame decode failed at block " + block + " lane "
+              + laneId, failure);
     }
+    if (frame.getLaneId() != laneId || frame.getBlockNumber() != block) {
+      throw corrupt("lane frame identity differs at block " + block + " lane " + laneId);
+    }
+    return frame;
   }
 
   private BlockSnapshotMeta requireCanonical(long block) throws IOException {
-    BlockSnapshotMeta meta = canonical.load(block);
+    BlockSnapshotMeta meta;
+    try {
+      meta = canonical.load(block);
+    } catch (IOException | RuntimeException failure) {
+      throw new ServingFaultException(Reason.SOURCE_UNAVAILABLE,
+          "canonical metadata is unavailable at block " + block, failure);
+    }
     if (meta == null || meta.getBlockNumber() != block) {
-      throw invalid("canonical metadata is missing at block " + block);
+      throw new ServingFaultException(Reason.SOURCE_UNAVAILABLE,
+          "State Archive V5 serving source canonical metadata is missing at block " + block);
     }
     return meta;
   }
 
-  private void requireRange(long fromExclusive, long through) {
+  private void requireRange(Committed view, long fromExclusive, long through) {
     long minimum = firstBlockNumber - 1;
     if (fromExclusive < minimum || through < fromExclusive
-        || through > tail.getCommonBlockNumber()) {
+        || through > view.getCommittedThrough()) {
       throw new IllegalArgumentException("State Archive V5 serving range is outside [B0,W]");
     }
+  }
+
+  private static ServingFaultException corrupt(String message) {
+    return new ServingFaultException(Reason.SOURCE_CORRUPT,
+        "State Archive V5 serving source " + message);
   }
 
   private static byte[] readExact(FileChannel channel, long position, int length)
@@ -191,9 +296,10 @@ final class StateArchiveServingSourceV5 implements StateArchiveServingSource {
     return new IOException("State Archive V5 serving source " + message, cause);
   }
 
-  private void requirePublished() throws IOException {
-    if (tail == null || target == null) {
-      throw invalid("has no published tail");
+  private static void requirePublished(Committed view) throws IOException {
+    if (view.getTail() == null || view.getTarget() == null) {
+      throw new ServingFaultException(Reason.SOURCE_UNAVAILABLE,
+          "State Archive V5 serving source has no published tail");
     }
   }
 
@@ -206,6 +312,7 @@ final class StateArchiveServingSourceV5 implements StateArchiveServingSource {
     }
   }
 
+  /** The requested range exceeds the encoded-byte budget. */
   private static final class ReplayHandles implements AutoCloseable {
     private final Map<Integer, OpenData> open = new HashMap<>();
 

@@ -18,6 +18,7 @@ import org.tron.core.ChainBaseManager;
 import org.tron.core.capsule.AccountCapsule;
 import org.tron.core.db2.common.DB;
 import org.tron.core.db2.common.Flusher;
+import org.tron.core.db2.common.TxCacheDB;
 import org.tron.core.db2.common.WrappedByteArray;
 import org.tron.core.store.AccountAssetStore;
 
@@ -30,6 +31,10 @@ public class SnapshotRoot extends AbstractSnapshot<byte[], byte[]> {
 
   void useMaterializedCoupledMutations() {
     coupledMutationsMaterialized = true;
+  }
+
+  boolean isCoupledMutationsMaterialized() {
+    return coupledMutationsMaterialized;
   }
 
   private TronCache<WrappedByteArray, WrappedByteArray> cache;
@@ -82,6 +87,7 @@ public class SnapshotRoot extends AbstractSnapshot<byte[], byte[]> {
 
   @Override
   public void put(byte[] key, byte[] value) {
+    OutOfBlockWriteGuard.check(getDbName(), key, value, db::get);
     byte[] v = value;
     if (needOptAssetOnDirectWrite()) {
       if (ByteArray.isEmpty(value)) {
@@ -105,6 +111,7 @@ public class SnapshotRoot extends AbstractSnapshot<byte[], byte[]> {
 
   @Override
   public void remove(byte[] key) {
+    OutOfBlockWriteGuard.check(getDbName(), key, null, db::get);
     if (needOptAssetOnDirectWrite()) {
       ChainBaseManager.getInstance().getAccountAssetStore().deleteAccount(key);
     }
@@ -119,6 +126,7 @@ public class SnapshotRoot extends AbstractSnapshot<byte[], byte[]> {
         .map(e -> Maps.immutableEntry(WrappedByteArray.of(e.getKey().getBytes()),
             WrappedByteArray.of(e.getValue().getBytes())))
         .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+    OutOfBlockWriteGuard.checkBatch(getDbName(), batch, db::get);
     if (needOptAsset()) {
       processAccount(batch);
     } else {
@@ -136,6 +144,7 @@ public class SnapshotRoot extends AbstractSnapshot<byte[], byte[]> {
               WrappedByteArray.of(e.getValue().getBytes())))
           .forEach(e -> batch.put(e.getKey(), e.getValue()));
     }
+    OutOfBlockWriteGuard.checkBatch(getDbName(), batch, db::get);
     if (needOptAsset()) {
       processAccount(batch);
     } else {
@@ -144,21 +153,61 @@ public class SnapshotRoot extends AbstractSnapshot<byte[], byte[]> {
     }
   }
 
-  /** Applies a fully coalesced common-checkpoint Store batch with an explicit sync barrier. */
-  void applyCheckpointMutations(Map<WrappedByteArray, WrappedByteArray> batch) {
+  /**
+   * RECOVERY_ONLY legacy replay (07-C): the same merge as {@link #merge(Snapshot)}, but every
+   * root write is synchronous. {@code processAccount} keeps writing its asset rows through
+   * {@code AccountAssetStore.updateByBatch}, i.e. into the lane's replay layer, so the precedence
+   * between those rows and the checkpoint's own account-asset rows is exactly the non-synchronous
+   * one; the lane root then merges them with its own synchronous batch.
+   */
+  void mergeLegacyRecoverySynced(Snapshot from) {
+    SnapshotImpl snapshot = (SnapshotImpl) from;
+    Map<WrappedByteArray, WrappedByteArray> batch = Streams.stream(snapshot.db)
+        .map(e -> Maps.immutableEntry(WrappedByteArray.of(e.getKey().getBytes()),
+            WrappedByteArray.of(e.getValue().getBytes())))
+        .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+    OutOfBlockWriteGuard.checkBatch(getDbName(), batch, db::get);
     if (needOptAsset()) {
-      processAccount(batch, true);
+      processAccount(batch, true, false);
+    } else if (db instanceof TxCacheDB) {
+      // In-memory bloom only; it has no durable state to sync.
+      ((Flusher) db).flush(batch);
+      putCache(batch);
     } else {
       ((Flusher) db).flushSynced(batch);
       putCache(batch);
     }
   }
 
+  /** Applies a fully coalesced common-checkpoint Store batch with an explicit sync barrier. */
+  void applyCheckpointMutations(Map<WrappedByteArray, WrappedByteArray> batch) {
+    applyCheckpointMutations(batch, true);
+  }
+
+  void applyCheckpointMutations(Map<WrappedByteArray, WrappedByteArray> batch, boolean sync) {
+    // Authorized Common redo bypasses the direct-root writer guard.
+    if (needOptAsset()) {
+      processAccount(batch, sync);
+    } else {
+      if (sync) {
+        ((Flusher) db).flushSynced(batch);
+      } else {
+        ((Flusher) db).flushUnsynced(batch);
+      }
+      putCache(batch);
+    }
+  }
+
   private void processAccount(Map<WrappedByteArray, WrappedByteArray> batch) {
-    processAccount(batch, false);
+    processAccount(batch, false, false);
   }
 
   private void processAccount(Map<WrappedByteArray, WrappedByteArray> batch, boolean synced) {
+    processAccount(batch, synced, synced);
+  }
+
+  private void processAccount(Map<WrappedByteArray, WrappedByteArray> batch, boolean synced,
+      boolean syncedAssets) {
     AccountAssetStore assetStore = ChainBaseManager.getInstance().getAccountAssetStore();
     Map<WrappedByteArray, WrappedByteArray> accounts = new HashMap<>();
     Map<WrappedByteArray, WrappedByteArray> assets = new HashMap<>();
@@ -184,7 +233,7 @@ public class SnapshotRoot extends AbstractSnapshot<byte[], byte[]> {
     }
     putCache(accounts);
     if (assets.size() > 0) {
-      if (synced) {
+      if (syncedAssets) {
         assetStore.updateByBatchSynced(AccountAssetStore.convert(assets));
       } else {
         assetStore.updateByBatch(AccountAssetStore.convert(assets));

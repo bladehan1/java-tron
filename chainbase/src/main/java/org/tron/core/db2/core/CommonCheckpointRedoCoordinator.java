@@ -5,11 +5,11 @@ import java.util.EnumMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.function.LongSupplier;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.db2.core.CommonCheckpointMaterializer.Authority;
 import org.tron.core.db2.core.CommonCheckpointMaterializer.Status;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /** Two-barrier, idempotent redo coordinator for one durable common checkpoint. */
 public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
@@ -24,6 +24,8 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
   private final LongSupplier nanoTime;
   private final TimingSink timingSink;
   private boolean closed;
+  private int durableBaseCadence;
+  private int completedSinceBase;
 
   public CommonCheckpointRedoCoordinator(CommonCheckpointFile checkpointFile,
       CommonCheckpointMaterializer chainbase, CommonCheckpointMaterializer pathState,
@@ -47,6 +49,8 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
     admit(Authority.CHAINBASE, chainbase);
     admit(Authority.PATH_STATE, pathState);
     admit(Authority.STATE_ARCHIVE, stateArchive);
+    chainbase.useRetainedRedo(checkpointFile.retainsGenerations());
+    pathState.useRetainedRedo(checkpointFile.retainsGenerations());
     this.faultHook = Objects.requireNonNull(faultHook, "faultHook");
     this.nanoTime = Objects.requireNonNull(nanoTime, "nanoTime");
     this.timingSink = Objects.requireNonNull(timingSink, "timingSink");
@@ -81,11 +85,22 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
     Holder<CommonCheckpointPayload> loaded = new Holder<>();
     long loadUs = timed(() -> loaded.value = checkpointFile.loadIfPresent());
     if (loaded.value == null) {
-      return RecoveryAction.NO_CHECKPOINT;
+      if (checkpointFile.retainsGenerations()) {
+        java.util.List<CommonCheckpointPayload> retained = checkpointFile.retained();
+        if (!retained.isEmpty()) {
+          loaded.value = retained.get(retained.size() - 1);
+        }
+      }
+      if (loaded.value == null) {
+        return RecoveryAction.NO_CHECKPOINT;
+      }
     }
     Timing timing = new Timing("recover", CommonCheckpointTarget.from(loaded.value),
         loaded.value.getBlocks().size());
     timing.walLoadUs = loadUs;
+    if (checkpointFile.retainsGenerations()) {
+      restoreRetained(false);
+    }
     RecoveryAction action = redo(loaded.value, timing);
     timing.totalUs = elapsedUs(totalStart);
     emitTiming(timing);
@@ -129,8 +144,13 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
     if (closed) {
       return;
     }
-    closed = true;
     Throwable failure = null;
+    try {
+      checkpointDurableBase();
+    } catch (IOException | RuntimeException forcing) {
+      failure = forcing;
+    }
+    closed = true;
     for (int index = ORDER.length - 1; index >= 0; index--) {
       CommonCheckpointMaterializer materializer = materializers.get(ORDER[index]);
       try {
@@ -143,11 +163,44 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
         }
       }
     }
+    try {
+      checkpointFile.close();
+    } catch (IOException closing) {
+      if (failure == null) {
+        failure = closing;
+      } else {
+        failure.addSuppressed(closing);
+      }
+    }
     if (failure instanceof IOException) {
       throw (IOException) failure;
     }
     if (failure != null) {
       throw (RuntimeException) failure;
+    }
+  }
+
+  private void restoreRetained(boolean sync) throws IOException {
+    java.util.List<CommonCheckpointPayload> payloads = checkpointFile.retained();
+    materializers.get(Authority.CHAINBASE).replayRetained(payloads, sync);
+    materializers.get(Authority.PATH_STATE).replayRetained(payloads, sync);
+  }
+
+  /** Bounds retained redo using the existing checkpoint flush-count setting. */
+  public synchronized void configureDurableBaseCadence(int generations) {
+    if (generations <= 0) {
+      throw new IllegalArgumentException("durable base cadence must be positive");
+    }
+    durableBaseCadence = generations;
+  }
+
+  /** Force the retained target data before advancing the durable base and pruning generations. */
+  public synchronized void checkpointDurableBase() throws IOException {
+    requireOpen();
+    if (checkpointFile.retainsGenerations() && !checkpointFile.isPresent()) {
+      restoreRetained(true);
+      checkpointFile.advanceDurableBase();
+      completedSinceBase = 0;
     }
   }
 
@@ -201,6 +254,9 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
     faultHook.after(Stage.BEFORE_CHECKPOINT_RETIRE);
     timing.walRetireUs = timed(checkpointFile::retire);
     faultHook.after(Stage.AFTER_CHECKPOINT_RETIRE);
+    if (durableBaseCadence > 0 && ++completedSinceBase >= durableBaseCadence) {
+      checkpointDurableBase();
+    }
     return RecoveryAction.COMPLETED_REDO;
   }
 

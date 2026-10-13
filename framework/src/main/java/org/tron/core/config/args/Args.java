@@ -176,6 +176,12 @@ public class Args extends CommonParameter {
 
     // 5. Apply platform constraints (e.g. ARM64 forces RocksDB)
     applyPlatformConstraints();
+    org.tron.core.config.args.ArchiveRocksDbPolicy.validate(PARAMETER.storage);
+    if (PARAMETER.storage.isArchiveFeaturesEnabled()) {
+      org.tron.common.setting.RocksDbThreadBudget.activate(
+          org.tron.common.setting.RocksDbSettings.getSettings().getCompactThreads(), 1,
+          org.tron.common.setting.RocksDbSettings.getSettings().getCompactThreads(), true);
+    }
 
     // 6. Init witness (depends on CLI witness flag)
     initLocalWitnesses(config, cmd);
@@ -971,6 +977,7 @@ public class Args extends CommonParameter {
 
   @VisibleForTesting
   public static void clearParam() {
+    org.tron.common.setting.RocksDbThreadBudget.deactivate();
     CommonParameter.reset();
     configFilePath = "";
     localWitnesses = null;

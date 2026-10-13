@@ -51,6 +51,7 @@ public class ConfigLoader {
         snapshot.allowTvmSelfdestructRestriction = ds.getAllowTvmSelfdestructRestriction() == 1;
         snapshot.allowTvmOsaka = ds.getAllowTvmOsaka() == 1;
         snapshot.allowHardenResourceCalculation = ds.getAllowHardenResourceCalculation() == 1;
+        snapshot.allowOptimizeTvmStorage = ds.getAllowOptimizeTvmStorage() == 1;
         if (isolate) {
           VMConfig.setLocalSnapshot(snapshot);
         } else {
@@ -64,8 +65,8 @@ public class ConfigLoader {
   /** Loads an isolated VM view exclusively from a Repository's request-owned state source. */
   public static void load(Repository repository) {
     if (disable) {
-      throw new HistoricalCapabilityException(
-          "Historical VM config loading cannot be disabled");
+      throw repository.markHistoricalFailure(new HistoricalCapabilityException(
+          "Historical VM config loading cannot be disabled"));
     }
     VMConfig.setVmTrace(CommonParameter.getInstance().isVmTrace());
     VMConfig.Snapshot snapshot = new VMConfig.Snapshot();
@@ -102,6 +103,7 @@ public class ConfigLoader {
     snapshot.allowTvmOsaka = enabled(repository, "ALLOW_TVM_OSAKA");
     snapshot.allowHardenResourceCalculation =
         enabled(repository, "ALLOW_HARDEN_RESOURCE_CALCULATION");
+    snapshot.allowOptimizeTvmStorage = enabled(repository, "ALLOW_OPTIMIZE_TVM_STORAGE");
     VMConfig.setLocalSnapshot(snapshot);
   }
 

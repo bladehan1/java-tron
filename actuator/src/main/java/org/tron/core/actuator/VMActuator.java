@@ -216,8 +216,12 @@ public class VMActuator implements Actuator2 {
           throw e;
         }
 
-        // Prepare the table once for this execution and all nested calls.
-        VM.play(program, OperationRegistry.prepareAndGetTable(isConstantCall));
+        // Prepare the table once for this execution and all nested calls. A historical call uses
+        // a request-scoped immutable table selected from its S(T) config instead of adjusting the
+        // shared constant-call table (chapter 05 section 3.9.2).
+        VM.play(program, rootRepository.isHistorical()
+            ? OperationRegistry.installHistoricalTable()
+            : OperationRegistry.prepareAndGetTable(isConstantCall));
         result = program.getResult();
 
         if (VMConfig.allowEnergyAdjustment()) {
@@ -287,7 +291,8 @@ public class VMActuator implements Actuator2 {
           }
 
         }
-      } else {
+      } else if (!rootRepository.isHistorical()) {
+        // A historical root is read-only; a call without code has nothing to commit.
         rootRepository.commit();
       }
       for (DataWord account : result.getDeleteAccounts()) {
@@ -310,6 +315,13 @@ public class VMActuator implements Actuator2 {
       result.setRuntimeError(result.getException().getMessage());
       logger.info("timeout: {}", result.getException().getMessage());
     } catch (Throwable e) {
+      if (rootRepository != null && rootRepository.isHistorical()
+          && e instanceof RuntimeException) {
+        // Chapter 05 section 3.7 P4: keep the original historical failure (capability, budget,
+        // corrupt, ...) instead of rewriting it to "Unknown Throwable"; the caller's final gate
+        // maps it from the session's TERMINAL cause.
+        throw rootRepository.markHistoricalFailure((RuntimeException) e);
+      }
       if (!(e instanceof TransferException)) {
         program.spendAllEnergy();
       }
@@ -324,6 +336,11 @@ public class VMActuator implements Actuator2 {
         result.setRuntimeError(result.getException().getMessage());
       }
       logger.info("runtime result is :{}", result.getException().getMessage());
+    } finally {
+      if (isConstantCall) {
+        VMConfig.clearLocalSnapshot();
+        OperationRegistry.clearRequestTable();
+      }
     }
     //use program returned fill context
     context.setProgramResult(result);

@@ -64,6 +64,26 @@ final class StateArchiveFiveLaneWriterV5 implements Closeable {
     this.appendHead = appendHead;
   }
 
+  static StateArchiveFiveLaneWriterV5 reopenBaseline(Path root, long firstBlock,
+      byte[] baselineDigest, long rotationBytes) throws IOException {
+    StateArchiveFiveLaneWriterV5 writer = new StateArchiveFiveLaneWriterV5(root, firstBlock,
+        baselineDigest, rotationBytes, null);
+    try {
+      for (int lane : StateArchiveGethFormatV5.laneIds()) {
+        StateArchiveLaneIndexV5 index = StateArchiveLaneIndexV5.openWritableCommitted(
+            laneRoot(root, lane).resolve("blocks.idx"), 0);
+        Path path = dataPath(root, lane, 0);
+        FileChannel data = FileChannel.open(
+            path, StandardOpenOption.READ, StandardOpenOption.WRITE);
+        writer.lanes.put(lane, new LaneState(lane, index, readHeader(data, path, NO_OP), data));
+      }
+      return writer;
+    } catch (IOException | RuntimeException failure) {
+      closeAll(new ArrayList<>(writer.lanes.values()), failure);
+      throw failure;
+    }
+  }
+
   static StateArchiveFiveLaneWriterV5 reopen(Path root, StateArchiveTailV5 tail,
       CommonCheckpointTarget target, byte[] baselineHistoryDigest,
       long rotationDecisionBytes) throws IOException {

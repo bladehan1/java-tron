@@ -141,11 +141,7 @@ final class PathStateNativeNodeStore implements Closeable {
     writeBatch(mutations, true);
   }
 
-  synchronized void writeBatchUnsynced(List<BatchMutation> mutations) {
-    writeBatch(mutations, false);
-  }
-
-  private void writeBatch(List<BatchMutation> mutations, boolean sync) {
+  void writeBatch(List<BatchMutation> mutations, boolean sync) {
     requireOpen();
     List<BatchMutation> supplied = Objects.requireNonNull(mutations, "mutations");
     if (supplied.isEmpty()) {
@@ -162,6 +158,10 @@ final class PathStateNativeNodeStore implements Closeable {
     } else {
       unsyncedWriteBatchCalls = StrictMathWrapper.addExact(unsyncedWriteBatchCalls, 1L);
     }
+  }
+
+  synchronized void writeBatchUnsynced(List<BatchMutation> mutations) {
+    writeBatch(mutations, false);
   }
 
   synchronized long getWriteBatchCalls() {
@@ -377,7 +377,10 @@ final class PathStateNativeNodeStore implements Closeable {
         options.setStatistics(statistics);
       }
       try {
+        org.tron.common.setting.RocksDbThreadBudget.beforeAuxiliaryOpen(
+            config.getBackgroundCompactions(), config.getBackgroundFlushes());
         database = org.rocksdb.RocksDB.open(options, directory.toString());
+        org.tron.common.setting.RocksDbThreadBudget.afterAuxiliaryOpen();
       } catch (RocksDBException failure) {
         unsyncedWrites.close();
         syncWrites.close();

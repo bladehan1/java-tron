@@ -51,7 +51,8 @@ final class StateArchivePointReaderV5 implements StateArchivePointSource {
     int storeId = StateArchiveFileFormatV3.storeId(admittedDb);
     int laneId = StateArchiveFileFormatV3.laneId(storeId);
     int fixedKeyWidth = StateArchiveFileFormatV3.fixedKeyWidth(laneId);
-    if (fixedKeyWidth != 0 && admittedKey.length != fixedKeyWidth) {
+    if ((laneId == 22 && admittedKey.length != 32 && admittedKey.length != 48)
+        || (laneId != 22 && fixedKeyWidth != 0 && admittedKey.length != fixedKeyWidth)) {
       throw new IllegalArgumentException("State Archive V5 point key width mismatch");
     }
 
@@ -154,7 +155,8 @@ final class StateArchivePointReaderV5 implements StateArchivePointSource {
     }
     int expectedWidth = StateArchiveFileFormatV3.fixedKeyWidth(expectedLane);
     if (entryCount == 0 || keysBytes < 0 || valuesBytes < 0
-        || expectedLane != laneId || keyWidth != expectedWidth
+        || expectedLane != laneId
+        || (keyWidth != expectedWidth && !(expectedLane == 22 && keyWidth == 0))
         || (keyWidth == 0 ? layout != VARIABLE_LAYOUT : layout != FIXED_LAYOUT)
         || sectionBytes < StateArchiveGethFormatV5.SECTION_HEADER_LENGTH
         || sectionBytes > sectionsEnd - position) {
@@ -196,6 +198,9 @@ final class StateArchivePointReaderV5 implements StateArchivePointSource {
       } else {
         candidate = read(channel, laneId, keys + (long) middle * section.keyWidth,
             section.keyWidth);
+      }
+      if (laneId == 22 && candidate.length != 32 && candidate.length != 48) {
+        throw invalid("storage-row key width");
       }
       int comparison = BlockReverseDiff.compareUnsigned(candidate, targetKey);
       if (comparison < 0) {

@@ -37,6 +37,41 @@ final class ServingIndexTiming implements AutoCloseable {
     CURRENT.set(this);
   }
 
+  static void leaseRefreshed() {
+    if (Metrics.enabled()) {
+      Export.WORK.labels("service", "lease_refresh", "success").inc();
+    }
+  }
+
+  static void batch(String kind) {
+    if (Metrics.enabled()) {
+      Export.WORK.labels("service", "batch_" + kind, "success").inc();
+    }
+  }
+
+  static void failure(ServingFailure failure) {
+    if (Metrics.enabled()) {
+      Export.FAILURES.labels(failure.getReason().name(),
+          failure.getKind().name().toLowerCase(java.util.Locale.ROOT)).inc();
+    }
+  }
+
+  static void serving(ServingView view) {
+    if (Metrics.enabled()) {
+      for (ServingState state : ServingState.values()) {
+        Export.STATE.labels(state.name()).set(view.getState() == state ? 1 : 0);
+      }
+      Export.BACKLOG_BYTES.set(view.getBacklogBytes());
+      Export.LAST_FAILURE.set(view.getLastFailure() == null ? 0
+          : view.getLastFailure().getTimeMillis() / 1000.0);
+      Export.HEIGHT.labels("indexed_from").set(view.getIndexedFrom());
+      Export.HEIGHT.labels("indexed_through").set(view.getIndexedThrough());
+      Export.HEIGHT.labels("committed_through").set(view.getCommittedThrough());
+      Export.HEIGHT.labels("backlog_blocks").set(view.getBacklogBlocks());
+      Export.HEIGHT.labels("ready").set(view.getState() == ServingState.LIVE ? 1 : 0);
+    }
+  }
+
   static void record(Stage stage, long started) {
     ServingIndexTiming timing = CURRENT.get();
     if (timing != null) {
@@ -129,6 +164,17 @@ final class ServingIndexTiming implements AutoCloseable {
   }
 
   private static final class Export {
+    private static final Gauge STATE = Gauge.build().name("tron_archive_serving_state")
+        .help("Current serving lifecycle state.").labelNames("state").register();
+    private static final Gauge BACKLOG_BYTES = Gauge.build()
+        .name("tron_archive_serving_backlog_bytes")
+        .help("Committed source bytes pending indexing; -1 means unknown.").register();
+    private static final Gauge LAST_FAILURE = Gauge.build()
+        .name("tron_archive_serving_last_failure_timestamp_seconds")
+        .help("Timestamp of the most recent serving failure.").register();
+    private static final Counter FAILURES = Counter.build()
+        .name("tron_archive_serving_failures_total")
+        .help("Classified serving failures.").labelNames("reason", "class").register();
     private static final Histogram DURATION = Histogram.build()
         .name("tron_archive_serving_stage_seconds")
         .help("Serving batch/source duration; nested stages must not be summed.")

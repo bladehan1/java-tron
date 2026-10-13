@@ -1527,6 +1527,11 @@ public class Wallet {
         .setValue(dbManager.getDynamicPropertiesStore().getAllowHardenExchangeCalculation())
         .build());
 
+    builder.addChainParameter(Protocol.ChainParameters.ChainParameter.newBuilder()
+        .setKey("getAllowOptimizeTvmStorage")
+        .setValue(dbManager.getDynamicPropertiesStore().getAllowOptimizeTvmStorage())
+        .build());
+
     return builder.build();
   }
 
@@ -3192,13 +3197,11 @@ public class Wallet {
         ? new VMActuator(true) : new VMActuator(true, HistoricalRepositoryProvider.INSTANCE);
 
     try {
-      if (session != null) {
-        session.checkActive();
-      }
-      vmActuator.validate(context);
-      vmActuator.execute(context);
-      if (session != null) {
-        session.checkActive();
+      if (session == null) {
+        vmActuator.validate(context);
+        vmActuator.execute(context);
+      } else {
+        org.tron.core.actuator.HistoricalConstantExecution.run(vmActuator, context);
       }
     } finally {
       // constant call runs on a pooled RPC worker; drop its thread-local VM config view so it

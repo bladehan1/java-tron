@@ -26,7 +26,6 @@ import org.tron.common.utils.Commons;
 import org.tron.common.utils.Sha256Hash;
 import org.tron.common.utils.StorageUtils;
 import org.tron.common.utils.StringUtil;
-import org.tron.core.db2.core.ExecutionAttribution;
 import org.tron.core.ChainBaseManager;
 import org.tron.core.capsule.AbiCapsule;
 import org.tron.core.capsule.AccountCapsule;
@@ -42,11 +41,13 @@ import org.tron.core.capsule.DelegatedResourceCapsule;
 import org.tron.core.capsule.VotesCapsule;
 import org.tron.core.capsule.WitnessCapsule;
 import org.tron.core.config.Parameter;
+import org.tron.core.config.Parameter.ForkBlockVersionEnum;
 import org.tron.core.db.BlockIndexStore;
 import org.tron.core.db.BlockStore;
 import org.tron.core.db.KhaosDatabase;
 import org.tron.core.db.TransactionTrace;
 import org.tron.core.db2.archive.HistoricalQuerySession;
+import org.tron.core.db2.core.ExecutionAttribution;
 import org.tron.core.exception.BadItemException;
 import org.tron.core.exception.ItemNotFoundException;
 import org.tron.core.exception.StoreException;
@@ -65,16 +66,16 @@ import org.tron.core.store.StorageRowStore;
 import org.tron.core.store.StoreFactory;
 import org.tron.core.store.VotesStore;
 import org.tron.core.store.WitnessStore;
-import org.tron.core.vm.config.VMConfig;
 import org.tron.core.vm.HistoricalCapabilityException;
+import org.tron.core.vm.config.VMConfig;
 import org.tron.core.vm.program.Program.IllegalOperationException;
 import org.tron.core.vm.program.Storage;
 import org.tron.protos.Protocol;
 import org.tron.protos.Protocol.Account;
 import org.tron.protos.Protocol.AccountType;
 import org.tron.protos.Protocol.DelegatedResource;
-import org.tron.protos.Protocol.Votes;
 import org.tron.protos.Protocol.DelegatedResourceAccountIndex;
+import org.tron.protos.Protocol.Votes;
 import org.tron.protos.contract.AssetIssueContractOuterClass.AssetIssueContract;
 import org.tron.protos.contract.Common;
 import org.tron.protos.contract.SmartContractOuterClass.ContractState;
@@ -235,8 +236,8 @@ public class RepositoryImpl implements Repository {
 
   private <T> T currentStore(T store, String capability) {
     if (readOnlyRoot) {
-      throw new HistoricalCapabilityException(
-          "Direct " + capability + " access is not supported by historical execution");
+      throw markHistoricalFailure(new HistoricalCapabilityException(
+          "Direct " + capability + " access is not supported by historical execution"));
     }
     return store;
   }
@@ -280,6 +281,11 @@ public class RepositoryImpl implements Repository {
   @Override
   public boolean isHistorical() {
     return readOnlyRoot;
+  }
+
+  @Override
+  public RuntimeException markHistoricalFailure(RuntimeException failure) {
+    return stateSource == null ? failure : stateSource.markFailure(failure);
   }
 
   @Override
@@ -381,6 +387,10 @@ public class RepositoryImpl implements Repository {
     AssetIssueCapsule assetIssueCapsule;
     if (this.parent != null) {
       assetIssueCapsule = parent.getAssetIssue(tokenIdWithoutLeadingZero);
+    } else if (readOnlyRoot) {
+      // The asset-issue stores are outside the historical capability set (chapter 05 3.6/3.11).
+      throw markHistoricalFailure(new HistoricalCapabilityException(
+          "TRC10 asset issue lookup is not supported by historical execution"));
     } else {
       assetIssueCapsule = Commons
           .getAssetIssueStoreFinal(dynamicPropertiesStore, assetIssueStore, assetIssueV2Store)
@@ -443,7 +453,8 @@ public class RepositoryImpl implements Repository {
       bytesCapsule = parent.getDynamicProperty(word);
     } else {
       bytesCapsule = stateSource.getDynamicProperty(word);
-      if (bytesCapsule == null) {
+      if (bytesCapsule == null && !readOnlyRoot) {
+        // Historical sources log and cache ABSENT themselves (chapter 05 section 3.10.5).
         logger.warn("Not found dynamic property:" + Strings.fromUTF8ByteArray(word));
       }
     }
@@ -838,8 +849,17 @@ public class RepositoryImpl implements Repository {
         storage = parentStorage;
       }
     } else {
-      StorageRowStore persistenceStore = stateSource.isReadOnly() ? null : getStorageRowStore();
-      storage = new Storage(address, persistenceStore, stateSource::getStorageRow);
+      if (stateSource.isReadOnly()) {
+        // Historical execution: both switches are resolved at S(T) and every row read goes
+        // through the request's session. The fork-38 storage check only applies to the
+        // 32-byte key path, so it is evaluated only when #99 is inactive at S(T).
+        boolean optimize = getDynamicPropertyLong("ALLOW_OPTIMIZE_TVM_STORAGE") == 1L;
+        storage = new Storage(address, null, stateSource::getStorageRow, optimize,
+            !optimize && stateSource.passesFork(ForkBlockVersionEnum.VERSION_4_8_2_3));
+      } else {
+        storage = new Storage(address, getStorageRowStore(),
+            VMConfig.allowOptimizeTvmStorage());
+      }
     }
     ContractCapsule contract = getContract(address);
     if (contract != null) {
@@ -975,6 +995,11 @@ public class RepositoryImpl implements Repository {
 
   @Override
   public long addTokenBalance(byte[] address, byte[] tokenId, long value) {
+    if (readOnlyRoot) {
+      // TRC10 transfers are rejected before any balance is read (chapter 05 section 3.11 point 3).
+      throw markHistoricalFailure(new HistoricalCapabilityException(
+          "TRC10 transfer is not supported by historical execution"));
+    }
     byte[] tokenIdWithoutLeadingZero = ByteUtil.stripLeadingZeroes(tokenId);
     AccountCapsule accountCapsule = getAccount(address);
     if (accountCapsule == null) {
@@ -1011,7 +1036,26 @@ public class RepositoryImpl implements Repository {
       return 0;
     }
     String tokenStr = new String(ByteUtil.stripLeadingZeroes(tokenId));
+    if (readOnlyRoot) {
+      return getHistoricalTokenBalance(address, accountCapsule, tokenStr);
+    }
     return accountCapsule.getAssetV2(tokenStr);
+  }
+
+  /**
+   * Historical TRC10 balance (chapter 05 section 3.11 point 2). No AccountCapsule asset method is
+   * called, so the process-wide latest {@code AssetUtil} stores are never consulted: an inline
+   * {@code assetV2} entry of the overlay/historical Account wins (P66_OFF and lazily migrated
+   * accounts); otherwise the balance is resolved at S(T) through the session. TRC10 balances cannot
+   * change inside a historical execution (transfers are rejected), so S(T) is exact here.
+   */
+  private long getHistoricalTokenBalance(byte[] address, AccountCapsule account,
+      String tokenId) {
+    Long inline = account.getInstance().getAssetV2Map().get(tokenId);
+    if (inline != null) {
+      return inline;
+    }
+    return stateSource.getAccountAssetBalance(address, tokenId);
   }
 
   @Override
@@ -1022,8 +1066,8 @@ public class RepositoryImpl implements Repository {
   @Override
   public BlockCapsule getBlockByNum(long num) {
     if (readOnlyRoot) {
-      throw new HistoricalCapabilityException(
-          "BLOCKHASH history is not supported by historical execution");
+      throw markHistoricalFailure(new HistoricalCapabilityException(
+          "BLOCKHASH history is not supported by historical execution"));
     }
     try {
       Sha256Hash hash = getBlockIdByNum(num);

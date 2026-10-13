@@ -82,6 +82,7 @@ public final class StateArchiveRuntimeOwner implements Closeable {
   private State state;
   private boolean detached;
   private IOException terminalFailure;
+  private volatile RuntimeException servingFailure;
 
   public StateArchiveRuntimeOwner(SnapshotManager snapshotManager,
       ArchiveRuntimeAttachment attachment, ArchiveRuntimeQueryGate queryGate,
@@ -291,9 +292,11 @@ public final class StateArchiveRuntimeOwner implements Closeable {
       PersistentServingKeyIndexGeneration.RuntimeBuilder attachedBuilder = builder;
       LatestStateGenerationCoordinator attachedLatest = latest;
       candidate = new ArchiveRuntimeAttachment(collector, asyncSink,
-          target -> publishServingIndex(attachedWriter, attachedCatalog, target),
-          target -> publishReadableState(attachedWriter, attachedCatalog, attachedBuilder,
-              attachedLatest, target));
+          target -> runDerivedServing(() ->
+              publishServingIndex(attachedWriter, attachedCatalog, target)),
+          target -> runDerivedServing(() ->
+              publishReadableState(attachedWriter, attachedCatalog, attachedBuilder,
+                  attachedLatest, target)));
       snapshotManager.attachArchiveRuntime(candidate);
       attached = true;
       snapshotManager.markArchiveReadableThrough(canonicalHead.getEpoch());
@@ -366,11 +369,13 @@ public final class StateArchiveRuntimeOwner implements Closeable {
     if (state != State.RUNNING || queryGate == null) {
       throw new IllegalStateException("State Archive historical query runtime is not running");
     }
+    requireServingAvailable();
     return queryGate.pin(targetBlock);
   }
 
   /** Machine-checks the latest committed H against the last Chainbase WAL binding. */
   public synchronized BlockSnapshotMeta verifyNormalWriteFixedPoint() throws IOException {
+    requireServingAvailable();
     ArchiveHistoryWriter writer = getHistoryWriter();
     HistoryCommitMarker head = Objects.requireNonNull(writer.committedHead(),
         "archive history head");
@@ -445,7 +450,10 @@ public final class StateArchiveRuntimeOwner implements Closeable {
     BlockSnapshotMeta previousReadableHead = readableHead;
     snapshotManager.markArchiveReadableThrough(target.getEpoch());
     try {
-      validateReadableState(catalog, target);
+      derivedServing(() -> {
+        validateReadableState(catalog, target);
+        return null;
+      });
       readableHead = target;
       readableStateFaultHook.afterStage(ReadableStateStage.READABLE_PUBLISHED);
     } catch (IOException | RuntimeException failure) {
@@ -475,7 +483,7 @@ public final class StateArchiveRuntimeOwner implements Closeable {
     String expectedLatest = latest.getCurrentGenerationId();
     long started = System.nanoTime();
     latestAuthorityHead = target;
-    try (PersistentServingKeyIndexGeneration current = catalog.pin()) {
+    try (PersistentServingKeyIndexGeneration current = derivedServing(catalog::pin)) {
       ServingIndexIncrementalPlan plan = writer.planServingIncrement(current.getIndexedThrough(),
           current.getHeadHash());
       boolean targetAlreadyIndexed = plan.getIndexedFrom() == plan.getIndexedThrough();
@@ -496,8 +504,11 @@ public final class StateArchiveRuntimeOwner implements Closeable {
       }
       try (LatestStateGenerationCoordinator.Candidate candidate =
           latest.acquire(generationId(target))) {
-        publishServingAndLatest(catalog, builder, latest, current, plan, candidate,
-            expectedLatest, target);
+        derivedServing(() -> {
+          publishServingAndLatest(catalog, builder, latest, current, plan, candidate,
+              expectedLatest, target);
+          return null;
+        });
         lastServingApply = ServingIndexApplyStatistics.from(plan, true,
             System.nanoTime() - started);
       }
@@ -686,14 +697,65 @@ public final class StateArchiveRuntimeOwner implements Closeable {
       throw new ArchivePersistenceException(
           "Serving index target differs from committed history head");
     }
-    servingIndexFaultHook.afterStage(ServingIndexStage.BEFORE_BUILD);
-    try (PersistentServingKeyIndexGeneration current = catalog.pin()) {
+    derivedServing(() -> {
+      servingIndexFaultHook.afterStage(ServingIndexStage.BEFORE_BUILD);
+      return null;
+    });
+    try (PersistentServingKeyIndexGeneration current = derivedServing(catalog::pin)) {
       if (!current.isExactOnlyFormat() || current.getIndexedThrough() > target.getEpoch()) {
         throw new ArchivePersistenceException(
             "Serving index cannot increment from current durable I");
       }
       writer.planServingIncrement(current.getIndexedThrough(), current.getHeadHash());
     }
+  }
+
+  private void requireServingAvailable() {
+    if (servingFailure != null) {
+      throw new HistoricalQueryException(HistoricalQueryException.Reason.UNAVAILABLE,
+          "Archive derived serving index is unavailable", servingFailure);
+    }
+  }
+
+  private void runDerivedServing(DerivedServingAction action) throws IOException {
+    if (servingFailure != null) {
+      return;
+    }
+    try {
+      action.run();
+    } catch (DerivedServingFailure failure) {
+      servingFailure = failure;
+      if (queryGate != null) {
+        queryGate.quiesce();
+      }
+      org.slf4j.LoggerFactory.getLogger("DB").error(
+          "Archive serving index unavailable; committed History and canonical flush retained",
+          failure.getCause());
+    }
+  }
+
+  private static <T> T derivedServing(DerivedServingValue<T> action) {
+    try {
+      return action.get();
+    } catch (IOException | RuntimeException failure) {
+      throw new DerivedServingFailure(failure);
+    }
+  }
+
+  private static final class DerivedServingFailure extends RuntimeException {
+    private DerivedServingFailure(Throwable cause) {
+      super("Archive derived serving index failed", cause);
+    }
+  }
+
+  @FunctionalInterface
+  private interface DerivedServingAction {
+    void run() throws IOException;
+  }
+
+  @FunctionalInterface
+  private interface DerivedServingValue<T> {
+    T get() throws IOException;
   }
 
   private void afterCatalogStage(PersistentServingKeyIndexCatalog.PublicationStage stage)

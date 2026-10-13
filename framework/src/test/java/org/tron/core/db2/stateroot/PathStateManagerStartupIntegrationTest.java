@@ -524,7 +524,10 @@ public class PathStateManagerStartupIntegrationTest {
     CommonCheckpointTarget target = CommonCheckpointTarget.from(payload);
     CommonCheckpointMaterializedStore materializedStore =
         new CommonCheckpointMaterializedStore(checkpointDirectory);
-    new CommonCheckpointFile(checkpointDirectory).publish(payload);
+    try (CommonCheckpointFile redo = CommonCheckpointFile.openDatabase(checkpointDirectory,
+        Engine.LEVELDB)) {
+      redo.publish(payload);
+    }
     new ChainbaseCheckpointMaterializer(checkpointDirectory, formatIdentity,
         snapshots.getDbs(), baseline, materializedStore).materialize(payload, target);
     PathStateParticipantScope scope = new PathStateCanonicalizer().participantScope();

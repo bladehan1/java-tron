@@ -11,6 +11,10 @@ public interface Flusher {
     throw new UnsupportedOperationException("Synchronous checkpoint flush is not supported");
   }
 
+  default void flushUnsynced(Map<WrappedByteArray, WrappedByteArray> batch) {
+    throw new UnsupportedOperationException("Unsynced common flush is not supported");
+  }
+
   void close();
 
   void reset();

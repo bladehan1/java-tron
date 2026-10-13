@@ -4,7 +4,9 @@ package org.tron.core.db2.archive;
 public class HistoricalQueryException extends ArchivePersistenceException {
 
   public enum Reason {
-    UNAVAILABLE, NON_CANONICAL, DATA_ACCESS, DEADLINE, CANCELLED, OVERLOADED
+    UNAVAILABLE, NON_CANONICAL, DATA_ACCESS, DEADLINE, CANCELLED, OVERLOADED,
+    /** Integrity failure of a historical value (decode failure, identity violation). */
+    CORRUPT
   }
 
   private final Reason reason;

@@ -342,6 +342,10 @@ public final class StateArchiveServingIndexBuildCoordinatorV3 implements AutoClo
     index.publishArchiveTailV5(tail, beforeWrite);
   }
 
+  synchronized void retireLegacyArchiveTail() throws IOException {
+    index.retireLegacyArchiveTail();
+  }
+
   synchronized StateArchiveTailV5 archiveTailV5(CommonCheckpointTarget target)
       throws IOException {
     requireOpen();

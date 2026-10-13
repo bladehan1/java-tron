@@ -75,8 +75,45 @@ public class StateArchiveRuntimeV5Test {
       assertEquals(Mode.LIVE_BACKGROUND, reopened.servingIndexStatus().getMode());
       assertEquals(99, reopened.servingIndexStatus().getIndexedFrom());
       assertEquals(102, reopened.servingIndexStatus().getIndexedThrough());
-      assertEquals(0, reopened.servingIndexStatus().getBuildSequence());
+      assertEquals(1, reopened.servingIndexStatus().getBuildSequence());
       assertHistory(reopened, successor, 101, 102);
+    }
+  }
+
+  @Test
+  public void corruptServingDoesNotPreventHistoryRecoveryOrCommonPublication() throws Exception {
+    Path root = temporaryFolder.newFolder("degraded-runtime").toPath();
+    byte[] format = hash(70);
+    byte[] baseline = hash(90);
+    Map<Long, BlockSnapshotMeta> canonical = new HashMap<>();
+    canonical.put(100L, meta(100));
+    canonical.put(101L, meta(101));
+    CommonCheckpointTarget initial;
+    try (StateArchiveAppendCheckpointMaterializerV5 archive = runtime(
+        root, format, baseline, canonical)) {
+      initial = publish(archive, format, Collections.singletonList(diff(100)));
+      archive.afterCommit(initial);
+      archive.completeServingInitialSync(initial);
+    }
+    Path keys = root.resolve("serving-index-v3/single-v1/keys");
+    try (StateArchiveIndexDatabase.Writer index =
+        StateArchiveIndexDatabase.openWriter(keys, Engine.LEVELDB)) {
+      index.write(Collections.singletonList(StateArchiveIndexDatabase.put(
+          PersistentServingKeyIndexGeneration.PROGRESS_KEY, new byte[]{1})), true);
+    }
+    try (StateArchiveAppendCheckpointMaterializerV5 archive = runtime(
+        root, format, baseline, canonical)) {
+      assertEquals(initial, archive.loadPublishedTargetIfPresent().get());
+      CommonCheckpointTarget successor = publish(archive, format,
+          Collections.singletonList(diff(101)));
+      archive.afterCommit(successor);
+      assertEquals(successor, archive.loadPublishedTargetIfPresent().get());
+      long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5);
+      while (archive.servingIndexStatus().getMode() != Mode.DEGRADED
+          && System.nanoTime() < deadline) {
+        Thread.sleep(10);
+      }
+      assertEquals(Mode.DEGRADED, archive.servingIndexStatus().getMode());
     }
   }
 

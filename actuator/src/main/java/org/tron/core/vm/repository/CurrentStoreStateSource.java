@@ -1,5 +1,6 @@
 package org.tron.core.vm.repository;
 
+import org.tron.common.utils.ForkController;
 import org.tron.core.ChainBaseManager;
 import org.tron.core.capsule.AccountCapsule;
 import org.tron.core.capsule.BytesCapsule;
@@ -7,6 +8,7 @@ import org.tron.core.capsule.CodeCapsule;
 import org.tron.core.capsule.ContractCapsule;
 import org.tron.core.capsule.ContractStateCapsule;
 import org.tron.core.capsule.StorageRowCapsule;
+import org.tron.core.config.Parameter.ForkBlockVersionEnum;
 import org.tron.core.exception.BadItemException;
 import org.tron.core.exception.ItemNotFoundException;
 import org.tron.core.store.StoreFactory;
@@ -53,6 +55,11 @@ final class CurrentStoreStateSource implements RepositoryStateSource {
   @Override
   public StorageRowCapsule getStorageRow(byte[] physicalKey) {
     return manager.getStorageRowStore().get(physicalKey);
+  }
+
+  @Override
+  public boolean passesFork(ForkBlockVersionEnum version) {
+    return ForkController.instance().pass(version);
   }
 
   @Override

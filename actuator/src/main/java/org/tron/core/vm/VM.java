@@ -20,11 +20,11 @@ public class VM {
       Op.DELEGATECALL, Op.CALLCODE, Op.CALLTOKEN);
 
   public static void play(Program program, JumpTable jumpTable) {
+    final boolean historical = program.getContractState().isHistorical();
     try {
       long factor = DYNAMIC_ENERGY_FACTOR_DECIMAL;
       long energyUsage = 0L;
       // hoist once per execution: avoids a per-opcode VMConfig.current() thread-local lookup
-      final boolean historical = program.getContractState().isHistorical();
       final boolean allowDynamicEnergy = VMConfig.allowDynamicEnergy();
 
       if (allowDynamicEnergy) {
@@ -117,6 +117,14 @@ public class VM {
     } catch (JVMStackOverFlowException | OutOfTimeException e) {
       throw e;
     } catch (RuntimeException e) {
+      if (historical) {
+        // Chapter 05 section 3.7 P3: historical-class failures (and an unexpected NPE) end the
+        // whole request instead of becoming a failed child frame the parent can ignore.
+        RuntimeException fatal = HistoricalFailures.escalate(program.getContractState(), e);
+        if (fatal != null) {
+          throw fatal;
+        }
+      }
       // https://openjdk.org/jeps/358
       // https://bugs.openjdk.org/browse/JDK-8220715
       // since jdk 14, the NullPointerExceptions message is not empty

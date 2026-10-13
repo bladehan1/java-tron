@@ -74,6 +74,35 @@ public class PathStateCheckpointMaterializerTest {
   }
 
   @Test
+  public void retainedRedoUsesUnsyncedTargetsAndOneCoalescedForcePerStore() throws Exception {
+    Fixture fixture = fixture("retained-redo", null);
+    try {
+      PathStatePhysicalStoreSet.PhysicalStore account = fixture.stores.participant("account");
+      long accountSync = account.getSyncedWriteBatchCalls();
+      long superSync = fixture.stores.superStore().getSyncedWriteBatchCalls();
+      long accountUnsynced = account.getUnsyncedWriteBatchCalls();
+      fixture.materializer.useRetainedRedo(true);
+      fixture.materializer.materialize(fixture.payload, fixture.target);
+      fixture.materializer.publish(fixture.target);
+      CommonCheckpointPayload child = payload(fixture.formatIdentity, 2, hash(1), hash(2),
+          hash(11), hash(12));
+      CommonCheckpointTarget childTarget = CommonCheckpointTarget.from(child);
+      fixture.materializer.materialize(child, childTarget);
+      fixture.materializer.publish(childTarget);
+      assertEquals(accountSync, account.getSyncedWriteBatchCalls());
+      assertEquals(accountUnsynced + 2, account.getUnsyncedWriteBatchCalls());
+      fixture.materializer.replayRetained(java.util.Arrays.asList(fixture.payload, child), true);
+      assertEquals(accountSync + 1, account.getSyncedWriteBatchCalls());
+      assertEquals(superSync + 1, fixture.stores.superStore().getSyncedWriteBatchCalls());
+      assertEquals(Status.PUBLISHED, fixture.materializer.inspect(childTarget));
+      assertArrayEquals(new byte[]{2}, account.getFlat(new byte[]{1}));
+      assertArrayEquals(new byte[]{4}, account.nodeStore().get(new byte[]{3}));
+    } finally {
+      fixture.stores.close();
+    }
+  }
+
+  @Test
   public void resumesEveryStoreAndMarkerBoundaryWithoutRepeatingExactBatches()
       throws Exception {
     for (PathStateCheckpointMaterializer.Stage stage

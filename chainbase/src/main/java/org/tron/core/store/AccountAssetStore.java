@@ -64,6 +64,21 @@ public class AccountAssetStore extends TronDatabase<byte[]> {
     recoveringSnapshots = false;
   }
 
+  /**
+   * Ends a RECOVERY_ONLY installation (07-C): unregisters the lane from the manager and returns
+   * to the upstream direct-write path. The shared native database stays open (I-16).
+   */
+  public synchronized void detachSnapshots(SnapshotManager manager) {
+    if (snapshots == null) {
+      throw new IllegalStateException("AccountAsset Snapshot lane is not attached");
+    }
+    if (manager.uninstallP66SnapshotLane() != snapshots) {
+      throw new IllegalStateException("Uninstalled a foreign AccountAsset Snapshot lane");
+    }
+    snapshots = null;
+    recoveringSnapshots = false;
+  }
+
   @Override
   public void close() {
     if (snapshots != null) {
@@ -107,7 +122,8 @@ public class AccountAssetStore extends TronDatabase<byte[]> {
 
   @Override
   public byte[] getUnchecked(byte[] key) {
-    return get(key);
+    // Without the lane this is a plain TronDatabase, exactly as upstream (D3).
+    return snapshots == null ? super.getUnchecked(key) : get(key);
   }
 
   @Autowired

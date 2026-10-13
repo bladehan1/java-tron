@@ -1,9 +1,21 @@
 package org.tron.core.vm;
 
+import org.tron.core.vm.repository.Repository;
+
 /** Runtime allowlist for capabilities reachable only after bytecode dispatch. */
 public final class HistoricalExecutionGuard {
 
   private HistoricalExecutionGuard() {
+  }
+
+  /** Checks the allowlist and marks the request TERMINAL on rejection (chapter 05 P1). */
+  public static void requirePrecompileAllowed(Repository repository,
+      PrecompiledContracts.PrecompiledContract contract) {
+    try {
+      requirePrecompileAllowed(contract);
+    } catch (HistoricalCapabilityException rejected) {
+      throw repository.markHistoricalFailure(rejected);
+    }
   }
 
   public static void requirePrecompileAllowed(

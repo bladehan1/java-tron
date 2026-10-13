@@ -47,6 +47,7 @@ public class VMConfig {
     public boolean allowTvmOsaka;
     public boolean allowHardenResourceCalculation;
     public boolean energyLimitHardFork;
+    public boolean allowOptimizeTvmStorage;
   }
 
   // HEAD / block-processing config, written by the consensus path; read by everyone with no
@@ -206,6 +207,10 @@ public class VMConfig {
     globalSnapshot.allowHardenResourceCalculation = allow == 1;
   }
 
+  public static void initAllowOptimizeTvmStorage(long allow) {
+    globalSnapshot.allowOptimizeTvmStorage = allow == 1;
+  }
+
   public static boolean getEnergyLimitHardFork() {
     Snapshot local = localSnapshot.get();
     return local == null ? CommonParameter.ENERGY_LIMIT_HARD_FORK
@@ -314,5 +319,9 @@ public class VMConfig {
 
   public static boolean allowHardenResourceCalculation() {
     return current().allowHardenResourceCalculation;
+  }
+
+  public static boolean allowOptimizeTvmStorage() {
+    return current().allowOptimizeTvmStorage;
   }
 }

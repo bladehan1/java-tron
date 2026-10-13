@@ -150,7 +150,7 @@ public class StateArchiveManagerStartupIntegrationTest {
   }
 
   @Test
-  public void servingIndexPublicationFailuresRetryWithoutResubmittingHistoryAndRestartCleanly()
+  public void servingIndexFailurePreservesCanonicalFlushAndRestartRebuildsIndex()
       throws Exception {
     for (ServingIndexStage failureStage : ServingIndexStage.values()) {
       Path output = temporaryFolder.newFolder(
@@ -179,34 +179,27 @@ public class StateArchiveManagerStartupIntegrationTest {
       setField(snapshots, "flushCount", 1);
       armed.set(failureStage);
 
-      assertThrows(org.tron.core.exception.TronError.class, snapshots::flushPending);
+      snapshots.flushPending();
       assertEquals(target, manager.getArchiveHistoryWriter().committedHeadMeta());
       assertEquals(6, snapshots.getArchiveReadableEpoch());
-      if (failureStage == ServingIndexStage.CURRENT_PUBLISHED) {
-        assertThrows(ArchivePersistenceException.class,
-            () -> manager.getArchiveAccountBalance(6,
-                new byte[HistoricalAccountBalanceReader.ADDRESS_LENGTH]));
-      } else {
-        assertFalse(manager.getArchiveAccountBalance(6,
-            new byte[HistoricalAccountBalanceReader.ADDRESS_LENGTH]).isPresent());
-      }
+      assertThrows(ArchivePersistenceException.class,
+          () -> manager.getArchiveAccountBalance(6,
+              new byte[HistoricalAccountBalanceReader.ADDRESS_LENGTH]));
       assertThrows(ArchivePersistenceException.class, manager::inspectArchiveServingIndex);
-      assertTrue(fixture.databases.values().stream().allMatch(database ->
-          failureStage == ServingIndexStage.BEFORE_BUILD
-              ? database.getHead() instanceof org.tron.core.db2.core.SnapshotImpl
-              : database.getHead() instanceof SnapshotRoot));
+      assertTrue(fixture.databases.values().stream()
+          .allMatch(database -> database.getHead() instanceof SnapshotRoot));
 
-      if (failureStage == ServingIndexStage.BEFORE_BUILD) {
-        snapshots.flushPending();
-        assertEquals(target, manager.getStateArchiveRuntime().verifyNormalWriteFixedPoint());
-        assertEquals(target.getEpoch(), snapshots.getArchiveReadableEpoch());
-        assertFalse(manager.getArchiveAccountBalance(7,
-            new byte[HistoricalAccountBalanceReader.ADDRESS_LENGTH]).isPresent());
-        assertServingFixedPoint(archive, target, 5);
-        assertEquals(1, countGenerationDirectories(archive));
-        assertTrue(fixture.databases.values().stream()
-            .allMatch(database -> database.getHead() instanceof SnapshotRoot));
+      BlockSnapshotMeta next = new BlockSnapshotMeta(8, 8, hash(8), hash(7), 8_000L);
+      try (ISession block = snapshots.buildSession()) {
+        fixture.databases.get("proposal").put(new byte[]{8, 8}, new byte[]{8});
+        block.commit(next);
       }
+      setField(snapshots, "flushCount", 1);
+      snapshots.flushPending();
+      assertEquals(next, manager.getArchiveHistoryWriter().committedHeadMeta());
+      assertTrue(fixture.databases.values().stream()
+          .allMatch(database -> database.getHead() instanceof SnapshotRoot));
+
       @SuppressWarnings("unchecked")
       ArgumentCaptor<Map<byte[], byte[]>> checkpoints = ArgumentCaptor.forClass(Map.class);
       verify(fixture.checkpoint, atLeastOnce()).updateByBatch(checkpoints.capture());
@@ -218,12 +211,12 @@ public class StateArchiveManagerStartupIntegrationTest {
 
       SnapshotFixture restarted = snapshotFixture(recoveredCheckpoint);
       invokeCheckpointRecovery(restarted.snapshots, restarted.checkpoint);
-      Manager restartedManager = manager(restarted.snapshots, target);
+      Manager restartedManager = manager(restarted.snapshots, next);
       withArchiveConfig(output, "ROCKSDB", true,
           () -> invoke(restartedManager, "initStateArchive"));
-      assertEquals(target,
+      assertEquals(next,
           restartedManager.getStateArchiveRuntime().verifyNormalWriteFixedPoint());
-      assertServingFixedPoint(archive, target, 5);
+      assertServingFixedPoint(archive, next, 5);
       assertEquals(1, countGenerationDirectories(archive));
       invoke(restartedManager, "closeStateArchive");
       restarted.snapshots.shutdown();
@@ -473,8 +466,7 @@ public class StateArchiveManagerStartupIntegrationTest {
     assertP66History(manager, address, absentAddress, tokenId);
     assertThrows(ArchivePersistenceException.class,
         () -> manager.getArchiveAccountAssetBalance(10, orphanAddress, tokenId));
-    assertThrows(ArchivePersistenceException.class,
-        () -> manager.getArchiveAccountAssetBalance(10, mixedAddress, tokenId));
+    assertEquals(7L, manager.getArchiveAccountAssetBalance(10, mixedAddress, tokenId).getBalance());
     assertThrows(ArchivePersistenceException.class,
         () -> manager.getArchiveAccountAssets(10, orphanAddress, prefixLimits()));
     assertThrows(ArchivePersistenceException.class,
@@ -501,8 +493,8 @@ public class StateArchiveManagerStartupIntegrationTest {
     assertP66History(restartedManager, address, absentAddress, tokenId);
     assertThrows(ArchivePersistenceException.class,
         () -> restartedManager.getArchiveAccountAssetBalance(10, orphanAddress, tokenId));
-    assertThrows(ArchivePersistenceException.class,
-        () -> restartedManager.getArchiveAccountAssetBalance(10, mixedAddress, tokenId));
+    assertEquals(7L, restartedManager.getArchiveAccountAssetBalance(10, mixedAddress, tokenId)
+        .getBalance());
     assertThrows(ArchivePersistenceException.class,
         () -> restartedManager.getArchiveAccountAssets(10, orphanAddress, prefixLimits()));
     assertThrows(ArchivePersistenceException.class,
@@ -1495,6 +1487,7 @@ public class StateArchiveManagerStartupIntegrationTest {
     String oldDirectory = storage.getStateArchiveDirectory();
     String oldDbDirectory = storage.getDbDirectory();
     String oldEngine = storage.getDbEngine();
+    String oldServingEngine = storage.getStateArchiveServingIndexEngine();
     long oldSegmentSize = storage.getStateArchiveMaxSegmentSize();
     int oldQueueCapacity = storage.getStateArchiveQueueCapacity();
     boolean oldEnabled = storage.isStateArchiveEnabled();
@@ -1503,6 +1496,7 @@ public class StateArchiveManagerStartupIntegrationTest {
       storage.setStateArchiveDirectory("state-archive");
       storage.setDbDirectory("database");
       storage.setDbEngine(engine);
+      storage.setStateArchiveServingIndexEngine(engine);
       storage.setDefaultDbOptions(new StorageConfig());
       storage.setStateArchiveMaxSegmentSize(4096);
       storage.setStateArchiveQueueCapacity(4);
@@ -1513,6 +1507,7 @@ public class StateArchiveManagerStartupIntegrationTest {
       storage.setStateArchiveDirectory(oldDirectory);
       storage.setDbDirectory(oldDbDirectory);
       storage.setDbEngine(oldEngine);
+      storage.setStateArchiveServingIndexEngine(oldServingEngine);
       storage.setStateArchiveMaxSegmentSize(oldSegmentSize);
       storage.setStateArchiveQueueCapacity(oldQueueCapacity);
       storage.setStateArchiveEnabled(oldEnabled);

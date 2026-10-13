@@ -10,11 +10,15 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
+import org.tron.core.db2.common.WrappedByteArray;
 import org.tron.core.db2.core.CommonCheckpointBaseline;
 import org.tron.core.db2.core.CommonCheckpointMaterializedStore;
 import org.tron.core.db2.core.CommonCheckpointMaterializer;
@@ -24,6 +28,7 @@ import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
 
 /** Next-format PathState participant for the common-checkpoint two-barrier protocol. */
 public final class PathStateCheckpointMaterializer implements CommonCheckpointMaterializer {
+  private boolean retainedRedo;
 
   public static final String CURRENT_FILE = "CURRENT";
   static final String LEGACY_BASELINE_FILE = "LEGACY_BASELINE";
@@ -215,13 +220,14 @@ public final class PathStateCheckpointMaterializer implements CommonCheckpointMa
       }
       PathStatePhysicalStoreSet.PhysicalStore store = stores.participant(pathStore.getDbName());
       if (!Arrays.equals(marker, store.checkpointTargetMarker())) {
-        store.applyCheckpointParticipant(pathStore, marker);
+        store.applyCheckpointParticipant(pathStore, marker, !retainedRedo);
         faultHook.after(Stage.AFTER_PARTICIPANT_BATCH, pathStore.getStoreId());
       }
     }
     PathStatePhysicalStoreSet.PhysicalStore superStore = stores.superStore();
     if (!Arrays.equals(marker, superStore.checkpointTargetMarker())) {
-      superStore.applyCheckpointSuper(admittedPayload.getSuperNodeMutations(), marker);
+      superStore.applyCheckpointSuper(
+          admittedPayload.getSuperNodeMutations(), marker, !retainedRedo);
       faultHook.after(Stage.AFTER_SUPER_BATCH, 0);
     }
     byte[] encoded = encode(admittedTarget);
@@ -241,6 +247,65 @@ public final class PathStateCheckpointMaterializer implements CommonCheckpointMa
     }
     PathStateMetadataFile.replaceCurrentBytes(directory.resolve(CURRENT_FILE), encode(admitted));
     faultHook.after(Stage.AFTER_CURRENT, 0);
+  }
+
+  @Override
+  public void useRetainedRedo(boolean enabled) {
+    retainedRedo = enabled;
+  }
+
+  @Override
+  public synchronized void replayRetained(java.util.List<CommonCheckpointPayload> payloads,
+      boolean sync) throws IOException {
+    if (payloads.isEmpty()) {
+      return;
+    }
+    Map<String, CommonCheckpointPayload.PathStoreTarget> latest = new LinkedHashMap<>();
+    Map<String, Map<WrappedByteArray, CommonCheckpointPayload.Mutation>> flat =
+        new LinkedHashMap<>();
+    Map<String, Map<WrappedByteArray, CommonCheckpointPayload.Mutation>> nodes =
+        new LinkedHashMap<>();
+    Map<WrappedByteArray, CommonCheckpointPayload.Mutation> superNodes = new LinkedHashMap<>();
+    for (CommonCheckpointPayload payload : payloads) {
+      requireTarget(CommonCheckpointTarget.from(payload));
+      Set<Integer> seen = new HashSet<>();
+      for (CommonCheckpointPayload.PathStoreTarget pathStore : payload.getPathStores()) {
+        PathStateParticipant participant = scope.require(pathStore.getDbName());
+        if (participant.getStoreId() != pathStore.getStoreId()
+            || !seen.add(pathStore.getStoreId())) {
+          throw new IOException("retained PathState participant identity differs");
+        }
+        latest.put(pathStore.getDbName(), pathStore);
+        accumulate(flat.computeIfAbsent(pathStore.getDbName(), key -> new LinkedHashMap<>()),
+            pathStore.getFlatMutations());
+        accumulate(nodes.computeIfAbsent(pathStore.getDbName(), key -> new LinkedHashMap<>()),
+            pathStore.getNodeMutations());
+      }
+      accumulate(superNodes, payload.getSuperNodeMutations());
+    }
+    CommonCheckpointTarget target = CommonCheckpointTarget.from(payloads.get(payloads.size() - 1));
+    byte[] marker = marker(target);
+    for (CommonCheckpointPayload.PathStoreTarget last : latest.values()) {
+      CommonCheckpointPayload.PathStoreTarget merged = new CommonCheckpointPayload.PathStoreTarget(
+          last.getStoreId(), last.getDbName(), last.getStoreRoot(),
+          new ArrayList<>(flat.get(last.getDbName()).values()),
+          new ArrayList<>(nodes.get(last.getDbName()).values()));
+      stores.participant(last.getDbName()).applyCheckpointParticipant(merged, marker, sync);
+      faultHook.after(Stage.AFTER_PARTICIPANT_BATCH, last.getStoreId());
+    }
+    stores.superStore().applyCheckpointSuper(new ArrayList<>(superNodes.values()), marker, sync);
+    faultHook.after(Stage.AFTER_SUPER_BATCH, 0);
+    if (!payloads.isEmpty()) {
+      CommonCheckpointTarget last = CommonCheckpointTarget.from(payloads.get(payloads.size() - 1));
+      recordMaterialized(last, encode(last));
+    }
+  }
+
+  private static void accumulate(Map<WrappedByteArray, CommonCheckpointPayload.Mutation> into,
+      java.util.List<CommonCheckpointPayload.Mutation> mutations) {
+    for (CommonCheckpointPayload.Mutation mutation : mutations) {
+      into.put(WrappedByteArray.of(mutation.getKey()), mutation);
+    }
   }
 
   private CommonCheckpointTarget requireTarget(CommonCheckpointTarget target) throws IOException {

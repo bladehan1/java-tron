@@ -131,6 +131,14 @@ final class StateArchiveTailV5 {
         "tail differs from Common target");
   }
 
+  byte[] getCommonBlockHash() {
+    return Arrays.copyOf(commonBlockHash, commonBlockHash.length);
+  }
+
+  byte[] getCommonTargetDigest() {
+    return Arrays.copyOf(commonTargetDigest, commonTargetDigest.length);
+  }
+
   long getFirstBlockNumber() {
     return firstBlockNumber;
   }

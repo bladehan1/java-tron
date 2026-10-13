@@ -13,6 +13,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import lombok.Getter;
+import org.tron.core.db2.archive.ArchiveStoreScope;
 import org.tron.core.db2.archive.BlockReverseDiff;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
 import org.tron.core.db2.common.HashDB;
@@ -35,6 +36,16 @@ public class SnapshotImpl extends AbstractSnapshot<Key, Value> {
 
   @Getter
   private PathStateSnapshotDelta preparedPathStateDelta;
+
+  /**
+   * Maintenance layer (design v2 ch02 §3.11.3, WP-02-12): a layer without block identity right
+   * above the root that collects the startup out-of-block writes and is folded into the first
+   * finalized block above it. Set by {@link SnapshotManager} after construction only, so the
+   * optimized root copy of {@code properties} is not a maintenance write. Never set in form OFF.
+   */
+  private boolean maintenance;
+  /** Whether the maintenance write window is open (startup defaults and migrations only). */
+  private volatile boolean maintenanceWritesOpen;
 
   SnapshotImpl(Snapshot snapshot) {
     root = snapshot.getRoot();
@@ -103,6 +114,9 @@ public class SnapshotImpl extends AbstractSnapshot<Key, Value> {
   public void put(byte[] key, byte[] value) {
     Preconditions.checkNotNull(key, "key in db is not null.");
     Preconditions.checkNotNull(value, "value in db is not null.");
+    if (maintenance && !admitMaintenanceWrite(key, value)) {
+      return;
+    }
 
     db.put(Key.copyOf(key), Value.copyOf(Value.Operator.PUT, value));
   }
@@ -110,7 +124,39 @@ public class SnapshotImpl extends AbstractSnapshot<Key, Value> {
   @Override
   public void remove(byte[] key) {
     Preconditions.checkNotNull(key, "key in db is not null.");
+    if (maintenance && !admitMaintenanceWrite(key, null)) {
+      return;
+    }
     db.put(Key.of(key), Value.of(Value.Operator.DELETE, null));
+  }
+
+  void markMaintenance() {
+    maintenance = true;
+  }
+
+  boolean isMaintenance() {
+    return maintenance;
+  }
+
+  void setMaintenanceWritesOpen(boolean open) {
+    maintenanceWritesOpen = open;
+  }
+
+  /**
+   * Outside the maintenance write window the phase-one guard still holds (ch02 §3.11.2): an
+   * exact-27 write that changes the visible state is refused before it is recorded, an identical
+   * restatement is a no-op. Derived (non exact-27) Stores are never guarded, as on the root.
+   * Returns whether the write must be recorded.
+   */
+  private boolean admitMaintenanceWrite(byte[] key, byte[] value) {
+    if (maintenanceWritesOpen || !ArchiveStoreScope.isStateDatabase(getDbName())) {
+      return true;
+    }
+    byte[] current = get(key);
+    if (value == null ? current == null : current != null && Arrays.equals(current, value)) {
+      return false;
+    }
+    throw OutOfBlockWriteGuard.refuse(getDbName(), key);
   }
 
   // we have a 3x3 matrix of all possibilities when merging previous snapshot and current snapshot :
