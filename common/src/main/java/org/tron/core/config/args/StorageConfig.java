@@ -267,7 +267,7 @@ public class StorageConfig {
     private long writeBufferBytes = 268435456L;
     private long nodeCacheBytes = 268435456L;
     private int participantThreads = 4;
-    private int branchThreads = 8;
+    private int branchThreads = 16;
     private boolean rebuildFromGenesis = false;
     private boolean verifyEveryBlock = true;
     private boolean volatileSnapshotBenchmark = false;

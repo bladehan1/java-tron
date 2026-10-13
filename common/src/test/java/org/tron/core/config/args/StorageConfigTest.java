@@ -243,7 +243,7 @@ public class StorageConfigTest {
     assertEquals(268435456L, defaults.getPathStateRoot().getWriteBufferBytes());
     assertEquals(268435456L, defaults.getPathStateRoot().getNodeCacheBytes());
     assertEquals(4, defaults.getPathStateRoot().getParticipantThreads());
-    assertEquals(8, defaults.getPathStateRoot().getBranchThreads());
+    assertEquals(16, defaults.getPathStateRoot().getBranchThreads());
     assertFalse(defaults.getPathStateRoot().isRebuildFromGenesis());
     assertTrue(defaults.getPathStateRoot().isVerifyEveryBlock());
     assertFalse(defaults.getPathStateRoot().isVolatileSnapshotBenchmark());

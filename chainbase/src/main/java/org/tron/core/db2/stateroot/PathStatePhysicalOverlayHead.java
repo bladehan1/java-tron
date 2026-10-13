@@ -36,7 +36,7 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
 
   private static final byte[] ABSENT = new byte[0];
   static final int DEFAULT_PARTICIPANT_THREADS = 4;
-  static final int DEFAULT_BRANCH_THREADS = 8;
+  static final int DEFAULT_BRANCH_THREADS = 16;
 
   private final PathStatePhysicalStoreSet stores;
   private final PathStateParticipantScope scope;
