@@ -69,16 +69,31 @@ public final class CommonCheckpointRuntimeOwner implements AutoCloseable {
   /** Keeps the write gate through publication and its required in-memory completion action. */
   CommonCheckpointRedoCoordinator.RecoveryAction apply(CommonCheckpointPayload payload,
       CompletionAction completion) throws IOException {
+    return apply(payload, completion, (lockWaitUs, completionUs, notifyCommittedUs) -> { });
+  }
+
+  /** Same apply, additionally reporting wall time of the untimed segments around durable redo. */
+  CommonCheckpointRedoCoordinator.RecoveryAction apply(CommonCheckpointPayload payload,
+      CompletionAction completion, ApplyStageTiming stageTiming) throws IOException {
+    long lockStart = System.nanoTime();
     gate.writeLock().lock();
+    long lockWaitUs = StrictMathWrapper.max(0L, (System.nanoTime() - lockStart) / 1_000L);
     try {
       requireState(State.READY, "common checkpoint runtime is not ready to flush");
       state = State.CHECKPOINTING;
       try {
         CommonCheckpointRedoCoordinator.RecoveryAction action = coordinator.applyDurable(
             Objects.requireNonNull(payload, "payload"));
+        long completionStart = System.nanoTime();
         Objects.requireNonNull(completion, "completion").run();
+        long completionUs = StrictMathWrapper.max(0L,
+            (System.nanoTime() - completionStart) / 1_000L);
         state = State.READY;
+        long notifyStart = System.nanoTime();
         coordinator.notifyCommitted(CommonCheckpointTarget.from(payload));
+        long notifyCommittedUs = StrictMathWrapper.max(0L,
+            (System.nanoTime() - notifyStart) / 1_000L);
+        stageTiming.record(lockWaitUs, completionUs, notifyCommittedUs);
         return action;
       } catch (IOException | RuntimeException failure) {
         state = State.FAILED;
@@ -199,6 +214,12 @@ public final class CommonCheckpointRuntimeOwner implements AutoCloseable {
   @FunctionalInterface
   interface CompletionAction {
     void run() throws IOException;
+  }
+
+  /** Receives wall-clock microseconds for the apply segments outside durable redo. */
+  @FunctionalInterface
+  interface ApplyStageTiming {
+    void record(long lockWaitUs, long completionUs, long notifyCommittedUs);
   }
 
   /** One same-thread request lease; close it only after every pinned read resource is released. */
