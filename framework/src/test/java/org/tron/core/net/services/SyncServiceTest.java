@@ -3,6 +3,7 @@ package org.tron.core.net.services;
 import static org.mockito.Mockito.mock;
 
 import com.google.common.cache.Cache;
+import com.google.protobuf.ByteString;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.net.InetSocketAddress;
@@ -14,8 +15,11 @@ import org.junit.Test;
 import org.mockito.Mockito;
 import org.springframework.context.ApplicationContext;
 import org.tron.common.BaseMethodTest;
+import org.tron.common.crypto.ECKey;
+import org.tron.common.utils.ByteArray;
 import org.tron.common.utils.ReflectUtils;
 import org.tron.common.utils.Sha256Hash;
+import org.tron.core.capsule.AccountCapsule;
 import org.tron.core.capsule.BlockCapsule;
 import org.tron.core.net.P2pEventHandlerImpl;
 import org.tron.core.net.message.adv.BlockMessage;
@@ -24,8 +28,11 @@ import org.tron.core.net.peer.PeerManager;
 import org.tron.core.net.peer.TronState;
 import org.tron.core.net.service.sync.SyncService;
 import org.tron.core.net.service.sync.UnparsedBlock;
+import org.tron.core.store.AccountStore;
+import org.tron.core.store.WitnessScheduleStore;
 import org.tron.p2p.connection.Channel;
 import org.tron.protos.Protocol;
+import org.tron.protos.Protocol.AccountType;
 
 public class SyncServiceTest extends BaseMethodTest {
   private SyncService service;
@@ -45,6 +52,9 @@ public class SyncServiceTest extends BaseMethodTest {
     service = context.getBean(SyncService.class);
     p2pEventHandler = context.getBean(P2pEventHandlerImpl.class);
     ctx = (ApplicationContext) ReflectUtils.getFieldObject(p2pEventHandler, "ctx");
+    context.getBean(WitnessScheduleStore.class).saveActiveWitnesses(
+        Collections.singletonList(ByteString.copyFrom(ByteArray.fromHexString(
+            "a0A389132D6639FBDA4FBC8B659264E6B7C90DB086"))));
   }
 
   @Override
@@ -264,6 +274,57 @@ public class SyncServiceTest extends BaseMethodTest {
 
     method.invoke(service);
 
+    Assert.assertTrue(requestBlockIds.getIfPresent(blockId) == null);
+  }
+
+  @Test
+  public void testHandleSyncBlockFromNonWitness() throws Exception {
+
+    Field field = PeerManager.class.getDeclaredField("peers");
+    field.setAccessible(true);
+    field.set(PeerManager.class, Collections.synchronizedList(new ArrayList<>()));
+
+    Method method = service.getClass().getDeclaredMethod("handleSyncBlock");
+    method.setAccessible(true);
+
+    Map<UnparsedBlock, PeerConnection> blockJustReceived =
+        (Map<UnparsedBlock, PeerConnection>)
+            ReflectUtils.getFieldObject(service, "blockJustReceived");
+
+    // an activated ordinary account that is not an active witness
+    ECKey key = new ECKey();
+    byte[] address = key.getAddress();
+    context.getBean(AccountStore.class)
+        .put(address, new AccountCapsule(ByteString.copyFrom(address), AccountType.Normal));
+
+    // the block carries a valid signature of this account, but the account
+    // is not in the active witness list
+    BlockCapsule blockCapsule = new BlockCapsule(100000, Sha256Hash.ZERO_HASH,
+        System.currentTimeMillis() / 3000 * 3000, ByteString.copyFrom(address));
+    blockCapsule.setMerkleRoot();
+    blockCapsule.sign(key.getPrivKeyBytes());
+    BlockCapsule.BlockId blockId = blockCapsule.getBlockId();
+
+    InetSocketAddress a1 = new InetSocketAddress("127.0.0.1", 10001);
+    Channel c1 = mock(Channel.class);
+    Mockito.when(c1.getInetSocketAddress()).thenReturn(a1);
+    Mockito.when(c1.getInetAddress()).thenReturn(a1.getAddress());
+    PeerManager.add(ctx, c1);
+    peer = PeerManager.getPeers().get(0);
+
+    UnparsedBlock unparsedBlock = new UnparsedBlock(blockId, blockCapsule.getData());
+    blockJustReceived.put(unparsedBlock, peer);
+
+    peer.getSyncBlockToFetch().add(blockId);
+
+    Cache<BlockCapsule.BlockId, PeerConnection> requestBlockIds =
+        (Cache<BlockCapsule.BlockId, PeerConnection>)
+            ReflectUtils.getFieldObject(service, "requestBlockIds");
+    requestBlockIds.put(blockId, peer);
+
+    method.invoke(service);
+
+    // rejected as an attack block: the requested id is invalidated
     Assert.assertTrue(requestBlockIds.getIfPresent(blockId) == null);
   }
 }

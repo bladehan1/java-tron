@@ -5,9 +5,13 @@ import static org.tron.core.exception.BadBlockException.TypeEnum.CALC_MERKLE_ROO
 
 import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
+import com.google.protobuf.ByteString;
 import io.prometheus.client.Histogram;
 import java.util.Collection;
+import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.LockSupport;
 import javax.annotation.PostConstruct;
@@ -60,6 +64,7 @@ import org.tron.core.net.message.MessageTypes;
 import org.tron.core.net.message.adv.BlockMessage;
 import org.tron.core.net.message.adv.TransactionMessage;
 import org.tron.core.net.peer.PeerConnection;
+import org.tron.core.store.DynamicPropertiesStore;
 import org.tron.core.store.WitnessScheduleStore;
 import org.tron.protos.Protocol.Inventory.InventoryType;
 
@@ -107,6 +112,15 @@ public class TronNetDelegate {
   private Cache<BlockId, Long> freshBlockId = CacheBuilder.newBuilder()
           .maximumSize(blockIdCacheSize).expireAfterWrite(1, TimeUnit.HOURS)
           .recordStats().build();
+
+  // The previous (solidified) period's witness list is final and cached forever.
+  // The current (unsolidified) period's list can change via rollback across a
+  // maintenance boundary, so it is read from the store on every sync block and
+  // only its shift into the previous period is tracked here.
+  private volatile List<ByteString> currentPeriodList = Collections.emptyList();
+  private volatile Set<ByteString> currentPeriodWitnesses = Collections.emptySet();
+  private volatile Set<ByteString> previousPeriodWitnesses = Collections.emptySet();
+  private volatile long currentPeriodStart = Long.MAX_VALUE;
 
   @PostConstruct
   public void init() {
@@ -353,6 +367,32 @@ public class TronNetDelegate {
     }
     if (!flag) {
       throw new P2pException(TypeEnum.BLOCK_SIGN_INVALID, "valid signature failed.");
+    }
+  }
+
+  public void validSyncBlock(BlockCapsule block) throws P2pException {
+    refreshPeriodWitnesses();
+    Set<ByteString> witnesses = block.getTimeStamp() < currentPeriodStart + BLOCK_PRODUCED_INTERVAL
+        ? previousPeriodWitnesses : currentPeriodWitnesses;
+    if (!witnesses.contains(block.getWitnessAddress())) {
+      throw new P2pException(TypeEnum.NON_WITNESS_BLOCK,
+          "block: " + block.getBlockId().getString() + ", witness: "
+              + Hex.toHexString(block.getWitnessAddress().toByteArray()));
+    }
+    validSignature(block);
+  }
+
+  // The maintenance block is still produced by the previous period's schedule,
+  // so the boundary is extended by one block interval.
+  private void refreshPeriodWitnesses() {
+    List<ByteString> latest = witnessScheduleStore.getActiveWitnesses();
+    if (!latest.equals(currentPeriodList)) {
+      DynamicPropertiesStore propertiesStore = dbManager.getDynamicPropertiesStore();
+      previousPeriodWitnesses = currentPeriodWitnesses;
+      currentPeriodList = latest;
+      currentPeriodWitnesses = new HashSet<>(latest);
+      currentPeriodStart = propertiesStore.getNextMaintenanceTime()
+          - propertiesStore.getMaintenanceTimeInterval();
     }
   }
 
