@@ -914,6 +914,7 @@ public class Manager {
         pathOwner = PathStatePhysicalOverlayHead.openCommonCheckpoint(pathDirectory, pathEngine,
             limits, storage.getPathStateRootNodeCacheBytes(),
             storage.getPathStateRootParticipantThreads(), storage.getPathStateRootBranchThreads(),
+            storage.getPathStateRootSecondLevelParallelThreshold(),
             formatIdentity, canonical, phase);
       } else {
         pathOwner = modeAdmitted || Files.isRegularFile(pathDirectory.resolve(
@@ -922,11 +923,13 @@ public class Manager {
             ? PathStatePhysicalOverlayHead.openCommonBaseline(pathDirectory, pathEngine, limits,
                 storage.getPathStateRootNodeCacheBytes(),
                 storage.getPathStateRootParticipantThreads(),
-                storage.getPathStateRootBranchThreads())
+                storage.getPathStateRootBranchThreads(),
+                storage.getPathStateRootSecondLevelParallelThreshold())
             : PathStatePhysicalOverlayHead.open(pathDirectory, pathEngine, limits,
                 storage.getPathStateRootNodeCacheBytes(),
                 storage.getPathStateRootParticipantThreads(),
-                storage.getPathStateRootBranchThreads());
+                storage.getPathStateRootBranchThreads(),
+                storage.getPathStateRootSecondLevelParallelThreshold());
       }
 
       PathStateRootMetadata initialHead = pathOwner.getHead();
@@ -1381,7 +1384,8 @@ public class Manager {
           ? PathStatePhysicalOverlayHead.open(directory, engine, limits,
               storage.getPathStateRootNodeCacheBytes(),
               storage.getPathStateRootParticipantThreads(),
-              storage.getPathStateRootBranchThreads())
+              storage.getPathStateRootBranchThreads(),
+              storage.getPathStateRootSecondLevelParallelThreshold())
           : PathStatePhysicalSnapshotHead.open(directory, engine, limits);
       PathStateRootMetadata recoveredHead = recovered.getHead();
       if (recoveredHead.getBlockNumber()

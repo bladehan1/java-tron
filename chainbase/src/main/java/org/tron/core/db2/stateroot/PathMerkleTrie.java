@@ -26,7 +26,7 @@ public final class PathMerkleTrie {
   private static final byte[] EMPTY_PATH = new byte[0];
   private static final byte[] EMPTY_RLP_ITEM = new byte[]{(byte) 0x80};
   private static final int PARALLEL_UPDATE_THRESHOLD = 4;
-  private static final int SECOND_LEVEL_PARALLEL_THRESHOLD = 64;
+  static final int DEFAULT_SECOND_LEVEL_PARALLEL_THRESHOLD = 64;
   private static final Comparator<BytesKey> UNSIGNED_KEY_COMPARATOR = (left, right) -> {
     int length = StrictMathWrapper.min(left.bytes.length, right.bytes.length);
     for (int i = 0; i < length; i++) {
@@ -123,17 +123,26 @@ public final class PathMerkleTrie {
 
   synchronized void applyBatch(List<BatchMutation> mutations, ExecutorService executor,
       boolean deferNodeEncoding) {
+    applyBatch(mutations, executor, deferNodeEncoding, DEFAULT_SECOND_LEVEL_PARALLEL_THRESHOLD);
+  }
+
+  synchronized void applyBatch(List<BatchMutation> mutations, ExecutorService executor,
+      boolean deferNodeEncoding, int secondLevelParallelThreshold) {
     requireMutable();
+    if (secondLevelParallelThreshold <= 0) {
+      throw new IllegalArgumentException("secondLevelParallelThreshold must be positive");
+    }
     if (deferNodeEncoding) {
       try (BlockNodeEncodingScope ignored = BlockNodeEncodingScope.open()) {
-        applyBatchInternal(mutations, executor);
+        applyBatchInternal(mutations, executor, secondLevelParallelThreshold);
       }
       return;
     }
-    applyBatchInternal(mutations, executor);
+    applyBatchInternal(mutations, executor, secondLevelParallelThreshold);
   }
 
-  private void applyBatchInternal(List<BatchMutation> mutations, ExecutorService executor) {
+  private void applyBatchInternal(List<BatchMutation> mutations, ExecutorService executor,
+      int secondLevelParallelThreshold) {
     List<BatchMutation> batch = new ArrayList<>(Objects.requireNonNull(mutations, "mutations"));
     Node resolvedRoot = resolve(rootNode, EMPTY_PATH);
     rootNode = resolvedRoot;
@@ -183,7 +192,7 @@ public final class PathMerkleTrie {
     for (SubtreeWork subtree : work) {
       byte[] path = new byte[]{(byte) subtree.position};
       Node child = root.children[subtree.position];
-      if (subtree.mutations.size() >= SECOND_LEVEL_PARALLEL_THRESHOLD) {
+      if (subtree.mutations.size() >= secondLevelParallelThreshold) {
         child = resolve(child, path);
         if (child instanceof BranchNode) {
           List<SubtreeWork> subtasks = secondLevelSubtasks((BranchNode) child, subtree);

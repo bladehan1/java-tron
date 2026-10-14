@@ -244,6 +244,7 @@ public class StorageConfigTest {
     assertEquals(268435456L, defaults.getPathStateRoot().getNodeCacheBytes());
     assertEquals(4, defaults.getPathStateRoot().getParticipantThreads());
     assertEquals(16, defaults.getPathStateRoot().getBranchThreads());
+    assertEquals(64, defaults.getPathStateRoot().getSecondLevelParallelThreshold());
     assertFalse(defaults.getPathStateRoot().isRebuildFromGenesis());
     assertTrue(defaults.getPathStateRoot().isVerifyEveryBlock());
     assertFalse(defaults.getPathStateRoot().isVolatileSnapshotBenchmark());
@@ -254,7 +255,7 @@ public class StorageConfigTest {
             + "directory = root-test, "
             + "formatVersion = 1, reversibleLayerLimit = 8, reversibleLayerBytes = 4096, "
             + "writeBufferBytes = 1024, nodeCacheBytes = 2048, participantThreads = 2, "
-            + "branchThreads = 3, rebuildFromGenesis = false, "
+            + "branchThreads = 3, secondLevelParallelThreshold = 8, rebuildFromGenesis = false, "
             + "verifyEveryBlock = true, volatileSnapshotBenchmark = true, "
             + "asyncPrepareBenchmark = true }"));
     assertTrue(configured.getPathStateRoot().isEnabled());
@@ -266,6 +267,7 @@ public class StorageConfigTest {
     assertEquals(2048L, configured.getPathStateRoot().getNodeCacheBytes());
     assertEquals(2, configured.getPathStateRoot().getParticipantThreads());
     assertEquals(3, configured.getPathStateRoot().getBranchThreads());
+    assertEquals(8, configured.getPathStateRoot().getSecondLevelParallelThreshold());
     assertTrue(configured.getPathStateRoot().isVolatileSnapshotBenchmark());
     assertTrue(configured.getPathStateRoot().isAsyncPrepareBenchmark());
   }
@@ -273,6 +275,16 @@ public class StorageConfigTest {
   @Test(expected = IllegalArgumentException.class)
   public void testPathStateRootRejectsInvalidPrepareThreads() {
     StorageConfig.fromConfig(withRef("storage.pathStateRoot.participantThreads = 0"));
+  }
+
+  @Test(expected = IllegalArgumentException.class)
+  public void testPathStateRootRejectsInvalidSecondLevelParallelThreshold() {
+    StorageConfig.fromConfig(withRef("storage.pathStateRoot.secondLevelParallelThreshold = 0"));
+  }
+
+  @Test(expected = IllegalArgumentException.class)
+  public void testPathStateRootRejectsExcessiveSecondLevelParallelThreshold() {
+    StorageConfig.fromConfig(withRef("storage.pathStateRoot.secondLevelParallelThreshold = 257"));
   }
 
   @Test(expected = IllegalArgumentException.class)
