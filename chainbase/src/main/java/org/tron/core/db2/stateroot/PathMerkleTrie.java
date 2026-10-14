@@ -11,13 +11,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.TreeMap;
-import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
-import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import org.tron.common.crypto.Hash;
 import org.tron.common.math.StrictMathWrapper;
@@ -132,29 +128,21 @@ public final class PathMerkleTrie {
 
   synchronized void applyBatch(List<BatchMutation> mutations, ExecutorService executor,
       boolean deferNodeEncoding, int secondLevelParallelThreshold) {
-    applyBatch(mutations, executor, deferNodeEncoding, secondLevelParallelThreshold, 1);
-  }
-
-  synchronized void applyBatch(List<BatchMutation> mutations, ExecutorService executor,
-      boolean deferNodeEncoding, int secondLevelParallelThreshold, int activeParticipants) {
     requireMutable();
     if (secondLevelParallelThreshold <= 0) {
       throw new IllegalArgumentException("secondLevelParallelThreshold must be positive");
     }
-    if (activeParticipants <= 0) {
-      throw new IllegalArgumentException("activeParticipants must be positive");
-    }
     if (deferNodeEncoding) {
       try (BlockNodeEncodingScope ignored = BlockNodeEncodingScope.open()) {
-        applyBatchInternal(mutations, executor, secondLevelParallelThreshold, activeParticipants);
+        applyBatchInternal(mutations, executor, secondLevelParallelThreshold);
       }
       return;
     }
-    applyBatchInternal(mutations, executor, secondLevelParallelThreshold, activeParticipants);
+    applyBatchInternal(mutations, executor, secondLevelParallelThreshold);
   }
 
   private void applyBatchInternal(List<BatchMutation> mutations, ExecutorService executor,
-      int secondLevelParallelThreshold, int activeParticipants) {
+      int secondLevelParallelThreshold) {
     List<BatchMutation> batch = new ArrayList<>(Objects.requireNonNull(mutations, "mutations"));
     Node resolvedRoot = resolve(rootNode, EMPTY_PATH);
     rootNode = resolvedRoot;
@@ -196,8 +184,6 @@ public final class PathMerkleTrie {
     });
     boolean deferNodeEncoding = DEFER_NODE_ENCODING.get();
     Objects.requireNonNull(executor, "executor");
-    int maxInFlight = maxInFlightBranches(executor, activeParticipants);
-    AtomicInteger inFlight = new AtomicInteger();
     // Submission and join both happen on this caller thread; pool tasks never submit again.
     List<Future<SubtreeResult>> futures = new ArrayList<>(work.size());
     List<SubtreeWork> directWork = new ArrayList<>(work.size());
@@ -215,9 +201,9 @@ public final class PathMerkleTrie {
             splitWork.add(split);
             for (SubtreeWork subtask : subtasks) {
               byte[] subPath = new byte[]{(byte) subtree.position, (byte) subtask.position};
-              Future<SubtreeResult> submitted = submitBranch(executor, inFlight, maxInFlight,
-                  futures, () -> applySubtree(split.branch.children[subtask.position], subPath, 2,
-                      subtask.mutations, deferNodeEncoding));
+              Future<SubtreeResult> submitted = executor.submit(() -> applySubtree(
+                  split.branch.children[subtask.position], subPath, 2,
+                  subtask.mutations, deferNodeEncoding));
               split.futures.add(submitted);
               futures.add(submitted);
             }
@@ -227,7 +213,7 @@ public final class PathMerkleTrie {
       }
       Node initial = child;
       directWork.add(subtree);
-      Future<SubtreeResult> submitted = submitBranch(executor, inFlight, maxInFlight, futures,
+      Future<SubtreeResult> submitted = executor.submit(
           () -> applySubtree(initial, path, 1, subtree.mutations, deferNodeEncoding));
       directFutures.add(submitted);
       futures.add(submitted);
@@ -288,78 +274,6 @@ public final class PathMerkleTrie {
     }
     rootNode = new BranchNode(children);
     dirty = true;
-  }
-
-  /**
-   * Submits one branch task unless this participant already has {@code maxInFlight} tasks in
-   * flight, in which case the task runs inline on the calling participant thread. Caller-runs
-   * is the backpressure that keeps one large participant from burst-filling the shared branch
-   * pool ahead of other participants; it never blocks waiting for a pool slot.
-   */
-  private Future<SubtreeResult> submitBranch(ExecutorService executor, AtomicInteger inFlight,
-      int maxInFlight, List<Future<SubtreeResult>> submitted, Callable<SubtreeResult> task) {
-    if (inFlight.get() < maxInFlight) {
-      inFlight.incrementAndGet();
-      return executor.submit(() -> {
-        try {
-          return task.call();
-        } finally {
-          inFlight.decrementAndGet();
-        }
-      });
-    }
-    try {
-      return new CompletedFuture<>(task.call());
-    } catch (RuntimeException failed) {
-      cancel(submitted);
-      throw failed;
-    } catch (Exception failed) {
-      cancel(submitted);
-      throw new IllegalStateException("path trie batch update failed", failed);
-    }
-  }
-
-  private static int maxInFlightBranches(ExecutorService executor, int activeParticipants) {
-    if (!(executor instanceof ThreadPoolExecutor)) {
-      return Integer.MAX_VALUE;
-    }
-    int branchThreads = ((ThreadPoolExecutor) executor).getMaximumPoolSize();
-    return StrictMathWrapper.max(2, branchThreads / StrictMathWrapper.max(1, activeParticipants));
-  }
-
-  /** Already-computed result of a caller-runs branch task; join semantics match pool futures. */
-  private static final class CompletedFuture<V> implements Future<V> {
-
-    private final V value;
-
-    private CompletedFuture(V value) {
-      this.value = value;
-    }
-
-    @Override
-    public boolean cancel(boolean mayInterruptIfRunning) {
-      return false;
-    }
-
-    @Override
-    public boolean isCancelled() {
-      return false;
-    }
-
-    @Override
-    public boolean isDone() {
-      return true;
-    }
-
-    @Override
-    public V get() {
-      return value;
-    }
-
-    @Override
-    public V get(long timeout, TimeUnit unit) {
-      return value;
-    }
   }
 
   private static final class SubtreeWork {

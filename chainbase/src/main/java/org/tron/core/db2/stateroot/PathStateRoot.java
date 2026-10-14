@@ -15,7 +15,6 @@ import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
-import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import org.tron.common.math.StrictMathWrapper;
 
@@ -120,8 +119,6 @@ public final class PathStateRoot {
     List<PreparedMutation> prepared = prepare(mutations);
     List<ParticipantWork> work = prepareParticipantWork(prepared);
     List<Future<?>> futures = new ArrayList<>(work.size());
-    int activeParticipants = StrictMathWrapper.max(1,
-        StrictMathWrapper.min(work.size(), participantPoolSize(participantExecutor)));
     // Preserve the existing wall boundary: grouping/sorting is outside this measurement.
     long startedNanos = System.nanoTime();
     boolean attribution = PathStateOperationTimer.enabled();
@@ -130,21 +127,12 @@ public final class PathStateRoot {
         participantWork.submittedNanos = System.nanoTime();
       }
       futures.add(Objects.requireNonNull(participantExecutor, "participantExecutor").submit(
-          () -> applyParticipant(participantWork, branchExecutor, secondLevelParallelThreshold,
-              activeParticipants)));
+          () -> applyParticipant(participantWork, branchExecutor, secondLevelParallelThreshold)));
     }
     awaitParticipants(futures);
     recordPendingLeafMutations(prepared);
     rootMaterialized = false;
     return summarizeParallelApply(prepared, work, startedNanos);
-  }
-
-  private static int participantPoolSize(ExecutorService participantExecutor) {
-    if (participantExecutor instanceof ThreadPoolExecutor) {
-      return StrictMathWrapper.max(1,
-          ((ThreadPoolExecutor) participantExecutor).getMaximumPoolSize());
-    }
-    return Integer.MAX_VALUE;
   }
 
   private static List<ParticipantWork> prepareParticipantWork(List<PreparedMutation> prepared) {
@@ -167,7 +155,7 @@ public final class PathStateRoot {
 
   // Called by a worker while the coordinator holds the root monitor; do not synchronize here.
   private void applyParticipant(ParticipantWork participantWork, ExecutorService branchExecutor,
-      int secondLevelParallelThreshold, int activeParticipants) {
+      int secondLevelParallelThreshold) {
     long participantStartedNanos = System.nanoTime();
     participantWork.queueNanos = participantWork.submittedNanos == 0 ? 0
         : participantStartedNanos - participantWork.submittedNanos;
@@ -181,8 +169,7 @@ public final class PathStateRoot {
         participantWork.participant.getDbName());
     participantTrie.applyBatch(batch,
         Objects.requireNonNull(branchExecutor, "branchExecutor"),
-        usesDeferredNodeEncoding(participantWork.participant), secondLevelParallelThreshold,
-        activeParticipants);
+        usesDeferredNodeEncoding(participantWork.participant), secondLevelParallelThreshold);
     participantTrie.rootHash();
     participantWork.elapsedNanos = System.nanoTime() - participantStartedNanos;
   }
