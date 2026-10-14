@@ -172,9 +172,7 @@ public final class SharedCheckpointDatabase implements Closeable {
       return;
     }
     List<StateArchiveIndexDatabase.Mutation> mutations = new ArrayList<>();
-    for (CommonCheckpointPayload payload : retained()) {
-      byte[] generation = generation(CommonCheckpointTarget.from(payload)
-          .getLastBlock().getBlockNumber());
+    for (byte[] generation : retainedGenerationKeys()) {
       if (!Arrays.equals(head, generation)) {
         mutations.add(StateArchiveIndexDatabase.delete(generation));
       }
@@ -182,6 +180,25 @@ public final class SharedCheckpointDatabase implements Closeable {
     mutations.add(StateArchiveIndexDatabase.put(BASE, head));
     mutations.add(StateArchiveIndexDatabase.put(START, head));
     writer.write(mutations, true);
+  }
+
+  /** Lists retained generation keys without decoding payloads; retained() validates the chain. */
+  private List<byte[]> retainedGenerationKeys() throws IOException {
+    List<byte[]> keys = new ArrayList<>();
+    try (StateArchiveIndexDatabase.Reader reader =
+        StateArchiveIndexDatabase.openReader(directory, engine);
+        StateArchiveIndexDatabase.Cursor cursor = reader.cursor()) {
+      cursor.seek(GENERATION);
+      StateArchiveIndexDatabase.KeyValue row;
+      while ((row = cursor.next()) != null) {
+        byte[] rowKey = row.getKey();
+        if (!startsWith(rowKey, GENERATION)) {
+          break;
+        }
+        keys.add(rowKey);
+      }
+    }
+    return keys;
   }
 
   private CommonCheckpointPayload decode(byte[] generation, byte[] encoded) throws IOException {
