@@ -15,6 +15,7 @@ import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import org.tron.common.math.StrictMathWrapper;
 
@@ -119,7 +120,8 @@ public final class PathStateRoot {
     List<PreparedMutation> prepared = prepare(mutations);
     List<ParticipantWork> work = prepareParticipantWork(prepared);
     List<Future<?>> futures = new ArrayList<>(work.size());
-    int activeParticipants = StrictMathWrapper.max(1, work.size());
+    int activeParticipants = StrictMathWrapper.max(1,
+        StrictMathWrapper.min(work.size(), participantPoolSize(participantExecutor)));
     // Preserve the existing wall boundary: grouping/sorting is outside this measurement.
     long startedNanos = System.nanoTime();
     boolean attribution = PathStateOperationTimer.enabled();
@@ -135,6 +137,14 @@ public final class PathStateRoot {
     recordPendingLeafMutations(prepared);
     rootMaterialized = false;
     return summarizeParallelApply(prepared, work, startedNanos);
+  }
+
+  private static int participantPoolSize(ExecutorService participantExecutor) {
+    if (participantExecutor instanceof ThreadPoolExecutor) {
+      return StrictMathWrapper.max(1,
+          ((ThreadPoolExecutor) participantExecutor).getMaximumPoolSize());
+    }
+    return Integer.MAX_VALUE;
   }
 
   private static List<ParticipantWork> prepareParticipantWork(List<PreparedMutation> prepared) {
