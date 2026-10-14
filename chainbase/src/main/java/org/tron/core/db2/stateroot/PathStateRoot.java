@@ -119,6 +119,7 @@ public final class PathStateRoot {
     List<PreparedMutation> prepared = prepare(mutations);
     List<ParticipantWork> work = prepareParticipantWork(prepared);
     List<Future<?>> futures = new ArrayList<>(work.size());
+    int activeParticipants = StrictMathWrapper.max(1, work.size());
     // Preserve the existing wall boundary: grouping/sorting is outside this measurement.
     long startedNanos = System.nanoTime();
     boolean attribution = PathStateOperationTimer.enabled();
@@ -127,7 +128,8 @@ public final class PathStateRoot {
         participantWork.submittedNanos = System.nanoTime();
       }
       futures.add(Objects.requireNonNull(participantExecutor, "participantExecutor").submit(
-          () -> applyParticipant(participantWork, branchExecutor, secondLevelParallelThreshold)));
+          () -> applyParticipant(participantWork, branchExecutor, secondLevelParallelThreshold,
+              activeParticipants)));
     }
     awaitParticipants(futures);
     recordPendingLeafMutations(prepared);
@@ -155,7 +157,7 @@ public final class PathStateRoot {
 
   // Called by a worker while the coordinator holds the root monitor; do not synchronize here.
   private void applyParticipant(ParticipantWork participantWork, ExecutorService branchExecutor,
-      int secondLevelParallelThreshold) {
+      int secondLevelParallelThreshold, int activeParticipants) {
     long participantStartedNanos = System.nanoTime();
     participantWork.queueNanos = participantWork.submittedNanos == 0 ? 0
         : participantStartedNanos - participantWork.submittedNanos;
@@ -169,7 +171,8 @@ public final class PathStateRoot {
         participantWork.participant.getDbName());
     participantTrie.applyBatch(batch,
         Objects.requireNonNull(branchExecutor, "branchExecutor"),
-        usesDeferredNodeEncoding(participantWork.participant), secondLevelParallelThreshold);
+        usesDeferredNodeEncoding(participantWork.participant), secondLevelParallelThreshold,
+        activeParticipants);
     participantTrie.rootHash();
     participantWork.elapsedNanos = System.nanoTime() - participantStartedNanos;
   }
