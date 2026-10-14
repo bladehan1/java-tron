@@ -608,7 +608,18 @@ public class SnapshotManager implements RevokingDatabase {
   }
 
   private void advance() {
-    dbs.forEach(db -> db.setHead(db.getHead().advance()));
+    dbs.forEach(db -> {
+      Snapshot head = db.getHead();
+      if (Snapshot.isImpl(head)) {
+        // Only the active session head keeps a block read cache: a layer covered by a new
+        // session must not retain one (one block of entries per store, dropped with the
+        // layer) and must not serve entries cached before merge/flush rearranged the stack.
+        ((SnapshotImpl) head).disableBlockReadCache();
+      }
+      Snapshot next = head.advance();
+      ((SnapshotImpl) next).enableBlockReadCache();
+      db.setHead(next);
+    });
     ++size;
   }
 
@@ -670,6 +681,24 @@ public class SnapshotManager implements RevokingDatabase {
         db.getHead().reloadToMem();
       }
     });
+    logBlockReadCacheStats();
+  }
+
+  /** One DEBUG line per committed session with per-store block read-cache occupancy. */
+  private void logBlockReadCacheStats() {
+    if (!logger.isDebugEnabled()) {
+      return;
+    }
+    StringBuilder stats = new StringBuilder("Block read cache (entries/hits):");
+    for (Chainbase db : dbs) {
+      Snapshot head = db.getHead();
+      if (Snapshot.isImpl(head) && ((SnapshotImpl) head).hasBlockReadCache()) {
+        stats.append(' ').append(db.getDbName()).append('=')
+            .append(((SnapshotImpl) head).getBlockReadCacheSize())
+            .append('/').append(((SnapshotImpl) head).getBlockReadCacheHits());
+      }
+    }
+    logger.debug(stats.toString());
   }
 
   /**
@@ -736,6 +765,7 @@ public class SnapshotManager implements RevokingDatabase {
         blockFinalizationActive = false;
       }
     }
+    logBlockReadCacheStats();
   }
 
   private void requireNoBlockFinalization() {
