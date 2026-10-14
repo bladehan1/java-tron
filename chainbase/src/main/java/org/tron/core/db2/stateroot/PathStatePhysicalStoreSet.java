@@ -2046,66 +2046,121 @@ public final class PathStatePhysicalStoreSet implements Closeable {
   static final class ResidentNodeCache {
 
     private static final long ENTRY_OVERHEAD_BYTES = 64;
-    private final long maxBytes;
-    private final Map<ResidentNodeCacheKey, ResidentNodeCacheValue> values =
-        new LinkedHashMap<>(1024, 0.75f, true);
-    private long bytes;
-    private long evictions;
+    private static final int MAX_STRIPES = 64;
+    // Stripes share the budget across Stores. The floor keeps tiny budgets on a single stripe
+    // instead of thrashing many stripes with unusably small per-stripe budgets.
+    private static final long MIN_STRIPE_BYTES = 1L << 20;
+
+    private final Stripe[] stripes;
 
     ResidentNodeCache(long maxBytes) {
       if (maxBytes <= 0) {
         throw new IllegalArgumentException("resident node cache bytes must be positive");
       }
-      this.maxBytes = maxBytes;
+      int stripeCount = (int) StrictMathWrapper.min((long) MAX_STRIPES,
+          StrictMathWrapper.max(1L, maxBytes / MIN_STRIPE_BYTES));
+      long stripeBytes = maxBytes / stripeCount;
+      stripes = new Stripe[stripeCount];
+      for (int index = 0; index < stripeCount; index++) {
+        stripes[index] = new Stripe(stripeBytes);
+      }
     }
 
-    synchronized Lookup get(int storeId, byte[] path) {
-      ResidentNodeCacheValue value = values.get(new ResidentNodeCacheKey(storeId, path));
-      return value == null ? Lookup.missing() : Lookup.found(value.value, value.updated);
+    Lookup get(int storeId, byte[] path) {
+      ResidentNodeCacheKey key = new ResidentNodeCacheKey(storeId, path);
+      Stripe stripe = stripeFor(key);
+      synchronized (stripe) {
+        ResidentNodeCacheValue value = stripe.values.get(key);
+        return value == null ? Lookup.missing() : Lookup.found(value.value, value.updated);
+      }
     }
 
-    synchronized void put(int storeId, byte[] path, byte[] value, boolean updated) {
+    void put(int storeId, byte[] path, byte[] value, boolean updated) {
       ResidentNodeCacheKey key = new ResidentNodeCacheKey(storeId, path);
       ResidentNodeCacheValue replacement = new ResidentNodeCacheValue(value, updated,
           ENTRY_OVERHEAD_BYTES + Integer.BYTES + key.path.length
               + (value == null ? 0 : value.length));
-      ResidentNodeCacheValue previous = values.put(key, replacement);
-      if (previous != null) {
-        bytes -= previous.weight;
-      }
-      bytes += replacement.weight;
-      java.util.Iterator<Map.Entry<ResidentNodeCacheKey, ResidentNodeCacheValue>> iterator =
-          values.entrySet().iterator();
-      while (bytes > maxBytes && iterator.hasNext()) {
-        Map.Entry<ResidentNodeCacheKey, ResidentNodeCacheValue> eldest = iterator.next();
-        bytes -= eldest.getValue().weight;
-        iterator.remove();
-        evictions++;
-      }
-    }
-
-    synchronized void clear(int storeId) {
-      java.util.Iterator<Map.Entry<ResidentNodeCacheKey, ResidentNodeCacheValue>> iterator =
-          values.entrySet().iterator();
-      while (iterator.hasNext()) {
-        Map.Entry<ResidentNodeCacheKey, ResidentNodeCacheValue> entry = iterator.next();
-        if (entry.getKey().storeId == storeId) {
-          bytes -= entry.getValue().weight;
+      Stripe stripe = stripeFor(key);
+      synchronized (stripe) {
+        ResidentNodeCacheValue previous = stripe.values.put(key, replacement);
+        if (previous != null) {
+          stripe.bytes -= previous.weight;
+        }
+        stripe.bytes += replacement.weight;
+        java.util.Iterator<Map.Entry<ResidentNodeCacheKey, ResidentNodeCacheValue>> iterator =
+            stripe.values.entrySet().iterator();
+        while (stripe.bytes > stripe.maxBytes && iterator.hasNext()) {
+          Map.Entry<ResidentNodeCacheKey, ResidentNodeCacheValue> eldest = iterator.next();
+          stripe.bytes -= eldest.getValue().weight;
           iterator.remove();
+          stripe.evictions++;
         }
       }
     }
 
-    synchronized long bytes() {
-      return bytes;
+    void clear(int storeId) {
+      for (Stripe stripe : stripes) {
+        synchronized (stripe) {
+          java.util.Iterator<Map.Entry<ResidentNodeCacheKey, ResidentNodeCacheValue>> iterator =
+              stripe.values.entrySet().iterator();
+          while (iterator.hasNext()) {
+            Map.Entry<ResidentNodeCacheKey, ResidentNodeCacheValue> entry = iterator.next();
+            if (entry.getKey().storeId == storeId) {
+              stripe.bytes -= entry.getValue().weight;
+              iterator.remove();
+            }
+          }
+        }
+      }
     }
 
-    synchronized int size() {
-      return values.size();
+    long bytes() {
+      long total = 0;
+      for (Stripe stripe : stripes) {
+        synchronized (stripe) {
+          total += stripe.bytes;
+        }
+      }
+      return total;
     }
 
-    synchronized long evictions() {
-      return evictions;
+    int size() {
+      int total = 0;
+      for (Stripe stripe : stripes) {
+        synchronized (stripe) {
+          total += stripe.values.size();
+        }
+      }
+      return total;
+    }
+
+    long evictions() {
+      long total = 0;
+      for (Stripe stripe : stripes) {
+        synchronized (stripe) {
+          total += stripe.evictions;
+        }
+      }
+      return total;
+    }
+
+    private Stripe stripeFor(ResidentNodeCacheKey key) {
+      int hash = key.hashCode();
+      hash ^= hash >>> 16;
+      return stripes[(hash & 0x7fffffff) % stripes.length];
+    }
+
+    private static final class Stripe {
+
+      private final long maxBytes;
+      private final Map<ResidentNodeCacheKey, ResidentNodeCacheValue> values =
+          new LinkedHashMap<>(1024, 0.75f, true);
+      private long bytes;
+      private long evictions;
+
+      private Stripe(long maxBytes) {
+        this.maxBytes = maxBytes;
+      }
     }
 
     static final class Lookup {
@@ -2116,7 +2171,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
 
       private Lookup(boolean found, byte[] value, boolean updated) {
         this.found = found;
-        this.value = value == null ? null : Arrays.copyOf(value, value.length);
+        this.value = value;
         this.updated = updated;
       }
 
