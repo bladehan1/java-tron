@@ -109,6 +109,13 @@ public final class PathStateRoot {
 
   synchronized ParallelApplyStats applyParallel(Collection<PathStateMutation> mutations,
       ExecutorService participantExecutor, ExecutorService branchExecutor) {
+    return applyParallel(mutations, participantExecutor, branchExecutor,
+        PathMerkleTrie.DEFAULT_SECOND_LEVEL_PARALLEL_THRESHOLD);
+  }
+
+  synchronized ParallelApplyStats applyParallel(Collection<PathStateMutation> mutations,
+      ExecutorService participantExecutor, ExecutorService branchExecutor,
+      int secondLevelParallelThreshold) {
     List<PreparedMutation> prepared = prepare(mutations);
     List<ParticipantWork> work = prepareParticipantWork(prepared);
     List<Future<?>> futures = new ArrayList<>(work.size());
@@ -120,7 +127,7 @@ public final class PathStateRoot {
         participantWork.submittedNanos = System.nanoTime();
       }
       futures.add(Objects.requireNonNull(participantExecutor, "participantExecutor").submit(
-          () -> applyParticipant(participantWork, branchExecutor)));
+          () -> applyParticipant(participantWork, branchExecutor, secondLevelParallelThreshold)));
     }
     awaitParticipants(futures);
     recordPendingLeafMutations(prepared);
@@ -147,7 +154,8 @@ public final class PathStateRoot {
   }
 
   // Called by a worker while the coordinator holds the root monitor; do not synchronize here.
-  private void applyParticipant(ParticipantWork participantWork, ExecutorService branchExecutor) {
+  private void applyParticipant(ParticipantWork participantWork, ExecutorService branchExecutor,
+      int secondLevelParallelThreshold) {
     long participantStartedNanos = System.nanoTime();
     participantWork.queueNanos = participantWork.submittedNanos == 0 ? 0
         : participantStartedNanos - participantWork.submittedNanos;
@@ -161,7 +169,7 @@ public final class PathStateRoot {
         participantWork.participant.getDbName());
     participantTrie.applyBatch(batch,
         Objects.requireNonNull(branchExecutor, "branchExecutor"),
-        usesDeferredNodeEncoding(participantWork.participant));
+        usesDeferredNodeEncoding(participantWork.participant), secondLevelParallelThreshold);
     participantTrie.rootHash();
     participantWork.elapsedNanos = System.nanoTime() - participantStartedNanos;
   }
@@ -322,7 +330,8 @@ public final class PathStateRoot {
 
   static boolean usesDeferredNodeEncoding(PathStateParticipant participant) {
     String dbName = participant.getDbName();
-    return "account".equals(dbName) || "account-asset".equals(dbName);
+    return "account".equals(dbName) || "account-asset".equals(dbName)
+        || "storage-row".equals(dbName);
   }
 
   /** Applies one rebuild batch while locking only the participant tries touched by that batch. */
