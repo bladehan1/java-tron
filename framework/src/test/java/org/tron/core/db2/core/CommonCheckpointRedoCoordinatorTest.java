@@ -69,10 +69,10 @@ public class CommonCheckpointRedoCoordinatorTest {
     assertEquals(1, timing.getHead());
     assertEquals(1, timing.getBlocks());
     assertEquals(1, timing.getWalPublishUs());
-    assertEquals(1, timing.getWalLoadUs());
+    assertEquals(0, timing.getWalLoadUs());
     assertEquals(1, timing.getWalRetireUs());
-    assertEquals(2, timing.getTargetBuildUs());
-    assertEquals(2, timing.getTargetBuildCount());
+    assertEquals(1, timing.getTargetBuildUs());
+    assertEquals(1, timing.getTargetBuildCount());
     assertEquals(0, timing.getRetainedLoadUs());
     assertEquals(0, timing.getRetainedLoadCount());
     assertEquals(0, timing.getChainbaseRetainedReplayUs());
@@ -146,8 +146,8 @@ public class CommonCheckpointRedoCoordinatorTest {
     assertEquals(0, timing.getWalPublishUs());
     assertEquals(1, timing.getWalLoadUs());
     assertEquals(1, timing.getWalRetireUs());
-    assertEquals(2, timing.getTargetBuildUs());
-    assertEquals(2, timing.getTargetBuildCount());
+    assertEquals(1, timing.getTargetBuildUs());
+    assertEquals(1, timing.getTargetBuildCount());
     assertEquals(0, timing.getRetainedLoadUs());
     assertEquals(0, timing.getRetainedLoadCount());
     assertEquals(0, timing.getChainbaseRetainedReplayUs());

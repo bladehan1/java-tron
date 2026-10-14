@@ -58,27 +58,27 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
 
   /** Durably publishes the redo payload before applying it to any authority. */
   public synchronized RecoveryAction apply(CommonCheckpointPayload payload) throws IOException {
-    RecoveryAction action = applyDurable(payload);
-    notifyCommitted(CommonCheckpointTarget.from(payload));
-    return action;
+    DurableResult result = applyDurable(payload);
+    notifyCommitted(result.getTarget());
+    return result.getAction();
   }
 
-  synchronized RecoveryAction applyDurable(CommonCheckpointPayload payload) throws IOException {
+  synchronized DurableResult applyDurable(CommonCheckpointPayload payload) throws IOException {
     requireOpen();
     CommonCheckpointPayload admitted = Objects.requireNonNull(payload, "payload");
     long targetStart = nanoTime.getAsLong();
-    Timing timing = new Timing("apply", CommonCheckpointTarget.from(admitted),
-        admitted.getBlocks().size());
+    CommonCheckpointTarget target = CommonCheckpointTarget.from(admitted);
+    Timing timing = new Timing("apply", target, admitted.getBlocks().size());
     timing.targetBuildUs += elapsedUs(targetStart);
     timing.targetBuildCount++;
     long totalStart = nanoTime.getAsLong();
     timing.walPublishUs = timed(() -> checkpointFile.publish(admitted));
-    Holder<CommonCheckpointPayload> loaded = new Holder<>();
-    timing.walLoadUs = timed(() -> loaded.value = checkpointFile.loadRequired());
-    RecoveryAction action = redo(loaded.value, timing);
+    // walLoadUs stays zero: publish() already guarantees the durable bytes are identical to the
+    // admitted payload encoding, so redo consumes the admitted payload without reading it back.
+    RecoveryAction action = redo(admitted, target, timing);
     timing.totalUs = elapsedUs(totalStart);
     emitTiming(timing);
-    return action;
+    return new DurableResult(action, target);
   }
 
   /** Resumes the only durable checkpoint, or performs no work when none exists. */
@@ -101,8 +101,8 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
       }
     }
     long targetStart = nanoTime.getAsLong();
-    Timing timing = new Timing("recover", CommonCheckpointTarget.from(loaded.value),
-        loaded.value.getBlocks().size());
+    CommonCheckpointTarget target = CommonCheckpointTarget.from(loaded.value);
+    Timing timing = new Timing("recover", target, loaded.value.getBlocks().size());
     timing.targetBuildUs += elapsedUs(targetStart);
     timing.targetBuildCount++;
     timing.walLoadUs = loadUs;
@@ -113,10 +113,10 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
     if (checkpointFile.retainsGenerations()) {
       restoreRetained(false, timing);
     }
-    RecoveryAction action = redo(loaded.value, timing);
+    RecoveryAction action = redo(loaded.value, target, timing);
     timing.totalUs = elapsedUs(totalStart);
     emitTiming(timing);
-    notifyCommitted(CommonCheckpointTarget.from(loaded.value));
+    notifyCommitted(target);
     return action;
   }
 
@@ -235,17 +235,14 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
     }
   }
 
-  private RecoveryAction redo(CommonCheckpointPayload payload, Timing timing) throws IOException {
-    Holder<CommonCheckpointTarget> held = new Holder<>();
-    timing.targetBuildUs += timed(() -> held.value = CommonCheckpointTarget.from(payload));
-    timing.targetBuildCount++;
-    CommonCheckpointTarget target = held.value;
+  private RecoveryAction redo(CommonCheckpointPayload payload, CommonCheckpointTarget target,
+      Timing timing) throws IOException {
     try (CheckpointScope ignored = new CheckpointScope(target, timing)) {
-      return redo(payload, target, timing);
+      return redoBarrier(payload, target, timing);
     }
   }
 
-  private RecoveryAction redo(CommonCheckpointPayload payload, CommonCheckpointTarget target,
+  private RecoveryAction redoBarrier(CommonCheckpointPayload payload, CommonCheckpointTarget target,
       Timing timing) throws IOException {
     Map<Authority, Status> initial = inspectAll(target, timing);
     if (initial.containsValue(Status.PUBLISHED)
@@ -606,6 +603,26 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
   public enum RecoveryAction {
     NO_CHECKPOINT,
     COMPLETED_REDO
+  }
+
+  /** The redo outcome together with the already-built target identity for post-commit work. */
+  static final class DurableResult {
+
+    private final RecoveryAction action;
+    private final CommonCheckpointTarget target;
+
+    private DurableResult(RecoveryAction action, CommonCheckpointTarget target) {
+      this.action = action;
+      this.target = target;
+    }
+
+    RecoveryAction getAction() {
+      return action;
+    }
+
+    CommonCheckpointTarget getTarget() {
+      return target;
+    }
   }
 
   enum Stage {
