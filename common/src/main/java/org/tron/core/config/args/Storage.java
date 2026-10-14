@@ -176,6 +176,10 @@ public class Storage {
 
   @Getter
   @Setter
+  private int pathStateRootSecondLevelParallelThreshold = 64;
+
+  @Getter
+  @Setter
   private boolean pathStateRootRebuildFromGenesis;
 
   @Getter

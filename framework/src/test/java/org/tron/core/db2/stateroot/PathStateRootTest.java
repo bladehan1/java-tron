@@ -302,11 +302,11 @@ public class PathStateRootTest {
   }
 
   @Test
-  public void deferredNodeEncodingIsInitiallyLimitedToAccountParticipants() {
+  public void deferredNodeEncodingCoversAccountAndStorageRowParticipants() {
     assertTrue(PathStateRoot.usesDeferredNodeEncoding(participant(4, "account")));
     assertTrue(PathStateRoot.usesDeferredNodeEncoding(participant(5, "account-asset")));
     assertFalse(PathStateRoot.usesDeferredNodeEncoding(participant(1, "abi")));
-    assertFalse(PathStateRoot.usesDeferredNodeEncoding(participant(22, "storage-row")));
+    assertTrue(PathStateRoot.usesDeferredNodeEncoding(participant(22, "storage-row")));
   }
 
   @Test

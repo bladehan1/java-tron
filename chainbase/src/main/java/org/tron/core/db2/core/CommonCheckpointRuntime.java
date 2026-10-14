@@ -219,6 +219,10 @@ public final class CommonCheckpointRuntime implements AutoCloseable {
         pathStatePlan.apply();
         timing.pathStateRebaseApplyUs = elapsedUs(pathStateApplyStart);
         publishedTarget = target;
+      }, (lockWaitUs, completionUs, notifyCommittedUs) -> {
+        timing.ownerLockWaitUs = lockWaitUs;
+        timing.ownerCompletionUs = completionUs;
+        timing.ownerNotifyCommittedUs = notifyCommittedUs;
       });
       timing.ownerApplyUs = elapsedUs(ownerApplyStart);
       timing.totalUs = elapsedUs(totalStart);
@@ -335,11 +339,14 @@ public final class CommonCheckpointRuntime implements AutoCloseable {
     logger.info("Common checkpoint runtime stages: head={}, blocks={}, payloadCaptureUs={}, "
             + "hotPrepareUs={}, ownerApplyUs={}, chainbaseRebasePrepareUs={}, "
             + "pathStateRebasePrepareUs={}, "
-            + "chainbaseRebaseApplyUs={}, pathStateRebaseApplyUs={}, totalUs={}",
+            + "chainbaseRebaseApplyUs={}, pathStateRebaseApplyUs={}, ownerLockWaitUs={}, "
+            + "ownerCompletionUs={}, ownerNotifyCommittedUs={}, totalUs={}",
         timing.head, timing.blocks, timing.payloadCaptureUs, timing.hotPrepareUs,
         timing.ownerApplyUs,
         timing.chainbaseRebasePrepareUs, timing.pathStateRebasePrepareUs,
-        timing.chainbaseRebaseApplyUs, timing.pathStateRebaseApplyUs, timing.totalUs);
+        timing.chainbaseRebaseApplyUs, timing.pathStateRebaseApplyUs,
+        timing.ownerLockWaitUs, timing.ownerCompletionUs, timing.ownerNotifyCommittedUs,
+        timing.totalUs);
   }
 
   static final class Timing {
@@ -353,6 +360,9 @@ public final class CommonCheckpointRuntime implements AutoCloseable {
     private long pathStateRebasePrepareUs;
     private long chainbaseRebaseApplyUs;
     private long pathStateRebaseApplyUs;
+    private long ownerLockWaitUs;
+    private long ownerCompletionUs;
+    private long ownerNotifyCommittedUs;
     private long totalUs;
 
     private Timing(int blocks) {
@@ -393,6 +403,18 @@ public final class CommonCheckpointRuntime implements AutoCloseable {
 
     long getPathStateRebaseApplyUs() {
       return pathStateRebaseApplyUs;
+    }
+
+    long getOwnerLockWaitUs() {
+      return ownerLockWaitUs;
+    }
+
+    long getOwnerCompletionUs() {
+      return ownerCompletionUs;
+    }
+
+    long getOwnerNotifyCommittedUs() {
+      return ownerNotifyCommittedUs;
     }
 
     long getTotalUs() {

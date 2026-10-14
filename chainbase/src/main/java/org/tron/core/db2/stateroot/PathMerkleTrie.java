@@ -26,6 +26,7 @@ public final class PathMerkleTrie {
   private static final byte[] EMPTY_PATH = new byte[0];
   private static final byte[] EMPTY_RLP_ITEM = new byte[]{(byte) 0x80};
   private static final int PARALLEL_UPDATE_THRESHOLD = 4;
+  static final int DEFAULT_SECOND_LEVEL_PARALLEL_THRESHOLD = 64;
   private static final Comparator<BytesKey> UNSIGNED_KEY_COMPARATOR = (left, right) -> {
     int length = StrictMathWrapper.min(left.bytes.length, right.bytes.length);
     for (int i = 0; i < length; i++) {
@@ -122,17 +123,26 @@ public final class PathMerkleTrie {
 
   synchronized void applyBatch(List<BatchMutation> mutations, ExecutorService executor,
       boolean deferNodeEncoding) {
+    applyBatch(mutations, executor, deferNodeEncoding, DEFAULT_SECOND_LEVEL_PARALLEL_THRESHOLD);
+  }
+
+  synchronized void applyBatch(List<BatchMutation> mutations, ExecutorService executor,
+      boolean deferNodeEncoding, int secondLevelParallelThreshold) {
     requireMutable();
+    if (secondLevelParallelThreshold <= 0) {
+      throw new IllegalArgumentException("secondLevelParallelThreshold must be positive");
+    }
     if (deferNodeEncoding) {
       try (BlockNodeEncodingScope ignored = BlockNodeEncodingScope.open()) {
-        applyBatchInternal(mutations, executor);
+        applyBatchInternal(mutations, executor, secondLevelParallelThreshold);
       }
       return;
     }
-    applyBatchInternal(mutations, executor);
+    applyBatchInternal(mutations, executor, secondLevelParallelThreshold);
   }
 
-  private void applyBatchInternal(List<BatchMutation> mutations, ExecutorService executor) {
+  private void applyBatchInternal(List<BatchMutation> mutations, ExecutorService executor,
+      int secondLevelParallelThreshold) {
     List<BatchMutation> batch = new ArrayList<>(Objects.requireNonNull(mutations, "mutations"));
     Node resolvedRoot = resolve(rootNode, EMPTY_PATH);
     rootNode = resolvedRoot;
@@ -172,22 +182,67 @@ public final class PathMerkleTrie {
       int compared = Integer.compare(right.mutations.size(), left.mutations.size());
       return compared != 0 ? compared : Integer.compare(left.position, right.position);
     });
-    List<Future<SubtreeResult>> futures = new ArrayList<>(work.size());
     boolean deferNodeEncoding = DEFER_NODE_ENCODING.get();
+    Objects.requireNonNull(executor, "executor");
+    // Submission and join both happen on this caller thread; pool tasks never submit again.
+    List<Future<SubtreeResult>> futures = new ArrayList<>(work.size());
+    List<SubtreeWork> directWork = new ArrayList<>(work.size());
+    List<Future<SubtreeResult>> directFutures = new ArrayList<>(work.size());
+    List<SplitWork> splitWork = new ArrayList<>();
     for (SubtreeWork subtree : work) {
-      futures.add(Objects.requireNonNull(executor, "executor").submit(
-          () -> applySubtree(root.children[subtree.position], subtree.position,
-              subtree.mutations, deferNodeEncoding)));
+      byte[] path = new byte[]{(byte) subtree.position};
+      Node child = root.children[subtree.position];
+      if (subtree.mutations.size() >= secondLevelParallelThreshold) {
+        child = resolve(child, path);
+        if (child instanceof BranchNode) {
+          List<SubtreeWork> subtasks = secondLevelSubtasks((BranchNode) child, subtree);
+          if (subtasks != null) {
+            SplitWork split = new SplitWork(subtree.position, (BranchNode) child, subtasks);
+            splitWork.add(split);
+            for (SubtreeWork subtask : subtasks) {
+              byte[] subPath = new byte[]{(byte) subtree.position, (byte) subtask.position};
+              Future<SubtreeResult> submitted = executor.submit(() -> applySubtree(
+                  split.branch.children[subtask.position], subPath, 2,
+                  subtask.mutations, deferNodeEncoding));
+              split.futures.add(submitted);
+              futures.add(submitted);
+            }
+            continue;
+          }
+        }
+      }
+      Node initial = child;
+      directWork.add(subtree);
+      Future<SubtreeResult> submitted = executor.submit(
+          () -> applySubtree(initial, path, 1, subtree.mutations, deferNodeEncoding));
+      directFutures.add(submitted);
+      futures.add(submitted);
     }
     Node[] children = Arrays.copyOf(root.children, root.children.length);
     Map<BytesKey, byte[]> previous = new LinkedHashMap<>();
     Map<BytesKey, byte[]> changed = new LinkedHashMap<>();
     try {
-      for (int i = 0; i < futures.size(); i++) {
-        SubtreeResult result = futures.get(i).get();
-        children[work.get(i).position] = result.node;
+      for (int i = 0; i < directWork.size(); i++) {
+        SubtreeResult result = directFutures.get(i).get();
+        children[directWork.get(i).position] = result.node;
         previous.putAll(result.previous);
         changed.putAll(result.changed);
+      }
+      for (SplitWork split : splitWork) {
+        Node[] branchChildren = Arrays.copyOf(split.branch.children,
+            split.branch.children.length);
+        boolean branchChanged = false;
+        for (int i = 0; i < split.subtasks.size(); i++) {
+          SubtreeResult result = split.futures.get(i).get();
+          int subPosition = split.subtasks.get(i).position;
+          branchChanged |= split.branch.children[subPosition] != result.node;
+          branchChildren[subPosition] = result.node;
+          previous.putAll(result.previous);
+          changed.putAll(result.changed);
+        }
+        children[split.position] = branchChanged
+            ? normalizeBranch(branchChildren, new byte[]{(byte) split.position})
+            : split.branch;
       }
     } catch (InterruptedException interrupted) {
       Thread.currentThread().interrupt();
@@ -232,6 +287,50 @@ public final class PathMerkleTrie {
     }
   }
 
+  /** One oversized first-nibble group split across the second nibble of its branch child. */
+  private static final class SplitWork {
+
+    private final int position;
+    private final BranchNode branch;
+    private final List<SubtreeWork> subtasks;
+    private final List<Future<SubtreeResult>> futures = new ArrayList<>();
+
+    private SplitWork(int position, BranchNode branch, List<SubtreeWork> subtasks) {
+      this.position = position;
+      this.branch = branch;
+      this.subtasks = subtasks;
+    }
+  }
+
+  /** Splits one large first-nibble group by second nibble when branch survival is guaranteed. */
+  private static List<SubtreeWork> secondLevelSubtasks(BranchNode branch, SubtreeWork subtree) {
+    boolean[] deletes = new boolean[16];
+    for (BatchMutation mutation : subtree.mutations) {
+      deletes[mutation.nibbles[1]] |= mutation.encodedValue == null;
+    }
+    int guaranteedSurvivors = 0;
+    for (int i = 0; i < branch.children.length; i++) {
+      if (branch.children[i] != null && !deletes[i]) {
+        guaranteedSurvivors++;
+      }
+    }
+    if (guaranteedSurvivors < 2) {
+      return null;
+    }
+    List<List<BatchMutation>> groups = groupMutations(subtree.mutations, 1);
+    List<SubtreeWork> subtasks = new ArrayList<>();
+    for (int i = 0; i < groups.size(); i++) {
+      if (!groups.get(i).isEmpty()) {
+        subtasks.add(new SubtreeWork(i, groups.get(i)));
+      }
+    }
+    subtasks.sort((left, right) -> {
+      int compared = Integer.compare(right.mutations.size(), left.mutations.size());
+      return compared != 0 ? compared : Integer.compare(left.position, right.position);
+    });
+    return subtasks;
+  }
+
   private void applySequentialBatch(List<BatchMutation> mutations) {
     for (BatchMutation mutation : mutations) {
       BytesKey key = new BytesKey(mutation.secureKey);
@@ -252,24 +351,23 @@ public final class PathMerkleTrie {
     }
   }
 
-  private SubtreeResult applySubtree(Node initial, int nibble,
+  private SubtreeResult applySubtree(Node initial, byte[] path, int offset,
       List<BatchMutation> mutations, boolean deferNodeEncoding) {
     if (deferNodeEncoding) {
       try (BlockNodeEncodingScope ignored = BlockNodeEncodingScope.open()) {
-        SubtreeResult result = applySubtreeInternal(initial, nibble, mutations);
+        SubtreeResult result = applySubtreeInternal(initial, path, offset, mutations);
         if (result.node != null) {
           nodeReference(result.node);
         }
         return result;
       }
     }
-    return applySubtreeInternal(initial, nibble, mutations);
+    return applySubtreeInternal(initial, path, offset, mutations);
   }
 
-  private SubtreeResult applySubtreeInternal(Node initial, int nibble,
+  private SubtreeResult applySubtreeInternal(Node initial, byte[] path, int offset,
       List<BatchMutation> mutations) {
     Node node = initial;
-    byte[] path = new byte[]{(byte) nibble};
     Map<BytesKey, byte[]> previous = new LinkedHashMap<>();
     Map<BytesKey, byte[]> changed = new LinkedHashMap<>();
     List<BatchMutation> effective = new ArrayList<>();
@@ -283,7 +381,7 @@ public final class PathMerkleTrie {
       } else if (inheritedSnapshot != null && inheritedSnapshot.containsLeaf(key)) {
         oldValue = inheritedSnapshot.leafValue(key);
       } else {
-        ValueResult result = resolvedValueAt(node, mutation.nibbles, 1, path);
+        ValueResult result = resolvedValueAt(node, mutation.nibbles, offset, path);
         node = result.node;
         oldValue = result.value;
       }
@@ -295,7 +393,7 @@ public final class PathMerkleTrie {
       effective.add(mutation);
     }
     if (!effective.isEmpty()) {
-      node = updateBatch(node, effective, 1, path);
+      node = updateBatch(node, effective, offset, path);
     }
     return new SubtreeResult(node, previous, changed);
   }

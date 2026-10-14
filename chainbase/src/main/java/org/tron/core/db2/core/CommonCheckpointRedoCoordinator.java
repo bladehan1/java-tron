@@ -58,24 +58,27 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
 
   /** Durably publishes the redo payload before applying it to any authority. */
   public synchronized RecoveryAction apply(CommonCheckpointPayload payload) throws IOException {
-    RecoveryAction action = applyDurable(payload);
-    notifyCommitted(CommonCheckpointTarget.from(payload));
-    return action;
+    DurableResult result = applyDurable(payload);
+    notifyCommitted(result.getTarget());
+    return result.getAction();
   }
 
-  synchronized RecoveryAction applyDurable(CommonCheckpointPayload payload) throws IOException {
+  synchronized DurableResult applyDurable(CommonCheckpointPayload payload) throws IOException {
     requireOpen();
     CommonCheckpointPayload admitted = Objects.requireNonNull(payload, "payload");
-    Timing timing = new Timing("apply", CommonCheckpointTarget.from(admitted),
-        admitted.getBlocks().size());
+    long targetStart = nanoTime.getAsLong();
+    CommonCheckpointTarget target = CommonCheckpointTarget.from(admitted);
+    Timing timing = new Timing("apply", target, admitted.getBlocks().size());
+    timing.targetBuildUs += elapsedUs(targetStart);
+    timing.targetBuildCount++;
     long totalStart = nanoTime.getAsLong();
     timing.walPublishUs = timed(() -> checkpointFile.publish(admitted));
-    Holder<CommonCheckpointPayload> loaded = new Holder<>();
-    timing.walLoadUs = timed(() -> loaded.value = checkpointFile.loadRequired());
-    RecoveryAction action = redo(loaded.value, timing);
+    // walLoadUs stays zero: publish() already guarantees the durable bytes are identical to the
+    // admitted payload encoding, so redo consumes the admitted payload without reading it back.
+    RecoveryAction action = redo(admitted, target, timing);
     timing.totalUs = elapsedUs(totalStart);
     emitTiming(timing);
-    return action;
+    return new DurableResult(action, target);
   }
 
   /** Resumes the only durable checkpoint, or performs no work when none exists. */
@@ -84,27 +87,36 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
     long totalStart = nanoTime.getAsLong();
     Holder<CommonCheckpointPayload> loaded = new Holder<>();
     long loadUs = timed(() -> loaded.value = checkpointFile.loadIfPresent());
+    long retainedLoadUs = -1L;
     if (loaded.value == null) {
       if (checkpointFile.retainsGenerations()) {
-        java.util.List<CommonCheckpointPayload> retained = checkpointFile.retained();
-        if (!retained.isEmpty()) {
-          loaded.value = retained.get(retained.size() - 1);
+        Holder<java.util.List<CommonCheckpointPayload>> retained = new Holder<>();
+        retainedLoadUs = timed(() -> retained.value = checkpointFile.retained());
+        if (!retained.value.isEmpty()) {
+          loaded.value = retained.value.get(retained.value.size() - 1);
         }
       }
       if (loaded.value == null) {
         return RecoveryAction.NO_CHECKPOINT;
       }
     }
-    Timing timing = new Timing("recover", CommonCheckpointTarget.from(loaded.value),
-        loaded.value.getBlocks().size());
+    long targetStart = nanoTime.getAsLong();
+    CommonCheckpointTarget target = CommonCheckpointTarget.from(loaded.value);
+    Timing timing = new Timing("recover", target, loaded.value.getBlocks().size());
+    timing.targetBuildUs += elapsedUs(targetStart);
+    timing.targetBuildCount++;
     timing.walLoadUs = loadUs;
-    if (checkpointFile.retainsGenerations()) {
-      restoreRetained(false);
+    if (retainedLoadUs >= 0) {
+      timing.retainedLoadUs += retainedLoadUs;
+      timing.retainedLoadCount++;
     }
-    RecoveryAction action = redo(loaded.value, timing);
+    if (checkpointFile.retainsGenerations()) {
+      restoreRetained(false, timing);
+    }
+    RecoveryAction action = redo(loaded.value, target, timing);
     timing.totalUs = elapsedUs(totalStart);
     emitTiming(timing);
-    notifyCommitted(CommonCheckpointTarget.from(loaded.value));
+    notifyCommitted(target);
     return action;
   }
 
@@ -180,10 +192,22 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
     }
   }
 
-  private void restoreRetained(boolean sync) throws IOException {
-    java.util.List<CommonCheckpointPayload> payloads = checkpointFile.retained();
-    materializers.get(Authority.CHAINBASE).replayRetained(payloads, sync);
-    materializers.get(Authority.PATH_STATE).replayRetained(payloads, sync);
+  private void restoreRetained(boolean sync, Timing timing) throws IOException {
+    Holder<java.util.List<CommonCheckpointPayload>> held = new Holder<>();
+    long loadUs = timed(() -> held.value = checkpointFile.retained());
+    java.util.List<CommonCheckpointPayload> payloads = held.value;
+    long chainbaseUs = timed(
+        () -> materializers.get(Authority.CHAINBASE).replayRetained(payloads, sync));
+    long pathStateUs = timed(
+        () -> materializers.get(Authority.PATH_STATE).replayRetained(payloads, sync));
+    if (timing != null) {
+      timing.retainedLoadUs += loadUs;
+      timing.retainedLoadCount++;
+      timing.chainbaseRetainedReplayUs += chainbaseUs;
+      timing.chainbaseRetainedReplayCount++;
+      timing.pathStateRetainedReplayUs += pathStateUs;
+      timing.pathStateRetainedReplayCount++;
+    }
   }
 
   /** Bounds retained redo using the existing checkpoint flush-count setting. */
@@ -196,22 +220,29 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
 
   /** Force the retained target data before advancing the durable base and pruning generations. */
   public synchronized void checkpointDurableBase() throws IOException {
+    checkpointDurableBase(null);
+  }
+
+  private void checkpointDurableBase(Timing timing) throws IOException {
     requireOpen();
     if (checkpointFile.retainsGenerations() && !checkpointFile.isPresent()) {
-      restoreRetained(true);
-      checkpointFile.advanceDurableBase();
+      restoreRetained(true, timing);
+      long advanceUs = timed(checkpointFile::advanceDurableBase);
+      if (timing != null) {
+        timing.durableBaseAdvanceUs += advanceUs;
+      }
       completedSinceBase = 0;
     }
   }
 
-  private RecoveryAction redo(CommonCheckpointPayload payload, Timing timing) throws IOException {
-    CommonCheckpointTarget target = CommonCheckpointTarget.from(payload);
+  private RecoveryAction redo(CommonCheckpointPayload payload, CommonCheckpointTarget target,
+      Timing timing) throws IOException {
     try (CheckpointScope ignored = new CheckpointScope(target, timing)) {
-      return redo(payload, target, timing);
+      return redoBarrier(payload, target, timing);
     }
   }
 
-  private RecoveryAction redo(CommonCheckpointPayload payload, CommonCheckpointTarget target,
+  private RecoveryAction redoBarrier(CommonCheckpointPayload payload, CommonCheckpointTarget target,
       Timing timing) throws IOException {
     Map<Authority, Status> initial = inspectAll(target, timing);
     if (initial.containsValue(Status.PUBLISHED)
@@ -255,7 +286,7 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
     timing.walRetireUs = timed(checkpointFile::retire);
     faultHook.after(Stage.AFTER_CHECKPOINT_RETIRE);
     if (durableBaseCadence > 0 && ++completedSinceBase >= durableBaseCadence) {
-      checkpointDurableBase();
+      checkpointDurableBase(timing);
     }
     return RecoveryAction.COMPLETED_REDO;
   }
@@ -360,7 +391,9 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
             + "chainbaseMaterializeUs={}/{}, pathStateMaterializeUs={}/{}, "
             + "archiveMaterializeUs={}/{}, chainbasePublishUs={}/{}, "
             + "pathStatePublishUs={}/{}, archivePublishUs={}/{}, walRetireUs={}, "
-            + "chainbaseEndUs={}, pathStateEndUs={}, archiveEndUs={}, totalUs={}",
+            + "chainbaseEndUs={}, pathStateEndUs={}, archiveEndUs={}, targetBuildUs={}/{}, "
+            + "retainedLoadUs={}/{}, chainbaseRetainedReplayUs={}/{}, "
+            + "pathStateRetainedReplayUs={}/{}, durableBaseAdvanceUs={}, totalUs={}",
         timing.mode, timing.head, timing.blocks, timing.walPublishUs, timing.walLoadUs,
         timing.begin(Authority.CHAINBASE), timing.begin(Authority.PATH_STATE),
         timing.begin(Authority.STATE_ARCHIVE), timing.inspect(Authority.CHAINBASE),
@@ -374,7 +407,10 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
         timing.publishCount(Authority.PATH_STATE), timing.publish(Authority.STATE_ARCHIVE),
         timing.publishCount(Authority.STATE_ARCHIVE), timing.walRetireUs,
         timing.end(Authority.CHAINBASE), timing.end(Authority.PATH_STATE),
-        timing.end(Authority.STATE_ARCHIVE), timing.totalUs);
+        timing.end(Authority.STATE_ARCHIVE), timing.targetBuildUs, timing.targetBuildCount,
+        timing.retainedLoadUs, timing.retainedLoadCount, timing.chainbaseRetainedReplayUs,
+        timing.chainbaseRetainedReplayCount, timing.pathStateRetainedReplayUs,
+        timing.pathStateRetainedReplayCount, timing.durableBaseAdvanceUs, timing.totalUs);
   }
 
   private void admit(Authority expected, CommonCheckpointMaterializer materializer) {
@@ -410,6 +446,15 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
     private long walPublishUs;
     private long walLoadUs;
     private long walRetireUs;
+    private long targetBuildUs;
+    private int targetBuildCount;
+    private long retainedLoadUs;
+    private int retainedLoadCount;
+    private long chainbaseRetainedReplayUs;
+    private int chainbaseRetainedReplayCount;
+    private long pathStateRetainedReplayUs;
+    private int pathStateRetainedReplayCount;
+    private long durableBaseAdvanceUs;
     private long totalUs;
 
     private Timing(String mode, CommonCheckpointTarget target, int blocks) {
@@ -440,6 +485,42 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
 
     long getWalRetireUs() {
       return walRetireUs;
+    }
+
+    long getTargetBuildUs() {
+      return targetBuildUs;
+    }
+
+    int getTargetBuildCount() {
+      return targetBuildCount;
+    }
+
+    long getRetainedLoadUs() {
+      return retainedLoadUs;
+    }
+
+    int getRetainedLoadCount() {
+      return retainedLoadCount;
+    }
+
+    long getChainbaseRetainedReplayUs() {
+      return chainbaseRetainedReplayUs;
+    }
+
+    int getChainbaseRetainedReplayCount() {
+      return chainbaseRetainedReplayCount;
+    }
+
+    long getPathStateRetainedReplayUs() {
+      return pathStateRetainedReplayUs;
+    }
+
+    int getPathStateRetainedReplayCount() {
+      return pathStateRetainedReplayCount;
+    }
+
+    long getDurableBaseAdvanceUs() {
+      return durableBaseAdvanceUs;
     }
 
     long getTotalUs() {
@@ -522,6 +603,26 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
   public enum RecoveryAction {
     NO_CHECKPOINT,
     COMPLETED_REDO
+  }
+
+  /** The redo outcome together with the already-built target identity for post-commit work. */
+  static final class DurableResult {
+
+    private final RecoveryAction action;
+    private final CommonCheckpointTarget target;
+
+    private DurableResult(RecoveryAction action, CommonCheckpointTarget target) {
+      this.action = action;
+      this.target = target;
+    }
+
+    RecoveryAction getAction() {
+      return action;
+    }
+
+    CommonCheckpointTarget getTarget() {
+      return target;
+    }
   }
 
   enum Stage {

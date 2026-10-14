@@ -252,6 +252,8 @@ public class Args extends CommonParameter {
         sc.getPathStateRoot().getParticipantThreads());
     PARAMETER.storage.setPathStateRootBranchThreads(
         sc.getPathStateRoot().getBranchThreads());
+    PARAMETER.storage.setPathStateRootSecondLevelParallelThreshold(
+        sc.getPathStateRoot().getSecondLevelParallelThreshold());
     PARAMETER.storage.setPathStateRootRebuildFromGenesis(
         sc.getPathStateRoot().isRebuildFromGenesis());
     PARAMETER.storage.setPathStateRootVerifyEveryBlock(

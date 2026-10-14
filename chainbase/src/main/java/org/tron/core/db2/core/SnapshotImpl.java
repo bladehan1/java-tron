@@ -12,6 +12,9 @@ import java.util.Iterator;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.atomic.LongAdder;
 import lombok.Getter;
 import org.tron.core.db2.archive.ArchiveStoreScope;
 import org.tron.core.db2.archive.BlockReverseDiff;
@@ -46,6 +49,22 @@ public class SnapshotImpl extends AbstractSnapshot<Key, Value> {
   private boolean maintenance;
   /** Whether the maintenance write window is open (startup defaults and migrations only). */
   private volatile boolean maintenanceWritesOpen;
+
+  /** Tombstone for a cached miss; a distinct instance, compared by reference. */
+  private static final byte[] NULL_ENTRY = new byte[0];
+
+  /**
+   * Block-scoped read-through cache of the active session head layer, or null when disabled.
+   * Enabled by {@link SnapshotManager#advance()} on the freshly advanced head and disabled on
+   * the layer it covers, so at most one layer per store holds a live cache and no cache
+   * survives in the committed-block stack (bounded by one block of reads, dropped with the
+   * layer). Entries memoize the state visible below this layer's own {@code db}: writes only
+   * ever land in {@code db}, and {@code db} is probed before the cache on every read, so a
+   * session put/remove always shadows a cached entry. The cache never feeds merge, flush,
+   * checkpoint, iterator or collect paths, which all read {@code db} directly.
+   */
+  private volatile ConcurrentMap<BlockReadCacheKey, byte[]> blockReadCache;
+  private final LongAdder blockReadCacheHits = new LongAdder();
 
   SnapshotImpl(Snapshot snapshot) {
     root = snapshot.getRoot();
@@ -86,7 +105,41 @@ public class SnapshotImpl extends AbstractSnapshot<Key, Value> {
 
   @Override
   public byte[] get(byte[] key) {
-    return get(this, key);
+    ConcurrentMap<BlockReadCacheKey, byte[]> cache = blockReadCache;
+    if (cache == null) {
+      return get(this, key);
+    }
+    return getWithBlockCache(key, cache);
+  }
+
+  /**
+   * Read order on the active session head: own {@code db}, then the block read cache, then a
+   * descent below this layer. {@code db} first is what makes the cache write-safe: a session
+   * put stores a non-null Value whose bytes the next read returns before ever consulting the
+   * cache, and a remove stores a DELETE Value (non-null Value, null bytes) that likewise wins
+   * over any cached entry and correctly yields null for a key still present below. The cached
+   * value (or NULL_ENTRY tombstone) only restates what the descent returned, and the descended
+   * state cannot change while this layer is the session head: merge/flush fold layers without
+   * altering visible state, and {@link SnapshotManager#advance()} disables this cache before a
+   * new session layer is stacked on top.
+   */
+  private byte[] getWithBlockCache(byte[] key, ConcurrentMap<BlockReadCacheKey, byte[]> cache) {
+    long readStarted = ExecutionAttribution.sample(getDbName(), "snapshot");
+    Value own = db.get(Key.of(key));
+    if (own != null) {
+      ExecutionAttribution.sampled(getDbName(), "snapshot", readStarted, 1, true);
+      return own.getBytes();
+    }
+    byte[] cached = cache.get(BlockReadCacheKey.of(key));
+    if (cached != null) {
+      blockReadCacheHits.increment();
+      ExecutionAttribution.sampled(getDbName(), "snapshot", readStarted, 0, true);
+      return cached == NULL_ENTRY ? null : cached;
+    }
+    byte[] result = get(previous, key);
+    cache.putIfAbsent(BlockReadCacheKey.copyOf(key), result == null ? NULL_ENTRY : result);
+    ExecutionAttribution.sampled(getDbName(), "snapshot", readStarted, 1, false);
+    return result;
   }
 
   private byte[] get(Snapshot head, byte[] key) {
@@ -132,6 +185,33 @@ public class SnapshotImpl extends AbstractSnapshot<Key, Value> {
 
   void markMaintenance() {
     maintenance = true;
+  }
+
+  /**
+   * Turns on the block read cache for this layer; called by {@link SnapshotManager#advance()}
+   * on the newly created session head only.
+   */
+  void enableBlockReadCache() {
+    blockReadCacheHits.reset();
+    blockReadCache = new ConcurrentHashMap<>();
+  }
+
+  /** Drops the block read cache; the layer keeps serving reads through the plain descent. */
+  void disableBlockReadCache() {
+    blockReadCache = null;
+  }
+
+  boolean hasBlockReadCache() {
+    return blockReadCache != null;
+  }
+
+  int getBlockReadCacheSize() {
+    ConcurrentMap<BlockReadCacheKey, byte[]> cache = blockReadCache;
+    return cache == null ? 0 : cache.size();
+  }
+
+  long getBlockReadCacheHits() {
+    return blockReadCacheHits.sum();
   }
 
   boolean isMaintenance() {
@@ -288,5 +368,39 @@ public class SnapshotImpl extends AbstractSnapshot<Key, Value> {
   @Override
   public void reloadToMem() {
       mergeAhead(previous);
+  }
+
+  /**
+   * Cache key with a precomputed hash: {@link WrappedByteArray#hashCode()} recomputes
+   * {@code Arrays.hashCode} on every probe, which the hot read path would otherwise pay on
+   * each lookup. Lookup keys wrap the caller's array; stored keys own a copy.
+   */
+  private static final class BlockReadCacheKey {
+    private final byte[] bytes;
+    private final int hash;
+
+    private BlockReadCacheKey(byte[] bytes) {
+      this.bytes = bytes;
+      this.hash = Arrays.hashCode(bytes);
+    }
+
+    static BlockReadCacheKey of(byte[] bytes) {
+      return new BlockReadCacheKey(bytes);
+    }
+
+    static BlockReadCacheKey copyOf(byte[] bytes) {
+      return new BlockReadCacheKey(Arrays.copyOf(bytes, bytes.length));
+    }
+
+    @Override
+    public boolean equals(Object o) {
+      return o == this || o instanceof BlockReadCacheKey
+          && Arrays.equals(bytes, ((BlockReadCacheKey) o).bytes);
+    }
+
+    @Override
+    public int hashCode() {
+      return hash;
+    }
   }
 }

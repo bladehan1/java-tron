@@ -69,8 +69,17 @@ public class CommonCheckpointRedoCoordinatorTest {
     assertEquals(1, timing.getHead());
     assertEquals(1, timing.getBlocks());
     assertEquals(1, timing.getWalPublishUs());
-    assertEquals(1, timing.getWalLoadUs());
+    assertEquals(0, timing.getWalLoadUs());
     assertEquals(1, timing.getWalRetireUs());
+    assertEquals(1, timing.getTargetBuildUs());
+    assertEquals(1, timing.getTargetBuildCount());
+    assertEquals(0, timing.getRetainedLoadUs());
+    assertEquals(0, timing.getRetainedLoadCount());
+    assertEquals(0, timing.getChainbaseRetainedReplayUs());
+    assertEquals(0, timing.getChainbaseRetainedReplayCount());
+    assertEquals(0, timing.getPathStateRetainedReplayUs());
+    assertEquals(0, timing.getPathStateRetainedReplayCount());
+    assertEquals(0, timing.getDurableBaseAdvanceUs());
     for (Authority authority : Authority.values()) {
       assertEquals(1, timing.begin(authority));
       assertEquals(5, timing.inspect(authority));
@@ -137,6 +146,15 @@ public class CommonCheckpointRedoCoordinatorTest {
     assertEquals(0, timing.getWalPublishUs());
     assertEquals(1, timing.getWalLoadUs());
     assertEquals(1, timing.getWalRetireUs());
+    assertEquals(1, timing.getTargetBuildUs());
+    assertEquals(1, timing.getTargetBuildCount());
+    assertEquals(0, timing.getRetainedLoadUs());
+    assertEquals(0, timing.getRetainedLoadCount());
+    assertEquals(0, timing.getChainbaseRetainedReplayUs());
+    assertEquals(0, timing.getChainbaseRetainedReplayCount());
+    assertEquals(0, timing.getPathStateRetainedReplayUs());
+    assertEquals(0, timing.getPathStateRetainedReplayCount());
+    assertEquals(0, timing.getDurableBaseAdvanceUs());
     for (Authority authority : Authority.values()) {
       assertEquals(1, timing.begin(authority));
       assertEquals(3, timing.inspect(authority));

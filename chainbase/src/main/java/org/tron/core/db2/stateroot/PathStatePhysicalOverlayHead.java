@@ -36,12 +36,14 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
 
   private static final byte[] ABSENT = new byte[0];
   static final int DEFAULT_PARTICIPANT_THREADS = 4;
-  static final int DEFAULT_BRANCH_THREADS = 8;
+  static final int DEFAULT_BRANCH_THREADS = 16;
+  static final int DEFAULT_SECOND_LEVEL_PARALLEL_THRESHOLD = 64;
 
   private final PathStatePhysicalStoreSet stores;
   private final PathStateParticipantScope scope;
   private final byte[] formatDigest;
   private final int maxHistory;
+  private final int secondLevelParallelThreshold;
   private final ExecutorService participantExecutor;
   private final ExecutorService branchExecutor;
   private final List<HeadState> history = new ArrayList<>();
@@ -53,13 +55,15 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
 
   private PathStatePhysicalOverlayHead(PathStatePhysicalStoreSet stores,
       PathStateRootMetadata head, PathStateRoot.Snapshot snapshot, int maxHistory,
-      int participantThreads, int branchThreads) {
+      int participantThreads, int branchThreads, int secondLevelParallelThreshold) {
     this.stores = Objects.requireNonNull(stores, "stores");
     this.scope = stores.participantScope();
     this.formatDigest = stores.getFormatDigest();
     this.head = Objects.requireNonNull(head, "head");
     this.snapshot = Objects.requireNonNull(snapshot, "snapshot");
     this.maxHistory = maxHistory;
+    this.secondLevelParallelThreshold =
+        requireSecondLevelParallelThreshold(secondLevelParallelThreshold);
     participantExecutor = newExecutor(participantThreads, "participant");
     branchExecutor = newExecutor(branchThreads, "branch");
   }
@@ -75,6 +79,16 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
       PathStateLayerLimits limits, long residentNodeCacheBytes, int participantThreads,
       int branchThreads, byte[] formatIdentity, BlockSnapshotMeta canonicalHead, P66Phase phase)
       throws IOException {
+    return openCommonCheckpoint(directory, engine, limits, residentNodeCacheBytes,
+        participantThreads, branchThreads, DEFAULT_SECOND_LEVEL_PARALLEL_THRESHOLD,
+        formatIdentity, canonicalHead, phase);
+  }
+
+  /** Opens a next-format published target with an explicit second-level sharding threshold. */
+  public static PathStatePhysicalOverlayHead openCommonCheckpoint(Path directory, Engine engine,
+      PathStateLayerLimits limits, long residentNodeCacheBytes, int participantThreads,
+      int branchThreads, int secondLevelParallelThreshold, byte[] formatIdentity,
+      BlockSnapshotMeta canonicalHead, P66Phase phase) throws IOException {
     requireThreadCount(participantThreads, "participantThreads");
     requireThreadCount(branchThreads, "branchThreads");
     PathStatePhysicalStoreSet opened = PathStatePhysicalStoreSet.openExisting(directory,
@@ -90,7 +104,7 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
           phase, opened.getFormatDigest(), current.getStateRoot(), current.getPayloadDigest());
       return new PathStatePhysicalOverlayHead(opened, metadata, restored,
           Objects.requireNonNull(limits, "limits").getMaxLayers(), participantThreads,
-          branchThreads);
+          branchThreads, secondLevelParallelThreshold);
     } catch (IOException | RuntimeException failure) {
       try {
         opened.close();
@@ -105,6 +119,14 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
   public static PathStatePhysicalOverlayHead openCommonBaseline(Path directory, Engine engine,
       PathStateLayerLimits limits, long residentNodeCacheBytes, int participantThreads,
       int branchThreads) throws IOException {
+    return openCommonBaseline(directory, engine, limits, residentNodeCacheBytes,
+        participantThreads, branchThreads, DEFAULT_SECOND_LEVEL_PARALLEL_THRESHOLD);
+  }
+
+  /** Opens the immutable fresh baseline with an explicit second-level sharding threshold. */
+  public static PathStatePhysicalOverlayHead openCommonBaseline(Path directory, Engine engine,
+      PathStateLayerLimits limits, long residentNodeCacheBytes, int participantThreads,
+      int branchThreads, int secondLevelParallelThreshold) throws IOException {
     requireThreadCount(participantThreads, "participantThreads");
     requireThreadCount(branchThreads, "branchThreads");
     PathStatePhysicalStoreSet opened = PathStatePhysicalStoreSet.openExisting(directory,
@@ -116,7 +138,7 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
       root.restoreStoredRoots(current.getStateRoot());
       return new PathStatePhysicalOverlayHead(opened, current, root.snapshot(),
           Objects.requireNonNull(limits, "limits").getMaxLayers(), participantThreads,
-          branchThreads);
+          branchThreads, secondLevelParallelThreshold);
     } catch (IOException | RuntimeException failure) {
       try {
         opened.close();
@@ -240,6 +262,14 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
   public static PathStatePhysicalOverlayHead open(Path directory, Engine engine,
       PathStateLayerLimits limits, long residentNodeCacheBytes, int participantThreads,
       int branchThreads) throws IOException {
+    return open(directory, engine, limits, residentNodeCacheBytes, participantThreads,
+        branchThreads, DEFAULT_SECOND_LEVEL_PARALLEL_THRESHOLD);
+  }
+
+  /** Opens a benchmark overlay with an explicit second-level sharding threshold. */
+  public static PathStatePhysicalOverlayHead open(Path directory, Engine engine,
+      PathStateLayerLimits limits, long residentNodeCacheBytes, int participantThreads,
+      int branchThreads, int secondLevelParallelThreshold) throws IOException {
     requireThreadCount(participantThreads, "participantThreads");
     requireThreadCount(branchThreads, "branchThreads");
     PathStatePhysicalStoreSet opened = PathStatePhysicalStoreSet.openExisting(directory,
@@ -255,7 +285,7 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
       }
       return new PathStatePhysicalOverlayHead(opened, current, restored,
           Objects.requireNonNull(limits, "limits").getMaxLayers(), participantThreads,
-          branchThreads);
+          branchThreads, secondLevelParallelThreshold);
     } catch (IOException | RuntimeException failure) {
       try {
         opened.close();
@@ -458,7 +488,8 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
       candidate.enableParticipantReadTiming();
     }
     PathStateRoot.ParallelApplyStats parallelStats = transition.getMutations().isEmpty() ? null
-        : candidate.applyParallel(transition.getMutations(), participantExecutor, branchExecutor);
+        : candidate.applyParallel(transition.getMutations(), participantExecutor, branchExecutor,
+            secondLevelParallelThreshold);
     PathStateRoot.Snapshot nextSnapshot = candidate.snapshot();
     long trieNanos = System.nanoTime();
     Map<Integer, List<PathStateSnapshotDelta.Mutation>> flatByStore = new LinkedHashMap<>();
@@ -634,6 +665,13 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
     if (threads <= 0 || threads > 64) {
       throw new IllegalArgumentException(label + " must be in [1, 64]");
     }
+  }
+
+  private static int requireSecondLevelParallelThreshold(int threshold) {
+    if (threshold <= 0 || threshold > 256) {
+      throw new IllegalArgumentException("secondLevelParallelThreshold must be in [1, 256]");
+    }
+    return threshold;
   }
 
   private static boolean matches(PathStateRootMetadata metadata, long blockNumber,

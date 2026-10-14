@@ -267,7 +267,8 @@ public class StorageConfig {
     private long writeBufferBytes = 268435456L;
     private long nodeCacheBytes = 268435456L;
     private int participantThreads = 4;
-    private int branchThreads = 8;
+    private int branchThreads = 16;
+    private int secondLevelParallelThreshold = 64;
     private boolean rebuildFromGenesis = false;
     private boolean verifyEveryBlock = true;
     private boolean volatileSnapshotBenchmark = false;
@@ -293,6 +294,10 @@ public class StorageConfig {
           || branchThreads <= 0 || branchThreads > 64) {
         throw new IllegalArgumentException(
             "pathStateRoot prepare threads must be in [1, 64]");
+      }
+      if (secondLevelParallelThreshold <= 0 || secondLevelParallelThreshold > 256) {
+        throw new IllegalArgumentException(
+            "pathStateRoot.secondLevelParallelThreshold must be in [1, 256]");
       }
       if (rebuildFromGenesis) {
         throw new IllegalArgumentException("pathStateRoot.rebuildFromGenesis is not supported");
