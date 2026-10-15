@@ -125,6 +125,11 @@ public class Storage {
   @Setter
   private String commonCheckpointDirectory;
 
+  /** Durable-base cadence in generations; 0 follows storage.snapshot.maxFlushCount. */
+  @Getter
+  @Setter
+  private int commonCheckpointDurableBaseGenerations = 0;
+
   @Getter
   @Setter
   private boolean pathStateRootEnabled;

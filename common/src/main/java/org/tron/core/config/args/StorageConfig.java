@@ -245,10 +245,16 @@ public class StorageConfig {
   public static class CommonCheckpointConfig {
     private boolean enabled = false;
     private String directory = "common-checkpoint";
+    // 0 = follow storage.snapshot.maxFlushCount; >0 overrides the durable-base cadence.
+    private int durableBaseGenerations = 0;
 
     void postProcess() {
       if (directory == null || directory.trim().isEmpty()) {
         throw new IllegalArgumentException("commonCheckpoint.directory must not be empty");
+      }
+      if (durableBaseGenerations < 0 || durableBaseGenerations > 500) {
+        throw new IllegalArgumentException(
+            "commonCheckpoint.durableBaseGenerations must be in [0, 500]");
       }
     }
   }

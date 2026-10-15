@@ -996,7 +996,9 @@ public class Manager {
           new ChainbaseCheckpointMaterializer(checkpointDirectory, formatIdentity,
               snapshots.getDbs(), baseline, materializedStore),
           pathMaterializer, archiveMaterializer);
-      coordinator.configureDurableBaseCadence(Math.max(1, storage.getMaxFlushCount()));
+      int durableBaseGenerations = storage.getCommonCheckpointDurableBaseGenerations();
+      coordinator.configureDurableBaseCadence(durableBaseGenerations > 0
+          ? durableBaseGenerations : Math.max(1, storage.getMaxFlushCount()));
       PathStatePhysicalOverlayHead admittedOwner = pathOwner;
       StateArchiveHotCheckpointMaterializer admittedHotMaterializer = hotMaterializer;
       StateArchiveHotStore admittedHotStore = hotStore;

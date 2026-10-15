@@ -157,13 +157,26 @@ public class StorageConfigTest {
     StorageConfig defaults = StorageConfig.fromConfig(withRef());
     assertFalse(defaults.getCommonCheckpoint().isEnabled());
     assertEquals("common-checkpoint", defaults.getCommonCheckpoint().getDirectory());
+    assertEquals(0, defaults.getCommonCheckpoint().getDurableBaseGenerations());
 
     StorageConfig configured = StorageConfig.fromConfig(withRef(
         "storage.stateArchive.enabled = true\n"
             + "storage.pathStateRoot.enabled = true\n"
-            + "storage.commonCheckpoint { enabled = true, directory = common-test }"));
+            + "storage.commonCheckpoint { enabled = true, directory = common-test, "
+            + "durableBaseGenerations = 25 }"));
     assertTrue(configured.getCommonCheckpoint().isEnabled());
     assertEquals("common-test", configured.getCommonCheckpoint().getDirectory());
+    assertEquals(25, configured.getCommonCheckpoint().getDurableBaseGenerations());
+  }
+
+  @Test(expected = IllegalArgumentException.class)
+  public void testCommonCheckpointRejectsNegativeDurableBaseGenerations() {
+    StorageConfig.fromConfig(withRef("storage.commonCheckpoint.durableBaseGenerations = -1"));
+  }
+
+  @Test(expected = IllegalArgumentException.class)
+  public void testCommonCheckpointRejectsExcessiveDurableBaseGenerations() {
+    StorageConfig.fromConfig(withRef("storage.commonCheckpoint.durableBaseGenerations = 501"));
   }
 
   @Test(expected = IllegalArgumentException.class)
