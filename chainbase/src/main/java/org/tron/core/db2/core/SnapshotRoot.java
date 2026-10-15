@@ -2,8 +2,10 @@ package org.tron.core.db2.core;
 
 import com.google.common.collect.Maps;
 import com.google.common.collect.Streams;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -198,6 +200,60 @@ public class SnapshotRoot extends AbstractSnapshot<byte[], byte[]> {
     }
   }
 
+  /**
+   * Applies one coalesced common-checkpoint batch behind a deferred durability barrier: the bulk
+   * is written unsynced and the tail entry carries the store's single synced write. The tail
+   * follows the bulk in the same WAL, so forcing it forces the whole batch — one fsync per
+   * touched database, which lets the stores replay in parallel instead of serial write+fsync
+   * interleaves.
+   */
+  void applyCheckpointMutationsDeferred(Map<WrappedByteArray, WrappedByteArray> batch) {
+    // Authorized Common redo bypasses the direct-root writer guard.
+    if (needOptAsset()) {
+      processAccountDeferred(batch);
+    } else {
+      flushSplit((Flusher) db, batch);
+      putCache(batch);
+    }
+  }
+
+  private static void flushSplit(Flusher flusher,
+      Map<WrappedByteArray, WrappedByteArray> batch) {
+    if (batch.size() <= 1) {
+      if (!batch.isEmpty()) {
+        flusher.flushSynced(batch);
+      }
+      return;
+    }
+    Map<WrappedByteArray, WrappedByteArray> bulk = new LinkedHashMap<>(batch.size());
+    Map.Entry<WrappedByteArray, WrappedByteArray> tail = null;
+    for (Map.Entry<WrappedByteArray, WrappedByteArray> entry : batch.entrySet()) {
+      if (tail != null) {
+        bulk.put(tail.getKey(), tail.getValue());
+      }
+      tail = entry;
+    }
+    flusher.flushUnsynced(bulk);
+    flusher.flushSynced(Collections.singletonMap(tail.getKey(), tail.getValue()));
+  }
+
+  private static void updateByBatchSplit(AccountAssetStore assetStore, Map<byte[], byte[]> rows) {
+    if (rows.size() <= 1) {
+      assetStore.updateByBatchSynced(rows);
+      return;
+    }
+    Map<byte[], byte[]> bulk = new HashMap<>(rows.size());
+    Map.Entry<byte[], byte[]> tail = null;
+    for (Map.Entry<byte[], byte[]> entry : rows.entrySet()) {
+      if (tail != null) {
+        bulk.put(tail.getKey(), tail.getValue());
+      }
+      tail = entry;
+    }
+    assetStore.updateByBatch(bulk);
+    assetStore.updateByBatchSynced(Collections.singletonMap(tail.getKey(), tail.getValue()));
+  }
+
   private void processAccount(Map<WrappedByteArray, WrappedByteArray> batch) {
     processAccount(batch, false, false);
   }
@@ -211,6 +267,37 @@ public class SnapshotRoot extends AbstractSnapshot<byte[], byte[]> {
     AccountAssetStore assetStore = ChainBaseManager.getInstance().getAccountAssetStore();
     Map<WrappedByteArray, WrappedByteArray> accounts = new HashMap<>();
     Map<WrappedByteArray, WrappedByteArray> assets = new HashMap<>();
+    foldAccountBatch(batch, assetStore, accounts, assets);
+    if (synced) {
+      ((Flusher) db).flushSynced(accounts);
+    } else {
+      ((Flusher) db).flush(accounts);
+    }
+    putCache(accounts);
+    if (assets.size() > 0) {
+      if (syncedAssets) {
+        assetStore.updateByBatchSynced(AccountAssetStore.convert(assets));
+      } else {
+        assetStore.updateByBatch(AccountAssetStore.convert(assets));
+      }
+    }
+  }
+
+  private void processAccountDeferred(Map<WrappedByteArray, WrappedByteArray> batch) {
+    AccountAssetStore assetStore = ChainBaseManager.getInstance().getAccountAssetStore();
+    Map<WrappedByteArray, WrappedByteArray> accounts = new HashMap<>();
+    Map<WrappedByteArray, WrappedByteArray> assets = new HashMap<>();
+    foldAccountBatch(batch, assetStore, accounts, assets);
+    flushSplit((Flusher) db, accounts);
+    putCache(accounts);
+    if (!assets.isEmpty()) {
+      updateByBatchSplit(assetStore, AccountAssetStore.convert(assets));
+    }
+  }
+
+  private static void foldAccountBatch(Map<WrappedByteArray, WrappedByteArray> batch,
+      AccountAssetStore assetStore, Map<WrappedByteArray, WrappedByteArray> accounts,
+      Map<WrappedByteArray, WrappedByteArray> assets) {
     batch.forEach((k, v) -> {
       if (ByteArray.isEmpty(v.getBytes())) {
         accounts.put(k, v);
@@ -226,19 +313,6 @@ public class SnapshotRoot extends AbstractSnapshot<byte[], byte[]> {
         accounts.put(k, WrappedByteArray.of(item.getData()));
       }
     });
-    if (synced) {
-      ((Flusher) db).flushSynced(accounts);
-    } else {
-      ((Flusher) db).flush(accounts);
-    }
-    putCache(accounts);
-    if (assets.size() > 0) {
-      if (syncedAssets) {
-        assetStore.updateByBatchSynced(AccountAssetStore.convert(assets));
-      } else {
-        assetStore.updateByBatch(AccountAssetStore.convert(assets));
-      }
-    }
   }
 
   private boolean cached() {

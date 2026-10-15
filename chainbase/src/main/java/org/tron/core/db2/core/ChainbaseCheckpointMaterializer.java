@@ -15,12 +15,17 @@ import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
 import org.tron.core.db2.common.WrappedByteArray;
 
@@ -35,6 +40,14 @@ public final class ChainbaseCheckpointMaterializer implements CommonCheckpointMa
   private static final int DIGEST_LENGTH = 32;
   private static final int RECORD_LENGTH = Integer.BYTES + 2 * Short.BYTES
       + 4 * DIGEST_LENGTH + 2 * Long.BYTES + DIGEST_LENGTH;
+
+  /** Shared daemon pool for parallel deferred retained-replay writes (one task per store). */
+  private static final ExecutorService CHECKPOINT_WRITE_EXECUTOR = Executors.newFixedThreadPool(4,
+      runnable -> {
+        Thread thread = new Thread(runnable, "chainbase-checkpoint-write");
+        thread.setDaemon(true);
+        return thread;
+      });
 
   private final Path directory;
   private final byte[] formatIdentity;
@@ -185,15 +198,94 @@ public final class ChainbaseCheckpointMaterializer implements CommonCheckpointMa
             .putAll(batch(store));
       }
     }
-    for (Map.Entry<String, Map<WrappedByteArray, WrappedByteArray>> entry : batches.entrySet()) {
-      ((SnapshotRoot) databases.get(entry.getKey()).getHead().getRoot())
-          .applyCheckpointMutations(entry.getValue(), sync);
-      faultHook.after(Stage.AFTER_STORE_BATCH, entry.getKey());
+    if (sync) {
+      // Deferred barrier (the path-state split-marker scheme generalized): each store writes its
+      // bulk unsynced and commits one synced tail record; the tail follows the bulk in the same
+      // WAL, so forcing it forces the whole batch. Store tasks run in parallel instead of serial
+      // write+fsync interleaves. account and account-asset share one task because the account
+      // batch derives rows in the account-asset database — their relative write order must stay
+      // serial. Fault hooks keep firing per store, in batch order, after the join.
+      List<Runnable> writes = new ArrayList<>();
+      for (Map.Entry<String, Map<WrappedByteArray, WrappedByteArray>> entry : batches.entrySet()) {
+        String dbName = entry.getKey();
+        if ("account-asset".equals(dbName) && batches.containsKey("account")) {
+          continue; // folded into the account task below
+        }
+        Map<WrappedByteArray, WrappedByteArray> storeBatch = entry.getValue();
+        if ("account".equals(dbName) && batches.containsKey("account-asset")) {
+          Map<WrappedByteArray, WrappedByteArray> assetBatch = batches.get("account-asset");
+          writes.add(() -> {
+            applyDeferred(dbName, storeBatch);
+            applyDeferred("account-asset", assetBatch);
+          });
+        } else {
+          writes.add(() -> applyDeferred(dbName, storeBatch));
+        }
+      }
+      awaitParallelWrites(writes);
+      for (String dbName : batches.keySet()) {
+        faultHook.after(Stage.AFTER_STORE_BATCH, dbName);
+      }
+    } else {
+      for (Map.Entry<String, Map<WrappedByteArray, WrappedByteArray>> entry
+          : batches.entrySet()) {
+        ((SnapshotRoot) databases.get(entry.getKey()).getHead().getRoot())
+            .applyCheckpointMutations(entry.getValue(), sync);
+        faultHook.after(Stage.AFTER_STORE_BATCH, entry.getKey());
+      }
     }
     if (!payloads.isEmpty()) {
       CommonCheckpointTarget last = CommonCheckpointTarget.from(payloads.get(payloads.size() - 1));
       recordMaterialized(last, encode(last));
     }
+  }
+
+  private void applyDeferred(String dbName, Map<WrappedByteArray, WrappedByteArray> storeBatch) {
+    ((SnapshotRoot) databases.get(dbName).getHead().getRoot())
+        .applyCheckpointMutationsDeferred(storeBatch);
+  }
+
+  private static void awaitParallelWrites(List<Runnable> writes) throws IOException {
+    List<Future<?>> futures = new ArrayList<>();
+    for (Runnable write : writes) {
+      futures.add(CHECKPOINT_WRITE_EXECUTOR.submit(write));
+    }
+    IOException failure = null;
+    boolean interrupted = false;
+    for (Future<?> future : futures) {
+      boolean complete = false;
+      while (!complete) {
+        try {
+          future.get();
+          complete = true;
+        } catch (InterruptedException interruptedFailure) {
+          interrupted = true;
+        } catch (ExecutionException writeFailure) {
+          complete = true;
+          Throwable cause = writeFailure.getCause();
+          IOException storeFailure = cause instanceof IOException
+              ? (IOException) cause
+              : new IOException("chainbase checkpoint store batch failed", cause);
+          failure = append(failure, storeFailure);
+        }
+      }
+    }
+    if (interrupted) {
+      Thread.currentThread().interrupt();
+      failure = append(failure,
+          new IOException("chainbase checkpoint store batch wait was interrupted"));
+    }
+    if (failure != null) {
+      throw failure;
+    }
+  }
+
+  private static IOException append(IOException failure, IOException next) {
+    if (failure == null) {
+      return next;
+    }
+    failure.addSuppressed(next);
+    return failure;
   }
 
   private CommonCheckpointTarget requireTarget(CommonCheckpointTarget target) throws IOException {
