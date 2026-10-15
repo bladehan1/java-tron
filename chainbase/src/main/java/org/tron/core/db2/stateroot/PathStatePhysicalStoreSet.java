@@ -975,6 +975,11 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     awaitParallelWrites(participantWriteExecutor, writes);
   }
 
+  /** Runs one deferred checkpoint write per store in parallel on the participant writer pool. */
+  void runParallelCheckpointWrites(List<Runnable> writes) throws IOException {
+    awaitParallelWrites(participantWriteExecutor, writes);
+  }
+
   static void awaitParallelWrites(ExecutorService executor, List<Runnable> writes)
       throws IOException {
     List<Future<?>> futures = new ArrayList<>();
@@ -1825,6 +1830,33 @@ public final class PathStatePhysicalStoreSet implements Closeable {
 
     void applyCheckpointParticipant(CommonCheckpointPayload.PathStoreTarget target,
         byte[] marker, boolean sync) {
+      List<PathStateNativeNodeStore.BatchMutation> mutations = checkpointDataMutations(target);
+      mutations.add(metadataMutation(CHECKPOINT_TARGET_METADATA, marker));
+      nativeStore.writeBatch(mutations, sync);
+      nodeStore.apply(checkpointCacheMutations(target));
+    }
+
+    /** Writes one checkpoint participant payload without its marker or durability barrier. */
+    void applyCheckpointParticipantData(CommonCheckpointPayload.PathStoreTarget target) {
+      List<PathStateNativeNodeStore.BatchMutation> mutations = checkpointDataMutations(target);
+      if (!mutations.isEmpty()) {
+        nativeStore.writeBatchUnsynced(mutations);
+      }
+      nodeStore.apply(checkpointCacheMutations(target));
+    }
+
+    /**
+     * Forces one checkpoint marker durable. The marker is the per-store commit point: it is
+     * written after the data batch in the same WAL, so a durable marker implies durable data.
+     */
+    void commitCheckpointMarker(byte[] marker) {
+      List<PathStateNativeNodeStore.BatchMutation> mutations = new ArrayList<>(1);
+      mutations.add(metadataMutation(CHECKPOINT_TARGET_METADATA, marker));
+      nativeStore.writeBatch(mutations, true);
+    }
+
+    private static List<PathStateNativeNodeStore.BatchMutation> checkpointDataMutations(
+        CommonCheckpointPayload.PathStoreTarget target) {
       List<PathStateNativeNodeStore.BatchMutation> mutations = new ArrayList<>();
       for (CommonCheckpointPayload.Mutation mutation : target.getFlatMutations()) {
         byte[] key = prefixed(FLAT_STATE_PREFIX, mutation.getKey(), "secureKey");
@@ -1832,7 +1864,6 @@ public final class PathStatePhysicalStoreSet implements Closeable {
             ? PathStateNativeNodeStore.BatchMutation.delete(key)
             : PathStateNativeNodeStore.BatchMutation.put(key, mutation.getValue()));
       }
-      List<NodeMutation> cacheMutations = new ArrayList<>();
       for (CommonCheckpointPayload.Mutation mutation : target.getNodeMutations()) {
         byte[] path = mutation.getKey();
         byte[] value = mutation.getValue();
@@ -1842,11 +1873,17 @@ public final class PathStatePhysicalStoreSet implements Closeable {
             : PathStateNativeNodeStore.BatchMutation.put(
                 prefixed(TRIE_NODE_PREFIX, path, "path"),
                 value));
-        cacheMutations.add(new NodeMutation(path, value));
       }
-      mutations.add(metadataMutation(CHECKPOINT_TARGET_METADATA, marker));
-      nativeStore.writeBatch(mutations, sync);
-      nodeStore.apply(cacheMutations);
+      return mutations;
+    }
+
+    private static List<NodeMutation> checkpointCacheMutations(
+        CommonCheckpointPayload.PathStoreTarget target) {
+      List<NodeMutation> cacheMutations = new ArrayList<>();
+      for (CommonCheckpointPayload.Mutation mutation : target.getNodeMutations()) {
+        cacheMutations.add(new NodeMutation(mutation.getKey(), mutation.getValue()));
+      }
+      return cacheMutations;
     }
 
     void applyCheckpointSuper(List<CommonCheckpointPayload.Mutation> supplied, byte[] marker) {
@@ -1857,6 +1894,26 @@ public final class PathStatePhysicalStoreSet implements Closeable {
         boolean sync) {
       List<PathStateNativeNodeStore.BatchMutation> mutations = new ArrayList<>();
       List<NodeMutation> cacheMutations = new ArrayList<>();
+      appendSuperMutations(supplied, mutations, cacheMutations);
+      mutations.add(metadataMutation(CHECKPOINT_TARGET_METADATA, marker));
+      nativeStore.writeBatch(mutations, sync);
+      nodeStore.apply(cacheMutations);
+    }
+
+    /** Writes checkpoint super-node mutations without the marker or durability barrier. */
+    void applyCheckpointSuperData(List<CommonCheckpointPayload.Mutation> supplied) {
+      List<PathStateNativeNodeStore.BatchMutation> mutations = new ArrayList<>();
+      List<NodeMutation> cacheMutations = new ArrayList<>();
+      appendSuperMutations(supplied, mutations, cacheMutations);
+      if (!mutations.isEmpty()) {
+        nativeStore.writeBatchUnsynced(mutations);
+      }
+      nodeStore.apply(cacheMutations);
+    }
+
+    private static void appendSuperMutations(List<CommonCheckpointPayload.Mutation> supplied,
+        List<PathStateNativeNodeStore.BatchMutation> mutations,
+        List<NodeMutation> cacheMutations) {
       for (CommonCheckpointPayload.Mutation mutation : supplied) {
         byte[] path = mutation.getKey();
         byte[] value = mutation.getValue();
@@ -1868,9 +1925,6 @@ public final class PathStatePhysicalStoreSet implements Closeable {
                 value));
         cacheMutations.add(new NodeMutation(path, value));
       }
-      mutations.add(metadataMutation(CHECKPOINT_TARGET_METADATA, marker));
-      nativeStore.writeBatch(mutations, sync);
-      nodeStore.apply(cacheMutations);
     }
 
     byte[] checkpointTargetMarker() {
