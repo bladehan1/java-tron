@@ -103,6 +103,48 @@ public class PathStateCheckpointMaterializerTest {
   }
 
   @Test
+  public void retainedReplayDefersDataBehindOneSyncedMarkerCommitPerStore() throws Exception {
+    Fixture fixture = fixture("deferred-barrier", null);
+    Path root = fixture.root;
+    PathStateParticipantScope scope = fixture.scope;
+    byte[] formatIdentity = fixture.formatIdentity;
+    CommonCheckpointTarget childTarget;
+    try {
+      PathStatePhysicalStoreSet.PhysicalStore account = fixture.stores.participant("account");
+      long accountSync = account.getSyncedWriteBatchCalls();
+      long accountUnsynced = account.getUnsyncedWriteBatchCalls();
+      long superSync = fixture.stores.superStore().getSyncedWriteBatchCalls();
+      long superUnsynced = fixture.stores.superStore().getUnsyncedWriteBatchCalls();
+      CommonCheckpointPayload child = payload(formatIdentity, 2, hash(1), hash(2),
+          hash(11), hash(12));
+      childTarget = CommonCheckpointTarget.from(child);
+      fixture.materializer.replayRetained(java.util.Arrays.asList(fixture.payload, child), true);
+      assertEquals(accountSync + 1, account.getSyncedWriteBatchCalls());
+      assertEquals(accountUnsynced + 1, account.getUnsyncedWriteBatchCalls());
+      assertEquals(superSync + 1, fixture.stores.superStore().getSyncedWriteBatchCalls());
+      assertEquals(superUnsynced + 1, fixture.stores.superStore().getUnsyncedWriteBatchCalls());
+      assertArrayEquals(account.checkpointTargetMarker(),
+          fixture.stores.superStore().checkpointTargetMarker());
+      assertEquals(Status.MATERIALIZED, fixture.materializer.inspect(childTarget));
+      fixture.materializer.publish(childTarget);
+      assertEquals(Status.PUBLISHED, fixture.materializer.inspect(childTarget));
+    } finally {
+      fixture.stores.close();
+    }
+
+    try (PathStatePhysicalStoreSet reopened = PathStatePhysicalStoreSet.openExisting(root, scope,
+        Engine.ROCKSDB)) {
+      assertArrayEquals(new byte[]{2}, reopened.participant("account").getFlat(new byte[]{1}));
+      assertArrayEquals(new byte[]{4}, reopened.participant("account").nodeStore()
+          .get(new byte[]{3}));
+      assertArrayEquals(new byte[]{6}, reopened.superStore().nodeStore().get(new byte[]{5}));
+      PathStateCheckpointMaterializer recovered = new PathStateCheckpointMaterializer(reopened,
+          scope, formatIdentity);
+      assertEquals(Status.PUBLISHED, recovered.inspect(childTarget));
+    }
+  }
+
+  @Test
   public void resumesEveryStoreAndMarkerBoundaryWithoutRepeatingExactBatches()
       throws Exception {
     for (PathStateCheckpointMaterializer.Stage stage

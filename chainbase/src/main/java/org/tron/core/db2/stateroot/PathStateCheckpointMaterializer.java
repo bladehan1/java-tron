@@ -14,6 +14,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -285,16 +286,46 @@ public final class PathStateCheckpointMaterializer implements CommonCheckpointMa
     }
     CommonCheckpointTarget target = CommonCheckpointTarget.from(payloads.get(payloads.size() - 1));
     byte[] marker = marker(target);
-    for (CommonCheckpointPayload.PathStoreTarget last : latest.values()) {
-      CommonCheckpointPayload.PathStoreTarget merged = new CommonCheckpointPayload.PathStoreTarget(
-          last.getStoreId(), last.getDbName(), last.getStoreRoot(),
-          new ArrayList<>(flat.get(last.getDbName()).values()),
-          new ArrayList<>(nodes.get(last.getDbName()).values()));
-      stores.participant(last.getDbName()).applyCheckpointParticipant(merged, marker, sync);
-      faultHook.after(Stage.AFTER_PARTICIPANT_BATCH, last.getStoreId());
+    if (sync) {
+      // Deferred barrier: write every store unsynced, then commit each store's marker with one
+      // synced batch. The marker follows the data in the same WAL, so a durable marker implies
+      // durable data. Per-store tasks run in parallel instead of serial write+fsync interleaves.
+      List<Runnable> writes = new ArrayList<>();
+      for (CommonCheckpointPayload.PathStoreTarget last : latest.values()) {
+        CommonCheckpointPayload.PathStoreTarget merged =
+            new CommonCheckpointPayload.PathStoreTarget(
+                last.getStoreId(), last.getDbName(), last.getStoreRoot(),
+                new ArrayList<>(flat.get(last.getDbName()).values()),
+                new ArrayList<>(nodes.get(last.getDbName()).values()));
+        PathStatePhysicalStoreSet.PhysicalStore store = stores.participant(last.getDbName());
+        writes.add(() -> {
+          store.applyCheckpointParticipantData(merged);
+          store.commitCheckpointMarker(marker);
+        });
+      }
+      writes.add(() -> {
+        stores.superStore().applyCheckpointSuperData(new ArrayList<>(superNodes.values()));
+        stores.superStore().commitCheckpointMarker(marker);
+      });
+      stores.runParallelCheckpointWrites(writes);
+      for (CommonCheckpointPayload.PathStoreTarget last : latest.values()) {
+        faultHook.after(Stage.AFTER_PARTICIPANT_BATCH, last.getStoreId());
+      }
+      faultHook.after(Stage.AFTER_SUPER_BATCH, 0);
+    } else {
+      for (CommonCheckpointPayload.PathStoreTarget last : latest.values()) {
+        CommonCheckpointPayload.PathStoreTarget merged =
+            new CommonCheckpointPayload.PathStoreTarget(
+                last.getStoreId(), last.getDbName(), last.getStoreRoot(),
+                new ArrayList<>(flat.get(last.getDbName()).values()),
+                new ArrayList<>(nodes.get(last.getDbName()).values()));
+        stores.participant(last.getDbName()).applyCheckpointParticipant(merged, marker, false);
+        faultHook.after(Stage.AFTER_PARTICIPANT_BATCH, last.getStoreId());
+      }
+      stores.superStore().applyCheckpointSuper(new ArrayList<>(superNodes.values()), marker,
+          false);
+      faultHook.after(Stage.AFTER_SUPER_BATCH, 0);
     }
-    stores.superStore().applyCheckpointSuper(new ArrayList<>(superNodes.values()), marker, sync);
-    faultHook.after(Stage.AFTER_SUPER_BATCH, 0);
     if (!payloads.isEmpty()) {
       CommonCheckpointTarget last = CommonCheckpointTarget.from(payloads.get(payloads.size() - 1));
       recordMaterialized(last, encode(last));

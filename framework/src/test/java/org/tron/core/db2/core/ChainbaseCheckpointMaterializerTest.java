@@ -103,6 +103,43 @@ public class ChainbaseCheckpointMaterializerTest {
   }
 
   @Test
+  public void retainedReplayDefersDataBehindOneSyncedTailFlushPerStore() throws Exception {
+    Fixture fixture = fixture("deferred-retained", null);
+    fixture.materializer.replayRetained(Collections.singletonList(fixture.payload), true);
+
+    // code has two mutations: bulk {1}=2 unsynced, tail delete {9} synced.
+    assertEquals(1, fixture.code.unsyncedFlushes);
+    assertEquals(1, fixture.code.syncedFlushes);
+    // storage-row has one mutation: the single synced tail only.
+    assertEquals(0, fixture.storage.unsyncedFlushes);
+    assertEquals(1, fixture.storage.syncedFlushes);
+    assertArrayEquals(new byte[]{2}, fixture.code.get(new byte[]{1}));
+    assertNull(fixture.code.get(new byte[]{9}));
+    assertArrayEquals(new byte[]{4}, fixture.storage.get(new byte[]{3}));
+
+    assertEquals(Status.MATERIALIZED, fixture.materializer.inspect(fixture.target));
+    fixture.materializer.publish(fixture.target);
+    assertEquals(Status.PUBLISHED, fixture.materializer.inspect(fixture.target));
+
+    ChainbaseCheckpointMaterializer reopened = new ChainbaseCheckpointMaterializer(fixture.root,
+        fixture.format, fixture.databases);
+    assertEquals(Status.PUBLISHED, reopened.inspect(fixture.target));
+  }
+
+  @Test
+  public void retainedReplayWithoutSyncKeepsSerialUnsyncedWrites() throws Exception {
+    Fixture fixture = fixture("deferred-retained-unsynced", null);
+    fixture.materializer.replayRetained(Collections.singletonList(fixture.payload), false);
+
+    assertEquals(0, fixture.code.syncedFlushes);
+    assertEquals(1, fixture.code.unsyncedFlushes);
+    assertEquals(0, fixture.storage.syncedFlushes);
+    assertEquals(1, fixture.storage.unsyncedFlushes);
+    assertArrayEquals(new byte[]{2}, fixture.code.get(new byte[]{1}));
+    assertArrayEquals(new byte[]{4}, fixture.storage.get(new byte[]{3}));
+  }
+
+  @Test
   public void resumesEveryStoreAndMarkerBoundaryUsingCheckpointRedo() throws Exception {
     for (ChainbaseCheckpointMaterializer.Stage stage
         : ChainbaseCheckpointMaterializer.Stage.values()) {
@@ -884,6 +921,7 @@ public class ChainbaseCheckpointMaterializerTest {
     private final String name;
     private final Map<WrappedByteArray, byte[]> values = new LinkedHashMap<>();
     private int syncedFlushes;
+    private int unsyncedFlushes;
     private int getCalls;
 
     private MemoryDb(String name) {
@@ -949,6 +987,12 @@ public class ChainbaseCheckpointMaterializerTest {
     @Override
     public void flushSynced(Map<WrappedByteArray, WrappedByteArray> batch) {
       syncedFlushes++;
+      apply(batch);
+    }
+
+    @Override
+    public void flushUnsynced(Map<WrappedByteArray, WrappedByteArray> batch) {
+      unsyncedFlushes++;
       apply(batch);
     }
 
