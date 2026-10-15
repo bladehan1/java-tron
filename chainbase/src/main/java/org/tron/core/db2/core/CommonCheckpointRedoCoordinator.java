@@ -4,6 +4,11 @@ import java.io.IOException;
 import java.util.EnumMap;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.function.LongSupplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -11,7 +16,16 @@ import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.db2.core.CommonCheckpointMaterializer.Authority;
 import org.tron.core.db2.core.CommonCheckpointMaterializer.Status;
 
-/** Two-barrier, idempotent redo coordinator for one durable common checkpoint. */
+/**
+ * Two-barrier, idempotent redo coordinator for one durable common checkpoint.
+ *
+ * <p>Durable-base advances (retained target replay plus generation pruning) run on a single
+ * daemon worker submitted at the redo tail. The worker re-acquires the coordinator monitor,
+ * so the whole restore-then-advance sequence is serialized against apply/recover/close and
+ * always lands between two redo batches, never overlapping one. Crash semantics are unchanged:
+ * the retained WAL stays intact until the retained target data has been forced, and an advance
+ * failure surfaces at the next batch entry exactly like a synchronous redo failure.
+ */
 public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
 
   private static final Logger logger = LoggerFactory.getLogger("DB");
@@ -23,6 +37,13 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
   private final FaultHook faultHook;
   private final LongSupplier nanoTime;
   private final TimingSink timingSink;
+  private final ExecutorService durableBaseExecutor = Executors.newSingleThreadExecutor(
+      runnable -> {
+        Thread thread = new Thread(runnable, "checkpoint-durable-base");
+        thread.setDaemon(true);
+        return thread;
+      });
+  private Future<?> pendingDurableBase;
   private boolean closed;
   private int durableBaseCadence;
   private int completedSinceBase;
@@ -57,13 +78,23 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
   }
 
   /** Durably publishes the redo payload before applying it to any authority. */
-  public synchronized RecoveryAction apply(CommonCheckpointPayload payload) throws IOException {
-    DurableResult result = applyDurable(payload);
-    notifyCommitted(result.getTarget());
-    return result.getAction();
+  public RecoveryAction apply(CommonCheckpointPayload payload) throws IOException {
+    awaitPendingDurableBase();
+    synchronized (this) {
+      DurableResult result = applyDurableLocked(payload);
+      notifyCommitted(result.getTarget());
+      return result.getAction();
+    }
   }
 
-  synchronized DurableResult applyDurable(CommonCheckpointPayload payload) throws IOException {
+  DurableResult applyDurable(CommonCheckpointPayload payload) throws IOException {
+    awaitPendingDurableBase();
+    synchronized (this) {
+      return applyDurableLocked(payload);
+    }
+  }
+
+  private DurableResult applyDurableLocked(CommonCheckpointPayload payload) throws IOException {
     requireOpen();
     CommonCheckpointPayload admitted = Objects.requireNonNull(payload, "payload");
     long targetStart = nanoTime.getAsLong();
@@ -82,7 +113,14 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
   }
 
   /** Resumes the only durable checkpoint, or performs no work when none exists. */
-  public synchronized RecoveryAction recover() throws IOException {
+  public RecoveryAction recover() throws IOException {
+    awaitPendingDurableBase();
+    synchronized (this) {
+      return recoverLocked();
+    }
+  }
+
+  private RecoveryAction recoverLocked() throws IOException {
     requireOpen();
     long totalStart = nanoTime.getAsLong();
     Holder<CommonCheckpointPayload> loaded = new Holder<>();
@@ -152,43 +190,70 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
 
   /** Closes runtime-owned authority resources in reverse publication order. */
   @Override
-  public synchronized void close() throws IOException {
-    if (closed) {
-      return;
-    }
+  public void close() throws IOException {
     Throwable failure = null;
     try {
-      checkpointDurableBase();
-    } catch (IOException | RuntimeException forcing) {
-      failure = forcing;
+      // Wait for the in-flight durable-base advance before forcing the final one. Even when this
+      // wait is interrupted, the synchronized section below still serializes against the worker.
+      awaitPendingDurableBase();
+    } catch (IOException | RuntimeException awaiting) {
+      failure = awaiting;
     }
-    closed = true;
-    for (int index = ORDER.length - 1; index >= 0; index--) {
-      CommonCheckpointMaterializer materializer = materializers.get(ORDER[index]);
+    synchronized (this) {
+      if (closed) {
+        return;
+      }
       try {
-        materializer.close();
-      } catch (IOException | RuntimeException closing) {
+        checkpointDurableBase(null);
+      } catch (IOException | RuntimeException forcing) {
+        if (failure == null) {
+          failure = forcing;
+        } else {
+          failure.addSuppressed(forcing);
+        }
+      }
+      closed = true;
+      for (int index = ORDER.length - 1; index >= 0; index--) {
+        CommonCheckpointMaterializer materializer = materializers.get(ORDER[index]);
+        try {
+          materializer.close();
+        } catch (IOException | RuntimeException closing) {
+          if (failure == null) {
+            failure = closing;
+          } else {
+            failure.addSuppressed(closing);
+          }
+        }
+      }
+      try {
+        checkpointFile.close();
+      } catch (IOException closing) {
         if (failure == null) {
           failure = closing;
         } else {
           failure.addSuppressed(closing);
         }
       }
-    }
-    try {
-      checkpointFile.close();
-    } catch (IOException closing) {
-      if (failure == null) {
-        failure = closing;
-      } else {
-        failure.addSuppressed(closing);
-      }
+      shutdownDurableBaseExecutor();
     }
     if (failure instanceof IOException) {
       throw (IOException) failure;
     }
     if (failure != null) {
       throw (RuntimeException) failure;
+    }
+  }
+
+  private void shutdownDurableBaseExecutor() {
+    durableBaseExecutor.shutdown();
+    try {
+      if (!durableBaseExecutor.awaitTermination(10, TimeUnit.SECONDS)) {
+        durableBaseExecutor.shutdownNow();
+        logger.warn("Common checkpoint durable-base worker did not stop within 10s");
+      }
+    } catch (InterruptedException interrupted) {
+      Thread.currentThread().interrupt();
+      durableBaseExecutor.shutdownNow();
     }
   }
 
@@ -210,7 +275,7 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
     }
   }
 
-  /** Bounds retained redo using the existing checkpoint flush-count setting. */
+  /** Bounds retained redo using the configured durable-base cadence. */
   public synchronized void configureDurableBaseCadence(int generations) {
     if (generations <= 0) {
       throw new IllegalArgumentException("durable base cadence must be positive");
@@ -219,8 +284,78 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
   }
 
   /** Force the retained target data before advancing the durable base and pruning generations. */
-  public synchronized void checkpointDurableBase() throws IOException {
-    checkpointDurableBase(null);
+  public void checkpointDurableBase() throws IOException {
+    awaitPendingDurableBase();
+    synchronized (this) {
+      checkpointDurableBase(null);
+    }
+  }
+
+  /** Blocks until a scheduled asynchronous durable-base advance completes or fails. */
+  public void awaitDurableBaseIdle() throws IOException {
+    awaitPendingDurableBase();
+  }
+
+  /**
+   * Hands the durable-base advance to the background worker. The cadence counter resets at
+   * submission; a failed advance surfaces at the next await point instead of failing this batch.
+   */
+  private void scheduleDurableBase(CommonCheckpointTarget target, int blocks) {
+    completedSinceBase = 0;
+    pendingDurableBase = durableBaseExecutor.submit(() -> {
+      runAsyncDurableBase(target, blocks);
+      return null;
+    });
+  }
+
+  /**
+   * Runs the same durable-base sequence as the synchronous path on the background worker, with
+   * its own timing record (mode=durableBase) so the offloaded cost stays visible per advance.
+   */
+  private void runAsyncDurableBase(CommonCheckpointTarget target, int blocks) throws IOException {
+    long totalStart = nanoTime.getAsLong();
+    Timing timing = new Timing("durableBase", target, blocks);
+    try {
+      synchronized (this) {
+        if (!closed) {
+          checkpointDurableBase(timing);
+        }
+      }
+    } finally {
+      timing.totalUs = elapsedUs(totalStart);
+      emitTiming(timing);
+    }
+  }
+
+  /**
+   * Waits for the in-flight asynchronous durable-base advance, if any. The wait happens WITHOUT
+   * the coordinator monitor so the worker can finish its serialized section; a failure is
+   * rethrown exactly like a synchronous redo failure so the owner fails closed the same way.
+   */
+  private void awaitPendingDurableBase() throws IOException {
+    Future<?> pending;
+    synchronized (this) {
+      pending = pendingDurableBase;
+      pendingDurableBase = null;
+    }
+    if (pending == null) {
+      return;
+    }
+    try {
+      pending.get();
+    } catch (InterruptedException failure) {
+      Thread.currentThread().interrupt();
+      throw new IOException("Interrupted awaiting common checkpoint durable base", failure);
+    } catch (ExecutionException failure) {
+      Throwable cause = failure.getCause();
+      if (cause instanceof IOException) {
+        throw (IOException) cause;
+      }
+      if (cause instanceof RuntimeException) {
+        throw (RuntimeException) cause;
+      }
+      throw new IOException("Common checkpoint durable base advance failed", cause);
+    }
   }
 
   private void checkpointDurableBase(Timing timing) throws IOException {
@@ -286,7 +421,7 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
     timing.walRetireUs = timed(checkpointFile::retire);
     faultHook.after(Stage.AFTER_CHECKPOINT_RETIRE);
     if (durableBaseCadence > 0 && ++completedSinceBase >= durableBaseCadence) {
-      checkpointDurableBase(timing);
+      scheduleDurableBase(target, timing.blocks);
     }
     return RecoveryAction.COMPLETED_REDO;
   }

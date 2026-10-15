@@ -5,6 +5,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertThrows;
+import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -12,6 +13,12 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import org.junit.BeforeClass;
 import org.junit.Rule;
 import org.junit.Test;
@@ -25,6 +32,7 @@ import org.tron.core.db2.core.CommonCheckpointFile;
 import org.tron.core.db2.core.CommonCheckpointMaterializer;
 import org.tron.core.db2.core.CommonCheckpointPayload;
 import org.tron.core.db2.core.CommonCheckpointRedoCoordinator;
+import org.tron.core.db2.core.CommonCheckpointRedoCoordinator.RecoveryAction;
 import org.tron.core.db2.core.CommonCheckpointTarget;
 import org.tron.core.db2.core.SnapshotRoot;
 import org.tron.core.db2.stateroot.PathStateFlushTarget;
@@ -92,12 +100,52 @@ public class SharedCheckpointDatabaseTest {
       coordinator.configureDurableBaseCadence(2);
       coordinator.apply(payload(1));
       coordinator.apply(payload(2));
+      // The cadence trigger submits an asynchronous durable-base advance; wait for it before
+      // asserting the pruned generation count.
+      coordinator.awaitDurableBaseIdle();
       assertEquals(1, file.retained().size());
       coordinator.apply(payload(3));
       assertEquals(2, file.retained().size());
       coordinator.apply(payload(4));
+      coordinator.awaitDurableBaseIdle();
       assertEquals(1, file.retained().size());
       assertEquals(4, CommonCheckpointTarget.from(file.latestCommitted())
+          .getLastBlock().getBlockNumber());
+    }
+  }
+
+  @Test
+  public void recoverAwaitsInFlightAsynchronousDurableBase() throws Exception {
+    Path common = temporary.newFolder().toPath();
+    Fake chain = new Fake(CommonCheckpointMaterializer.Authority.CHAINBASE);
+    Fake path = new Fake(CommonCheckpointMaterializer.Authority.PATH_STATE);
+    Fake history = new Fake(CommonCheckpointMaterializer.Authority.STATE_ARCHIVE);
+    path.syncReplayStarted = new CountDownLatch(1);
+    path.syncReplayRelease = new CountDownLatch(1);
+    try (CommonCheckpointFile file = CommonCheckpointFile.openDatabase(common, Engine.LEVELDB);
+        CommonCheckpointRedoCoordinator coordinator =
+            new CommonCheckpointRedoCoordinator(file, chain, path, history)) {
+      coordinator.configureDurableBaseCadence(1);
+      coordinator.apply(payload(1));
+      // The asynchronous durable-base advance is now blocked inside the sync retained replay.
+      assertTrue(path.syncReplayStarted.await(5, TimeUnit.SECONDS));
+      ExecutorService executor = Executors.newSingleThreadExecutor();
+      Future<RecoveryAction> recovery = executor.submit(coordinator::recover);
+      try {
+        // recover() must wait for the in-flight advance instead of overlapping it.
+        assertThrows(TimeoutException.class,
+            () -> recovery.get(200, TimeUnit.MILLISECONDS));
+      } finally {
+        path.syncReplayRelease.countDown();
+      }
+      try {
+        assertEquals(RecoveryAction.COMPLETED_REDO, recovery.get(5, TimeUnit.SECONDS));
+      } finally {
+        executor.shutdownNow();
+      }
+      coordinator.awaitDurableBaseIdle();
+      assertEquals(1, file.retained().size());
+      assertEquals(1, CommonCheckpointTarget.from(file.latestCommitted())
           .getLastBlock().getBlockNumber());
     }
   }
@@ -188,6 +236,8 @@ public class SharedCheckpointDatabaseTest {
     private CommonCheckpointTarget materialized;
     private CommonCheckpointTarget published;
     private boolean failSync;
+    private volatile CountDownLatch syncReplayStarted;
+    private volatile CountDownLatch syncReplayRelease;
 
     private Fake(Authority authority) {
       this.authority = authority;
@@ -219,6 +269,17 @@ public class SharedCheckpointDatabaseTest {
         throws IOException {
       if (sync && failSync) {
         throw new IOException("injected target force failure");
+      }
+      if (sync && syncReplayStarted != null) {
+        syncReplayStarted.countDown();
+        try {
+          if (!syncReplayRelease.await(5, TimeUnit.SECONDS)) {
+            throw new IOException("injected sync replay release timeout");
+          }
+        } catch (InterruptedException failure) {
+          Thread.currentThread().interrupt();
+          throw new IOException("injected sync replay interrupted", failure);
+        }
       }
       if (!payloads.isEmpty()) {
         materialized = CommonCheckpointTarget.from(payloads.get(payloads.size() - 1));
