@@ -74,6 +74,8 @@ public final class ServingIndexService implements AutoCloseable {
   private volatile ServingView view;
   private volatile boolean closing;
   private volatile boolean started;
+  /** Operator-thread request, consumed by the build thread. */
+  private volatile boolean rebuildRequested;
   /** ch09 OPS-D6: true while the disk budget is at RED or above (ch04 §5.1 DISK_PRESSURE). */
   private volatile BooleanSupplier diskPressure = () -> false;
 
@@ -92,7 +94,6 @@ public final class ServingIndexService implements AutoCloseable {
   private long backoffMillis;
   private long pendingSinceMillis;
   private long backlogObservedSinceMillis;
-  private boolean rebuildRequested;
   private final long[] batchCounters = new long[3];
 
   ServingIndexService(Path servingRoot, Path historyRoot, Path legacyServing, Engine engine,
@@ -549,7 +550,10 @@ public final class ServingIndexService implements AutoCloseable {
       if ((rebuildRequested || config.isAutoRebuild() && failure.getReason().isRebuildable())
           && underDiskPressure()) {
         // ch04 §5.1 DISK_PRESSURE pauses rebuilds too; the request is kept for later.
-        deleteDiscardedNow();
+        if (retryAtMillis == Long.MAX_VALUE || clock.getAsLong() >= retryAtMillis) {
+          deleteDiscardedNow();
+          scheduleRetry(failure);
+        }
         return false;
       }
       if (config.isAutoRebuild() && failure.getReason().isRebuildable()) {

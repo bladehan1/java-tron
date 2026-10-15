@@ -27,6 +27,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Stream;
 import org.junit.After;
@@ -312,6 +313,70 @@ public class ServingIndexServiceTest {
     assertTrue(rebuilt.awaitLive(WAIT));
     assertEquals(2, rebuilt.status().getIndexedThrough());
     awaitNoDiscarded(newer.servingRoot);
+  }
+
+  @Test(timeout = 60_000)
+  public void operatorRebuildRequestSurvivesDiskPressureWithBackoff() throws Exception {
+    assertRebuildPausesUnderDiskPressure(false);
+  }
+
+  @Test(timeout = 60_000)
+  public void automaticRebuildWaitsUnderDiskPressureWithBackoff() throws Exception {
+    assertRebuildPausesUnderDiskPressure(true);
+  }
+
+  private void assertRebuildPausesUnderDiskPressure(boolean autoRebuild) throws Exception {
+    History newer = history(1);
+    ServingIndexService first = service(newer, config(), ServingIndexService.Hooks.NONE);
+    newer.publish(first, 1, 6);
+    assertTrue(awaitThrough(first, 6));
+    first.close();
+
+    History older = history(1, newer.servingRoot);
+    older.publishWithoutNotify(1, 3);
+    AtomicLong now = new AtomicLong(1_000);
+    AtomicBoolean pressure = new AtomicBoolean(true);
+    AtomicBoolean opening = new AtomicBoolean(true);
+    AtomicInteger pressureChecks = new AtomicInteger();
+    CountDownLatch expiredRetryObserved = new CountDownLatch(1);
+    ServingIndexService service = new ServingIndexService(older.servingRoot, older.root,
+        null, Engine.ROCKSDB, older.source, config().setAutoRebuild(autoRebuild)
+            .setRetryInitialBackoffMillis(1_000).setRetryMaxBackoffMillis(1_000)
+            .setPollMillis(1_000).validate(), ServingIndexService.Hooks.NONE, now::get);
+    closeables.add(service);
+    service.setDiskPressureSignal(() -> {
+      if (opening.getAndSet(false)) {
+        // Allow admission to observe INDEX_AHEAD before pressure pauses its rebuild.
+        return false;
+      }
+      if (now.get() >= 2_000 && pressure.get()) {
+        pressureChecks.incrementAndGet();
+        expiredRetryObserved.countDown();
+      }
+      return pressure.get();
+    });
+    if (!autoRebuild) {
+      service.requestRebuild();
+    }
+    service.start();
+    awaitFailure(service, Reason.INDEX_AHEAD);
+    Path discarded = older.servingRoot.resolve(ServingIndexService.DISCARDED_PREFIX + "test");
+    Files.createDirectory(discarded);
+    now.set(2_000);
+    service.onCommonPublished(null);
+    assertTrue(expiredRetryObserved.await(10, TimeUnit.SECONDS));
+    Thread.sleep(150);
+    assertEquals(ServingState.DEGRADED, service.status().getState());
+    assertTrue("expired retry must back off instead of polling at 1 ms",
+        pressureChecks.get() <= 5);
+    assertFalse("discard cleanup continues while rebuild is paused", Files.exists(discarded));
+
+    pressure.set(false);
+    now.set(3_000);
+    service.onCommonPublished(null);
+    assertTrue(service.awaitLive(WAIT));
+    assertEquals(3, service.status().getIndexedThrough());
+    older.assertOracle(service);
   }
 
   /** T8 (component, G4): restart with I == W is LIVE with no notification; I < W catches up. */
