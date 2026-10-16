@@ -30,6 +30,7 @@ import org.tron.core.db2.common.LevelDB;
 import org.tron.core.db2.common.RocksDB;
 import org.tron.core.db2.common.WrappedByteArray;
 import org.tron.core.db2.core.Chainbase;
+import org.tron.core.db2.core.ExecutionAttribution;
 import org.tron.core.db2.core.ITronChainBase;
 import org.tron.core.db2.core.SnapshotRoot;
 import org.tron.core.exception.BadItemException;
@@ -81,6 +82,9 @@ public abstract class TronStoreWithRevoking<T extends ProtoCapsule> implements I
 
   @PostConstruct
   private void init() {
+    if (revokingDB instanceof Chainbase) {
+      ((Chainbase) revokingDB).setRegistrationSource(getClass().getName());
+    }
     revokingDatabase.add(revokingDB);
     dbStatService.register(db);
   }
@@ -91,7 +95,10 @@ public abstract class TronStoreWithRevoking<T extends ProtoCapsule> implements I
       return;
     }
 
-    revokingDB.put(key, item.getData());
+    long started = ExecutionAttribution.sample(db.getDbName(), "encode");
+    byte[] value = item.getData();
+    ExecutionAttribution.sampled(db.getDbName(), "encode", started, 0, false);
+    revokingDB.put(key, value);
   }
 
   @Override
@@ -122,6 +129,7 @@ public abstract class TronStoreWithRevoking<T extends ProtoCapsule> implements I
   }
 
   public T of(byte[] value) throws BadItemException {
+    long started = ExecutionAttribution.sample(db.getDbName(), "decode");
     try {
       Constructor constructor = token.getRawType().getConstructor(byte[].class);
       @SuppressWarnings("unchecked")
@@ -129,6 +137,8 @@ public abstract class TronStoreWithRevoking<T extends ProtoCapsule> implements I
       return t;
     } catch (NoSuchMethodException | IllegalAccessException | InstantiationException | InvocationTargetException e) {
       throw new BadItemException(e.getMessage());
+    } finally {
+      ExecutionAttribution.sampled(db.getDbName(), "decode", started, 0, false);
     }
   }
 

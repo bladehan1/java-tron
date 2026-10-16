@@ -6,6 +6,15 @@ public interface Flusher {
 
   void flush(Map<WrappedByteArray, WrappedByteArray> batch);
 
+  /** Flushes one checkpoint batch with an explicit durability barrier. */
+  default void flushSynced(Map<WrappedByteArray, WrappedByteArray> batch) {
+    throw new UnsupportedOperationException("Synchronous checkpoint flush is not supported");
+  }
+
+  default void flushUnsynced(Map<WrappedByteArray, WrappedByteArray> batch) {
+    throw new UnsupportedOperationException("Unsynced common flush is not supported");
+  }
+
   void close();
 
   void reset();
