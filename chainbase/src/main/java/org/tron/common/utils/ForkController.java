@@ -20,6 +20,7 @@ import org.tron.core.ChainBaseManager;
 import org.tron.core.capsule.BlockCapsule;
 import org.tron.core.config.Parameter.ForkBlockVersionConsts;
 import org.tron.core.config.Parameter.ForkBlockVersionEnum;
+import org.tron.core.db2.archive.query.HistoricalExecutionScope;
 import org.tron.core.store.DynamicPropertiesStore;
 
 @Slf4j(topic = "utils")
@@ -60,36 +61,46 @@ public class ForkController {
     if (manager == null) {
       throw new IllegalStateException("not inited");
     }
+    return evaluate(version, latestSource);
+  }
+
+  /**
+   * The fork-activation rule as a pure function of its dynamic-property inputs (chapter 05
+   * section 3.9.3). {@link #pass(int)} evaluates it against the latest store; historical
+   * execution evaluates the same algorithm against S(T).
+   */
+  public static boolean evaluate(int version, ForkStateSource source) {
+    Objects.requireNonNull(source, "source");
     if (version > ForkBlockVersionEnum.VERSION_4_0.getValue()) {
-      return passNew(version);
+      return passNew(version, source);
     } else {
-      return passOld(version);
+      return passOld(version, source);
     }
   }
 
-  private boolean passOld(int version) {
+  private static boolean passOld(int version, ForkStateSource source) {
     if (version == ForkBlockVersionConsts.ENERGY_LIMIT) {
-      return checkForEnergyLimit();
+      return checkForEnergyLimit(source);
     }
 
-    byte[] stats = manager.getDynamicPropertiesStore().statsByVersion(version);
+    byte[] stats = source.statsByVersion(version);
     return check(stats);
   }
 
-  private boolean passNew(int version) {
+  private static boolean passNew(int version, ForkStateSource source) {
     ForkBlockVersionEnum versionEnum = ForkBlockVersionEnum.getForkBlockVersionEnum(version);
     if (versionEnum == null) {
       logger.warn("Not exist block version: {}.", version);
       return false;
     }
-    long latestBlockTime = manager.getDynamicPropertiesStore().getLatestBlockHeaderTimestamp();
-    long maintenanceTimeInterval = manager.getDynamicPropertiesStore().getMaintenanceTimeInterval();
+    long latestBlockTime = source.latestBlockHeaderTimestamp();
+    long maintenanceTimeInterval = source.maintenanceTimeInterval();
     long hardForkTime = ((versionEnum.getHardForkTime() - 1) / maintenanceTimeInterval + 1)
         * maintenanceTimeInterval;
     if (latestBlockTime < hardForkTime) {
       return false;
     }
-    byte[] stats = manager.getDynamicPropertiesStore().statsByVersion(version);
+    byte[] stats = source.statsByVersion(version);
     if (stats == null || stats.length == 0) {
       return false;
     }
@@ -100,19 +111,19 @@ public class ForkController {
       }
     }
     return count >= ceil((double) versionEnum.getHardForkRate() * stats.length / 100,
-        manager.getDynamicPropertiesStore().disableJavaLangMath());
+        source.disableJavaLangMath());
   }
 
 
   // when block.version = 5,
   // it make block use new energy to handle transaction when block number >= 4727890L.
   // version !=5, skip this.
-  private boolean checkForEnergyLimit() {
-    long blockNum = manager.getDynamicPropertiesStore().getLatestBlockHeaderNumber();
+  private static boolean checkForEnergyLimit(ForkStateSource source) {
+    long blockNum = source.latestBlockHeaderNumber();
     return blockNum >= CommonParameter.getInstance().getBlockNumForEnergyLimit();
   }
 
-  private boolean check(byte[] stats) {
+  private static boolean check(byte[] stats) {
     if (stats == null || stats.length == 0) {
       return false;
     }
@@ -125,6 +136,34 @@ public class ForkController {
 
     return true;
   }
+
+  /** Latest inputs, read through the manager's current DynamicPropertiesStore on every access. */
+  private final ForkStateSource latestSource = new ForkStateSource() {
+    @Override
+    public long latestBlockHeaderTimestamp() {
+      return manager.getDynamicPropertiesStore().getLatestBlockHeaderTimestamp();
+    }
+
+    @Override
+    public long maintenanceTimeInterval() {
+      return manager.getDynamicPropertiesStore().getMaintenanceTimeInterval();
+    }
+
+    @Override
+    public byte[] statsByVersion(int version) {
+      return manager.getDynamicPropertiesStore().statsByVersion(version);
+    }
+
+    @Override
+    public boolean disableJavaLangMath() {
+      return manager.getDynamicPropertiesStore().disableJavaLangMath();
+    }
+
+    @Override
+    public long latestBlockHeaderNumber() {
+      return manager.getDynamicPropertiesStore().getLatestBlockHeaderNumber();
+    }
+  };
 
   private void downgrade(int version, int slot) {
     for (ForkBlockVersionEnum versionEnum : ForkBlockVersionEnum.values()) {
@@ -213,6 +252,10 @@ public class ForkController {
   }
 
   public static ForkController instance() {
+    if (HistoricalExecutionScope.isActive()) {
+      // Latest fork state must never answer a historical request (chapter 05 section 3.9.3).
+      throw HistoricalExecutionScope.trap("ForkController.instance()");
+    }
     return ForkControllerEnum.INSTANCE.getInstance();
   }
 

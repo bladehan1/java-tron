@@ -7,6 +7,7 @@ import java.util.Set;
 import lombok.extern.slf4j.Slf4j;
 import org.bouncycastle.util.encoders.Hex;
 import org.springframework.util.StringUtils;
+import org.tron.core.archive.execution.HistoricalFailures;
 import org.tron.core.vm.config.VMConfig;
 import org.tron.core.vm.program.Program;
 import org.tron.core.vm.program.Program.JVMStackOverFlowException;
@@ -20,6 +21,7 @@ public class VM {
       Op.DELEGATECALL, Op.CALLCODE, Op.CALLTOKEN);
 
   public static void play(Program program, JumpTable jumpTable) {
+    final boolean historical = program.getContractState().isHistorical();
     try {
       long factor = DYNAMIC_ENERGY_FACTOR_DECIMAL;
       long energyUsage = 0L;
@@ -31,6 +33,9 @@ public class VM {
       }
 
       while (!program.isStopped()) {
+        if (historical) {
+          program.getContractState().checkHistoricalQueryActive();
+        }
         if (VMConfig.vmTrace()) {
           program.saveOpTrace();
         }
@@ -88,6 +93,9 @@ public class VM {
 
           /* exec op action */
           op.execute(program);
+          if (historical) {
+            program.getContractState().checkHistoricalQueryActive();
+          }
 
           program.setPreviouslyExecutedOp((byte) op.getOpcode());
         } catch (RuntimeException e) {
@@ -110,6 +118,14 @@ public class VM {
     } catch (JVMStackOverFlowException | OutOfTimeException e) {
       throw e;
     } catch (RuntimeException e) {
+      if (historical) {
+        // Chapter 05 section 3.7 P3: historical-class failures (and an unexpected NPE) end the
+        // whole request instead of becoming a failed child frame the parent can ignore.
+        RuntimeException fatal = HistoricalFailures.escalate(program.getContractState(), e);
+        if (fatal != null) {
+          throw fatal;
+        }
+      }
       // https://openjdk.org/jeps/358
       // https://bugs.openjdk.org/browse/JDK-8220715
       // since jdk 14, the NullPointerExceptions message is not empty

@@ -19,6 +19,9 @@ import org.tron.core.Constant;
 import org.tron.core.capsule.AccountCapsule;
 import org.tron.core.capsule.AssetIssueCapsule;
 import org.tron.core.capsule.TransactionCapsule;
+import org.tron.core.db2.core.ExecutionAttribution;
+import org.tron.core.db2.core.ExecutionAttribution.ReadScope;
+import org.tron.core.db2.core.ExecutionAttribution.ReadSite;
 import org.tron.core.exception.AccountResourceInsufficientException;
 import org.tron.core.exception.ContractValidateException;
 import org.tron.core.exception.TooBigTransactionException;
@@ -130,7 +133,10 @@ public class BandwidthProcessor extends ResourceProcessor {
       logger.debug("TxId {}, bandwidth cost: {}.", trx.getTransactionId(), bytesSize);
       trace.setNetBill(bytesSize, 0);
       byte[] address = TransactionCapsule.getOwner(contract);
-      AccountCapsule accountCapsule = chainBaseManager.getAccountStore().get(address);
+      AccountCapsule accountCapsule;
+      try (ReadScope ignored = ExecutionAttribution.readSite(ReadSite.BANDWIDTH_OWNER)) {
+        accountCapsule = chainBaseManager.getAccountStore().get(address);
+      }
       if (accountCapsule == null) {
         throw new ContractValidateException(String.format("account [%s] does not exist",
             StringUtil.encode58Check(address)));
@@ -268,8 +274,10 @@ public class BandwidthProcessor extends ResourceProcessor {
         } catch (Exception ex) {
           throw new RuntimeException(ex.getMessage());
         }
-        toAccount =
-            chainBaseManager.getAccountStore().get(transferContract.getToAddress().toByteArray());
+        try (ReadScope ignored = ExecutionAttribution.readSite(ReadSite.BANDWIDTH_RECEIVER)) {
+          toAccount =
+              chainBaseManager.getAccountStore().get(transferContract.getToAddress().toByteArray());
+        }
         return toAccount == null;
       case TransferAssetContract:
         TransferAssetContract transferAssetContract;
@@ -278,8 +286,10 @@ public class BandwidthProcessor extends ResourceProcessor {
         } catch (Exception ex) {
           throw new RuntimeException(ex.getMessage());
         }
-        toAccount = chainBaseManager.getAccountStore()
-            .get(transferAssetContract.getToAddress().toByteArray());
+        try (ReadScope ignored = ExecutionAttribution.readSite(ReadSite.BANDWIDTH_RECEIVER)) {
+          toAccount = chainBaseManager.getAccountStore()
+              .get(transferAssetContract.getToAddress().toByteArray());
+        }
         return toAccount == null;
       default:
         return false;

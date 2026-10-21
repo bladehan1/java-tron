@@ -15,6 +15,10 @@ import com.google.common.collect.Lists;
 import com.google.common.primitives.Longs;
 import com.google.protobuf.ByteString;
 import io.prometheus.client.Histogram;
+import java.nio.file.Files;
+import java.nio.file.LinkOption;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -25,6 +29,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -71,6 +76,7 @@ import org.tron.common.logsfilter.trigger.ContractEventTrigger;
 import org.tron.common.logsfilter.trigger.ContractLogTrigger;
 import org.tron.common.logsfilter.trigger.ContractTrigger;
 import org.tron.common.logsfilter.trigger.Trigger;
+import org.tron.common.math.StrictMathWrapper;
 import org.tron.common.overlay.message.Message;
 import org.tron.common.parameter.CommonParameter;
 import org.tron.common.prometheus.MetricKeys;
@@ -90,6 +96,9 @@ import org.tron.core.ChainBaseManager;
 import org.tron.core.Constant;
 import org.tron.core.Wallet;
 import org.tron.core.actuator.ActuatorCreator;
+import org.tron.core.archive.checkpoint.StateArchiveCheckpointStartup;
+import org.tron.core.archive.query.StateArchiveQuerySessions;
+import org.tron.core.archive.startup.StateArchiveStartup;
 import org.tron.core.capsule.AccountCapsule;
 import org.tron.core.capsule.BlockBalanceTraceCapsule;
 import org.tron.core.capsule.BlockCapsule;
@@ -113,8 +122,60 @@ import org.tron.core.db.api.EnergyPriceHistoryLoader;
 import org.tron.core.db.api.MigrateTurkishKeyHelper;
 import org.tron.core.db.api.MoveAbiHelper;
 import org.tron.core.db2.ISession;
+import org.tron.core.db2.archive.ArchiveFormatAdmissionValidator.Result;
+import org.tron.core.db2.archive.ArchiveHistoryWriter;
+import org.tron.core.db2.archive.ArchiveStoreScope;
+import org.tron.core.db2.archive.BlockSnapshotMeta;
+import org.tron.core.db2.archive.HistoricalAccountAssetBalanceResolver;
+import org.tron.core.db2.archive.HistoricalAccountAssetPrefixResolver;
+import org.tron.core.db2.archive.HistoricalQuerySession;
+import org.tron.core.db2.archive.LatestStateGenerationCoordinatorFactory;
+import org.tron.core.db2.archive.OldValue;
+import org.tron.core.db2.archive.StateArchiveAppendFileRuntime;
+import org.tron.core.db2.archive.StateArchiveCheckpointMaterializer;
+import org.tron.core.db2.archive.StateArchiveCheckpointReadSnapshot;
+import org.tron.core.db2.archive.StateArchiveHotCheckpointMaterializer;
+import org.tron.core.db2.archive.StateArchiveHotStore;
+import org.tron.core.db2.archive.StateArchiveRuntimeOwner;
+import org.tron.core.db2.archive.query.HistoricalQueryAdmission;
+import org.tron.core.db2.archive.query.account.HistoricalAccountBalanceReader;
+import org.tron.core.db2.archive.query.latest.LatestStateGenerationAdapter;
+import org.tron.core.db2.archive.query.snapshot.ArchivePointSnapshot;
+import org.tron.core.db2.checkpoint.common.CommonCheckpointBaseline;
+import org.tron.core.db2.checkpoint.common.CommonCheckpointBaselineFile;
+import org.tron.core.db2.checkpoint.common.CommonCheckpointFile;
+import org.tron.core.db2.checkpoint.common.CommonCheckpointFormat;
+import org.tron.core.db2.checkpoint.common.CommonCheckpointHotRecovery;
+import org.tron.core.db2.checkpoint.common.CommonCheckpointMaterializedStore;
+import org.tron.core.db2.checkpoint.common.CommonCheckpointMaterializer;
+import org.tron.core.db2.checkpoint.common.CommonCheckpointPayload;
+import org.tron.core.db2.checkpoint.common.CommonCheckpointRecoveryStateAdapter;
+import org.tron.core.db2.checkpoint.common.CommonCheckpointRedoCoordinator;
+import org.tron.core.db2.checkpoint.common.CommonCheckpointRuntime;
+import org.tron.core.db2.checkpoint.common.CommonCheckpointRuntimeAttachment;
+import org.tron.core.db2.checkpoint.common.CommonCheckpointRuntimeOwner;
+import org.tron.core.db2.checkpoint.common.CommonCheckpointTarget;
 import org.tron.core.db2.core.Chainbase;
+import org.tron.core.db2.core.ChainbaseCheckpointMaterializer;
+import org.tron.core.db2.core.ExecutionAttribution;
+import org.tron.core.db2.core.P66LaneStartup;
 import org.tron.core.db2.core.SnapshotManager;
+import org.tron.core.db2.stateroot.PathStateBlockTransition;
+import org.tron.core.db2.stateroot.PathStateCanonicalizer;
+import org.tron.core.db2.stateroot.PathStateCanonicalizer.P66Phase;
+import org.tron.core.db2.stateroot.PathStateCheckpointMaterializer;
+import org.tron.core.db2.stateroot.PathStateHead;
+import org.tron.core.db2.stateroot.PathStateLayerLimits;
+import org.tron.core.db2.stateroot.PathStateNativeSnapshotSource;
+import org.tron.core.db2.stateroot.PathStatePhysicalOverlayHead;
+import org.tron.core.db2.stateroot.PathStatePhysicalRuntimeAdmission;
+import org.tron.core.db2.stateroot.PathStatePhysicalSnapshotHead;
+import org.tron.core.db2.stateroot.PathStatePhysicalStoreSet;
+import org.tron.core.db2.stateroot.PathStateRebuildCoordinator.SnapshotIdentity;
+import org.tron.core.db2.stateroot.PathStateRoot;
+import org.tron.core.db2.stateroot.PathStateRootMetadata;
+import org.tron.core.db2.stateroot.PathStateRuntimeAttachment;
+import org.tron.core.db2.stateroot.PathStateStoreManifest;
 import org.tron.core.exception.AccountResourceInsufficientException;
 import org.tron.core.exception.BadBlockException;
 import org.tron.core.exception.BadItemException;
@@ -177,7 +238,6 @@ import org.tron.protos.Protocol.Transaction.Contract;
 import org.tron.protos.Protocol.TransactionInfo;
 import org.tron.protos.contract.BalanceContract;
 
-
 @Slf4j(topic = "DB")
 @Component
 public class Manager {
@@ -187,6 +247,26 @@ public class Manager {
   private static final int SLEEP_TIME_OUT = 50;
   private static final int TX_ID_CACHE_SIZE = 100_000;
   private static final int SLEEP_FOR_WAIT_LOCK = 10;
+  private static final int PATH_STATE_REBUILD_PAGE_SIZE = 4096;
+  private static final int PATH_STATE_REBUILD_MARKET_ENTRY_LIMIT = 1_000_000;
+  @Getter
+  private ArchiveHistoryWriter archiveHistoryWriter;
+  @Getter
+  private StateArchiveRuntimeOwner stateArchiveRuntime;
+  @Getter
+  private PathStateHead pathStateSnapshotHead;
+  @Getter
+  private PathStateRuntimeAttachment pathStateRuntime;
+  @Getter
+  private CommonCheckpointRuntimeAttachment commonCheckpointRuntime;
+  private StateArchiveAppendFileRuntime stateArchiveAppendMaterializer;
+  private boolean stateArchiveServingLive;
+  /** Form ON (07 §3.1): any archive feature switch; fixed at init. */
+  private boolean archiveFeaturesEnabled;
+  private StateArchiveRuntimeOwner.ServingIndexFaultHook stateArchiveServingIndexFaultHook =
+      stage -> { };
+  private StateArchiveRuntimeOwner.ReadableStateFaultHook stateArchiveReadableStateFaultHook =
+      stage -> { };
   private static final int NO_BLOCK_WAITING_LOCK = 0;
   private final int shieldedTransInPendingMaxCounts =
       Args.getInstance().getShieldedTransInPendingMaxCounts();
@@ -485,8 +565,42 @@ public class Manager {
     ExecutorServiceManager.shutdownAndAwaitTermination(validateSignService, "validate-sign");
   }
 
+  private org.tron.common.setting.ArchiveDiskRedLine archiveDiskRedLine;
+  private java.util.concurrent.ScheduledExecutorService archiveDiskMonitor;
+
+  private void initArchiveDiskRedLine(org.tron.core.config.args.Storage storage) {
+    java.nio.file.Path output = java.nio.file.Paths.get(Args.getInstance().getOutputDirectory());
+    archiveDiskRedLine = new org.tron.common.setting.ArchiveDiskRedLine(
+        java.util.Arrays.asList(output.resolve(storage.getDbDirectory()),
+            output.resolve(storage.getCommonCheckpointDirectory()),
+            output.resolve(storage.getPathStateRootDirectory()),
+            output.resolve(storage.getStateArchiveDirectory())),
+        org.tron.common.setting.ArchiveDiskRedLine::usableBytes,
+        () -> {
+          historicalQueryAdmission.stop();
+          org.tron.common.exit.ExitManager.logAndExit(new org.tron.core.exception.TronError(
+              "Archive disk redline: refusing new work and shutting down",
+              org.tron.core.exception.TronError.ErrCode.STATE_ARCHIVE_INIT));
+        });
+    archiveDiskRedLine.check();
+    ((SnapshotManager) revokingStore).setArchiveWriteAdmission(archiveDiskRedLine::check);
+    archiveDiskMonitor = java.util.concurrent.Executors.newSingleThreadScheduledExecutor(task -> {
+      Thread thread = new Thread(task, "archive-disk-redline");
+      thread.setDaemon(true);
+      return thread;
+    });
+    archiveDiskMonitor.scheduleWithFixedDelay(() -> {
+      try {
+        archiveDiskRedLine.check();
+      } catch (IllegalStateException failure) {
+        logger.error(failure.getMessage());
+      }
+    }, 30, 30, java.util.concurrent.TimeUnit.SECONDS);
+  }
+
   @PostConstruct
   public void init() {
+    org.tron.core.config.args.ArchiveRocksDbPolicy.validate(Args.getInstance().getStorage());
     ChainBaseManager.init(chainBaseManager);
     Message.setDynamicPropertiesStore(this.getDynamicPropertiesStore());
     mortgageService
@@ -495,7 +609,31 @@ public class Manager {
     accountStateCallBack.setChainBaseManager(chainBaseManager);
     trieService.setChainBaseManager(chainBaseManager);
     revokingStore.disable();
+    // D3 / 07-B / 07-C: the P66 lane exists only in form ON (or once, recovery-only, for a legacy
+    // checkpoint that already contains account-asset redo); form OFF is the upstream path.
+    org.tron.core.config.args.Storage startupStorage = Args.getInstance().getStorage();
+    archiveFeaturesEnabled = startupStorage.isArchiveFeaturesEnabled();
+    if (archiveFeaturesEnabled) {
+      org.tron.common.setting.RocksDbThreadBudget.activate(
+          org.tron.common.setting.RocksDbSettings.getSettings().getCompactThreads(), 1,
+          org.tron.common.setting.RocksDbSettings.getSettings().getCompactThreads(), true);
+      initArchiveDiskRedLine(startupStorage);
+      NativeMemoryBudget.checkAtStartup(startupStorage, java.nio.file.Paths.get(
+          Args.getInstance().getOutputDirectory()));
+    }
+    P66LaneStartup.Mode p66LaneMode = P66LaneStartup.beforeLegacyCheck(revokingStore,
+        chainBaseManager.getAccountAssetStore(), archiveFeaturesEnabled);
     revokingStore.check();
+    boolean commonRecoveredEarly = startupStorage.isCommonCheckpointEnabled()
+        && java.nio.file.Files.isRegularFile(java.nio.file.Paths.get(
+            Args.getInstance().getOutputDirectory()).resolve(
+                startupStorage.getCommonCheckpointDirectory()).resolve("COMMON_BASELINE"));
+    if (commonRecoveredEarly) {
+      initCommonCheckpoint();
+    }
+    P66LaneStartup.afterLegacyCheck(p66LaneMode, revokingStore,
+        chainBaseManager.getAccountAssetStore(), startupStorage.isCommonCheckpointEnabled());
+    openStartupMaintenanceLayer(commonRecoveredEarly);
     transactionCache.initCache();
     rewardViCalService.init();
     this.setProposalController(ProposalController.createInstance(this));
@@ -535,6 +673,7 @@ public class Manager {
     }
     getChainBaseManager().getForkController().init(this.chainBaseManager);
 
+    maintenanceWrites(true);
     if (Args.getInstance().isNeedToUpdateAsset() && needToUpdateAsset()) {
       new AssetUpdateHelper(chainBaseManager).doWork();
     }
@@ -561,9 +700,22 @@ public class Manager {
 
     //for test only
     chainBaseManager.getDynamicPropertiesStore().updateDynamicStoreByConfig();
+    if (startupStorage.isCommonCheckpointEnabled()) {
+      consensus.initGenesisSchedule();
+    }
+    maintenanceWrites(false);
 
     // init liteFullNode
     initLiteNode();
+
+    if (Args.getInstance().getStorage().isCommonCheckpointEnabled()) {
+      if (!commonRecoveredEarly) {
+        initCommonCheckpoint();
+      }
+    } else {
+      initStateArchive();
+      initPathStateRoot();
+    }
 
     long headNum = chainBaseManager.getDynamicPropertiesStore().getLatestBlockHeaderNumber();
     logger.info("Current headNum is: {}.", headNum);
@@ -571,6 +723,9 @@ public class Manager {
     logger.info("Node type is: {}.", isLite ? "lite" : "full");
     if (isLite) {
       logger.info("Lite node lowestNum: {}", chainBaseManager.getLowestBlockNum());
+    }
+    if (revokingStore instanceof SnapshotManager) {
+      ((SnapshotManager) revokingStore).settleMaintenanceLayer();
     }
     revokingStore.enable();
     validateSignService = ExecutorServiceManager
@@ -604,6 +759,822 @@ public class Manager {
     }
 
     maxFlushCount = CommonParameter.getInstance().getStorage().getMaxFlushCount();
+  }
+
+  private void initStateArchive() {
+    org.tron.core.config.args.Storage storage = Args.getInstance().getStorage();
+    Path archiveDirectory = Paths.get(Args.getInstance().getOutputDirectory(),
+        storage.getStateArchiveDirectory()).normalize();
+    Result admission = StateArchiveStartup.requireAdmitted(storage.isStateArchiveEnabled(),
+        archiveDirectory);
+    if (!storage.isStateArchiveEnabled()) {
+      return;
+    }
+    if (!(revokingStore instanceof SnapshotManager)) {
+      throw new IllegalStateException("State archive requires SnapshotManager");
+    }
+    try {
+      long headNumber = getDynamicPropertiesStore().getLatestBlockHeaderNumber();
+      BlockCapsule headBlock = chainBaseManager.getBlockByNum(headNumber);
+      BlockSnapshotMeta canonicalHead = BlockSnapshotMeta.forBlock(headNumber,
+          getDynamicPropertiesStore().getLatestBlockHeaderHash().getBytes(),
+          headBlock.getParentHash().getBytes(), headBlock.getTimeStamp());
+      StateArchiveStartup.Attachment attachment = StateArchiveStartup.attach(
+          (SnapshotManager) revokingStore, archiveDirectory, storage, getDynamicPropertiesStore(),
+          canonicalHead, admission, stateArchiveServingIndexFaultHook,
+          stateArchiveReadableStateFaultHook);
+      archiveHistoryWriter = attachment.getWriter();
+      stateArchiveRuntime = attachment.getRuntime();
+      BlockSnapshotMeta archiveHead = attachment.getRecoveredHead();
+      logger.info("State archive runtime attached: directory={}, head={}, actions={}, engine={}",
+          archiveDirectory, archiveHead.getBlockNumber(),
+          stateArchiveRuntime.getStartupRecoveryActionCount(),
+          configuredAuxiliaryEngine(storage.getStateArchiveServingIndexEngine(),
+              storage.getDbEngine()));
+    } catch (java.io.IOException | BadItemException | ItemNotFoundException
+        | RuntimeException failure) {
+      throw new IllegalStateException("Failed to recover State Archive startup", failure);
+    }
+  }
+
+  /** Installs the fresh-format three-authority runtime before block processing is enabled. */
+  private void initCommonCheckpoint() {
+    if (!(revokingStore instanceof SnapshotManager)) {
+      throw new IllegalStateException("Common checkpoint requires SnapshotManager");
+    }
+    org.tron.core.config.args.Storage storage = Args.getInstance().getStorage();
+    SnapshotManager snapshots = (SnapshotManager) revokingStore;
+    Path pathDirectory = Paths.get(Args.getInstance().getOutputDirectory(),
+        storage.getPathStateRootDirectory()).normalize();
+    Path archiveDirectory = Paths.get(Args.getInstance().getOutputDirectory(),
+        storage.getStateArchiveDirectory()).normalize();
+    Path checkpointDirectory = Paths.get(Args.getInstance().getOutputDirectory(),
+        storage.getCommonCheckpointDirectory()).normalize();
+    byte[] formatIdentity = CommonCheckpointFormat.identity();
+    org.tron.core.config.args.StorageConfig.StateArchiveAppendFileConfig appendConfig =
+        storage.getStateArchiveAppendFileSettings();
+    boolean appendEnabled = appendConfig != null && appendConfig.isEnabled();
+    Path appendDirectory = archiveDirectory.resolve("history").resolve("v5");
+    PathStatePhysicalOverlayHead pathOwner = null;
+    CommonCheckpointRuntimeAttachment attachment = null;
+    StateArchiveHotStore hotStore = null;
+    StateArchiveAppendFileRuntime appendMaterializer = null;
+    CommonCheckpointFile openedCheckpointFile = null;
+    try {
+      PathStateStoreManifest.Engine pathEngine = configuredAuxiliaryEngine(
+          storage.getPathStateRootEngine(), storage.getDbEngine());
+      PathStateStoreManifest.Engine servingIndexEngine = configuredAuxiliaryEngine(
+          storage.getStateArchiveServingIndexEngine(), storage.getDbEngine());
+      boolean pathExisted = Files.exists(pathDirectory, LinkOption.NOFOLLOW_LINKS);
+      boolean modeAdmitted = pathExisted
+          && PathStateCheckpointMaterializer.isCommonModeAdmitted(pathDirectory, formatIdentity);
+      CommonCheckpointBaselineFile baselineFile =
+          new CommonCheckpointBaselineFile(checkpointDirectory);
+      boolean baselineExists = Files.isRegularFile(
+          checkpointDirectory.resolve(CommonCheckpointBaselineFile.FILE_NAME),
+          LinkOption.NOFOLLOW_LINKS);
+      if (baselineExists && !Arrays.equals(baselineFile.load().getFormatIdentity(),
+          formatIdentity)) {
+        throw new IllegalStateException("Common checkpoint Snapshot semantics differ");
+      }
+      if (!baselineExists) {
+        requireEmptyOrMissing(archiveDirectory, "State Archive");
+        if (!pathExisted) {
+          requireEmptyOrMissing(checkpointDirectory, "common checkpoint");
+          baselineFile.beginBootstrap(formatIdentity);
+        } else if (!baselineFile.hasBootstrapIntent(formatIdentity)) {
+          requireEmptyOrMissing(checkpointDirectory, "common checkpoint");
+          if (!Files.isRegularFile(
+              pathDirectory.resolve(PathStateCheckpointMaterializer.CURRENT_FILE),
+              LinkOption.NOFOLLOW_LINKS)) {
+            throw new IllegalStateException(
+                "Common checkpoint existing PathState requires one legacy CURRENT");
+          }
+        }
+      }
+      if (!pathExisted) {
+        rebuildPathStateRoot(snapshots, pathDirectory, pathEngine);
+      } else if (!modeAdmitted && !Files.isRegularFile(
+          pathDirectory.resolve(PathStateCheckpointMaterializer.CURRENT_FILE),
+          LinkOption.NOFOLLOW_LINKS)
+          && !Files.isRegularFile(pathDirectory.resolve(
+          PathStateCheckpointMaterializer.COMMON_BASELINE_HEAD_FILE),
+          LinkOption.NOFOLLOW_LINKS)) {
+        rebuildPathStateRoot(snapshots, pathDirectory, pathEngine);
+      }
+
+      PathStateLayerLimits limits = new PathStateLayerLimits(
+          storage.getPathStateRootReversibleLayerLimit(),
+          storage.getPathStateRootReversibleLayerBytes());
+      recoverPendingCommonCheckpoint(snapshots, checkpointDirectory, archiveDirectory,
+          pathDirectory, pathEngine, servingIndexEngine,
+          storage.getPathStateRootNodeCacheBytes(), formatIdentity, baselineFile, baselineExists,
+          modeAdmitted, appendEnabled, appendDirectory, appendConfig);
+      chainBaseManager.getAccountAssetStore().finishSnapshotRecovery(snapshots);
+      BlockSnapshotMeta canonical = currentCanonicalBlockMeta();
+      P66Phase phase = currentPathStatePhase();
+      if (modeAdmitted && Files.isRegularFile(
+          pathDirectory.resolve(PathStateCheckpointMaterializer.CURRENT_FILE),
+          LinkOption.NOFOLLOW_LINKS)) {
+        pathOwner = PathStatePhysicalOverlayHead.openCommonCheckpoint(pathDirectory, pathEngine,
+            limits, storage.getPathStateRootNodeCacheBytes(),
+            storage.getPathStateRootParticipantThreads(), storage.getPathStateRootBranchThreads(),
+            storage.getPathStateRootSecondLevelParallelThreshold(),
+            formatIdentity, canonical, phase);
+      } else {
+        pathOwner = modeAdmitted || Files.isRegularFile(pathDirectory.resolve(
+            PathStateCheckpointMaterializer.COMMON_BASELINE_HEAD_FILE),
+            LinkOption.NOFOLLOW_LINKS)
+            ? PathStatePhysicalOverlayHead.openCommonBaseline(pathDirectory, pathEngine, limits,
+                storage.getPathStateRootNodeCacheBytes(),
+                storage.getPathStateRootParticipantThreads(),
+                storage.getPathStateRootBranchThreads(),
+                storage.getPathStateRootSecondLevelParallelThreshold())
+            : PathStatePhysicalOverlayHead.open(pathDirectory, pathEngine, limits,
+                storage.getPathStateRootNodeCacheBytes(),
+                storage.getPathStateRootParticipantThreads(),
+                storage.getPathStateRootBranchThreads(),
+                storage.getPathStateRootSecondLevelParallelThreshold());
+      }
+
+      PathStateRootMetadata initialHead = pathOwner.getHead();
+      CommonCheckpointBaseline supplied = new CommonCheckpointBaseline(formatIdentity,
+          canonical, initialHead.getStateRoot());
+      CommonCheckpointBaseline baseline = baselineExists ? baselineFile.load()
+          : baselineFile.openOrCreate(supplied);
+      org.tron.core.db2.core.OutOfBlockWriteGuard.markCommonEstablished(checkpointDirectory);
+      if (!Arrays.equals(baseline.getFormatIdentity(), formatIdentity)) {
+        throw new IllegalStateException("Common checkpoint baseline format differs");
+      }
+      if (!modeAdmitted) {
+        if (!baseline.getHead().equals(canonical)
+            || !Arrays.equals(baseline.getStateRoot(), initialHead.getStateRoot())) {
+          throw new IllegalStateException(
+              "Common checkpoint baseline differs from fresh PathState head");
+        }
+        pathOwner.admitFreshCommonBaseline(baseline);
+        baselineFile.retireBootstrapIntent();
+      }
+
+      LatestStateGenerationAdapter latest =
+          LatestStateGenerationCoordinatorFactory.createAdapter(snapshots);
+      CommonCheckpointMaterializedStore materializedStore =
+          new CommonCheckpointMaterializedStore(checkpointDirectory);
+      PathStateCheckpointMaterializer pathMaterializer = pathOwner.checkpointMaterializer(
+          formatIdentity, baseline, materializedStore);
+      org.tron.core.config.args.StorageConfig.StateArchiveHotStoreConfig hotConfig =
+          storage.getStateArchiveHotStoreSettings();
+      boolean hotEnabled = hotConfig != null && hotConfig.isEnabled();
+      PathStateStoreManifest.Engine hotEngine = configuredAuxiliaryEngine(
+          hotConfig == null ? null : hotConfig.getEngine(), storage.getDbEngine());
+      PathStateStoreManifest.Engine archiveRuntimeEngine = hotEnabled
+          ? hotEngine : servingIndexEngine;
+      Path hotDirectory = archiveDirectory.resolve("hot");
+      if (hotEnabled && !Files.exists(hotDirectory, LinkOption.NOFOLLOW_LINKS)) {
+        requireEmptyOrMissing(archiveDirectory, "State Archive v2");
+        if (!baseline.getHead().equals(canonical)) {
+          throw new IllegalStateException(
+              "State Archive Hot DB requires a fresh common checkpoint baseline");
+        }
+      }
+      CommonCheckpointFile checkpointFile = CommonCheckpointFile.openDatabase(
+          checkpointDirectory, archiveRuntimeEngine);
+      openedCheckpointFile = checkpointFile;
+      StateArchiveHotCheckpointMaterializer hotMaterializer = null;
+      org.tron.core.db2.checkpoint.common.CommonCheckpointMaterializer archiveMaterializer;
+      if (appendEnabled) {
+        appendMaterializer = createAppendMaterializer(appendDirectory, formatIdentity,
+            archiveRuntimeEngine, baseline, appendConfig,
+            checkpointFile.latestCommitted());
+        archiveMaterializer = appendMaterializer;
+      } else if (hotEnabled) {
+        hotStore = StateArchiveHotStore.openOrCreate(hotDirectory, formatIdentity, hotEngine,
+            baseline.getHead().getBlockNumber(), baseline.getHead().getBlockHash(), hotConfig);
+        hotMaterializer = new StateArchiveHotCheckpointMaterializer(hotStore);
+        archiveMaterializer = hotMaterializer;
+      } else {
+        archiveMaterializer = new StateArchiveCheckpointMaterializer(archiveDirectory,
+            formatIdentity, baseline, servingIndexEngine, materializedStore);
+      }
+      CommonCheckpointRedoCoordinator coordinator = new CommonCheckpointRedoCoordinator(
+          checkpointFile,
+          new ChainbaseCheckpointMaterializer(checkpointDirectory, formatIdentity,
+              snapshots.getDbs(), baseline, materializedStore),
+          pathMaterializer, archiveMaterializer);
+      int durableBaseGenerations = storage.getCommonCheckpointDurableBaseGenerations();
+      coordinator.configureDurableBaseCadence(durableBaseGenerations > 0
+          ? durableBaseGenerations : StrictMathWrapper.max(1, storage.getMaxFlushCount()));
+      PathStatePhysicalOverlayHead admittedOwner = pathOwner;
+      StateArchiveHotCheckpointMaterializer admittedHotMaterializer = hotMaterializer;
+      StateArchiveHotStore admittedHotStore = hotStore;
+      StateArchiveAppendFileRuntime admittedAppendMaterializer = appendMaterializer;
+      attachment = CommonCheckpointRuntimeAttachment.open(true,
+          () -> {
+            CommonCheckpointRuntimeOwner owner = new CommonCheckpointRuntimeOwner(coordinator);
+            if (admittedAppendMaterializer != null) {
+              return new CommonCheckpointRuntime(owner, snapshots.getDbs(), appendDirectory,
+                  formatIdentity, archiveRuntimeEngine, latest,
+                  admittedOwner::prepareCommonCheckpointRebase, admittedAppendMaterializer);
+            }
+            if (admittedHotMaterializer == null) {
+              return new CommonCheckpointRuntime(owner, snapshots.getDbs(), archiveDirectory,
+                  formatIdentity, archiveRuntimeEngine, latest,
+                  admittedOwner::prepareCommonCheckpointRebase, materializedStore);
+            }
+            CommonCheckpointRecoveryStateAdapter recoveryState =
+                new CommonCheckpointRecoveryStateAdapter(getDynamicPropertiesStore(),
+                    chainBaseManager);
+            CommonCheckpointHotRecovery recovery = new CommonCheckpointHotRecovery(checkpointFile,
+                recoveryState, recoveryState, admittedHotMaterializer::reconcilePreparedTail);
+            return new CommonCheckpointRuntime(owner, snapshots.getDbs(), archiveDirectory,
+                formatIdentity, archiveRuntimeEngine, latest,
+                admittedOwner::prepareCommonCheckpointRebase, admittedHotMaterializer, recovery);
+          });
+
+      canonical = currentCanonicalBlockMeta();
+      if (Files.isRegularFile(pathDirectory.resolve(PathStateCheckpointMaterializer.CURRENT_FILE),
+          LinkOption.NOFOLLOW_LINKS)
+          && (initialHead.getBlockNumber() != canonical.getBlockNumber()
+          || !Arrays.equals(initialHead.getBlockHash(), canonical.getBlockHash()))) {
+        admittedOwner.synchronizePublishedCheckpoint(formatIdentity, canonical,
+            currentPathStatePhase());
+      }
+      if (Files.isRegularFile(pathDirectory.resolve(PathStateCheckpointMaterializer.CURRENT_FILE),
+          LinkOption.NOFOLLOW_LINKS)) {
+        if (admittedAppendMaterializer != null) {
+          requireAppendCommonPublishedAuthorities(checkpointDirectory, pathDirectory,
+              formatIdentity, admittedAppendMaterializer);
+        } else if (admittedHotStore == null) {
+          requireCommonPublishedAuthorities(checkpointDirectory, archiveDirectory, pathDirectory,
+              formatIdentity, servingIndexEngine, materializedStore);
+        } else {
+          requireHotCommonPublishedAuthorities(checkpointDirectory, pathDirectory,
+              formatIdentity, admittedHotStore);
+        }
+      }
+      PathStateRootMetadata recovered = admittedOwner.getHead();
+      if (recovered.getBlockNumber() != canonical.getBlockNumber()
+          || !Arrays.equals(recovered.getBlockHash(), canonical.getBlockHash())) {
+        throw new IllegalStateException(
+            "Common checkpoint PathState head differs from recovered Chainbase head");
+      }
+
+      snapshots.installCommonCheckpointArchiveCollector(
+          StateArchiveCheckpointStartup.collector(snapshots));
+      pathStateSnapshotHead = admittedOwner;
+      attachPathStateBlockFinalRuntime();
+      snapshots.attachCommonCheckpointRuntime(attachment);
+      commonCheckpointRuntime = attachment;
+      stateArchiveAppendMaterializer = admittedAppendMaterializer;
+      if (admittedAppendMaterializer != null
+          && appendConfig.isTestOnlyForceServingHandoff()) {
+        logger.warn("TEST-ONLY State Archive serving handoff forced at the recovered local "
+            + "Common boundary; historical results during catch-up are not reliable");
+        updateStateArchiveServingMode(false);
+      }
+      pathOwner = null;
+      attachment = null;
+      hotStore = null;
+      appendMaterializer = null;
+      logger.info("Common checkpoint runtime attached: checkpoint={}, archive={}, path={}, "
+              + "head={}, format={}, pathEngine={}, archiveEngine={}", checkpointDirectory,
+          archiveDirectory, pathDirectory, canonical.getBlockNumber(), CommonCheckpointFormat.ID,
+          pathEngine, archiveRuntimeEngine);
+    } catch (java.io.IOException | BadItemException | ItemNotFoundException
+        | RuntimeException failure) {
+      if (pathStateRuntime != null) {
+        try {
+          snapshots.detachPathStateRuntime(pathStateRuntime);
+          pathStateRuntime.close();
+        } catch (java.io.IOException | RuntimeException closeFailure) {
+          failure.addSuppressed(closeFailure);
+        } finally {
+          pathStateRuntime = null;
+        }
+      }
+      pathStateSnapshotHead = null;
+      try {
+        snapshots.clearCommonCheckpointArchiveCollector();
+      } catch (RuntimeException cleanupFailure) {
+        failure.addSuppressed(cleanupFailure);
+      }
+      if (attachment != null) {
+        attachment.close();
+        hotStore = null;
+        appendMaterializer = null;
+      }
+      if (hotStore != null) {
+        try {
+          hotStore.close();
+        } catch (java.io.IOException closeFailure) {
+          failure.addSuppressed(closeFailure);
+        }
+      }
+      if (appendMaterializer != null) {
+        try {
+          appendMaterializer.close();
+        } catch (java.io.IOException closeFailure) {
+          failure.addSuppressed(closeFailure);
+        }
+      }
+      if (pathOwner != null) {
+        try {
+          pathOwner.close();
+        } catch (java.io.IOException closeFailure) {
+          failure.addSuppressed(closeFailure);
+        }
+      }
+      if (openedCheckpointFile != null) {
+        try {
+          openedCheckpointFile.close();
+        } catch (java.io.IOException closeFailure) {
+          failure.addSuppressed(closeFailure);
+        }
+      }
+      throw new IllegalStateException("Failed to recover common checkpoint startup", failure);
+    }
+  }
+
+  private void openStartupMaintenanceLayer(boolean recovered) {
+    DynamicPropertiesStore properties = getDynamicPropertiesStore();
+    if (recovered) {
+      ((SnapshotManager) revokingStore).openMaintenanceLayer();
+      maintenanceWrites(true);
+    }
+    try {
+      properties.applyDeferredConstructorDefaults();
+    } finally {
+      maintenanceWrites(false);
+    }
+  }
+
+  private void maintenanceWrites(boolean open) {
+    if (revokingStore instanceof SnapshotManager) {
+      SnapshotManager snapshots = (SnapshotManager) revokingStore;
+      if (open) {
+        snapshots.beginMaintenanceWrites();
+      } else {
+        snapshots.endMaintenanceWrites();
+      }
+    }
+  }
+
+  private void recoverPendingCommonCheckpoint(SnapshotManager snapshots,
+      Path checkpointDirectory, Path archiveDirectory, Path pathDirectory,
+      PathStateStoreManifest.Engine pathEngine,
+      PathStateStoreManifest.Engine archiveEngine, long residentNodeCacheBytes,
+      byte[] formatIdentity, CommonCheckpointBaselineFile baselineFile, boolean baselineExists,
+      boolean modeAdmitted, boolean appendEnabled, Path appendDirectory,
+      org.tron.core.config.args.StorageConfig.StateArchiveAppendFileConfig appendConfig)
+      throws java.io.IOException {
+    if (!Files.exists(checkpointDirectory.resolve("COMMON_CHECKPOINT"), LinkOption.NOFOLLOW_LINKS)
+        && !Files.exists(checkpointDirectory.resolve("redo"), LinkOption.NOFOLLOW_LINKS)) {
+      return;
+    }
+    try (CommonCheckpointFile checkpointFile = CommonCheckpointFile.openDatabase(
+        checkpointDirectory, archiveEngine)) {
+      if (!checkpointFile.isPresent() && checkpointFile.retained().isEmpty()) {
+        return;
+      }
+      if (!baselineExists || !modeAdmitted) {
+        throw new java.io.IOException(
+            "Common checkpoint WAL requires an admitted PathState baseline");
+      }
+      CommonCheckpointBaseline baseline = baselineFile.load();
+      CommonCheckpointMaterializedStore materializedStore =
+          new CommonCheckpointMaterializedStore(checkpointDirectory);
+      CommonCheckpointMaterializer archiveRecovery = appendEnabled
+          ? createAppendMaterializer(appendDirectory, formatIdentity, archiveEngine, baseline,
+              appendConfig, checkpointFile.latestCommitted())
+          : new StateArchiveCheckpointMaterializer(archiveDirectory, formatIdentity, baseline,
+              archiveEngine, materializedStore);
+      try (PathStateCheckpointMaterializer.RecoverySession pathRecovery =
+          PathStateCheckpointMaterializer.openRecovery(pathDirectory, pathEngine,
+              residentNodeCacheBytes, formatIdentity, baseline, materializedStore);
+          CommonCheckpointMaterializer admittedArchive = archiveRecovery;
+          CommonCheckpointRedoCoordinator coordinator = new CommonCheckpointRedoCoordinator(
+              checkpointFile,
+              new ChainbaseCheckpointMaterializer(checkpointDirectory, formatIdentity,
+                  snapshots.getDbs(), baseline, materializedStore),
+              pathRecovery.getMaterializer(),
+              admittedArchive)) {
+        CommonCheckpointRedoCoordinator.RecoveryAction action = coordinator.recover();
+        logger.info("Common checkpoint startup redo completed before PathState open: action={}",
+            action);
+      }
+    }
+  }
+
+  private StateArchiveAppendFileRuntime createAppendMaterializer(Path appendDirectory,
+      byte[] formatIdentity, PathStateStoreManifest.Engine archiveEngine,
+      CommonCheckpointBaseline baseline,
+      org.tron.core.config.args.StorageConfig.StateArchiveAppendFileConfig appendConfig,
+      CommonCheckpointPayload recoveryPayload)
+      throws java.io.IOException {
+    return StateArchiveCheckpointStartup.createAppendMaterializer(appendDirectory, formatIdentity,
+        archiveEngine, baseline, appendConfig, recoveryPayload, getDynamicPropertiesStore(),
+        chainBaseManager);
+  }
+
+  private BlockSnapshotMeta currentCanonicalBlockMeta()
+      throws BadItemException, ItemNotFoundException {
+    long number = getDynamicPropertiesStore().getLatestBlockHeaderNumber();
+    BlockCapsule block = chainBaseManager.getBlockByNum(number);
+    return BlockSnapshotMeta.forBlock(number,
+        getDynamicPropertiesStore().getLatestBlockHeaderHash().getBytes(),
+        block.getParentHash().getBytes(), block.getTimeStamp());
+  }
+
+  private P66Phase currentPathStatePhase() {
+    long value = getDynamicPropertiesStore().getAllowAccountAssetOptimizationFromRoot();
+    if (value != 0L && value != 1L) {
+      throw new IllegalStateException("Common checkpoint P66 phase is invalid");
+    }
+    return value == 0L ? P66Phase.P66_OFF : P66Phase.P66_ON;
+  }
+
+  private static void requireCommonPublishedAuthorities(Path checkpointDirectory,
+      Path archiveDirectory, Path pathDirectory, byte[] formatIdentity,
+      PathStateStoreManifest.Engine engine,
+      CommonCheckpointMaterializedStore materializedStore) throws java.io.IOException {
+    ChainbaseCheckpointMaterializer.PublishedHead chain =
+        ChainbaseCheckpointMaterializer.loadPublishedHead(checkpointDirectory, formatIdentity);
+    PathStateCheckpointMaterializer.PublishedHead path =
+        PathStateCheckpointMaterializer.loadPublishedHead(pathDirectory, formatIdentity);
+    org.tron.core.db2.checkpoint.common.CommonCheckpointTarget archive =
+        StateArchiveCheckpointMaterializer.loadPublishedTarget(archiveDirectory, formatIdentity,
+            engine, materializedStore);
+    BlockSnapshotMeta last = archive.getLastBlock();
+    if (chain.getEpoch() != last.getEpoch() || path.getEpoch() != last.getEpoch()
+        || chain.getBlockNumber() != last.getBlockNumber()
+        || path.getBlockNumber() != last.getBlockNumber()
+        || !Arrays.equals(chain.getBlockHash(), last.getBlockHash())
+        || !Arrays.equals(path.getBlockHash(), last.getBlockHash())
+        || !Arrays.equals(chain.getPayloadDigest(), archive.getPayloadDigest())
+        || !Arrays.equals(path.getPayloadDigest(), archive.getPayloadDigest())
+        || !Arrays.equals(chain.getStateRoot(), archive.getStateRoot())
+        || !Arrays.equals(path.getStateRoot(), archive.getStateRoot())) {
+      throw new java.io.IOException("Common checkpoint published authorities differ");
+    }
+  }
+
+  private static void requireHotCommonPublishedAuthorities(Path checkpointDirectory,
+      Path pathDirectory, byte[] formatIdentity, StateArchiveHotStore hotStore)
+      throws java.io.IOException {
+    ChainbaseCheckpointMaterializer.PublishedHead chain =
+        ChainbaseCheckpointMaterializer.loadPublishedHead(checkpointDirectory, formatIdentity);
+    PathStateCheckpointMaterializer.PublishedHead path =
+        PathStateCheckpointMaterializer.loadPublishedHead(pathDirectory, formatIdentity);
+    Optional<byte[]> hotTarget = hotStore.getPublishedTargetDigest();
+    if (!hotTarget.isPresent()
+        || chain.getEpoch() != path.getEpoch()
+        || chain.getBlockNumber() != path.getBlockNumber()
+        || chain.getBlockNumber() != hotStore.getCommittedHead()
+        || !Arrays.equals(chain.getBlockHash(), path.getBlockHash())
+        || !Arrays.equals(chain.getBlockHash(), hotStore.getCommittedHeadHash())
+        || !Arrays.equals(chain.getPayloadDigest(), path.getPayloadDigest())
+        || !Arrays.equals(chain.getPayloadDigest(), hotTarget.get())
+        || !Arrays.equals(chain.getStateRoot(), path.getStateRoot())) {
+      throw new java.io.IOException("Hot common checkpoint published authorities differ");
+    }
+  }
+
+  private static void requireAppendCommonPublishedAuthorities(Path checkpointDirectory,
+      Path pathDirectory, byte[] formatIdentity,
+      StateArchiveAppendFileRuntime materializer) throws java.io.IOException {
+    ChainbaseCheckpointMaterializer.PublishedHead chain =
+        ChainbaseCheckpointMaterializer.loadPublishedHead(checkpointDirectory, formatIdentity);
+    PathStateCheckpointMaterializer.PublishedHead path =
+        PathStateCheckpointMaterializer.loadPublishedHead(pathDirectory, formatIdentity);
+    org.tron.core.db2.checkpoint.common.CommonCheckpointTarget archive = materializer
+        .loadPublishedTargetIfPresent().orElseThrow(() ->
+            new java.io.IOException("Append-file Archive readable target is missing"));
+    BlockSnapshotMeta last = archive.getLastBlock();
+    if (chain.getEpoch() != last.getEpoch() || path.getEpoch() != last.getEpoch()
+        || chain.getBlockNumber() != last.getBlockNumber()
+        || path.getBlockNumber() != last.getBlockNumber()
+        || !Arrays.equals(chain.getBlockHash(), last.getBlockHash())
+        || !Arrays.equals(path.getBlockHash(), last.getBlockHash())
+        || !Arrays.equals(chain.getPayloadDigest(), archive.getPayloadDigest())
+        || !Arrays.equals(path.getPayloadDigest(), archive.getPayloadDigest())
+        || !Arrays.equals(chain.getStateRoot(), archive.getStateRoot())
+        || !Arrays.equals(path.getStateRoot(), archive.getStateRoot())) {
+      throw new java.io.IOException("Append-file common checkpoint authorities differ");
+    }
+  }
+
+  private static void requireEmptyOrMissing(Path directory, String label)
+      throws java.io.IOException {
+    if (!Files.exists(directory, LinkOption.NOFOLLOW_LINKS)) {
+      return;
+    }
+    if (!Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS)) {
+      throw new java.io.IOException(label + " path is not a directory");
+    }
+    try (java.util.stream.Stream<Path> entries = Files.list(directory)) {
+      if (entries.findAny().isPresent()) {
+        throw new java.io.IOException(label + " fresh directory is not empty");
+      }
+    }
+  }
+
+  private static PathStateStoreManifest.Engine configuredAuxiliaryEngine(String configured,
+      String fallback) {
+    String selected = configured == null ? fallback : configured;
+    if (selected == null) {
+      return PathStateStoreManifest.Engine.ROCKSDB;
+    }
+    try {
+      return PathStateStoreManifest.Engine.valueOf(selected.trim().toUpperCase(Locale.ROOT));
+    } catch (IllegalArgumentException failure) {
+      throw new IllegalStateException("Unsupported auxiliary database engine: " + selected,
+          failure);
+    }
+  }
+
+  private void initPathStateRoot() {
+    org.tron.core.config.args.Storage storage = Args.getInstance().getStorage();
+    if (!storage.isPathStateRootEnabled()) {
+      try {
+        PathStatePhysicalRuntimeAdmission.inspect(false, null, null);
+      } catch (java.io.IOException impossible) {
+        throw new IllegalStateException("Disabled path-state admission failed", impossible);
+      }
+      return;
+    }
+    Path directory = Paths.get(Args.getInstance().getOutputDirectory(),
+        storage.getPathStateRootDirectory()).normalize();
+    PathStateHead recovered = null;
+    try {
+      PathStateStoreManifest.Engine engine = configuredAuxiliaryEngine(
+          storage.getPathStateRootEngine(), storage.getDbEngine());
+      PathStatePhysicalRuntimeAdmission.Result admission =
+          PathStatePhysicalRuntimeAdmission.inspect(true, directory, engine);
+      if (admission.getStatus()
+          == PathStatePhysicalRuntimeAdmission.Status.REBUILD_REQUIRED) {
+        if (!(revokingStore instanceof SnapshotManager)) {
+          throw new IllegalStateException("Path-state rebuild requires SnapshotManager");
+        }
+        rebuildPathStateRoot((SnapshotManager) revokingStore, directory, engine);
+        admission = PathStatePhysicalRuntimeAdmission.inspect(true, directory, engine);
+      }
+      if (admission.getStatus()
+          != PathStatePhysicalRuntimeAdmission.Status.CURRENT_CANDIDATE) {
+        throw new IllegalStateException(
+            "Path-state startup requires a completed admitted rebuild");
+      }
+      PathStateLayerLimits limits = new PathStateLayerLimits(
+          storage.getPathStateRootReversibleLayerLimit(),
+          storage.getPathStateRootReversibleLayerBytes());
+      recovered = storage.isPathStateRootVolatileSnapshotBenchmark()
+          ? PathStatePhysicalOverlayHead.open(directory, engine, limits,
+              storage.getPathStateRootNodeCacheBytes(),
+              storage.getPathStateRootParticipantThreads(),
+              storage.getPathStateRootBranchThreads(),
+              storage.getPathStateRootSecondLevelParallelThreshold())
+          : PathStatePhysicalSnapshotHead.open(directory, engine, limits);
+      PathStateRootMetadata recoveredHead = recovered.getHead();
+      if (recoveredHead.getBlockNumber()
+          != getDynamicPropertiesStore().getLatestBlockHeaderNumber()
+          || !Arrays.equals(recoveredHead.getBlockHash(),
+          getDynamicPropertiesStore().getLatestBlockHeaderHash().getBytes())) {
+        throw new IllegalStateException(
+            "Path-state CURRENT differs from the persisted Chainbase head");
+      }
+      pathStateSnapshotHead = recovered;
+      attachPathStateBlockFinalRuntime();
+      logger.info("Path-state current root attached: directory={}, head={}, engine={}, "
+              + "volatileSnapshotBenchmark={}, asyncPrepareBenchmark={}, nodeCacheBytes={}, "
+              + "participantThreads={}, branchThreads={}",
+          directory,
+          recoveredHead.getBlockNumber(), engine,
+          storage.isPathStateRootVolatileSnapshotBenchmark(),
+          storage.isPathStateRootAsyncPrepareBenchmark(),
+          storage.getPathStateRootNodeCacheBytes(), storage.getPathStateRootParticipantThreads(),
+          storage.getPathStateRootBranchThreads());
+      recovered = null;
+    } catch (java.io.IOException | RuntimeException failure) {
+      pathStateSnapshotHead = null;
+      if (recovered != null) {
+        try {
+          recovered.close();
+        } catch (java.io.IOException closeFailure) {
+          failure.addSuppressed(closeFailure);
+        }
+      }
+      throw new IllegalStateException("Failed to recover path-state startup", failure);
+    }
+  }
+
+  private void attachPathStateBlockFinalRuntime() throws java.io.IOException {
+    if (!(revokingStore instanceof SnapshotManager)) {
+      throw new IllegalStateException("Path-state block-final capture requires SnapshotManager");
+    }
+    AccountAssetStore accountAssetStore = chainBaseManager.getAccountAssetStore();
+    if (accountAssetStore == null) {
+      throw new IllegalStateException(
+          "Path-state block-final capture requires account-asset Store");
+    }
+    org.tron.core.db2.stateroot.PathStateTransitionCollector collector =
+        new org.tron.core.db2.archive.PhysicalSnapshotPathStateCollector();
+    org.tron.core.config.args.Storage storage = Args.getInstance().getStorage();
+    PathStateRuntimeAttachment attachment = storage.isCommonCheckpointEnabled()
+        ? PathStateRuntimeAttachment.commonCheckpoint(collector, pathStateSnapshotHead)
+        : storage.isPathStateRootAsyncPrepareBenchmark()
+        ? PathStateRuntimeAttachment.deferred(collector, this::advancePathStateRoot,
+            this::flushPathStateBaseThrough,
+            transition -> pathStateSnapshotHead.preview(transition),
+            (meta, transition) -> pathStateSnapshotHead.prepareSnapshotDelta(meta, transition))
+        : new PathStateRuntimeAttachment(collector, this::advancePathStateRoot,
+            this::flushPathStateBaseThrough,
+            transition -> pathStateSnapshotHead.preview(transition),
+            (meta, transition) -> pathStateSnapshotHead.prepareSnapshotDelta(meta, transition));
+    attachment.synchronizeReadyHead(pathStateSnapshotHead.getHead());
+    ((SnapshotManager) revokingStore).attachPathStateRuntime(attachment);
+    pathStateRuntime = attachment;
+  }
+
+  private void advancePathStateRoot(PathStateBlockTransition transition)
+      throws java.io.IOException {
+    PathStateHead owner = pathStateSnapshotHead;
+    if (owner == null) {
+      throw new java.io.IOException("Path-state snapshot owner is unavailable");
+    }
+    owner.advance(transition);
+  }
+
+  private void flushPathStateBaseThrough(long blockNumber, byte[] blockHash)
+      throws java.io.IOException {
+    PathStateHead owner = pathStateSnapshotHead;
+    if (owner == null) {
+      throw new java.io.IOException("Path-state snapshot owner is unavailable");
+    }
+    owner.flushBaseThrough(blockNumber, blockHash);
+  }
+
+  private void rebuildPathStateRoot(SnapshotManager snapshotManager, Path directory,
+      PathStateStoreManifest.Engine engine) throws java.io.IOException {
+    boolean accountAssetRegistered = snapshotManager.getDbs().stream()
+        .anyMatch(database -> "account-asset".equals(database.getDbName()));
+    if (!accountAssetRegistered) {
+      throw new java.io.IOException(
+          "Path-state rebuild requires the AccountAsset Snapshot participant");
+    }
+    try (PathStateNativeSnapshotSource source = PathStateNativeSnapshotSource.acquire(
+        snapshotManager, java.util.Collections.emptyMap(), this::readPathStateSnapshotIdentity,
+        PATH_STATE_REBUILD_PAGE_SIZE, PATH_STATE_REBUILD_MARKET_ENTRY_LIMIT)) {
+      SnapshotIdentity identity = source.identity();
+      PathStateRootMetadata metadata;
+      try (PathStatePhysicalStoreSet stores = PathStatePhysicalStoreSet.open(directory,
+          new PathStateCanonicalizer().participantScope(), engine)) {
+        PathStateRoot rebuilt = stores.ingestAndBuild(source);
+        metadata = PathStateRootMetadata.base(identity.getBlockNumber(), identity.getBlockHash(),
+            identity.getParentHash(), identity.getTimestamp(), identity.getPhase(),
+            stores.getFormatDigest(), rebuilt.rootHash(), source.sourceIdentityDigest());
+        stores.publishCurrent(metadata);
+      }
+      logger.info("Path-state initial root rebuilt: directory={}, head={}, entries={}",
+          directory, metadata.getBlockNumber(), "exact-27");
+    }
+  }
+
+  private SnapshotIdentity readPathStateSnapshotIdentity() throws java.io.IOException {
+    DynamicPropertiesStore dynamic = getDynamicPropertiesStore();
+    long blockNumber = dynamic.getLatestBlockHeaderNumber();
+    try {
+      BlockCapsule block = chainBaseManager.getBlockByNum(blockNumber);
+      byte[] blockHash = dynamic.getLatestBlockHeaderHash().getBytes();
+      long timestamp = dynamic.getLatestBlockHeaderTimestamp();
+      if (block.getNum() != blockNumber
+          || !Arrays.equals(block.getBlockId().getBytes(), blockHash)
+          || block.getTimeStamp() != timestamp) {
+        throw new java.io.IOException(
+            "Path-state rebuild block differs from persisted Chainbase head");
+      }
+      long allowAssetOptimization = dynamic.getAllowAccountAssetOptimizationFromRoot();
+      if (allowAssetOptimization != 0 && allowAssetOptimization != 1) {
+        throw new java.io.IOException("Path-state rebuild P66 phase is invalid");
+      }
+      P66Phase phase = allowAssetOptimization == 0 ? P66Phase.P66_OFF : P66Phase.P66_ON;
+      return new SnapshotIdentity(blockNumber, blockHash, block.getParentHash().getBytes(),
+          timestamp, phase);
+    } catch (BadItemException | ItemNotFoundException failure) {
+      throw new java.io.IOException("Path-state rebuild cannot resolve canonical head", failure);
+    }
+  }
+
+  public HistoricalAccountBalanceReader.Result getArchiveAccountBalance(long blockNumber,
+      byte[] address) throws ItemNotFoundException, BadItemException {
+    CommonCheckpointRuntimeAttachment common = commonCheckpointRuntime;
+    if (common != null) {
+      try (StateArchiveCheckpointReadSnapshot snapshot = common.pinPoint(blockNumber)) {
+        return HistoricalAccountBalanceReader.read(snapshot, address);
+      } catch (java.io.IOException failure) {
+        throw new org.tron.core.db2.archive.ArchivePersistenceException(
+            "Failed to read common-checkpoint historical account snapshot", failure);
+      }
+    }
+    StateArchiveRuntimeOwner runtime = stateArchiveRuntime;
+    if (runtime == null) {
+      throw new IllegalStateException("Experimental state archive is disabled");
+    }
+    try (org.tron.core.db2.archive.query.ArchiveRuntimeQueryGate.Lease lease =
+        runtime.pinHistoricalState(blockNumber)) {
+      return HistoricalAccountBalanceReader.read(lease.getSnapshot(), address);
+    } catch (java.io.IOException failure) {
+      throw new org.tron.core.db2.archive.ArchivePersistenceException(
+          "Failed to read request-owned historical account snapshot", failure);
+    }
+  }
+
+  public boolean isArchiveHistoricalQueryEnabled() {
+    return stateArchiveRuntime != null || commonCheckpointRuntime != null;
+  }
+
+  private final HistoricalQueryAdmission historicalQueryAdmission = new HistoricalQueryAdmission();
+
+  /** Opens one canonical request-owned exact-27 historical query view. */
+  public HistoricalQuerySession openArchiveHistoricalQuery(long blockNumber,
+      byte[] expectedBlockHash) throws ItemNotFoundException, BadItemException {
+    return StateArchiveQuerySessions.open(blockNumber, expectedBlockHash, historicalQueryAdmission,
+        chainBaseManager, () -> stateArchiveRuntime, () -> commonCheckpointRuntime);
+  }
+
+  /** Measures the current experimental exact-only serving index at its readable fixed point. */
+  public StateArchiveRuntimeOwner.ServingIndexInspection inspectArchiveServingIndex() {
+    StateArchiveRuntimeOwner runtime = stateArchiveRuntime;
+    if (runtime == null) {
+      throw new IllegalStateException("Experimental state archive is disabled");
+    }
+    try {
+      return runtime.inspectServingIndex();
+    } catch (java.io.IOException failure) {
+      throw new org.tron.core.db2.archive.ArchivePersistenceException(
+          "Failed to inspect State Archive serving index", failure);
+    }
+  }
+
+  /** Resolves one P66-aware historical TRC10 balance from a single request generation. */
+  public HistoricalAccountAssetBalanceResolver.Result getArchiveAccountAssetBalance(
+      long blockNumber, byte[] address, String tokenId) {
+    try (ArchivePointSnapshot snapshot = pinArchivePoint(blockNumber)) {
+      return new HistoricalAccountAssetBalanceResolver().resolve(snapshot, address, tokenId);
+    } catch (java.io.IOException failure) {
+      throw new org.tron.core.db2.archive.ArchivePersistenceException(
+          "Failed to resolve request-owned historical AccountAsset snapshot", failure);
+    }
+  }
+
+  /** Resolves one bounded P66-aware historical TRC10 balance prefix per request generation. */
+  public HistoricalAccountAssetPrefixResolver.Result getArchiveAccountAssets(
+      long blockNumber, byte[] address, HistoricalAccountAssetPrefixResolver.Limits limits) {
+    StateArchiveRuntimeOwner runtime = stateArchiveRuntime;
+    if (commonCheckpointRuntime != null) {
+      throw new UnsupportedOperationException(
+          "Common-checkpoint Archive supports exact point reads only");
+    }
+    if (runtime == null) {
+      throw new IllegalStateException("Experimental state archive is disabled");
+    }
+    try (org.tron.core.db2.archive.query.ArchiveRuntimeQueryGate.Lease lease =
+        runtime.pinHistoricalState(blockNumber)) {
+      return new HistoricalAccountAssetPrefixResolver().resolve(
+          lease.getSnapshot(), address, limits);
+    } catch (java.io.IOException failure) {
+      throw new org.tron.core.db2.archive.ArchivePersistenceException(
+          "Failed to resolve request-owned historical AccountAsset prefix", failure);
+    }
+  }
+
+  /** Reads one physical key from an exact versioned State Store at a historical block. */
+  public OldValue getArchiveStateValue(long blockNumber, String dbName, byte[] physicalRawKey) {
+    if (!ArchiveStoreScope.isStateDatabase(dbName)) {
+      throw new IllegalArgumentException("Not a versioned archive state database: " + dbName);
+    }
+    Objects.requireNonNull(physicalRawKey, "physicalRawKey");
+    try (ArchivePointSnapshot snapshot = pinArchivePoint(blockNumber)) {
+      return snapshot.get(dbName, physicalRawKey);
+    } catch (java.io.IOException failure) {
+      throw new org.tron.core.db2.archive.ArchivePersistenceException(
+          "Failed to read request-owned historical State Store snapshot", failure);
+    }
+  }
+
+  /** Tests one physical key without opening range or cross-Store iteration semantics. */
+  public boolean hasArchiveStateValue(long blockNumber, String dbName, byte[] physicalRawKey) {
+    return getArchiveStateValue(blockNumber, dbName, physicalRawKey).isPresent();
+  }
+
+  private ArchivePointSnapshot pinArchivePoint(long blockNumber) throws java.io.IOException {
+    CommonCheckpointRuntimeAttachment common = commonCheckpointRuntime;
+    if (common != null) {
+      return common.pinPoint(blockNumber);
+    }
+    StateArchiveRuntimeOwner legacy = stateArchiveRuntime;
+    if (legacy == null) {
+      throw new IllegalStateException("Experimental state archive is disabled");
+    }
+    return legacy.pinHistoricalState(blockNumber);
   }
 
   /**
@@ -1039,6 +2010,7 @@ public class Manager {
       logger.info("Start to erase block: {}.", oldHeadBlock);
       khaosDb.pop();
       revokingStore.fastPop();
+      rewindPathStateRootAfterPop();
       logger.info("End to erase block: {}.", oldHeadBlock);
       oldHeadBlock.getTransactions().forEach(tc ->
           poppedTransactions.add(new TransactionCapsule(tc.getInstance())));
@@ -1047,6 +2019,30 @@ public class Manager {
 
     } catch (ItemNotFoundException | BadItemException e) {
       logger.warn(e.getMessage(), e);
+    }
+  }
+
+  /** Keeps the non-consensus path-state head aligned after Chainbase owns a successful pop. */
+  private void rewindPathStateRootAfterPop() {
+    PathStateHead owner = pathStateSnapshotHead;
+    if (owner == null) {
+      return;
+    }
+    long canonicalNumber = getDynamicPropertiesStore().getLatestBlockHeaderNumber();
+    byte[] canonicalHash = getDynamicPropertiesStore().getLatestBlockHeaderHash().getBytes();
+    try {
+      PathStateRootMetadata rewound = owner.rewindTo(canonicalNumber, canonicalHash);
+      PathStateRuntimeAttachment runtime = pathStateRuntime;
+      if (runtime != null) {
+        runtime.synchronizeReadyHead(rewound);
+      }
+    } catch (java.io.IOException | RuntimeException failure) {
+      PathStateRuntimeAttachment runtime = pathStateRuntime;
+      if (runtime != null) {
+        runtime.failAt(PathStateRuntimeAttachment.FailureStage.REORG,
+            canonicalNumber, canonicalHash, failure);
+      }
+      logger.error("Path-state short-reorg rewind failed after canonical block pop", failure);
     }
   }
 
@@ -1065,15 +2061,24 @@ public class Manager {
       TooBigTransactionException, DupTransactionException, TaposException,
       ValidateScheduleException, ReceiptCheckErrException, VMIllegalException,
       TooBigTransactionResultException, ZksnarkException, BadBlockException, EventBloomException {
+    long startedNanos = System.nanoTime();
     processBlock(block, txs);
+    long processedNanos = System.nanoTime();
     chainBaseManager.getBlockStore().put(block.getBlockId().getBytes(), block);
     chainBaseManager.getBlockIndexStore().put(block.getBlockId());
     if (block.getTransactions().size() != 0) {
       chainBaseManager.getTransactionRetStore()
           .put(ByteArray.fromLong(block.getNum()), block.getResult());
     }
+    long storedNanos = System.nanoTime();
 
     updateFork(block);
+    long forkUpdatedNanos = System.nanoTime();
+    logger.info("ApplyBlock outer stages: head={}, processMs={}, storeMs={}, forkMs={}, totalMs={}",
+        block.getNum(), elapsedMillis(startedNanos, processedNanos),
+        elapsedMillis(processedNanos, storedNanos),
+        elapsedMillis(storedNanos, forkUpdatedNanos),
+        elapsedMillis(startedNanos, forkUpdatedNanos));
     if (System.currentTimeMillis() - block.getTimeStamp() >= 60_000) {
       revokingStore.setMaxFlushCount(maxFlushCount);
       if (Args.getInstance().getShutdownBlockTime() != null
@@ -1089,6 +2094,75 @@ public class Manager {
     } else {
       revokingStore.setMaxFlushCount(SnapshotManager.DEFAULT_MIN_FLUSH_COUNT);
     }
+  }
+
+  private static final class BlockApplyMetrics {
+    private static final Histogram DURATION = Histogram.build()
+        .name("tron_block_apply_stage_seconds")
+        .help("Session opening including checkpoint, or block execution, in successful blocks.")
+        .labelNames("stage").register();
+  }
+
+  /**
+   * Ends a canonical block session. Form OFF is the upstream {@code ISession.commit()} (07-B, D3):
+   * no block metadata, no P66 materialization, no derived artifacts. Form ON runs the block-final
+   * pipeline.
+   */
+  private void commitBlockSession(ISession blockSession, BlockCapsule block) {
+    if (!archiveFeaturesEnabled) {
+      blockSession.commit();
+      return;
+    }
+    finalizeBlockSession(blockSession, block);
+  }
+
+  private void finalizeBlockSession(ISession blockSession, BlockCapsule block) {
+    blockSession.finalizeBlock(BlockSnapshotMeta.forBlock(
+        block.getNum(), block.getBlockId().getBytes(), block.getParentHash().getBytes(),
+        block.getTimeStamp()), stages -> {
+          stages.normalizeSnapshot();
+          stages.startBlockDiff();
+          stages.buildPathState();
+          stages.completeArtifacts();
+          stages.commitSession();
+        });
+    // Header diagnosis is observational and must remain after the commit handoff.  It must not
+    // become a second state-root publication path or be used as proof that checkpoint flush has
+    // completed.
+    diagnosePathStateHeader(block);
+  }
+
+  private void diagnosePathStateHeader(BlockCapsule block) {
+    PathStateRuntimeAttachment runtime = pathStateRuntime;
+    if (runtime == null) {
+      return;
+    }
+    byte[] blockHash = block.getBlockId().getBytes();
+    byte[] carriedRoot = block.getStateRoot();
+    boolean carriedRootUsable = carriedRoot != null && carriedRoot.length == 32;
+    boolean ready = runtime.isReadyForHeaderDiagnostic(block.getNum(), blockHash);
+    byte[] localRoot = null;
+    boolean ownerRead = false;
+    long ownerReadStartedNanos = System.nanoTime();
+    try {
+      PathStateHead owner = pathStateSnapshotHead;
+      if (carriedRootUsable && ready && owner != null) {
+        ownerRead = true;
+        PathStateRootMetadata local = owner.getHead();
+        if (local.getBlockNumber() == block.getNum()
+            && Arrays.equals(local.getBlockHash(), blockHash)) {
+          localRoot = local.getStateRoot();
+        }
+      }
+    } catch (java.io.IOException | RuntimeException diagnosticFailure) {
+      logger.warn("Path-state local root unavailable for header diagnostic", diagnosticFailure);
+    }
+    long ownerReadMicros = TimeUnit.NANOSECONDS.toMicros(
+        System.nanoTime() - ownerReadStartedNanos);
+    runtime.diagnoseHeader(block.getNum(), blockHash, carriedRoot, localRoot);
+    logger.info("Path-state header diagnostic access: head={}, ownerRead={}, "
+            + "skippedNotReady={}, carriedRootUsable={}, ownerReadMicros={}",
+        block.getNum(), ownerRead, !ready, carriedRootUsable, ownerReadMicros);
   }
 
   private void switchFork(BlockCapsule newHead)
@@ -1154,7 +2228,7 @@ public class Manager {
             tx.setVerified(false);
           }
           applyBlock(item.getBlk().setSwitch(true));
-          tmpSession.commit();
+          commitBlockSession(tmpSession, item.getBlk());
         } catch (AccountResourceInsufficientException
             | ValidateSignatureException
             | ContractValidateException
@@ -1192,7 +2266,7 @@ public class Manager {
               // todo  process the exception carefully later
               try (ISession tmpSession = revokingStore.buildSession()) {
                 applyBlock(khaosBlock.getBlk().setSwitch(true));
-                tmpSession.commit();
+                commitBlockSession(tmpSession, khaosBlock.getBlk());
               } catch (AccountResourceInsufficientException
                   | ValidateSignatureException
                   | ContractValidateException
@@ -1280,9 +2354,24 @@ public class Manager {
       DupTransactionException, TransactionExpirationException,
       BadNumberBlockException, BadBlockException, NonCommonBlockException,
       ReceiptCheckErrException, VMIllegalException, ZksnarkException, EventBloomException {
+    pushBlock(block, false);
+  }
+
+  /** Saves a block while preserving the explicit network sync/live source transition. */
+  public void pushBlock(final BlockCapsule block, boolean syncSource)
+      throws ValidateSignatureException, ContractValidateException, ContractExeException,
+      UnLinkedBlockException, ValidateScheduleException, AccountResourceInsufficientException,
+      TaposException, TooBigTransactionException, TooBigTransactionResultException,
+      DupTransactionException, TransactionExpirationException,
+      BadNumberBlockException, BadBlockException, NonCommonBlockException,
+      ReceiptCheckErrException, VMIllegalException, ZksnarkException, EventBloomException {
+    if (archiveDiskRedLine != null) {
+      archiveDiskRedLine.check();
+    }
     setBlockWaitLock(true);
     try {
       synchronized (this) {
+        updateStateArchiveServingMode(syncSource);
         Metrics.histogramObserve(blockedTimer.get());
         blockedTimer.remove();
         if (Metrics.enabled()) {
@@ -1298,7 +2387,9 @@ public class Manager {
         final Histogram.Timer timer = Metrics.histogramStartTimer(
                 MetricKeys.Histogram.BLOCK_PUSH_LATENCY);
         long start = System.currentTimeMillis();
+        long startedNanos = System.nanoTime();
         List<TransactionCapsule> txs = getVerifyTxs(block);
+        long verifiedNanos = System.nanoTime();
         logger.info("Block num: {}, re-push-size: {}, pending-size: {}, "
                         + "block-tx-size: {}, verify-tx-size: {}",
                 block.getNum(), rePushTransactions.size(), pendingTransactions.size(),
@@ -1386,9 +2477,16 @@ public class Manager {
               return;
             }
             long oldSolidNum = getDynamicPropertiesStore().getLatestSolidifiedBlockNum();
+            long applyStartedNanos = System.nanoTime();
+            long sessionOpenedNanos;
+            long appliedNanos;
+            long committedNanos;
             try (ISession tmpSession = revokingStore.buildSession()) {
+              sessionOpenedNanos = System.nanoTime();
               applyBlock(newBlock, txs);
-              tmpSession.commit();
+              appliedNanos = System.nanoTime();
+              commitBlockSession(tmpSession, newBlock);
+              committedNanos = System.nanoTime();
             } catch (Throwable throwable) {
               logger.error(throwable.getMessage(), throwable);
               khaosDb.removeBlk(block.getBlockId());
@@ -1397,6 +2495,24 @@ public class Manager {
             }
             long newSolidNum = getDynamicPropertiesStore().getLatestSolidifiedBlockNum();
             blockTrigger(newBlock, oldSolidNum, newSolidNum);
+            long triggeredNanos = System.nanoTime();
+            if (Boolean.getBoolean("tron.pathstate.attribution") && Metrics.enabled()) {
+              BlockApplyMetrics.DURATION.labels("session_open")
+                  .observe((sessionOpenedNanos - applyStartedNanos) / 1e9);
+              BlockApplyMetrics.DURATION.labels("block_execute")
+                  .observe((appliedNanos - sessionOpenedNanos) / 1e9);
+            }
+            logger.debug("PushBlock core stages: head={}, verifyMs={}, preApplyMs={}, applyMs={}, "
+                    + "commitMs={}, triggerMs={}, throughTriggerMs={}, sessionOpenMs={}, "
+                    + "blockExecuteMs={}", newBlock.getNum(),
+                elapsedMillis(startedNanos, verifiedNanos),
+                elapsedMillis(verifiedNanos, applyStartedNanos),
+                elapsedMillis(applyStartedNanos, appliedNanos),
+                elapsedMillis(appliedNanos, committedNanos),
+                elapsedMillis(committedNanos, triggeredNanos),
+                elapsedMillis(startedNanos, triggeredNanos),
+                elapsedMillis(applyStartedNanos, sessionOpenedNanos),
+                elapsedMillis(sessionOpenedNanos, appliedNanos));
           }
           logger.info(SAVE_BLOCK, newBlock);
         }
@@ -1424,6 +2540,10 @@ public class Manager {
     } finally {
       setBlockWaitLock(false);
     }
+  }
+
+  private static long elapsedMillis(long startedNanos, long completedNanos) {
+    return TimeUnit.NANOSECONDS.toMillis(completedNanos - startedNanos);
   }
 
   void blockTrigger(final BlockCapsule block, long oldSolid, long newSolid) {
@@ -1464,6 +2584,11 @@ public class Manager {
         .saveLatestBlockHeaderNumber(block.getNum());
     chainBaseManager.getDynamicPropertiesStore()
         .saveLatestBlockHeaderTimestamp(block.getTimeStamp());
+    if (archiveFeaturesEnabled && Args.getInstance().isSolidityNode()) {
+      // TrustNode supplies solid blocks. Capture this property before block finalization,
+      // so RD, PathState and Common all include it and session rollback restores it.
+      chainBaseManager.getDynamicPropertiesStore().saveLatestSolidifiedBlockNum(block.getNum());
+    }
     revokingStore.setMaxSize((int) (
         chainBaseManager.getDynamicPropertiesStore().getLatestBlockHeaderNumber()
             - chainBaseManager.getDynamicPropertiesStore().getLatestSolidifiedBlockNum()
@@ -1534,6 +2659,7 @@ public class Manager {
       trxCap.setInBlock(true);
     }
 
+    long detailStarted = ExecutionAttribution.start(ExecutionAttribution.Phase.VALIDATE);
     validateTapos(trxCap);
     validateCommon(trxCap);
 
@@ -1548,14 +2674,25 @@ public class Manager {
     if (!trxCap.isInBlock()) {
       trxCap.sanitize();
     }
+    ExecutionAttribution.stage("validate", detailStarted);
+    detailStarted = ExecutionAttribution.start(ExecutionAttribution.Phase.TRACE_INIT);
     TransactionTrace trace = new TransactionTrace(trxCap, StoreFactory.getInstance(),
         new RuntimeImpl());
     trxCap.setTrxTrace(trace);
 
+    ExecutionAttribution.stage("trace_init", detailStarted);
+    long feePartStarted = ExecutionAttribution.start(ExecutionAttribution.Phase.BANDWIDTH);
     consumeBandwidth(trxCap, trace);
+    ExecutionAttribution.stage("bandwidth", feePartStarted);
+    feePartStarted = ExecutionAttribution.start(ExecutionAttribution.Phase.MULTISIGN);
     consumeMultiSignFee(trxCap, trace);
+    ExecutionAttribution.stage("multisign", feePartStarted);
+    feePartStarted = ExecutionAttribution.start(ExecutionAttribution.Phase.MEMO);
     consumeMemoFee(trxCap, trace);
+    ExecutionAttribution.stage("memo", feePartStarted);
 
+    ExecutionAttribution.stage("fees", detailStarted);
+    detailStarted = ExecutionAttribution.start(ExecutionAttribution.Phase.RUNTIME);
     trace.init(blockCap, eventPluginLoaded);
     trace.checkIsConstant();
     trace.exec();
@@ -1575,10 +2712,14 @@ public class Manager {
       }
     }
 
+    ExecutionAttribution.stage("runtime", detailStarted);
+    detailStarted = ExecutionAttribution.start(ExecutionAttribution.Phase.FINALIZATION);
     trace.finalization();
     if (getDynamicPropertiesStore().supportVM()) {
       trxCap.setResult(trace.getTransactionContext());
     }
+    ExecutionAttribution.stage("finalization", detailStarted);
+    detailStarted = ExecutionAttribution.start(ExecutionAttribution.Phase.RESULT);
     chainBaseManager.getTransactionStore().put(trxCap.getTransactionId().getBytes(), trxCap);
 
     Optional.ofNullable(transactionCache)
@@ -1622,6 +2763,8 @@ public class Manager {
              Hex.toHexString(transactionInfo.getId()), cost, type, contract.getType().name());
     }
     Metrics.histogramObserve(requestTimer);
+    ExecutionAttribution.stage("result", detailStarted);
+    ExecutionAttribution.phase(ExecutionAttribution.Phase.OTHER);
     return transactionInfo.getInstance();
   }
 
@@ -1757,9 +2900,10 @@ public class Manager {
     blockCapsule.addAllTransactions(toBePacked);
     accountStateCallBack.executeGenerateFinish();
 
+    blockCapsule.setMerkleRoot();
+    previewGeneratedPathStateRoot(blockCapsule);
     session.reset();
 
-    blockCapsule.setMerkleRoot();
     blockCapsule.sign(miner.getPrivateKey());
 
     BlockCapsule capsule = new BlockCapsule(blockCapsule.getInstance());
@@ -1774,6 +2918,25 @@ public class Manager {
         capsule.getSerializedSize());
 
     return capsule;
+  }
+
+  private void previewGeneratedPathStateRoot(BlockCapsule block) {
+    if (pathStateRuntime == null || !(revokingStore instanceof SnapshotManager)) {
+      return;
+    }
+    try {
+      byte[] targetBlockHash = new BlockCapsule(block.getInstance()).getBlockId().getBytes();
+      byte[] root = ((SnapshotManager) revokingStore).previewPathStateRoot(
+          BlockSnapshotMeta.forBlock(block.getNum(), targetBlockHash,
+              block.getParentHash().getBytes(), block.getTimeStamp()));
+      // tag 3 plus a 32-byte length-delimited value adds exactly 34 protobuf bytes.
+      if (root != null && block.getSerializedSize() <= ChainConstant.BLOCK_SIZE - 34) {
+        block.setStateRoot(root);
+      }
+    } catch (RuntimeException previewFailure) {
+      logger.warn("Path-state producer preview unavailable; state_root remains absent",
+          previewFailure);
+    }
   }
 
   private void filterOwnerAddress(TransactionCapsule transactionCapsule, Set<String> result) {
@@ -1852,6 +3015,7 @@ public class Manager {
       DupTransactionException, TransactionExpirationException, ValidateScheduleException,
       ReceiptCheckErrException, VMIllegalException, TooBigTransactionResultException,
       ZksnarkException, BadBlockException, EventBloomException {
+    long startedNanos = System.nanoTime();
     // todo set revoking db max size.
 
     // checkWitness
@@ -1876,9 +3040,14 @@ public class Manager {
     TransactionRetCapsule transactionRetCapsule =
         new TransactionRetCapsule(block);
     HistoryBlockHashUtil.write(this, block);
-    try {
+    long transactionStartedNanos = System.nanoTime();
+    try (ExecutionAttribution detail = ExecutionAttribution.open(
+        block.getNum(), block.getBlockId().toString())) {
+      long loopStarted = ExecutionAttribution.start();
       merkleContainer.resetCurrentMerkleTree();
+      ExecutionAttribution.phase(ExecutionAttribution.Phase.CALLBACK);
       accountStateCallBack.preExecute(block);
+      ExecutionAttribution.phase(ExecutionAttribution.Phase.OTHER);
       List<TransactionInfo> results = new ArrayList<>();
       long num = block.getNum();
       for (TransactionCapsule transactionCapsule : block.getTransactions()) {
@@ -1893,18 +3062,31 @@ public class Manager {
         if (block.generatedByMyself) {
           transactionCapsule.setVerified(true);
         }
+        long callbackStarted = ExecutionAttribution.start(ExecutionAttribution.Phase.CALLBACK);
         accountStateCallBack.preExeTrans();
+        ExecutionAttribution.stage("callback", callbackStarted);
+        ExecutionAttribution.phase(ExecutionAttribution.Phase.OTHER);
         TransactionInfo result = processTransaction(transactionCapsule, block);
+        callbackStarted = ExecutionAttribution.start(ExecutionAttribution.Phase.CALLBACK);
         accountStateCallBack.exeTransFinish();
+        ExecutionAttribution.stage("callback", callbackStarted);
+        ExecutionAttribution.phase(ExecutionAttribution.Phase.OTHER);
         if (Objects.nonNull(result)) {
           results.add(result);
         }
       }
       transactionRetCapsule.addAllTransactionInfos(results);
+      long finishStarted = ExecutionAttribution.start(ExecutionAttribution.Phase.CALLBACK);
       accountStateCallBack.executePushFinish();
+      ExecutionAttribution.stage("callback", finishStarted);
+      ExecutionAttribution.stage("loop", loopStarted);
+      if (detail != null) {
+        detail.publish();
+      }
     } finally {
       accountStateCallBack.exceptionFinish();
     }
+    long transactionCompletedNanos = System.nanoTime();
     merkleContainer.saveCurrentMerkleTreeAsBestMerkleTree(block.getNum());
     block.setResult(transactionRetCapsule);
     if (getDynamicPropertiesStore().getAllowAdaptiveEnergy() == 1) {
@@ -1941,6 +3123,12 @@ public class Manager {
         .initBlockSection(transactionRetCapsule);
     chainBaseManager.getSectionBloomStore().write(block.getNum());
     block.setBloom(blockBloom);
+    long completedNanos = System.nanoTime();
+    logger.debug("ProcessBlock stages: head={}, preTxMs={}, txLoopMs={}, postTxMs={}, totalMs={}",
+        block.getNum(), elapsedMillis(startedNanos, transactionStartedNanos),
+        elapsedMillis(transactionStartedNanos, transactionCompletedNanos),
+        elapsedMillis(transactionCompletedNanos, completedNanos),
+        elapsedMillis(startedNanos, completedNanos));
   }
 
   private void payReward(BlockCapsule block) {
@@ -2655,14 +3843,82 @@ public class Manager {
   }
 
   public void close() {
+    if (archiveDiskMonitor != null) {
+      archiveDiskMonitor.shutdownNow();
+    }
+    historicalQueryAdmission.stop();
     stopRePushThread();
     stopRePushTriggerThread();
     EventPluginLoader.getInstance().stopPlugin();
     stopFilterProcessThread();
     stopValidateSignThread();
+    rewardViCalService.stop();
+    closeCommonCheckpoint();
+    closePathStateRoot();
+    closeStateArchive();
     chainBaseManager.shutdown();
     revokingStore.shutdown();
     session.reset();
+  }
+
+  private void closeStateArchive() {
+    StateArchiveRuntimeOwner runtime = stateArchiveRuntime;
+    if (runtime == null) {
+      return;
+    }
+    try {
+      runtime.close();
+      stateArchiveRuntime = null;
+      archiveHistoryWriter = null;
+    } catch (java.io.IOException failure) {
+      throw new IllegalStateException("Failed to close State Archive runtime", failure);
+    }
+  }
+
+  private void closeCommonCheckpoint() {
+    CommonCheckpointRuntimeAttachment runtime = commonCheckpointRuntime;
+    if (runtime == null) {
+      return;
+    }
+    if (!(revokingStore instanceof SnapshotManager)) {
+      throw new IllegalStateException("Common checkpoint runtime lost SnapshotManager ownership");
+    }
+    revokingStore.flushPending();
+    ((SnapshotManager) revokingStore).detachCommonCheckpointRuntime(runtime);
+    runtime.close();
+    commonCheckpointRuntime = null;
+    stateArchiveAppendMaterializer = null;
+    stateArchiveServingLive = false;
+  }
+
+  private void updateStateArchiveServingMode(boolean syncSource) {
+    // The serving worker now derives its lifecycle directly from committed History.
+    stateArchiveServingLive = !syncSource;
+  }
+
+  private void closePathStateRoot() {
+    PathStateRuntimeAttachment runtime = pathStateRuntime;
+    if (runtime != null) {
+      if (!(revokingStore instanceof SnapshotManager)) {
+        throw new IllegalStateException("Path-state runtime lost SnapshotManager ownership");
+      }
+      ((SnapshotManager) revokingStore).detachPathStateRuntime(runtime);
+      try {
+        runtime.close();
+      } catch (java.io.IOException failure) {
+        throw new IllegalStateException("Failed to close PathState runtime", failure);
+      }
+      pathStateRuntime = null;
+    }
+    PathStateHead owner = pathStateSnapshotHead;
+    pathStateSnapshotHead = null;
+    if (owner != null) {
+      try {
+        owner.close();
+      } catch (java.io.IOException failure) {
+        throw new IllegalStateException("Failed to close path-state current head", failure);
+      }
+    }
   }
 
   private static class ValidateSignTask implements Callable<Boolean> {

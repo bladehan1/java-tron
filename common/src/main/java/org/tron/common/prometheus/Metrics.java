@@ -19,8 +19,8 @@ public class Metrics {
     throw new IllegalStateException("Metrics");
   }
 
-  public static synchronized  void init() {
-    if(initialized) {
+  public static synchronized void init() {
+    if (initialized) {
       return;
     }
     if (CommonParameter.getInstance().isMetricsPrometheusEnable()) {
@@ -28,6 +28,7 @@ public class Metrics {
         DefaultExports.initialize();
         new OperatingSystemExports().register(CollectorRegistry.defaultRegistry);
         new GuavaCacheExports().register(CollectorRegistry.defaultRegistry);
+        new ChainbaseRocksDbExports().register(CollectorRegistry.defaultRegistry);
         int port = CommonParameter.getInstance().getMetricsPrometheusPort();
         new HTTPServer.Builder().withPort(port).build();
         logger.info("prometheus exposed on port : {}", port);

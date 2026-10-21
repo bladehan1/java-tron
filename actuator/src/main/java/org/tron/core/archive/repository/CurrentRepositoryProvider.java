@@ -1,0 +1,14 @@
+package org.tron.core.archive.repository;
+
+import org.tron.core.vm.repository.Repository;
+import org.tron.core.vm.repository.RepositoryImpl;
+
+/** Default provider preserving the existing current Chainbase execution path. */
+public enum CurrentRepositoryProvider implements RepositoryProvider {
+  INSTANCE;
+
+  @Override
+  public Repository createRoot(org.tron.core.db.TransactionContext context) {
+    return RepositoryImpl.createRoot(context.getStoreFactory());
+  }
+}
