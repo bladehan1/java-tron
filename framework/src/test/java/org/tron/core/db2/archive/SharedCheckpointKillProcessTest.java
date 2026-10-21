@@ -2,6 +2,7 @@ package org.tron.core.db2.archive;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
+import static org.tron.core.db2.NativeCheckpointTestSupport.engine;
 
 import java.io.File;
 import java.net.URL;
@@ -16,7 +17,6 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.tron.core.config.args.Args;
-import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
 
 /** Actual JVM halt with an open native redo database, rather than a clean-close simulation. */
 public class SharedCheckpointKillProcessTest {
@@ -28,7 +28,7 @@ public class SharedCheckpointKillProcessTest {
     for (String stage : new String[]{"commit", "applied"}) {
       Path root = temporary.newFolder(stage).toPath();
       runChild(stage, root);
-      try (SharedCheckpointDatabase database = new SharedCheckpointDatabase(root, Engine.LEVELDB)) {
+      try (SharedCheckpointDatabase database = new SharedCheckpointDatabase(root, engine())) {
         assertEquals(2, database.retained().size());
         assertEquals("commit".equals(stage), database.isPending());
         assertEquals(2, database.latest().getBlocks().get(0).getMeta().getBlockNumber());
@@ -39,7 +39,8 @@ public class SharedCheckpointKillProcessTest {
 
   private static void runChild(String stage, Path root) throws Exception {
     Process child = new ProcessBuilder(Paths.get(System.getProperty("java.home"), "bin", "java")
-        .toString(), "-cp", runtimeClasspath(), SharedCheckpointKillProcessTest.class.getName(),
+        .toString(), "-Dstorage.db.engine=" + engine().name(),
+        "-cp", runtimeClasspath(), SharedCheckpointKillProcessTest.class.getName(),
         stage, root.toString()).redirectErrorStream(true)
         .redirectOutput(root.getParent().resolve(stage + ".log").toFile()).start();
     try {
@@ -56,7 +57,7 @@ public class SharedCheckpointKillProcessTest {
   public static void main(String[] args) throws Exception {
     Args.setParam(new String[]{"--output-directory", args[1] + "-config"}, "config-test.conf");
     SharedCheckpointDatabase database = new SharedCheckpointDatabase(Paths.get(args[1]),
-        Engine.LEVELDB);
+        engine());
     database.publish(SharedCheckpointDatabaseTest.payload(1));
     database.applied();
     database.publish(SharedCheckpointDatabaseTest.payload(2));

@@ -3,6 +3,7 @@ package org.tron.core.db2.archive;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertThrows;
+import static org.tron.core.db2.NativeCheckpointTestSupport.engine;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -12,11 +13,9 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
-import org.junit.BeforeClass;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
-import org.tron.common.TestConstants;
 import org.tron.core.db2.archive.BlockReverseDiff.DbGroup;
 import org.tron.core.db2.archive.BlockReverseDiff.Entry;
 import org.tron.core.db2.archive.PersistentServingKeyIndexGeneration.MutableIndex;
@@ -26,17 +25,11 @@ import org.tron.core.db2.checkpoint.common.CommonCheckpointMaterializer.Status;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointPayload;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointTarget;
 import org.tron.core.db2.stateroot.PathStateFlushTarget;
-import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
 
 public class StateArchiveAppendCheckpointMaterializerV5Test {
 
   @Rule
   public final TemporaryFolder temporaryFolder = new TemporaryFolder();
-
-  @BeforeClass
-  public static void assumeLevelDbAvailable() {
-    TestConstants.assumeLevelDbAvailable();
-  }
 
   @Test
   public void forcesDataThenIndexSyncsTailThenPublishesCommonMarker() throws Exception {
@@ -46,7 +39,7 @@ public class StateArchiveAppendCheckpointMaterializerV5Test {
     List<String> events = new ArrayList<>();
 
     try (StateArchiveAppendCheckpointMaterializerV5 archive =
-        new StateArchiveAppendCheckpointMaterializerV5(root, format, Engine.LEVELDB,
+        new StateArchiveAppendCheckpointMaterializerV5(root, format, engine(),
             100, hash(99), StateArchiveGethFormatV5.SEGMENT_TARGET_BYTES,
             (required, reserve) -> { }, null, (path, position, length) -> { },
             (stage, laneId) -> events.add(stage + ":" + laneId), () -> { })) {
@@ -91,7 +84,7 @@ public class StateArchiveAppendCheckpointMaterializerV5Test {
     CommonCheckpointTarget committed;
     CommonCheckpointTarget pending;
     try (StateArchiveAppendCheckpointMaterializerV5 archive =
-        new StateArchiveAppendCheckpointMaterializerV5(root, format, Engine.LEVELDB,
+        new StateArchiveAppendCheckpointMaterializerV5(root, format, engine(),
             100, hash(99), StateArchiveGethFormatV5.SEGMENT_TARGET_BYTES,
             number -> null)) {
       List<BlockReverseDiff> first = Collections.singletonList(diff(100));
@@ -106,7 +99,7 @@ public class StateArchiveAppendCheckpointMaterializerV5Test {
     }
     // The second prepared Tail is durable, but the caller's Common commit is still block 100.
     try (StateArchiveAppendCheckpointMaterializerV5 archive =
-        StateArchiveAppendCheckpointMaterializerV5.openForCommon(root, format, Engine.LEVELDB,
+        StateArchiveAppendCheckpointMaterializerV5.openForCommon(root, format, engine(),
             100, hash(99), StateArchiveGethFormatV5.SEGMENT_TARGET_BYTES,
             number -> null, committed)) {
       assertEquals(Status.PUBLISHED, archive.inspect(committed));
@@ -120,7 +113,7 @@ public class StateArchiveAppendCheckpointMaterializerV5Test {
       archive.publish(retry);
     }
     try (StateArchiveAppendCheckpointMaterializerV5 archive =
-        StateArchiveAppendCheckpointMaterializerV5.openForCommon(root, format, Engine.LEVELDB,
+        StateArchiveAppendCheckpointMaterializerV5.openForCommon(root, format, engine(),
             100, hash(99), StateArchiveGethFormatV5.SEGMENT_TARGET_BYTES,
             number -> null, pending)) {
       assertEquals(Status.PUBLISHED, archive.inspect(pending));
@@ -133,7 +126,7 @@ public class StateArchiveAppendCheckpointMaterializerV5Test {
     byte[] format = hash(70);
     CommonCheckpointTarget pending;
     try (StateArchiveAppendCheckpointMaterializerV5 archive =
-        new StateArchiveAppendCheckpointMaterializerV5(root, format, Engine.LEVELDB,
+        new StateArchiveAppendCheckpointMaterializerV5(root, format, engine(),
             100, hash(99), StateArchiveGethFormatV5.SEGMENT_TARGET_BYTES,
             number -> null)) {
       List<BlockReverseDiff> first = Collections.singletonList(diff(100));
@@ -142,7 +135,7 @@ public class StateArchiveAppendCheckpointMaterializerV5Test {
       pending = archive.prepare(CommonCheckpointCapture.create(payload, first, binding));
     }
     try (StateArchiveAppendCheckpointMaterializerV5 archive =
-        StateArchiveAppendCheckpointMaterializerV5.openForCommon(root, format, Engine.LEVELDB,
+        StateArchiveAppendCheckpointMaterializerV5.openForCommon(root, format, engine(),
             100, hash(99), StateArchiveGethFormatV5.SEGMENT_TARGET_BYTES,
             number -> null, pending)) {
       assertEquals(Status.MATERIALIZED, archive.inspect(pending));
@@ -158,12 +151,12 @@ public class StateArchiveAppendCheckpointMaterializerV5Test {
       byte[] format = hash(70);
       List<BlockReverseDiff> first = Collections.singletonList(diff(100));
       StateArchiveHotBatchDescriptor binding = StateArchiveHotStore.planCheckpointDescriptor(
-          Engine.LEVELDB, 99, hash(99), new byte[32], first);
+          engine(), 99, hash(99), new byte[32], first);
       CommonCheckpointTarget target = CommonCheckpointTarget.from(payload(format, first, binding));
       try (StateArchiveFiveLaneWriterV5 writer =
           new StateArchiveFiveLaneWriterV5(root, 100, hash(99));
           StateArchiveServingIndexBuildCoordinatorV3 coordinator =
-              new StateArchiveServingIndexBuildCoordinatorV3(root, Engine.LEVELDB, 1000)) {
+              new StateArchiveServingIndexBuildCoordinatorV3(root, engine(), 1000)) {
         writer.append(diff(100));
         StateArchiveTailV5 tail = writer.forceTailReady(target);
         coordinator.publishArchiveTailV5(tail);
@@ -176,14 +169,14 @@ public class StateArchiveAppendCheckpointMaterializerV5Test {
         }
       }
       try (StateArchiveAppendCheckpointMaterializerV5 archive =
-          StateArchiveAppendCheckpointMaterializerV5.openForCommon(root, format, Engine.LEVELDB,
+          StateArchiveAppendCheckpointMaterializerV5.openForCommon(root, format, engine(),
               100, hash(99), StateArchiveGethFormatV5.SEGMENT_TARGET_BYTES,
               number -> null, target)) {
         assertEquals(Status.PUBLISHED, archive.inspect(target));
       }
       Path index = root.resolve(StateArchiveServingIndexBuildCoordinatorV3.DIRECTORY)
           .resolve("single-v1");
-      try (MutableIndex reopened = new MutableIndex(index, Engine.LEVELDB)) {
+      try (MutableIndex reopened = new MutableIndex(index, engine())) {
         assertThrows(ArchivePersistenceException.class, () -> reopened.archiveTailV5(target));
       }
     }
@@ -197,7 +190,7 @@ public class StateArchiveAppendCheckpointMaterializerV5Test {
     List<String> events = new ArrayList<>();
 
     StateArchiveAppendCheckpointMaterializerV5 archive =
-        new StateArchiveAppendCheckpointMaterializerV5(root, format, Engine.LEVELDB,
+        new StateArchiveAppendCheckpointMaterializerV5(root, format, engine(),
             100, hash(99), StateArchiveGethFormatV5.SEGMENT_TARGET_BYTES,
             (required, reserve) -> { }, null, (path, position, length) -> { },
             (stage, laneId) -> events.add(stage + ":" + laneId), () -> {
@@ -215,7 +208,7 @@ public class StateArchiveAppendCheckpointMaterializerV5Test {
 
     Path index = root.resolve(StateArchiveServingIndexBuildCoordinatorV3.DIRECTORY)
         .resolve("single-v1");
-    try (MutableIndex reopened = new MutableIndex(index, Engine.LEVELDB)) {
+    try (MutableIndex reopened = new MutableIndex(index, engine())) {
       assertThrows(ArchivePersistenceException.class,
           () -> reopened.archiveTailV5(target));
     }
@@ -228,7 +221,7 @@ public class StateArchiveAppendCheckpointMaterializerV5Test {
     Files.write(oldFormat, new byte[]{4});
 
     IOException failure = assertThrows(IOException.class,
-        () -> new StateArchiveAppendCheckpointMaterializerV5(root, hash(72), Engine.LEVELDB,
+        () -> new StateArchiveAppendCheckpointMaterializerV5(root, hash(72), engine(),
             100, hash(99), StateArchiveGethFormatV5.SEGMENT_TARGET_BYTES,
             blockNumber -> null));
 

@@ -4,6 +4,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
+import static org.tron.core.db2.NativeCheckpointTestSupport.database;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
@@ -11,12 +12,10 @@ import org.junit.BeforeClass;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
-import org.tron.common.storage.leveldb.LevelDbDataSourceImpl;
 import org.tron.core.config.args.Args;
 import org.tron.core.db2.ISession;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
 import org.tron.core.db2.archive.SnapshotOldValueCollector;
-import org.tron.core.db2.common.LevelDB;
 
 public class StartupMaintenanceLayerIntegrationTest {
   @Rule
@@ -32,8 +31,7 @@ public class StartupMaintenanceLayerIntegrationTest {
   public void startupWritesFoldIntoHistoryAndSurviveCarrierPop() throws Exception {
     Path path = temporary.newFolder().toPath();
     SnapshotManager manager = new SnapshotManager("");
-    Chainbase properties = new Chainbase(new SnapshotRoot(new LevelDB(
-        new LevelDbDataSourceImpl(path.toString(), "properties"))));
+    Chainbase properties = new Chainbase(new SnapshotRoot(database(path, "properties")));
     try {
       manager.add(properties);
       manager.enable();
@@ -79,8 +77,7 @@ public class StartupMaintenanceLayerIntegrationTest {
     org.tron.core.store.CheckTmpStore checkpoint = new org.tron.core.store.CheckTmpStore(null);
     SnapshotManager manager = new SnapshotManager("");
     manager.setCheckTmpStore(checkpoint);
-    Chainbase properties = new Chainbase(new SnapshotRoot(new LevelDB(
-        new LevelDbDataSourceImpl(path.toString(), "properties"))));
+    Chainbase properties = new Chainbase(new SnapshotRoot(database(path, "properties")));
     try {
       manager.add(properties);
       manager.check();

@@ -3,6 +3,7 @@ package org.tron.core.db2.core;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
+import static org.tron.core.db2.NativeCheckpointTestSupport.database;
 
 import java.nio.file.Path;
 import java.util.Collections;
@@ -11,9 +12,7 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.tron.common.parameter.CommonParameter;
-import org.tron.common.storage.leveldb.LevelDbDataSourceImpl;
 import org.tron.core.config.args.Args;
-import org.tron.core.db2.common.LevelDB;
 import org.tron.core.db2.common.WrappedByteArray;
 
 public class OutOfBlockWriteGuardTest {
@@ -30,8 +29,7 @@ public class OutOfBlockWriteGuardTest {
     Path path = temporary.newFolder().toPath();
     CommonParameter parameter = CommonParameter.getInstance();
     String previousOutput = parameter.outputDirectory;
-    SnapshotRoot root = new SnapshotRoot(new LevelDB(
-        new LevelDbDataSourceImpl(path.toString(), "properties")));
+    SnapshotRoot root = new SnapshotRoot(database(path, "properties"));
     try {
       parameter.outputDirectory = path.toString();
       OutOfBlockWriteGuard.reset();

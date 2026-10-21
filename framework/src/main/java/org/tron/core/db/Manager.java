@@ -76,6 +76,7 @@ import org.tron.common.logsfilter.trigger.ContractEventTrigger;
 import org.tron.common.logsfilter.trigger.ContractLogTrigger;
 import org.tron.common.logsfilter.trigger.ContractTrigger;
 import org.tron.common.logsfilter.trigger.Trigger;
+import org.tron.common.math.StrictMathWrapper;
 import org.tron.common.overlay.message.Message;
 import org.tron.common.parameter.CommonParameter;
 import org.tron.common.prometheus.MetricKeys;
@@ -962,7 +963,7 @@ public class Manager {
           pathMaterializer, archiveMaterializer);
       int durableBaseGenerations = storage.getCommonCheckpointDurableBaseGenerations();
       coordinator.configureDurableBaseCadence(durableBaseGenerations > 0
-          ? durableBaseGenerations : Math.max(1, storage.getMaxFlushCount()));
+          ? durableBaseGenerations : StrictMathWrapper.max(1, storage.getMaxFlushCount()));
       PathStatePhysicalOverlayHead admittedOwner = pathOwner;
       StateArchiveHotCheckpointMaterializer admittedHotMaterializer = hotMaterializer;
       StateArchiveHotStore admittedHotStore = hotStore;

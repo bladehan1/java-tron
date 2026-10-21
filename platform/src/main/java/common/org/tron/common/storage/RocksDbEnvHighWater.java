@@ -1,5 +1,7 @@
 package org.tron.common.storage;
 
+import org.tron.common.math.MathWrapper;
+
 /**
  * Process high-water mark for the RocksJava 5.15.10 line (design v2 ch08 §3.3.2 item 2).
  *
@@ -39,8 +41,9 @@ public final class RocksDbEnvHighWater {
    */
   public synchronized void raiseAndApply(int compactionThreads, int flushThreads,
       PoolSetter setter) {
-    compactionHighWater = Math.max(compactionHighWater, Math.max(1, compactionThreads));
-    flushHighWater = Math.max(flushHighWater, Math.max(1, flushThreads));
+    compactionHighWater = MathWrapper.max(compactionHighWater,
+        MathWrapper.max(1, compactionThreads));
+    flushHighWater = MathWrapper.max(flushHighWater, MathWrapper.max(1, flushThreads));
     // LOW (compaction) through FLUSH_POOL, HIGH (flush) through COMPACTION_POOL: see class doc.
     setter.setBackgroundThreads(compactionHighWater, JAVA_FLUSH_POOL_ID);
     setter.setBackgroundThreads(flushHighWater, JAVA_COMPACTION_POOL_ID);

@@ -5,6 +5,7 @@ import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import lombok.extern.slf4j.Slf4j;
+import org.tron.common.math.StrictMathWrapper;
 import org.tron.common.storage.RocksDbEnvBudget;
 
 /**
@@ -89,9 +90,9 @@ public final class RocksDbThreadBudget {
     if (compactionThreads <= 0 || flushThreads <= 0) {
       throw new IllegalArgumentException("RocksDB thread budget must be positive");
     }
-    compactionTarget = Math.max(compactionTarget,
-        Math.max(compactionThreads, chainbaseCompactThreads));
-    flushTarget = Math.max(flushTarget, flushThreads);
+    compactionTarget = StrictMathWrapper.max(compactionTarget,
+        StrictMathWrapper.max(compactionThreads, chainbaseCompactThreads));
+    flushTarget = StrictMathWrapper.max(flushTarget, flushThreads);
     active = true;
     apply();
     logger.info("RocksDB process thread budget active: jniLine={}, LOW(compaction)={}, "
@@ -119,8 +120,8 @@ public final class RocksDbThreadBudget {
     if (!active) {
       return;
     }
-    compactionTarget = Math.max(compactionTarget, backgroundCompactions);
-    flushTarget = Math.max(flushTarget, backgroundFlushes);
+    compactionTarget = StrictMathWrapper.max(compactionTarget, backgroundCompactions);
+    flushTarget = StrictMathWrapper.max(flushTarget, backgroundFlushes);
     apply();
   }
 

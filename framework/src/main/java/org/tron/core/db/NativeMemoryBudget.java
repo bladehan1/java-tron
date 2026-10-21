@@ -16,6 +16,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.stream.Stream;
 import lombok.extern.slf4j.Slf4j;
+import org.tron.common.math.StrictMathWrapper;
 import org.tron.common.utils.StorageUtils;
 import org.tron.core.config.args.Storage;
 import org.tron.core.config.args.StorageConfig.NativeDbConfig;
@@ -93,7 +94,7 @@ public final class NativeMemoryBudget {
     }
 
     long pinnedOverflow() {
-      return Math.max(0L, pinnedBytes - cacheBytes);
+      return StrictMathWrapper.max(0L, pinnedBytes - cacheBytes);
     }
   }
 

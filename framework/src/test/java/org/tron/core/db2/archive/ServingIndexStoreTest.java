@@ -22,6 +22,7 @@ import java.util.TreeMap;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
+import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.db2.archive.PersistentServingKeyIndexGeneration.Descriptor;
 import org.tron.core.db2.archive.ServingFailure.Reason;
 import org.tron.core.db2.archive.ServingFailure.ServingFaultException;
@@ -181,7 +182,7 @@ public class ServingIndexStoreTest {
       try (ServingIndexStore store = open(directory, false)) {
         for (int start = 0; start < prefix.size(); start += 100) {
           assertTrue(store.commit(plan(store, prefix.subList(start,
-              Math.min(prefix.size(), start + 100))), LARGE, false));
+              StrictMathWrapper.min(prefix.size(), start + 100))), LARGE, false));
         }
         int stopAt = interruptAt;
         int[] seen = new int[1];

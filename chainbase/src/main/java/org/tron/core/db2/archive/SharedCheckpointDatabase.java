@@ -8,6 +8,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointPayload;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointPayloadCodec;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointTarget;
@@ -153,7 +154,7 @@ public final class SharedCheckpointDatabase implements Closeable {
   }
 
   private static int compareUnsigned(byte[] left, byte[] right) {
-    for (int index = 0; index < Math.min(left.length, right.length); index++) {
+    for (int index = 0; index < StrictMathWrapper.min(left.length, right.length); index++) {
       int compared = Integer.compare(left[index] & 255, right[index] & 255);
       if (compared != 0) {
         return compared;

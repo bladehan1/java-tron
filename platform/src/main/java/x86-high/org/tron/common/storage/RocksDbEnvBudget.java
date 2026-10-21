@@ -3,6 +3,7 @@ package org.tron.common.storage;
 import org.rocksdb.Env;
 import org.rocksdb.Priority;
 import org.rocksdb.RocksDB;
+import org.tron.common.math.MathWrapper;
 
 /**
  * Process RocksDB background-thread budget, RocksJava 9.7.4 line (design v2 ch08 §3.3.2).
@@ -27,8 +28,8 @@ public final class RocksDbEnvBudget {
   public static void raise(int compactionThreads, int flushThreads) {
     RocksDB.loadLibrary();
     Env env = Env.getDefault();
-    env.incBackgroundThreadsIfNeeded(Math.max(1, compactionThreads), Priority.LOW);
-    env.incBackgroundThreadsIfNeeded(Math.max(1, flushThreads), Priority.HIGH);
+    env.incBackgroundThreadsIfNeeded(MathWrapper.max(1, compactionThreads), Priority.LOW);
+    env.incBackgroundThreadsIfNeeded(MathWrapper.max(1, flushThreads), Priority.HIGH);
   }
 
   /** C++ LOW (compaction) pool size, or -1 when the line cannot read it back. */

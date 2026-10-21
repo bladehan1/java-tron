@@ -8,6 +8,8 @@ import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
+import static org.tron.core.db2.NativeCheckpointTestSupport.database;
+import static org.tron.core.db2.NativeCheckpointTestSupport.engine;
 
 import java.io.IOException;
 import java.nio.file.Path;
@@ -23,7 +25,6 @@ import org.junit.BeforeClass;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
-import org.tron.common.storage.leveldb.LevelDbDataSourceImpl;
 import org.tron.core.config.args.Args;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointFile;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointMaterializer;
@@ -31,12 +32,10 @@ import org.tron.core.db2.checkpoint.common.CommonCheckpointPayload;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointRedoCoordinator;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointRedoCoordinator.RecoveryAction;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointTarget;
-import org.tron.core.db2.common.LevelDB;
 import org.tron.core.db2.core.Chainbase;
 import org.tron.core.db2.core.ChainbaseCheckpointMaterializer;
 import org.tron.core.db2.core.SnapshotRoot;
 import org.tron.core.db2.stateroot.PathStateFlushTarget;
-import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
 
 public class SharedCheckpointDatabaseTest {
   @Rule
@@ -51,9 +50,9 @@ public class SharedCheckpointDatabaseTest {
   @Test
   public void retainsGenerationsAndRestoresLossEvenAfterPublication() throws Exception {
     Path common = temporary.newFolder().toPath();
-    Chainbase properties = new Chainbase(new SnapshotRoot(new LevelDB(
-        new LevelDbDataSourceImpl(temporary.newFolder().toString(), "properties"))));
-    CommonCheckpointFile file = CommonCheckpointFile.openDatabase(common, Engine.LEVELDB);
+    Chainbase properties = new Chainbase(new SnapshotRoot(
+        database(temporary.newFolder().toPath(), "properties")));
+    CommonCheckpointFile file = CommonCheckpointFile.openDatabase(common, engine());
     Fake path = new Fake(CommonCheckpointMaterializer.Authority.PATH_STATE);
     Fake history = new Fake(CommonCheckpointMaterializer.Authority.STATE_ARCHIVE);
     ChainbaseCheckpointMaterializer chainbase = new ChainbaseCheckpointMaterializer(common,
@@ -82,7 +81,7 @@ public class SharedCheckpointDatabaseTest {
       properties.close();
     }
     try (SharedCheckpointDatabase reopened =
-        new SharedCheckpointDatabase(common.resolve("redo"), Engine.LEVELDB)) {
+        new SharedCheckpointDatabase(common.resolve("redo"), engine())) {
       assertEquals(1, reopened.retained().size());
       assertFalse(reopened.isPending());
     }
@@ -94,7 +93,7 @@ public class SharedCheckpointDatabaseTest {
     Fake chain = new Fake(CommonCheckpointMaterializer.Authority.CHAINBASE);
     Fake path = new Fake(CommonCheckpointMaterializer.Authority.PATH_STATE);
     Fake history = new Fake(CommonCheckpointMaterializer.Authority.STATE_ARCHIVE);
-    try (CommonCheckpointFile file = CommonCheckpointFile.openDatabase(common, Engine.LEVELDB);
+    try (CommonCheckpointFile file = CommonCheckpointFile.openDatabase(common, engine());
         CommonCheckpointRedoCoordinator coordinator =
             new CommonCheckpointRedoCoordinator(file, chain, path, history)) {
       coordinator.configureDurableBaseCadence(2);
@@ -122,7 +121,7 @@ public class SharedCheckpointDatabaseTest {
     Fake history = new Fake(CommonCheckpointMaterializer.Authority.STATE_ARCHIVE);
     path.syncReplayStarted = new CountDownLatch(1);
     path.syncReplayRelease = new CountDownLatch(1);
-    try (CommonCheckpointFile file = CommonCheckpointFile.openDatabase(common, Engine.LEVELDB);
+    try (CommonCheckpointFile file = CommonCheckpointFile.openDatabase(common, engine());
         CommonCheckpointRedoCoordinator coordinator =
             new CommonCheckpointRedoCoordinator(file, chain, path, history)) {
       coordinator.configureDurableBaseCadence(1);
@@ -153,7 +152,7 @@ public class SharedCheckpointDatabaseTest {
   @Test
   public void rejectsConflictsGapsAndPruneBeforeMaterialization() throws Exception {
     Path root = temporary.newFolder().toPath();
-    try (SharedCheckpointDatabase database = new SharedCheckpointDatabase(root, Engine.LEVELDB)) {
+    try (SharedCheckpointDatabase database = new SharedCheckpointDatabase(root, engine())) {
       database.publish(payload(1));
       assertThrows(IOException.class, database::advanceDurableBase);
       database.applied();
@@ -167,7 +166,7 @@ public class SharedCheckpointDatabaseTest {
   @Test
   public void rejectsMissingGenerationBeforeOpeningWrites() throws Exception {
     Path root = temporary.newFolder().toPath();
-    try (SharedCheckpointDatabase database = new SharedCheckpointDatabase(root, Engine.LEVELDB)) {
+    try (SharedCheckpointDatabase database = new SharedCheckpointDatabase(root, engine())) {
       database.publish(payload(1));
       database.applied();
       database.publish(payload(2));
@@ -177,21 +176,21 @@ public class SharedCheckpointDatabaseTest {
     byte[] key = java.nio.ByteBuffer.allocate(prefix.length + Long.BYTES)
         .put(prefix).putLong(1).array();
     try (StateArchiveIndexDatabase.Writer writer =
-        StateArchiveIndexDatabase.openWriter(root, Engine.LEVELDB)) {
+        StateArchiveIndexDatabase.openWriter(root, engine())) {
       writer.write(Collections.singletonList(StateArchiveIndexDatabase.delete(key)), true);
     }
     // The first generation anchor must survive: deletion cannot silently reset the base.
-    assertThrows(IOException.class, () -> new SharedCheckpointDatabase(root, Engine.LEVELDB));
+    assertThrows(IOException.class, () -> new SharedCheckpointDatabase(root, engine()));
   }
 
   @Test
   public void reopensPendingCommitAndKeepsBothRedoBodies() throws Exception {
     Path common = temporary.newFolder().toPath();
-    try (CommonCheckpointFile file = CommonCheckpointFile.openDatabase(common, Engine.LEVELDB)) {
+    try (CommonCheckpointFile file = CommonCheckpointFile.openDatabase(common, engine())) {
       file.publish(payload(1));
       assertNotNull(file.loadIfPresent());
     }
-    try (CommonCheckpointFile file = CommonCheckpointFile.openDatabase(common, Engine.LEVELDB)) {
+    try (CommonCheckpointFile file = CommonCheckpointFile.openDatabase(common, engine())) {
       assertEquals(1, file.retained().size());
       assertEquals("properties", file.loadRequired().getChainbaseStores().get(0).getDbName());
       assertEquals(1, file.loadRequired().getPathStores().size());

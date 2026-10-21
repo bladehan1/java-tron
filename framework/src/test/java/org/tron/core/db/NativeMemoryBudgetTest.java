@@ -12,6 +12,7 @@ import java.util.List;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
+import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.config.args.StorageConfig.PathStateDbSettingsConfig;
 import org.tron.core.db2.stateroot.PathStateNativeBudget;
 
@@ -94,7 +95,7 @@ public class NativeMemoryBudgetTest {
     for (PathStateNativeBudget.Entry entry : PathStateNativeBudget.entries(settings, true,
         false)) {
       plain += entry.getCacheBytes();
-      overflow += Math.max(0, entry.getPinnedBytes() - entry.getCacheBytes());
+      overflow += StrictMathWrapper.max(0, entry.getPinnedBytes() - entry.getCacheBytes());
       if ("large".equals(entry.getProfile())) {
         // 36 L0 files x ~1 MiB of index+filter exceed the 32 MiB large-tier cache (§3.8.1).
         assertTrue(entry.getPinnedBytes() > entry.getCacheBytes());

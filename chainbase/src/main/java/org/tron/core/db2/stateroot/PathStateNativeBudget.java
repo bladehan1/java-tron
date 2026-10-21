@@ -3,6 +3,7 @@ package org.tron.core.db2.stateroot;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.config.args.StorageConfig.NativeDbConfig;
 import org.tron.core.config.args.StorageConfig.PathStateDbSettingsConfig;
 
@@ -96,7 +97,8 @@ public final class PathStateNativeBudget {
   static long l0MetadataBytes(NativeDbConfig config) {
     long entries = config.getWriteBufferSize() / 100L;
     long filter = entries * config.getBloomBitsPerKey() / 8L;
-    long index = config.getWriteBufferSize() / Math.max(1, config.getBlockSize()) * 16L;
+    long index = config.getWriteBufferSize()
+        / StrictMathWrapper.max(1, config.getBlockSize()) * 16L;
     return filter + index;
   }
 }

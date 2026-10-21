@@ -156,6 +156,13 @@ public final class StateArchiveAppendCheckpointMaterializerV5
           throw new IOException("Archive V5 configured first block differs from tail");
         }
         HistorySuffixRecovery.trim(directory, tail, selected);
+        // A crash after tail publication can leave the old serving copy behind. Retire it
+        // after validating the authoritative tail even when migration no longer needs a read.
+        if (openedCoordinator == null && Files.isDirectory(directory.resolve(
+            StateArchiveServingIndexBuildCoordinatorV3.DIRECTORY).resolve("single-v1"))) {
+          openedCoordinator = new StateArchiveServingIndexBuildCoordinatorV3(
+              directory, bindingEngine, 1_000);
+        }
         if (openedCoordinator != null) {
           openedCoordinator.retireLegacyArchiveTail();
           openedCoordinator.close();
