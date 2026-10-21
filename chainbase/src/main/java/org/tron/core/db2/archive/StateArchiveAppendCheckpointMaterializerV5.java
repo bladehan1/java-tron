@@ -10,6 +10,8 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.db2.archive.PersistentServingKeyIndexGeneration.ExactWriteFaultHook;
 import org.tron.core.db2.archive.StateArchiveCommittedViewV5.ReadObserver;
@@ -25,6 +27,7 @@ import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
 /** Default-off fresh-root V5 participant through the tail/Common publication barriers. */
 public final class StateArchiveAppendCheckpointMaterializerV5
     implements StateArchiveAppendFileRuntime {
+  private static final Logger logger = LoggerFactory.getLogger("DB");
 
   public static byte[] baselineHistoryDigest(long firstBlockNumber, byte[] parentHash) {
     return StateArchiveGethFormatV5.baselineHistoryDigest(firstBlockNumber, parentHash);
@@ -156,17 +159,19 @@ public final class StateArchiveAppendCheckpointMaterializerV5
           throw new IOException("Archive V5 configured first block differs from tail");
         }
         HistorySuffixRecovery.trim(directory, tail, selected);
-        // A crash after tail publication can leave the old serving copy behind. Retire it
-        // after validating the authoritative tail even when migration no longer needs a read.
-        if (openedCoordinator == null && Files.isDirectory(directory.resolve(
-            StateArchiveServingIndexBuildCoordinatorV3.DIRECTORY).resolve("single-v1"))) {
-          openedCoordinator = new StateArchiveServingIndexBuildCoordinatorV3(
-              directory, bindingEngine, 1_000);
-        }
         if (openedCoordinator != null) {
           openedCoordinator.retireLegacyArchiveTail();
           openedCoordinator.close();
           openedCoordinator = null;
+        } else {
+          // The tail is already authoritative. Derived serving damage must not block history.
+          try {
+            PersistentServingKeyIndexGeneration.retireLegacyArchiveTail(directory.resolve(
+                StateArchiveServingIndexBuildCoordinatorV3.DIRECTORY).resolve("single-v1"),
+                bindingEngine);
+          } catch (IOException | RuntimeException failure) {
+            logger.warn("Unable to retire legacy tail from derived serving cache", failure);
+          }
         }
         openedWriter = StateArchiveFiveLaneWriterV5.reopen(directory, tail, selected,
             admittedBaseline, rotationTargetBytes, this.readObserver);

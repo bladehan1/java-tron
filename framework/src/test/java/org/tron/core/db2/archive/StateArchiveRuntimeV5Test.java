@@ -5,8 +5,10 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
+import static org.tron.core.db2.NativeCheckpointTestSupport.engine;
 
 import java.nio.ByteBuffer;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -14,11 +16,9 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import org.junit.BeforeClass;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
-import org.tron.common.TestConstants;
 import org.tron.core.db2.archive.BlockReverseDiff.DbGroup;
 import org.tron.core.db2.archive.BlockReverseDiff.Entry;
 import org.tron.core.db2.archive.StateArchiveServingIndexBuildCoordinatorV3.Mode;
@@ -26,17 +26,11 @@ import org.tron.core.db2.checkpoint.common.CommonCheckpointCapture;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointPayload;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointTarget;
 import org.tron.core.db2.stateroot.PathStateFlushTarget;
-import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
 
 public class StateArchiveRuntimeV5Test {
 
   @Rule
   public final TemporaryFolder temporaryFolder = new TemporaryFolder();
-
-  @BeforeClass
-  public static void assumeLevelDbAvailable() {
-    TestConstants.assumeLevelDbAvailable();
-  }
 
   @Test(timeout = 30000)
   public void publishesBuildsServesSuccessorAndReopensAtExactCommon() throws Exception {
@@ -82,6 +76,16 @@ public class StateArchiveRuntimeV5Test {
 
   @Test
   public void corruptServingDoesNotPreventHistoryRecoveryOrCommonPublication() throws Exception {
+    assertServingDamageIsIsolated(false);
+  }
+
+  @Test
+  public void corruptServingEngineDoesNotPreventHistoryRecoveryOrCommonPublication()
+      throws Exception {
+    assertServingDamageIsIsolated(true);
+  }
+
+  private void assertServingDamageIsIsolated(boolean corruptEngine) throws Exception {
     Path root = temporaryFolder.newFolder("degraded-runtime").toPath();
     byte[] format = hash(70);
     byte[] baseline = hash(90);
@@ -95,11 +99,15 @@ public class StateArchiveRuntimeV5Test {
       archive.afterCommit(initial);
       archive.completeServingInitialSync(initial);
     }
-    Path keys = root.resolve("serving-index-v3/single-v1/keys");
-    try (StateArchiveIndexDatabase.Writer index =
-        StateArchiveIndexDatabase.openWriter(keys, Engine.LEVELDB)) {
-      index.write(Collections.singletonList(StateArchiveIndexDatabase.put(
-          PersistentServingKeyIndexGeneration.PROGRESS_KEY, new byte[]{1})), true);
+    Path serving = root.resolve("serving-index-v3/single-v1");
+    if (corruptEngine) {
+      Files.write(serving.resolve(StateArchiveIndexEngineManifest.FILE), new byte[]{1});
+    } else {
+      try (StateArchiveIndexDatabase.Writer index =
+          StateArchiveIndexDatabase.openWriter(serving.resolve("keys"), engine())) {
+        index.write(Collections.singletonList(StateArchiveIndexDatabase.put(
+            PersistentServingKeyIndexGeneration.PROGRESS_KEY, new byte[]{1})), true);
+      }
     }
     try (StateArchiveAppendCheckpointMaterializerV5 archive = runtime(
         root, format, baseline, canonical)) {
@@ -120,7 +128,7 @@ public class StateArchiveRuntimeV5Test {
   private static StateArchiveAppendCheckpointMaterializerV5 runtime(Path root,
       byte[] format, byte[] baseline, Map<Long, BlockSnapshotMeta> canonical)
       throws Exception {
-    return new StateArchiveAppendCheckpointMaterializerV5(root, format, Engine.LEVELDB,
+    return new StateArchiveAppendCheckpointMaterializerV5(root, format, engine(),
         100, baseline, 700, (required, reserve) -> { }, canonical::get, null,
         (path, position, length) -> { }, (stage, laneId) -> { }, () -> { });
   }

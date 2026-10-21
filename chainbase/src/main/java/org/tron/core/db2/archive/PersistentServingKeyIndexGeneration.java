@@ -751,6 +751,21 @@ public final class PersistentServingKeyIndexGeneration implements PinnedServingK
     }
   }
 
+  /** Removes only the obsolete authority alias, without reading derived serving progress. */
+  static void retireLegacyArchiveTail(Path directory, Engine engine) throws IOException {
+    if (!Files.isDirectory(directory.resolve(DATABASE), LinkOption.NOFOLLOW_LINKS)) {
+      return;
+    }
+    StateArchiveIndexEngineManifest.require(directory, engine);
+    try (StateArchiveIndexDatabase.Writer writer =
+        StateArchiveIndexDatabase.openWriter(directory.resolve(DATABASE), engine)) {
+      if (writer.get(ARCHIVE_TAIL_KEY_V5) != null) {
+        writer.write(Collections.singletonList(
+            StateArchiveIndexDatabase.delete(ARCHIVE_TAIL_KEY_V5)), true);
+      }
+    }
+  }
+
   /**
    * Versioned single-DB layout. Pages and the descriptor commit in the same sync batch;
    * no filesystem generation or second database is involved in normal advancement.
