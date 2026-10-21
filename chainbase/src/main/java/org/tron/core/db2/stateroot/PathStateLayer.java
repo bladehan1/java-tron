@@ -1,0 +1,241 @@
+package org.tron.core.db2.stateroot;
+
+import java.io.Closeable;
+import java.io.IOException;
+import java.nio.file.Path;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Objects;
+import org.tron.core.db2.stateroot.PathStateCanonicalizer.P66Phase;
+
+/** One writable, current-only path-state layer derived from the published canonical parent. */
+public final class PathStateLayer implements Closeable {
+
+  private final PathStateStoreManifest manifest;
+  private final PathStateLayerPublication publication;
+  private final PathStateNodeStoreSet stores;
+  private final PathStateRoot root;
+  private final PathStateRootMetadata parent;
+  private final long blockNumber;
+  private final byte[] blockHash;
+  private final byte[] parentHash;
+  private final long timestamp;
+  private final P66Phase phase;
+  private final byte[] transitionDigest;
+  private PathStateRootMetadata prepared;
+  private PathStateRootMetadata committed;
+  private PathStateRoot.Snapshot preparedSnapshot;
+
+  private PathStateLayer(PathStateStoreManifest manifest, PathStateLayerPublication publication,
+      PathStateNodeStoreSet stores, PathStateRoot root, PathStateRootMetadata parent,
+      long blockNumber, byte[] blockHash, byte[] parentHash, long timestamp, P66Phase phase,
+      byte[] transitionDigest) {
+    this.manifest = manifest;
+    this.publication = publication;
+    this.stores = stores;
+    this.root = root;
+    this.parent = parent;
+    this.blockNumber = blockNumber;
+    this.blockHash = copy32(blockHash, "blockHash");
+    this.parentHash = copy32(parentHash, "parentHash");
+    this.timestamp = timestamp;
+    this.phase = Objects.requireNonNull(phase, "phase");
+    this.transitionDigest = copy32(transitionDigest, "transitionDigest");
+  }
+
+  /** Begins a child layer only when the supplied parent is the exact verified CURRENT record. */
+  public static PathStateLayer begin(PathStateStoreManifest manifest,
+      PathStateRootMetadata parent, long blockNumber, byte[] blockHash, byte[] parentHash,
+      long timestamp, P66Phase phase, byte[] transitionDigest) throws IOException {
+    return begin(manifest, parent, blockNumber, blockHash, parentHash, timestamp, phase,
+        transitionDigest, PathStateLayerLimits.defaults());
+  }
+
+  public static PathStateLayer begin(PathStateStoreManifest manifest,
+      PathStateRootMetadata parent, long blockNumber, byte[] blockHash, byte[] parentHash,
+      long timestamp, P66Phase phase, byte[] transitionDigest, PathStateLayerLimits limits)
+      throws IOException {
+    return begin(manifest, parent, blockNumber, blockHash, parentHash, timestamp, phase,
+        transitionDigest, limits, stage -> { });
+  }
+
+  /** Begins a child from an explicitly retained, immutable in-process parent trie snapshot. */
+  public static PathStateLayer beginFromSnapshot(PathStateStoreManifest manifest,
+      PathStateRootMetadata parent, PathStateRoot.Snapshot parentSnapshot, long blockNumber,
+      byte[] blockHash, byte[] parentHash, long timestamp, P66Phase phase,
+      byte[] transitionDigest) throws IOException {
+    return beginFromSnapshot(manifest, parent, parentSnapshot, blockNumber, blockHash, parentHash,
+        timestamp, phase, transitionDigest, PathStateLayerLimits.defaults());
+  }
+
+  public static PathStateLayer beginFromSnapshot(PathStateStoreManifest manifest,
+      PathStateRootMetadata parent, PathStateRoot.Snapshot parentSnapshot, long blockNumber,
+      byte[] blockHash, byte[] parentHash, long timestamp, P66Phase phase,
+      byte[] transitionDigest, PathStateLayerLimits limits) throws IOException {
+    return begin(manifest, parent, blockNumber, blockHash, parentHash, timestamp, phase,
+        transitionDigest, Objects.requireNonNull(limits, "limits"), stage -> { },
+        Objects.requireNonNull(parentSnapshot, "parentSnapshot"));
+  }
+
+  /** Begins durable publication from an immutable candidate computed without native I/O. */
+  public static PathStateLayer beginPrepared(PathStateStoreManifest manifest,
+      PathStateRootMetadata parent, PreparedPathStateTransition prepared,
+      PathStateLayerLimits limits) throws IOException {
+    PreparedPathStateTransition candidate = Objects.requireNonNull(prepared, "prepared");
+    if (!candidate.extendsParent(Objects.requireNonNull(parent, "parent"))) {
+      throw new IOException("path-state prepared transition parent is not CURRENT candidate");
+    }
+    PathStateBlockTransition transition = candidate.getTransition();
+    return begin(manifest, parent, transition.getBlockNumber(), transition.getBlockHash(),
+        transition.getParentHash(), transition.getTimestamp(), transition.getPhase(),
+        transition.getPayloadDigest(), Objects.requireNonNull(limits, "limits"), stage -> { },
+        null, candidate);
+  }
+
+  static PathStateLayer begin(PathStateStoreManifest manifest,
+      PathStateRootMetadata parent, long blockNumber, byte[] blockHash, byte[] parentHash,
+      long timestamp, P66Phase phase, byte[] transitionDigest,
+      PathStateLayerPublication.FaultHook faultHook) throws IOException {
+    return begin(manifest, parent, blockNumber, blockHash, parentHash, timestamp, phase,
+        transitionDigest, PathStateLayerLimits.defaults(), faultHook, null);
+  }
+
+  static PathStateLayer begin(PathStateStoreManifest manifest,
+      PathStateRootMetadata parent, long blockNumber, byte[] blockHash, byte[] parentHash,
+      long timestamp, P66Phase phase, byte[] transitionDigest, PathStateLayerLimits limits,
+      PathStateLayerPublication.FaultHook faultHook) throws IOException {
+    return begin(manifest, parent, blockNumber, blockHash, parentHash, timestamp, phase,
+        transitionDigest, limits, faultHook, null);
+  }
+
+  private static PathStateLayer begin(PathStateStoreManifest manifest,
+      PathStateRootMetadata parent, long blockNumber, byte[] blockHash, byte[] parentHash,
+      long timestamp, P66Phase phase, byte[] transitionDigest, PathStateLayerLimits limits,
+      PathStateLayerPublication.FaultHook faultHook, PathStateRoot.Snapshot parentSnapshot)
+      throws IOException {
+    return begin(manifest, parent, blockNumber, blockHash, parentHash, timestamp, phase,
+        transitionDigest, limits, faultHook, parentSnapshot, null);
+  }
+
+  private static PathStateLayer begin(PathStateStoreManifest manifest,
+      PathStateRootMetadata parent, long blockNumber, byte[] blockHash, byte[] parentHash,
+      long timestamp, P66Phase phase, byte[] transitionDigest, PathStateLayerLimits limits,
+      PathStateLayerPublication.FaultHook faultHook, PathStateRoot.Snapshot parentSnapshot,
+      PreparedPathStateTransition preparedTransition) throws IOException {
+    PathStateStoreManifest admitted = Objects.requireNonNull(manifest, "manifest");
+    PathStateLayerLimits admittedLimits = Objects.requireNonNull(limits, "limits");
+    PathStateRootMetadata admittedParent = Objects.requireNonNull(parent, "parent");
+    PathStateCurrentStore currentStore = new PathStateCurrentStore(admitted);
+    requireSame(admittedParent, currentStore.current(),
+        "path-state layer parent is not CURRENT");
+    if (blockNumber != admittedParent.getBlockNumber() + 1
+        || !Arrays.equals(parentHash, admittedParent.getBlockHash())) {
+      throw new IOException("path-state layer identity does not extend CURRENT");
+    }
+
+    PathStateRootMetadata identity = PathStateRootMetadata.layer(blockNumber, blockHash,
+        parentHash, timestamp, phase, admitted.getIdentityDigest(),
+        admittedParent.getStateRoot(), admittedParent.getStateRoot(), transitionDigest);
+    Path layerDirectory = admitted.getLayerDirectory(blockNumber, blockHash);
+    admittedLimits.verifyCanBegin(admitted, layerDirectory);
+    PathStateNodeStoreSet parentStores =
+        PathStateNodeStoreSet.openPublished(admitted, admittedParent);
+    PathStateNodeStoreSet childStores = null;
+    try {
+      PathStateRoot parentRoot = parentSnapshot == null && preparedTransition == null
+          ? parentStores.createRoot() : null;
+      childStores = PathStateNodeStoreSet.beginLayer(admitted, identity, parentStores);
+      PathStateRoot childRoot = preparedTransition != null
+          ? childStores.createRootFrom(preparedTransition)
+          : parentSnapshot == null
+          ? childStores.createRootFrom(parentRoot.snapshot(), parentRoot.rootHash())
+          : childStores.createRootFrom(parentSnapshot, admittedParent.getStateRoot());
+      return new PathStateLayer(admitted,
+          new PathStateLayerPublication(admitted, admittedLimits, faultHook),
+          childStores, childRoot,
+          admittedParent, blockNumber, blockHash, parentHash, timestamp, phase,
+          transitionDigest);
+    } catch (RuntimeException | IOException failure) {
+      PathStateNodeStoreSet owned = childStores == null ? parentStores : childStores;
+      try {
+        owned.close();
+      } catch (IOException closeFailure) {
+        failure.addSuppressed(closeFailure);
+      }
+      throw failure;
+    }
+  }
+
+  public synchronized void apply(Collection<PathStateMutation> mutations) {
+    requireUncommitted();
+    root.apply(mutations);
+  }
+
+  /** Persists this layer's nodes/leaves/progress before publishing metadata and CURRENT. */
+  public synchronized PathStateRootMetadata commit() throws IOException {
+    if (committed != null) {
+      return committed;
+    }
+    if (prepared == null) {
+      prepared = PathStateRootMetadata.layer(blockNumber, blockHash, parentHash, timestamp, phase,
+          manifest.getIdentityDigest(), parent.getStateRoot(), root.rootHash(), transitionDigest);
+    }
+    committed = publication.publish(stores, prepared);
+    return committed;
+  }
+
+  public synchronized byte[] rootHash() {
+    return root.rootHash();
+  }
+
+  /** Returns a detached immutable trie snapshot only after this layer is durably CURRENT. */
+  public synchronized PathStateRoot.Snapshot snapshot() {
+    if (committed == null) {
+      throw new IllegalStateException("path-state layer is not committed");
+    }
+    return preparedSnapshot == null ? root.snapshot() : preparedSnapshot;
+  }
+
+  synchronized PathStateRoot.Snapshot prepareSnapshot() {
+    if (committed != null) {
+      return snapshot();
+    }
+    if (prepared == null) {
+      prepared = PathStateRootMetadata.layer(blockNumber, blockHash, parentHash, timestamp, phase,
+          manifest.getIdentityDigest(), parent.getStateRoot(), root.rootHash(), transitionDigest);
+    }
+    if (preparedSnapshot == null) {
+      preparedSnapshot = root.snapshot();
+    }
+    if (!Arrays.equals(prepared.getStateRoot(), preparedSnapshot.getStateRoot())) {
+      throw new IllegalStateException("path-state prepared snapshot root mismatch");
+    }
+    return preparedSnapshot;
+  }
+
+  @Override
+  public synchronized void close() throws IOException {
+    stores.close();
+  }
+
+  private void requireUncommitted() {
+    if (prepared != null) {
+      throw new IllegalStateException("path-state layer is already frozen for commit");
+    }
+  }
+
+  private static void requireSame(PathStateRootMetadata expected,
+      PathStateRootMetadata actual, String error) throws IOException {
+    if (!Arrays.equals(expected.encode(), actual.encode())) {
+      throw new IOException(error);
+    }
+  }
+
+  private static byte[] copy32(byte[] value, String name) {
+    byte[] copy = Arrays.copyOf(Objects.requireNonNull(value, name), value.length);
+    if (copy.length != PathStateRootMetadata.DIGEST_LENGTH) {
+      throw new IllegalArgumentException(name + " must be exactly 32 bytes");
+    }
+    return copy;
+  }
+}

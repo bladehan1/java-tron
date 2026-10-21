@@ -11,6 +11,7 @@ import org.eclipse.jetty.servlet.ServletHolder;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import org.tron.common.application.HttpService;
+import org.tron.core.archive.query.http.GetAccountBalanceFromArchiveServlet;
 import org.tron.core.config.args.Args;
 import org.tron.core.services.filter.HttpApiAccessFilter;
 import org.tron.core.services.filter.HttpInterceptor;
@@ -257,6 +258,8 @@ public class FullNodeHttpApiService extends HttpService {
 
   @Autowired
   private GetAccountBalanceServlet getAccountBalanceServlet;
+  @Autowired
+  private GetAccountBalanceFromArchiveServlet getAccountBalanceFromArchiveServlet;
 
   @Autowired
   private GetBlockBalanceServlet getBlockBalanceServlet;
@@ -488,6 +491,8 @@ public class FullNodeHttpApiService extends HttpService {
 
     context.addServlet(new ServletHolder(getAccountBalanceServlet),
         "/wallet/getaccountbalance");
+    context.addServlet(new ServletHolder(getAccountBalanceFromArchiveServlet),
+        "/wallet/getaccountbalancefromarchive");
     context.addServlet(new ServletHolder(getBlockBalanceServlet),
         "/wallet/getblockbalance");
     context.addServlet(new ServletHolder(getBurnTrxServlet), "/wallet/getburntrx");

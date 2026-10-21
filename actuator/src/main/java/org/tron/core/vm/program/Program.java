@@ -44,6 +44,8 @@ import org.tron.common.utils.Utils;
 import org.tron.common.utils.WalletUtil;
 import org.tron.core.ChainBaseManager;
 import org.tron.core.Constant;
+import org.tron.core.archive.execution.HistoricalExecutionGuard;
+import org.tron.core.archive.execution.HistoricalFailures;
 import org.tron.core.capsule.AccountCapsule;
 import org.tron.core.capsule.BlockCapsule;
 import org.tron.core.capsule.ContractCapsule;
@@ -820,6 +822,10 @@ public class Program {
 
   private void createContractImpl(DataWord value, byte[] programCode, byte[] newAddress,
       boolean isCreate2) {
+    if (getContractState().isHistorical()) {
+      throw HistoricalFailures.capability(getContractState(),
+          "CREATE and CREATE2 are not supported by historical execution");
+    }
     byte[] senderAddress = getContextAddress();
 
     if (logger.isDebugEnabled()) {
@@ -1671,6 +1677,10 @@ public class Program {
       PrecompiledContracts.PrecompiledContract contract) {
     returnDataBuffer = null; // reset return buffer right before the call
 
+    if (getContractState().isHistorical()) {
+      HistoricalExecutionGuard.requirePrecompileAllowed(getContractState(), contract);
+    }
+
     if (getCallDeep() == MAX_DEPTH) {
       stackPushZero();
       this.refundEnergy(msg.getEnergy().longValue(), " call deep limit reach");
@@ -2374,11 +2384,11 @@ public class Program {
 
     if (contractStateCapsule == null) {
       contractStateCapsule = new ContractStateCapsule(
-          contractState.getDynamicPropertiesStore().getCurrentCycleNumber());
+          currentCycleNumber());
       contractState.updateContractState(getContextAddress(), contractStateCapsule);
     } else {
       if (contractStateCapsule.catchUpToCycle(
-          contractState.getDynamicPropertiesStore().getCurrentCycleNumber(),
+          currentCycleNumber(),
           VMConfig.getDynamicEnergyThreshold(),
           VMConfig.getDynamicEnergyIncreaseFactor(),
           VMConfig.getDynamicEnergyMaxFactor(),
@@ -2391,6 +2401,16 @@ public class Program {
     contextContractFactor = contractStateCapsule.getEnergyFactor()
         + Constant.DYNAMIC_ENERGY_FACTOR_DECIMAL;
     return contextContractFactor;
+  }
+
+  /**
+   * Current execution keeps the upstream typed getter (its 0 default included); historical
+   * execution reads S(T) and applies the same typed-getter default (chapter 05 section 3.10.4).
+   */
+  private long currentCycleNumber() {
+    return contractState.isHistorical()
+        ? contractState.getDynamicPropertyLong("CURRENT_CYCLE_NUMBER")
+        : contractState.getDynamicPropertiesStore().getCurrentCycleNumber();
   }
 
   public void addContextContractUsage(long value) {
