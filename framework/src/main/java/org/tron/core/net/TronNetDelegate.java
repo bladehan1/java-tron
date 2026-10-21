@@ -5,9 +5,13 @@ import static org.tron.core.exception.BadBlockException.TypeEnum.CALC_MERKLE_ROO
 
 import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
+import com.google.protobuf.ByteString;
 import io.prometheus.client.Histogram;
 import java.util.Collection;
+import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.LockSupport;
 import javax.annotation.PostConstruct;
@@ -60,6 +64,7 @@ import org.tron.core.net.message.MessageTypes;
 import org.tron.core.net.message.adv.BlockMessage;
 import org.tron.core.net.message.adv.TransactionMessage;
 import org.tron.core.net.peer.PeerConnection;
+import org.tron.core.store.DynamicPropertiesStore;
 import org.tron.core.store.WitnessScheduleStore;
 import org.tron.protos.Protocol.Inventory.InventoryType;
 
@@ -107,6 +112,18 @@ public class TronNetDelegate {
   private Cache<BlockId, Long> freshBlockId = CacheBuilder.newBuilder()
           .maximumSize(blockIdCacheSize).expireAfterWrite(1, TimeUnit.HOURS)
           .recordStats().build();
+
+  // The current (unsolidified) period's witness list can change through a fork
+  // switch across a maintenance boundary, so it is re-read from the store on
+  // every sync block (~10us); the previous (solidified) period's list is final
+  // and cached on the transition.
+  private volatile List<ByteString> currentPeriodList = Collections.emptyList();
+  private volatile Set<ByteString> currentPeriodWitnesses = Collections.emptySet();
+  private volatile long currentPeriodStart = Long.MAX_VALUE;
+  private volatile Set<ByteString> previousPeriodWitnesses = Collections.emptySet();
+  private volatile long previousPeriodStart = Long.MAX_VALUE;
+  private volatile boolean currentPeriodSettled = false;
+  private volatile long solidBlockTime = 0;
 
   @PostConstruct
   public void init() {
@@ -353,6 +370,90 @@ public class TronNetDelegate {
     }
     if (!flag) {
       throw new P2pException(TypeEnum.BLOCK_SIGN_INVALID, "valid signature failed.");
+    }
+  }
+
+  public void validSyncBlock(BlockCapsule block) throws P2pException {
+    refreshPeriodWitnesses();
+    // Every honestly produced block above the solid block has a strictly greater
+    // timestamp (consensus enforces slot monotonicity at apply time), so a sync
+    // block not newer than the solid block is always forged; this floor also
+    // prevents bypassing the witness check with backdated timestamps.
+    if (block.getTimeStamp() <= solidBlockTime
+        || !isPeriodWitness(block.getTimeStamp(), block.getWitnessAddress())) {
+      throw new P2pException(TypeEnum.NON_WITNESS_BLOCK,
+          "block: " + block.getBlockId().getString() + ", witness: "
+              + Hex.toHexString(block.getWitnessAddress().toByteArray()));
+    }
+    validSignature(block);
+  }
+
+  // The maintenance block is still produced by the previous period's schedule, so
+  // each period's coverage is extended by one block interval. While the current
+  // period's maintenance transition is not solidified, its witness list may still
+  // change through a fork switch, so the previous period's witnesses are accepted
+  // as well; once the transition solidifies, the check is strict again. Blocks
+  // older than the tracked periods (or whose list remains unknown after reading
+  // the solidified state) are let through and validated at apply time. With the
+  // solid time floor, this pass-through zone is non-empty only when
+  // solidification has genuinely stalled beyond a maintenance period.
+  private boolean isPeriodWitness(long blockTime, ByteString witness) {
+    if (blockTime >= currentPeriodStart + BLOCK_PRODUCED_INTERVAL) {
+      return currentPeriodWitnesses.contains(witness)
+          || !currentPeriodSettled && previousPeriodWitnesses.contains(witness);
+    }
+    if (!previousPeriodWitnesses.isEmpty()
+        && blockTime >= previousPeriodStart + BLOCK_PRODUCED_INTERVAL) {
+      return previousPeriodWitnesses.contains(witness);
+    }
+    return true;
+  }
+
+  private void refreshPeriodWitnesses() {
+    DynamicPropertiesStore propertiesStore = dbManager.getDynamicPropertiesStore();
+    long periodStart = propertiesStore.getNextMaintenanceTime()
+        - propertiesStore.getMaintenanceTimeInterval();
+    List<ByteString> latest = witnessScheduleStore.getActiveWitnesses();
+    if (periodStart != currentPeriodStart) {
+      if (currentPeriodStart != Long.MAX_VALUE
+          && periodStart > currentPeriodStart
+          && periodStart - currentPeriodStart == propertiesStore.getMaintenanceTimeInterval()) {
+        // Only a forward transition by one period can shift current into previous.
+        previousPeriodWitnesses = currentPeriodWitnesses;
+        previousPeriodStart = currentPeriodStart;
+      } else {
+        // Startup, rollback, or a gap: the old current list is not the previous period.
+        previousPeriodWitnesses = Collections.emptySet();
+        previousPeriodStart = Long.MAX_VALUE;
+      }
+      currentPeriodStart = periodStart;
+    }
+    // A competing fork can replace the list without changing the period. In that
+    // case keep the previous period intact and replace only the current list.
+    if (!latest.equals(currentPeriodList)) {
+      currentPeriodList = latest;
+      currentPeriodWitnesses = new HashSet<>(latest);
+    }
+    solidBlockTime = getSolidBlockTime();
+    currentPeriodSettled = solidBlockTime >= currentPeriodStart;
+    if (previousPeriodWitnesses.isEmpty() && !currentPeriodSettled) {
+      // Read the existing solidified state before treating the history as unknown.
+      // Check its period as well: during a prolonged stall it may be older still.
+      long solidNext = propertiesStore.getNextMaintenanceTimeFromSolidity();
+      if (solidNext == currentPeriodStart) {
+        previousPeriodWitnesses = new HashSet<>(
+            witnessScheduleStore.getActiveWitnessesFromSolidity());
+        previousPeriodStart = solidNext
+            - propertiesStore.getMaintenanceTimeIntervalFromSolidity();
+      }
+    }
+  }
+
+  private long getSolidBlockTime() {
+    try {
+      return chainBaseManager.getBlockById(chainBaseManager.getSolidBlockId()).getTimeStamp();
+    } catch (BadItemException | ItemNotFoundException e) {
+      return 0;
     }
   }
 

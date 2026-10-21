@@ -53,6 +53,7 @@ public class P2pException extends Exception {
     BLOCK_SIGN_INVALID(15, "block sign invalid"),
     BLOCK_MERKLE_INVALID(16, "block merkle invalid"),
     RATE_LIMIT_EXCEEDED(17, "rate limit exceeded"),
+    NON_WITNESS_BLOCK(18, "non-witness block"),
 
     DEFAULT(100, "default exception");
 
