@@ -335,7 +335,7 @@ public class SyncService {
     boolean attackFlag = false;
     BlockId blockId = block.getBlockId();
     try {
-      tronNetDelegate.validSignature(block);
+      tronNetDelegate.validSyncBlock(block);
       tronNetDelegate.processBlock(block, true);
       peerConnection.setBlockRcvTime(System.currentTimeMillis());
       pbftDataSyncHandler.processPBFTCommitData(block);
@@ -343,7 +343,8 @@ public class SyncService {
       logger.error("Process sync block {} failed, type: {}",
               blockId.getString(), p2pException.getType());
       attackFlag = p2pException.getType().equals(TypeEnum.BLOCK_SIGN_INVALID)
-              || p2pException.getType().equals(TypeEnum.BLOCK_MERKLE_INVALID);
+              || p2pException.getType().equals(TypeEnum.BLOCK_MERKLE_INVALID)
+              || p2pException.getType().equals(TypeEnum.NON_WITNESS_BLOCK);
       flag = false;
     } catch (Exception e) {
       logger.error("Process sync block {} failed", blockId.getString(), e);

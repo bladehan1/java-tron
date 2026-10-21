@@ -2,6 +2,7 @@ package org.tron.core.db;
 
 import com.google.protobuf.ByteString;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import javax.annotation.Resource;
 
@@ -12,6 +13,9 @@ import org.tron.common.BaseTest;
 import org.tron.common.TestConstants;
 import org.tron.common.utils.ByteArray;
 import org.tron.core.config.args.Args;
+import org.tron.core.db2.ISession;
+import org.tron.core.db2.core.Chainbase.Cursor;
+import org.tron.core.store.DynamicPropertiesStore;
 import org.tron.core.store.WitnessScheduleStore;
 
 public class WitnessScheduleStoreTest extends BaseTest {
@@ -100,6 +104,34 @@ public class WitnessScheduleStoreTest extends BaseTest {
     Assert.assertEquals(getByteString(CURRENT_KEY1), firstWitness);
     Assert.assertEquals(getByteString(CURRENT_KEY2), secondWitness);
     Assert.assertEquals(getByteString(CURRENT_KEY3), thirdWitness);
+  }
+
+  @Test
+  public void testReadWitnessScheduleFromSolidity() {
+    DynamicPropertiesStore properties = chainBaseManager.getDynamicPropertiesStore();
+    long originalNext = properties.getNextMaintenanceTime();
+    long originalInterval = properties.getMaintenanceTimeInterval();
+    Cursor cursor = witnessScheduleStore.getRevokingDB().getCursor();
+    long boundary = 216_000_000;
+    long interval = 21_600_000;
+    witnessScheduleStore.saveActiveWitnesses(witnessAddresses);
+    properties.saveNextMaintenanceTime(boundary);
+    properties.saveMaintenanceTimeInterval(interval);
+    try (ISession session = dbManager.getRevokingStore().buildSession()) {
+      witnessScheduleStore.saveActiveWitnesses(
+          Collections.singletonList(getByteString(CURRENT_KEY1)));
+      properties.saveNextMaintenanceTime(boundary + interval);
+      properties.saveMaintenanceTimeInterval(interval * 2);
+      Assert.assertEquals(1, witnessScheduleStore.getActiveWitnesses().size());
+      Assert.assertEquals(witnessAddresses, witnessScheduleStore.getActiveWitnessesFromSolidity());
+      Assert.assertEquals(boundary, properties.getNextMaintenanceTimeFromSolidity());
+      Assert.assertEquals(interval, properties.getMaintenanceTimeIntervalFromSolidity());
+      Assert.assertEquals(cursor, witnessScheduleStore.getRevokingDB().getCursor());
+    } finally {
+      properties.saveNextMaintenanceTime(originalNext);
+      properties.saveMaintenanceTimeInterval(originalInterval);
+    }
+    Assert.assertEquals(witnessAddresses, witnessScheduleStore.getActiveWitnesses());
   }
 
 }

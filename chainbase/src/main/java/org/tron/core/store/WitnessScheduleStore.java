@@ -11,6 +11,7 @@ import org.springframework.stereotype.Component;
 import org.tron.common.utils.ByteArray;
 import org.tron.core.capsule.BytesCapsule;
 import org.tron.core.db.TronStoreWithRevoking;
+import org.tron.core.db2.core.Chainbase;
 
 @Slf4j(topic = "DB")
 @Component
@@ -39,8 +40,12 @@ public class WitnessScheduleStore extends TronStoreWithRevoking<BytesCapsule> {
   }
 
   private List<ByteString> getData(byte[] species) {
+    return getData(species, getUnchecked(species));
+  }
+
+  private List<ByteString> getData(byte[] species, BytesCapsule value) {
     List<ByteString> witnessesAddressList = new ArrayList<>();
-    return Optional.ofNullable(getUnchecked(species))
+    return Optional.ofNullable(value)
         .map(BytesCapsule::getData)
         .map(ba -> {
           int len = ba.length / ADDRESS_BYTE_ARRAY_LENGTH;
@@ -62,6 +67,11 @@ public class WitnessScheduleStore extends TronStoreWithRevoking<BytesCapsule> {
 
   public List<ByteString> getActiveWitnesses() {
     return getData(ACTIVE_WITNESSES);
+  }
+
+  public List<ByteString> getActiveWitnessesFromSolidity() {
+    byte[] data = ((Chainbase) revokingDB).getHead().getSolidity().get(ACTIVE_WITNESSES);
+    return getData(ACTIVE_WITNESSES, data == null ? null : new BytesCapsule(data));
   }
 
   public void saveCurrentShuffledWitnesses(List<ByteString> witnessesAddressList) {

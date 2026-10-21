@@ -22,6 +22,7 @@ import org.tron.common.utils.Time;
 import org.tron.core.capsule.BytesCapsule;
 import org.tron.core.config.Parameter.ChainConstant;
 import org.tron.core.db.TronStoreWithRevoking;
+import org.tron.core.db2.core.Chainbase;
 import org.tron.core.exception.BadItemException;
 import org.tron.core.exception.ItemNotFoundException;
 
@@ -2241,6 +2242,22 @@ public class DynamicPropertiesStore extends TronStoreWithRevoking<BytesCapsule> 
         .map(ByteArray::toLong)
         .orElseThrow(
             () -> new IllegalArgumentException("not found NEXT_MAINTENANCE_TIME"));
+  }
+
+  public long getNextMaintenanceTimeFromSolidity() {
+    return getLongFromSolidity(NEXT_MAINTENANCE_TIME);
+  }
+
+  public long getMaintenanceTimeIntervalFromSolidity() {
+    return getLongFromSolidity(MAINTENANCE_TIME_INTERVAL);
+  }
+
+  private long getLongFromSolidity(byte[] key) {
+    byte[] value = ((Chainbase) revokingDB).getHead().getSolidity().get(key);
+    if (value == null) {
+      throw new IllegalArgumentException("not found " + ByteArray.toStr(key));
+    }
+    return ByteArray.toLong(value);
   }
 
   public long getMaintenanceSkipSlots() {
