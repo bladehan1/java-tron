@@ -42,24 +42,34 @@ import org.tron.core.capsule.BlockCapsule;
 import org.tron.core.capsule.TransactionCapsule;
 import org.tron.core.db.TransactionContext;
 import org.tron.core.db.TransactionContext.ExecutionMode;
-import org.tron.core.db2.archive.ArchiveReadContext.HistoricalStore;
-import org.tron.core.db2.archive.ArchiveReadContext.StoreAdapter;
 import org.tron.core.db2.archive.BlockReverseDiff.DbGroup;
 import org.tron.core.db2.archive.BlockReverseDiff.Entry;
-import org.tron.core.db2.archive.P66AccountAssetCodec.Phase;
+import org.tron.core.db2.archive.checkpoint.progress.ArchiveProgressEnvelope;
+import org.tron.core.db2.archive.contract.AccountAssetStorage;
 import org.tron.core.db2.archive.contract.PinnedHistory;
 import org.tron.core.db2.archive.history.codec.BlockHistoryCodec;
 import org.tron.core.db2.archive.history.codec.HistoryIndexCodec;
+import org.tron.core.db2.archive.history.codec.P66AccountAssetCodec;
+import org.tron.core.db2.archive.history.codec.P66AccountAssetCodec.Phase;
 import org.tron.core.db2.archive.history.model.HistoryCommitMarker;
 import org.tron.core.db2.archive.history.model.HistoryIndexLocation;
 import org.tron.core.db2.archive.history.model.HistoryIndexRecord;
 import org.tron.core.db2.archive.history.model.HistoryIndexRecord.KeyGroup;
 import org.tron.core.db2.archive.history.model.HistoryLocation;
 import org.tron.core.db2.archive.history.read.CommittedHistoryReader;
+import org.tron.core.db2.archive.history.store.HistoryIndexStore;
+import org.tron.core.db2.archive.history.store.HistorySegmentStore;
+import org.tron.core.db2.archive.history.store.HistoryStoreTestSupport;
 import org.tron.core.db2.archive.query.ArchiveQueryGateTestSupport;
 import org.tron.core.db2.archive.query.ArchiveRuntimeQueryGate;
 import org.tron.core.db2.archive.query.HistoricalQueryBudgetException;
 import org.tron.core.db2.archive.query.HistoricalQueryCapabilityException;
+import org.tron.core.db2.archive.query.account.HistoricalAccountAssetBalanceResolver;
+import org.tron.core.db2.archive.query.account.HistoricalAccountAssetPrefixResolver;
+import org.tron.core.db2.archive.query.session.ArchiveReadContext;
+import org.tron.core.db2.archive.query.session.ArchiveReadContext.HistoricalStore;
+import org.tron.core.db2.archive.query.session.ArchiveReadContext.StoreAdapter;
+import org.tron.core.db2.archive.query.session.HistoricalQuerySession;
 import org.tron.core.db2.archive.query.snapshot.ArchiveReadSnapshot;
 import org.tron.core.db2.archive.query.snapshot.ArchiveReadSnapshot.PinnedLatestState;
 import org.tron.core.db2.archive.query.snapshot.HistoricalRangeOverlay;
@@ -260,7 +270,7 @@ public class ArchiveReadSnapshotTest {
         temporaryFolder.newFolder("historical-account-asset-context").toPath())) {
       fixture.append(diff(1,
           new DbGroup("properties", Collections.singletonList(new Entry(
-              HistoricalAccountAssetBalanceResolver.proposal66PhysicalKey(),
+              AccountAssetStorage.proposal66PhysicalKey(),
               OldValue.present(ByteArray.fromLong(0L))))),
           new DbGroup("account", Collections.singletonList(
               new Entry(address, OldValue.present(account)))),
@@ -311,7 +321,7 @@ public class ArchiveReadSnapshotTest {
               new Entry(address, OldValue.present(offAtZero))))));
       BlockReverseDiff activation = diff(2,
           new DbGroup("properties", Collections.singletonList(new Entry(
-              HistoricalAccountAssetBalanceResolver.proposal66PhysicalKey(),
+              AccountAssetStorage.proposal66PhysicalKey(),
               OldValue.present(ByteArray.fromLong(0L))))),
           new DbGroup("account", Collections.singletonList(
               new Entry(address, OldValue.present(offAtOne)))),
@@ -338,7 +348,7 @@ public class ArchiveReadSnapshotTest {
 
       Map<String, Map<String, byte[]>> latestValues = new HashMap<>();
       latestValues.put("properties", Collections.singletonMap(
-          text(HistoricalAccountAssetBalanceResolver.proposal66PhysicalKey()),
+          text(AccountAssetStorage.proposal66PhysicalKey()),
           ByteArray.fromLong(1L)));
       latestValues.put("account", Collections.singletonMap(text(address), onAtFour));
       latestValues.put("account-asset", Collections.singletonMap(
@@ -360,7 +370,7 @@ public class ArchiveReadSnapshotTest {
     byte[] address = address(42);
     String tokenId = "1000001";
     Map<String, byte[]> latestValues = new HashMap<>();
-    latestValues.put(text(HistoricalAccountAssetBalanceResolver.proposal66PhysicalKey()),
+    latestValues.put(text(AccountAssetStorage.proposal66PhysicalKey()),
         ByteArray.fromLong(1L));
     latestValues.put(text(address), account(address, true, null, 0L));
     InMemoryLatest latest = new InMemoryLatest(0, hash(0), latestValues);
@@ -909,7 +919,7 @@ public class ArchiveReadSnapshotTest {
 
     private Fixture(Path archive) throws IOException {
       bodies = new HistorySegmentStore(archive, new BlockHistoryCodec(), 4096);
-      index = new HistoryIndexStore(archive, new HistoryIndexCodec());
+      index = HistoryStoreTestSupport.openIndex(archive, new HistoryIndexCodec());
     }
 
     private void append(BlockReverseDiff diff) throws IOException {

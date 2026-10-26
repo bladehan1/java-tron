@@ -15,7 +15,7 @@ import org.junit.rules.TemporaryFolder;
 import org.tron.core.config.args.Args;
 import org.tron.core.db2.ISession;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
-import org.tron.core.db2.archive.SnapshotOldValueCollector;
+import org.tron.core.db2.archive.history.write.SnapshotOldValueCollector;
 
 public class StartupMaintenanceLayerIntegrationTest {
   @Rule

@@ -14,6 +14,8 @@ import java.util.List;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
+import org.tron.core.db2.archive.history.store.HistoryStoreTestSupport;
+import org.tron.core.db2.archive.history.store.HistoryStoreTestSupport.Manifest;
 
 public class ArchiveParticipantDescriptorTest {
 
@@ -57,17 +59,17 @@ public class ArchiveParticipantDescriptorTest {
   public void manifestBindsApprovedScopeAndRejectsLegacyVersions() throws Exception {
     List<String> participants = ArchiveParticipantDescriptor.current().getParticipants();
     Path archive = temporaryFolder.newFolder("exact-27-manifest").toPath();
-    ArchiveBaseManifest manifest = new ArchiveBaseManifest(archive, participants);
+    Manifest manifest = new Manifest(archive, participants);
     manifest.ensureBase(meta(1));
 
     byte[] encoded = Files.readAllBytes(archive.resolve("MANIFEST"));
     assertEquals(3, ByteBuffer.wrap(encoded, Integer.BYTES, Short.BYTES).getShort());
-    new ArchiveBaseManifest(archive, participants);
+    new Manifest(archive, participants);
 
     List<String> abiExcludedExact26 = new ArrayList<>(participants);
     abiExcludedExact26.remove("abi");
     assertThrows(ArchivePersistenceException.class,
-        () -> new ArchiveBaseManifest(archive, abiExcludedExact26));
+        () -> new Manifest(archive, abiExcludedExact26));
 
     ByteBuffer.wrap(encoded).putShort(Integer.BYTES, (short) 2);
     byte[] payload = Arrays.copyOf(encoded, encoded.length - Integer.BYTES);
@@ -75,7 +77,7 @@ public class ArchiveParticipantDescriptorTest {
         .putInt(Hashing.crc32c().hashBytes(payload).asInt());
     Files.write(archive.resolve("MANIFEST"), encoded);
     assertThrows(ArchivePersistenceException.class,
-        () -> new ArchiveBaseManifest(archive, participants));
+        () -> new Manifest(archive, participants));
   }
 
   private static BlockSnapshotMeta meta(long epoch) {

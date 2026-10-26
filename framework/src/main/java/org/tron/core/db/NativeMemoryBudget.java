@@ -20,6 +20,7 @@ import org.tron.common.math.StrictMathWrapper;
 import org.tron.common.utils.StorageUtils;
 import org.tron.core.config.args.Storage;
 import org.tron.core.config.args.StorageConfig.NativeDbConfig;
+import org.tron.core.db2.archive.ArchiveStoreScope;
 import org.tron.core.db2.stateroot.PathStateNativeBudget;
 
 /**

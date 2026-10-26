@@ -16,7 +16,6 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
-import org.tron.core.db2.archive.HistoryIndexStore;
 import org.tron.core.db2.archive.OldValue;
 import org.tron.core.db2.archive.contract.ArchiveQueryLimitExceededException;
 import org.tron.core.db2.archive.history.codec.HistoryIndexCodec;
@@ -25,6 +24,8 @@ import org.tron.core.db2.archive.history.model.HistoryIndexLocation;
 import org.tron.core.db2.archive.history.model.HistoryIndexRecord;
 import org.tron.core.db2.archive.history.model.HistoryIndexRecord.KeyGroup;
 import org.tron.core.db2.archive.history.model.HistoryLocation;
+import org.tron.core.db2.archive.history.store.HistoryIndexStore;
+import org.tron.core.db2.archive.history.store.HistoryStoreTestSupport;
 import org.tron.core.db2.archive.query.snapshot.HistoricalRangeOverlay.Entry;
 import org.tron.core.db2.archive.query.snapshot.HistoricalRangeOverlay.KeyRange;
 import org.tron.core.db2.archive.query.snapshot.HistoricalRangeOverlay.Limits;
@@ -99,7 +100,7 @@ public class HistoricalRangeOverlayTest {
   private ServingKeyIndexGeneration buildIndex(String name) throws Exception {
     Path archive = temporaryFolder.newFolder(name).toPath();
     List<HistoryCommitMarker> markers = new ArrayList<>();
-    try (HistoryIndexStore authoritative = new HistoryIndexStore(
+    try (HistoryIndexStore authoritative = HistoryStoreTestSupport.openIndex(
         archive, new HistoryIndexCodec())) {
       markers.add(append(authoritative, 1, group("account", bytes("p/c"))));
       markers.add(append(authoritative, 2,

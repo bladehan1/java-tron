@@ -22,8 +22,8 @@ import org.tron.core.db2.archive.BlockReverseDiff.DbGroup;
 import org.tron.core.db2.archive.BlockReverseDiff.Entry;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
 import org.tron.core.db2.archive.OldValue;
-import org.tron.core.db2.archive.StateArchiveHotBatchDescriptor;
-import org.tron.core.db2.archive.StateArchiveHotStore;
+import org.tron.core.db2.archive.history.hot.StateArchiveHotBatchDescriptor;
+import org.tron.core.db2.archive.history.hot.StateArchiveHotStore;
 import org.tron.core.db2.stateroot.PathStateFlushTarget;
 import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
 

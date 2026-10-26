@@ -4,7 +4,8 @@ import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import org.tron.common.math.StrictMathWrapper;
-import org.tron.core.db2.archive.query.HistoricalQueryException.Reason;
+import org.tron.core.db2.archive.contract.HistoricalQueryException;
+import org.tron.core.db2.archive.contract.HistoricalQueryException.Reason;
 
 /**
  * Cooperative cancellation shared by admission, state reads and every historical VM frame.

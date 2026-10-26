@@ -49,12 +49,19 @@ import org.tron.core.db.common.DbSourceInter;
 import org.tron.core.db2.ISession;
 import org.tron.core.db2.archive.BlockReverseDiff.DbGroup;
 import org.tron.core.db2.archive.BlockReverseDiff.Entry;
+import org.tron.core.db2.archive.contract.AccountAssetStorage;
 import org.tron.core.db2.archive.history.model.HistoryCommitMarker;
 import org.tron.core.db2.archive.history.model.HistoryIndexLocation;
 import org.tron.core.db2.archive.history.model.HistoryLocation;
+import org.tron.core.db2.archive.history.store.ArchiveHistoryWriter;
+import org.tron.core.db2.archive.history.store.HistoryStoreTestSupport;
 import org.tron.core.db2.archive.history.write.BlockReverseDiffSink;
 import org.tron.core.db2.archive.history.write.DurableBlockReverseDiffSink;
+import org.tron.core.db2.archive.history.write.DurableHistoryMarkerRangeEvidence;
 import org.tron.core.db2.archive.history.write.OldValueCollector;
+import org.tron.core.db2.archive.history.write.PhysicalSnapshotPathStateCollector;
+import org.tron.core.db2.archive.history.write.SnapshotOldValueCollector;
+import org.tron.core.db2.archive.runtime.ArchiveRuntimeAttachment;
 import org.tron.core.db2.common.DB;
 import org.tron.core.db2.common.Flusher;
 import org.tron.core.db2.common.WrappedByteArray;
@@ -200,7 +207,7 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
   @Test
   public void pathStateRuntimeCoexistsWithArchiveAtBlockFinalBoundary() throws Exception {
     MemoryDb propertiesDb = new MemoryDb("properties");
-    propertiesDb.put(HistoricalAccountAssetBalanceResolver.proposal66PhysicalKey(),
+    propertiesDb.put(AccountAssetStorage.proposal66PhysicalKey(),
         Longs.toByteArray(1L));
     MemoryDb codeDb = new MemoryDb("code");
     SnapshotManager manager = new SnapshotManager("");
@@ -235,7 +242,7 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
   @Test(timeout = 10000)
   public void commonPathStateCapturesArchiveAndPathStateInParallelWithoutP66() throws Exception {
     MemoryDb propertiesDb = new MemoryDb("properties");
-    propertiesDb.put(HistoricalAccountAssetBalanceResolver.proposal66PhysicalKey(),
+    propertiesDb.put(AccountAssetStorage.proposal66PhysicalKey(),
         Longs.toByteArray(1L));
     SnapshotManager manager = new SnapshotManager("");
     Chainbase properties = new Chainbase(new SnapshotRoot(propertiesDb));
@@ -365,7 +372,7 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
           new org.tron.core.db2.stateroot.PathStateCanonicalizer();
       root.apply(Arrays.asList(
           canonicalizer.put(P66Phase.P66_ON, "properties",
-              HistoricalAccountAssetBalanceResolver.proposal66PhysicalKey(),
+              AccountAssetStorage.proposal66PhysicalKey(),
               Longs.toByteArray(1L)),
           canonicalizer.put(P66Phase.P66_ON, "code", codeKey, before)));
       base = PathStateRootMetadata.base(0L, parentHash, hash(99), 1L,
@@ -1023,7 +1030,7 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
     setFlushCount(manager, 1);
     HistoryCommitMarker committed = marker(first.getMeta());
     when(sink.createMarkerRangeEvidence(1)).thenReturn(
-        new DurableHistoryMarkerRangeEvidence(new DurableHistoryMarkerRangeEvidence.Source() {
+        HistoryStoreTestSupport.evidence(new HistoryStoreTestSupport.Source() {
           @Override
           public HistoryCommitMarker marker(long epoch) {
             return committed;
@@ -1104,8 +1111,8 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
   }
 
   private static void equivalenceProperties(SnapshotManager manager) {
-    equivalenceStore(manager, HistoricalAccountAssetBalanceResolver.PROPERTIES_DATABASE,
-        HistoricalAccountAssetBalanceResolver.proposal66PhysicalKey(),
+    equivalenceStore(manager, AccountAssetStorage.PROPERTIES_DATABASE,
+        AccountAssetStorage.proposal66PhysicalKey(),
         Longs.toByteArray(1L));
   }
 
@@ -1192,8 +1199,7 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
     public DurableHistoryMarkerRangeEvidence createMarkerRangeEvidence(int maxMarkers) {
       evidenceCalls++;
       if (evidenceCalls == 1) {
-        return new DurableHistoryMarkerRangeEvidence(
-            new DurableHistoryMarkerRangeEvidence.Source() {
+        return HistoryStoreTestSupport.evidence(new HistoryStoreTestSupport.Source() {
               @Override
               public HistoryCommitMarker marker(long epoch) {
                 return null;

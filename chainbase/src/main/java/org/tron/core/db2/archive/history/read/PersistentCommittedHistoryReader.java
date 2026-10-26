@@ -5,7 +5,6 @@ import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
-import org.tron.core.db2.archive.ArchiveHistoryReadHandles;
 import org.tron.core.db2.archive.ArchivePersistenceException;
 import org.tron.core.db2.archive.BlockReverseDiff;
 import org.tron.core.db2.archive.BlockReverseDiff.DbGroup;
@@ -16,6 +15,7 @@ import org.tron.core.db2.archive.history.model.HistoryCommitMarker;
 import org.tron.core.db2.archive.history.model.HistoryIndexRecord;
 import org.tron.core.db2.archive.history.model.HistoryIndexRecord.KeyGroup;
 import org.tron.core.db2.archive.history.model.HistoryLocation;
+import org.tron.core.db2.archive.history.store.ArchiveHistoryReadHandles;
 import org.tron.core.db2.archive.serving.PinnedServingKeyIndex;
 
 /** Request-owned commit/index/segment handles pinned to one persistent serving generation. */

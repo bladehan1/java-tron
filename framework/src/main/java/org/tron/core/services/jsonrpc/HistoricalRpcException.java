@@ -2,8 +2,8 @@ package org.tron.core.services.jsonrpc;
 
 import org.tron.core.archive.execution.HistoricalCapabilityException;
 import org.tron.core.db2.archive.ArchivePersistenceException;
+import org.tron.core.db2.archive.contract.HistoricalQueryException;
 import org.tron.core.db2.archive.query.HistoricalQueryBudgetException;
-import org.tron.core.db2.archive.query.HistoricalQueryException;
 
 /** Historical-only error projection. Numeric codes retain the current prototype contract. */
 final class HistoricalRpcException extends RuntimeException {

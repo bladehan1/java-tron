@@ -6,7 +6,7 @@ import org.tron.core.capsule.ContractCapsule;
 import org.tron.core.capsule.ContractStateCapsule;
 import org.tron.core.capsule.StorageRowCapsule;
 import org.tron.core.config.Parameter.ForkBlockVersionEnum;
-import org.tron.core.db2.archive.HistoricalQuerySession;
+import org.tron.core.db2.archive.query.session.HistoricalQuerySession;
 
 /** Exact historical state reads backed only by one request-owned Archive session. */
 final class HistoricalArchiveStateSource implements RepositoryStateSource {

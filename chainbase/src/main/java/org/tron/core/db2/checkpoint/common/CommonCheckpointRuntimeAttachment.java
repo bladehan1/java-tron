@@ -2,8 +2,8 @@ package org.tron.core.db2.checkpoint.common;
 
 import java.io.IOException;
 import java.util.Objects;
-import org.tron.core.db2.archive.StateArchiveCheckpointReadSnapshot;
 import org.tron.core.db2.archive.query.HistoricalQueryControl;
+import org.tron.core.db2.archive.query.snapshot.StateArchiveCheckpointReadSnapshot;
 
 /** Default-off lifecycle attachment that exclusively owns one next-format runtime. */
 public final class CommonCheckpointRuntimeAttachment implements AutoCloseable {

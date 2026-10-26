@@ -4,7 +4,7 @@ import lombok.Data;
 import org.tron.common.runtime.ProgramResult;
 import org.tron.core.capsule.BlockCapsule;
 import org.tron.core.capsule.TransactionCapsule;
-import org.tron.core.db2.archive.HistoricalQuerySession;
+import org.tron.core.db2.archive.query.session.HistoricalQuerySession;
 import org.tron.core.store.StoreFactory;
 
 @Data

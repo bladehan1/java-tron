@@ -28,7 +28,7 @@ import org.tron.core.db.KhaosDatabase;
 import org.tron.core.db.Manager;
 import org.tron.core.db2.ISession;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
-import org.tron.core.db2.archive.SnapshotOldValueCollector;
+import org.tron.core.db2.archive.history.write.SnapshotOldValueCollector;
 import org.tron.core.db2.common.RocksDB;
 import org.tron.core.db2.core.Chainbase;
 import org.tron.core.db2.core.SnapshotImpl;

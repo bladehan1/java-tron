@@ -7,9 +7,9 @@ import static org.junit.Assert.assertTrue;
 import org.junit.Test;
 import org.tron.core.archive.execution.HistoricalCapabilityException;
 import org.tron.core.db2.archive.ArchivePersistenceException;
+import org.tron.core.db2.archive.contract.HistoricalQueryException;
+import org.tron.core.db2.archive.contract.HistoricalQueryException.Reason;
 import org.tron.core.db2.archive.query.HistoricalQueryBudgetException;
-import org.tron.core.db2.archive.query.HistoricalQueryException;
-import org.tron.core.db2.archive.query.HistoricalQueryException.Reason;
 
 public class HistoricalRpcExceptionTest {
 

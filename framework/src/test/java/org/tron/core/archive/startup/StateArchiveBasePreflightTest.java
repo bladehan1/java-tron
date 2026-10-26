@@ -17,10 +17,10 @@ import java.util.List;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
-import org.tron.core.db2.archive.ArchiveHistoryWriter;
 import org.tron.core.db2.archive.ArchiveStoreScope;
 import org.tron.core.db2.archive.BlockReverseDiff;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
+import org.tron.core.db2.archive.history.store.ArchiveHistoryWriter;
 
 public class StateArchiveBasePreflightTest {
 

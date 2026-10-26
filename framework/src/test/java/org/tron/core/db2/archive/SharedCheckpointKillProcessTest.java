@@ -17,6 +17,7 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.tron.core.config.args.Args;
+import org.tron.core.db2.archive.checkpoint.storage.SharedCheckpointDatabase;
 
 /** Actual JVM halt with an open native redo database, rather than a clean-close simulation. */
 public class SharedCheckpointKillProcessTest {

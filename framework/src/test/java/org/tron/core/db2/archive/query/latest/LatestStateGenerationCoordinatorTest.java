@@ -21,19 +21,17 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
-import org.tron.core.db2.archive.ArchiveHistoryWriter;
 import org.tron.core.db2.archive.ArchivePersistenceException;
-import org.tron.core.db2.archive.ArchiveProgressEnvelope;
-import org.tron.core.db2.archive.ArchiveStateBarrier;
 import org.tron.core.db2.archive.BlockReverseDiff;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
 import org.tron.core.db2.archive.OldValue;
-import org.tron.core.db2.archive.PersistentServingKeyIndexGeneration;
+import org.tron.core.db2.archive.checkpoint.progress.ArchiveProgressEnvelope;
 import org.tron.core.db2.archive.history.model.HistoryCommitMarker;
+import org.tron.core.db2.archive.history.store.ArchiveHistoryWriter;
 import org.tron.core.db2.archive.query.latest.LatestStateGenerationAdapter.SnapshotCapableStore;
 import org.tron.core.db2.archive.query.latest.LatestStateGenerationAdapter.StoreSnapshot;
-import org.tron.core.db2.archive.query.snapshot.ArchiveReadSnapshot;
 import org.tron.core.db2.archive.query.snapshot.ArchiveReadSnapshot.PinnedLatestState;
+import org.tron.core.db2.archive.serving.PersistentServingKeyIndexGeneration;
 import org.tron.core.db2.core.SnapshotManager;
 
 public class LatestStateGenerationCoordinatorTest {

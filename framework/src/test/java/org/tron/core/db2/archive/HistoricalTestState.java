@@ -13,6 +13,8 @@ import java.util.function.Supplier;
 import org.bouncycastle.util.encoders.Hex;
 import org.tron.common.utils.ByteArray;
 import org.tron.core.db2.archive.query.HistoricalQueryControl;
+import org.tron.core.db2.archive.query.session.HistoricalQuerySession;
+import org.tron.core.db2.archive.query.session.HistoricalSessionTestSupport;
 import org.tron.core.db2.archive.query.snapshot.ArchivePointSnapshot;
 import org.tron.protos.Protocol.Account;
 import org.tron.protos.Protocol.AccountType;
@@ -182,7 +184,7 @@ final class HistoricalTestState implements ArchivePointSnapshot {
   }
 
   HistoricalQuerySession open(HistoricalQuerySession.Limits limits) throws IOException {
-    return HistoricalQuerySession.openPoint(this, hash((int) TARGET_BLOCK), limits,
+    return HistoricalSessionTestSupport.openPoint(this, hash((int) TARGET_BLOCK), limits,
         new HistoricalQueryControl(limits.getTimeoutMillis()), () -> { });
   }
 

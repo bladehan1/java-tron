@@ -47,7 +47,7 @@ import org.tron.core.db.BlockIndexStore;
 import org.tron.core.db.BlockStore;
 import org.tron.core.db.KhaosDatabase;
 import org.tron.core.db.TransactionTrace;
-import org.tron.core.db2.archive.HistoricalQuerySession;
+import org.tron.core.db2.archive.query.session.HistoricalQuerySession;
 import org.tron.core.db2.core.ExecutionAttribution;
 import org.tron.core.exception.BadItemException;
 import org.tron.core.exception.ItemNotFoundException;

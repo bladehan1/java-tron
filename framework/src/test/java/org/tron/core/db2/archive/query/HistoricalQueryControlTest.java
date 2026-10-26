@@ -6,7 +6,8 @@ import static org.junit.Assert.assertTrue;
 
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.Test;
-import org.tron.core.db2.archive.query.HistoricalQueryException.Reason;
+import org.tron.core.db2.archive.contract.HistoricalQueryException;
+import org.tron.core.db2.archive.contract.HistoricalQueryException.Reason;
 
 public class HistoricalQueryControlTest {
 

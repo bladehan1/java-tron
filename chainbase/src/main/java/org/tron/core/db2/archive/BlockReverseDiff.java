@@ -7,7 +7,6 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
 import org.tron.common.math.StrictMathWrapper;
-import org.tron.core.db2.archive.BlockSnapshotMeta;
 
 /** Immutable reverse diff for one canonical block. */
 public final class BlockReverseDiff {
@@ -89,6 +88,11 @@ public final class BlockReverseDiff {
 
     public OldValue getOldValue() {
       return oldValue;
+    }
+
+    /** Estimated plan input retained by one immutable entry, without decoding a body. */
+    public long getEstimatedIndexInputBytes() {
+      return estimatedIndexInputBytes();
     }
 
     long estimatedIndexInputBytes() {

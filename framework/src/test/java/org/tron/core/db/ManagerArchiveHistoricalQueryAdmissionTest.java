@@ -16,10 +16,10 @@ import org.tron.common.parameter.CommonParameter;
 import org.tron.common.utils.Sha256Hash;
 import org.tron.core.ChainBaseManager;
 import org.tron.core.capsule.BlockCapsule;
-import org.tron.core.db2.archive.HistoricalQuerySession;
-import org.tron.core.db2.archive.StateArchiveCheckpointReadSnapshot;
-import org.tron.core.db2.archive.query.HistoricalQueryException;
-import org.tron.core.db2.archive.query.HistoricalQueryException.Reason;
+import org.tron.core.db2.archive.contract.HistoricalQueryException;
+import org.tron.core.db2.archive.contract.HistoricalQueryException.Reason;
+import org.tron.core.db2.archive.query.session.HistoricalQuerySession;
+import org.tron.core.db2.archive.query.snapshot.StateArchiveCheckpointReadSnapshot;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointRuntimeAttachment;
 
 public class ManagerArchiveHistoricalQueryAdmissionTest {

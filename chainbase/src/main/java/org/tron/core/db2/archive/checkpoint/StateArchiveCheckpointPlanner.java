@@ -3,7 +3,7 @@ package org.tron.core.db2.archive.checkpoint;
 import java.io.IOException;
 import java.util.List;
 import org.tron.core.db2.archive.BlockReverseDiff;
-import org.tron.core.db2.archive.StateArchiveHotBatchDescriptor;
+import org.tron.core.db2.archive.history.hot.StateArchiveHotBatchDescriptor;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointCapture;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointMaterializer;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointTarget;

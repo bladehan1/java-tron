@@ -16,9 +16,9 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.springframework.test.util.ReflectionTestUtils;
+import org.tron.core.db2.archive.contract.HistoricalQueryException;
+import org.tron.core.db2.archive.contract.HistoricalQueryException.Reason;
 import org.tron.core.db2.archive.query.HistoricalQueryControl;
-import org.tron.core.db2.archive.query.HistoricalQueryException;
-import org.tron.core.db2.archive.query.HistoricalQueryException.Reason;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointMaterializer.Authority;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointRuntimeOwner.ReadLease;
 

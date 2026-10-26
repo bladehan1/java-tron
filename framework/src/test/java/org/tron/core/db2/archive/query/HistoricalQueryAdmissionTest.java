@@ -9,8 +9,9 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import org.junit.Test;
+import org.tron.core.db2.archive.contract.HistoricalQueryException;
+import org.tron.core.db2.archive.contract.HistoricalQueryException.Reason;
 import org.tron.core.db2.archive.query.HistoricalQueryAdmission.Request;
-import org.tron.core.db2.archive.query.HistoricalQueryException.Reason;
 
 public class HistoricalQueryAdmissionTest {
 

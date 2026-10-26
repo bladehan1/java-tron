@@ -9,7 +9,6 @@ import static org.mockito.Mockito.when;
 
 import java.io.IOException;
 import java.nio.file.Files;
-import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -25,8 +24,8 @@ import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.tron.core.db2.archive.BlockReverseDiff;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
+import org.tron.core.db2.archive.contract.HistoricalQueryException;
 import org.tron.core.db2.archive.query.HistoricalQueryControl;
-import org.tron.core.db2.archive.query.HistoricalQueryException;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointMaterializer.Authority;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointMaterializer.Status;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointRedoCoordinator.RecoveryAction;

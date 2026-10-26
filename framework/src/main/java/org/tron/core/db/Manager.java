@@ -5,7 +5,6 @@ import static org.tron.common.math.Maths.max;
 import static org.tron.common.math.Maths.min;
 import static org.tron.common.utils.Commons.adjustBalance;
 import static org.tron.core.Constant.TRANSACTION_MAX_BYTE_SIZE;
-import static org.tron.core.exception.BadBlockException.TypeEnum.CALC_MERKLE_ROOT_FAILED;
 import static org.tron.protos.Protocol.Transaction.Contract.ContractType.TransferContract;
 import static org.tron.protos.Protocol.Transaction.Result.contractResult.SUCCESS;
 
@@ -55,7 +54,6 @@ import org.bouncycastle.util.encoders.Hex;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
-import org.tron.api.GrpcAPI;
 import org.tron.api.GrpcAPI.TransactionInfoList;
 import org.tron.common.args.GenesisBlock;
 import org.tron.common.bloom.Bloom;
@@ -122,25 +120,25 @@ import org.tron.core.db.api.EnergyPriceHistoryLoader;
 import org.tron.core.db.api.MigrateTurkishKeyHelper;
 import org.tron.core.db.api.MoveAbiHelper;
 import org.tron.core.db2.ISession;
-import org.tron.core.db2.archive.ArchiveFormatAdmissionValidator.Result;
-import org.tron.core.db2.archive.ArchiveHistoryWriter;
 import org.tron.core.db2.archive.ArchiveStoreScope;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
-import org.tron.core.db2.archive.HistoricalAccountAssetBalanceResolver;
-import org.tron.core.db2.archive.HistoricalAccountAssetPrefixResolver;
-import org.tron.core.db2.archive.HistoricalQuerySession;
-import org.tron.core.db2.archive.LatestStateGenerationCoordinatorFactory;
 import org.tron.core.db2.archive.OldValue;
-import org.tron.core.db2.archive.StateArchiveAppendFileRuntime;
-import org.tron.core.db2.archive.StateArchiveCheckpointMaterializer;
-import org.tron.core.db2.archive.StateArchiveCheckpointReadSnapshot;
-import org.tron.core.db2.archive.StateArchiveHotCheckpointMaterializer;
-import org.tron.core.db2.archive.StateArchiveHotStore;
-import org.tron.core.db2.archive.StateArchiveRuntimeOwner;
+import org.tron.core.db2.archive.checkpoint.StateArchiveAppendFileRuntime;
+import org.tron.core.db2.archive.checkpoint.StateArchiveCheckpointMaterializer;
+import org.tron.core.db2.archive.checkpoint.StateArchiveHotCheckpointMaterializer;
+import org.tron.core.db2.archive.checkpoint.authority.ArchiveFormatAdmissionValidator.Result;
+import org.tron.core.db2.archive.history.hot.StateArchiveHotStore;
+import org.tron.core.db2.archive.history.store.ArchiveHistoryWriter;
 import org.tron.core.db2.archive.query.HistoricalQueryAdmission;
+import org.tron.core.db2.archive.query.account.HistoricalAccountAssetBalanceResolver;
+import org.tron.core.db2.archive.query.account.HistoricalAccountAssetPrefixResolver;
 import org.tron.core.db2.archive.query.account.HistoricalAccountBalanceReader;
 import org.tron.core.db2.archive.query.latest.LatestStateGenerationAdapter;
+import org.tron.core.db2.archive.query.latest.LatestStateGenerationCoordinatorFactory;
+import org.tron.core.db2.archive.query.session.HistoricalQuerySession;
 import org.tron.core.db2.archive.query.snapshot.ArchivePointSnapshot;
+import org.tron.core.db2.archive.query.snapshot.StateArchiveCheckpointReadSnapshot;
+import org.tron.core.db2.archive.runtime.StateArchiveRuntimeOwner;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointBaseline;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointBaselineFile;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointFile;
@@ -1376,7 +1374,7 @@ public class Manager {
           "Path-state block-final capture requires account-asset Store");
     }
     org.tron.core.db2.stateroot.PathStateTransitionCollector collector =
-        new org.tron.core.db2.archive.PhysicalSnapshotPathStateCollector();
+        new org.tron.core.db2.archive.history.write.PhysicalSnapshotPathStateCollector();
     org.tron.core.config.args.Storage storage = Args.getInstance().getStorage();
     PathStateRuntimeAttachment attachment = storage.isCommonCheckpointEnabled()
         ? PathStateRuntimeAttachment.commonCheckpoint(collector, pathStateSnapshotHead)

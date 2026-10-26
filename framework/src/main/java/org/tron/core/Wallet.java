@@ -169,7 +169,7 @@ import org.tron.core.db.EnergyProcessor;
 import org.tron.core.db.Manager;
 import org.tron.core.db.TransactionContext;
 import org.tron.core.db.TransactionContext.ExecutionMode;
-import org.tron.core.db2.archive.HistoricalQuerySession;
+import org.tron.core.db2.archive.query.session.HistoricalQuerySession;
 import org.tron.core.db2.core.Chainbase;
 import org.tron.core.db2.core.Chainbase.Cursor;
 import org.tron.core.exception.AccountResourceInsufficientException;

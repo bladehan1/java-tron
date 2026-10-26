@@ -5,7 +5,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 import org.tron.core.db2.archive.BlockReverseDiff;
-import org.tron.core.db2.archive.StateArchiveHotBatchDescriptor;
+import org.tron.core.db2.archive.history.hot.StateArchiveHotBatchDescriptor;
 
 /** V2 coordination payload plus transient Archive bodies that are never encoded into its WAL. */
 public final class CommonCheckpointCapture {

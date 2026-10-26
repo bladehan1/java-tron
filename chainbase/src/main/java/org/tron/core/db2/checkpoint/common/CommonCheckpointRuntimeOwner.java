@@ -5,8 +5,8 @@ import java.io.UncheckedIOException;
 import java.util.Objects;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import org.tron.common.math.StrictMathWrapper;
+import org.tron.core.db2.archive.contract.HistoricalQueryException;
 import org.tron.core.db2.archive.query.HistoricalQueryControl;
-import org.tron.core.db2.archive.query.HistoricalQueryException;
 
 /** Explicit lifecycle and read gate for the next-format common-checkpoint runtime. */
 public final class CommonCheckpointRuntimeOwner implements AutoCloseable {
@@ -132,8 +132,8 @@ public final class CommonCheckpointRuntimeOwner implements AutoCloseable {
         }
       } catch (InterruptedException failure) {
         Thread.currentThread().interrupt();
-        throw new org.tron.core.db2.archive.query.HistoricalQueryException(
-            org.tron.core.db2.archive.query.HistoricalQueryException.Reason.CANCELLED,
+        throw new org.tron.core.db2.archive.contract.HistoricalQueryException(
+            org.tron.core.db2.archive.contract.HistoricalQueryException.Reason.CANCELLED,
             "Historical pin interrupted", failure);
       }
     }

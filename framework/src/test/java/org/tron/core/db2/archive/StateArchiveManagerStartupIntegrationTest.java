@@ -54,15 +54,27 @@ import org.tron.core.db.Manager;
 import org.tron.core.db.TronDatabase;
 import org.tron.core.db.common.DbSourceInter;
 import org.tron.core.db2.ISession;
-import org.tron.core.db2.archive.StateArchiveRuntimeOwner.ReadableStateStage;
-import org.tron.core.db2.archive.StateArchiveRuntimeOwner.ServingIndexStage;
-import org.tron.core.db2.archive.StateArchiveRuntimeOwner.State;
+import org.tron.core.db2.archive.contract.AccountAssetStorage;
+import org.tron.core.db2.archive.history.codec.P66AccountAssetCodec;
 import org.tron.core.db2.archive.history.model.HistoryCommitMarker;
+import org.tron.core.db2.archive.history.store.ArchiveHistoryWriter;
 import org.tron.core.db2.archive.query.ArchiveRuntimeQueryGate;
+import org.tron.core.db2.archive.query.account.HistoricalAccountAssetBalanceResolver;
+import org.tron.core.db2.archive.query.account.HistoricalAccountAssetPrefixResolver;
 import org.tron.core.db2.archive.query.account.HistoricalAccountBalanceReader;
-import org.tron.core.db2.archive.query.latest.LatestStateGenerationAdapter;
 import org.tron.core.db2.archive.query.latest.LatestStateGenerationAdapter.SnapshotCapableStore;
 import org.tron.core.db2.archive.query.latest.LatestStateGenerationAdapter.StoreSnapshot;
+import org.tron.core.db2.archive.recovery.wal.ArchiveWalBinding;
+import org.tron.core.db2.archive.recovery.wal.ArchiveWalBindingTestSupport;
+import org.tron.core.db2.archive.runtime.RuntimeOwnerTestSupport;
+import org.tron.core.db2.archive.runtime.StateArchiveRuntimeOwner;
+import org.tron.core.db2.archive.runtime.StateArchiveRuntimeOwner.ReadableStateStage;
+import org.tron.core.db2.archive.runtime.StateArchiveRuntimeOwner.ServingIndexStage;
+import org.tron.core.db2.archive.runtime.StateArchiveRuntimeOwner.State;
+import org.tron.core.db2.archive.serving.PersistentServingKeyIndexCatalog;
+import org.tron.core.db2.archive.serving.PersistentServingKeyIndexGeneration;
+import org.tron.core.db2.archive.serving.ServingTestSupport;
+import org.tron.core.db2.archive.storage.index.IndexStorageTestSupport;
 import org.tron.core.db2.common.DB;
 import org.tron.core.db2.common.Flusher;
 import org.tron.core.db2.common.LevelDB;
@@ -247,7 +259,7 @@ public class StateArchiveManagerStartupIntegrationTest {
       try (PersistentServingKeyIndexCatalog catalog =
           PersistentServingKeyIndexCatalog.open(archive.resolve("serving-index"));
           PersistentServingKeyIndexGeneration serving = catalog.pin()) {
-        assertEquals(Engine.valueOf(engine), serving.getEngine());
+        assertEquals(Engine.valueOf(engine), ServingTestSupport.engine(serving));
       }
       assertEquals(head.getEpoch(), snapshots.getArchiveReadableEpoch());
       assertTrue(Files.isRegularFile(archive.resolve("MANIFEST")));
@@ -424,7 +436,7 @@ public class StateArchiveManagerStartupIntegrationTest {
     byte[] orphanKey = codec.assetPhysicalKey(orphanAddress, tokenId);
     byte[] mixedKey = codec.assetPhysicalKey(mixedAddress, tokenId);
     fixture.databases.get("properties").put(
-        HistoricalAccountAssetBalanceResolver.proposal66PhysicalKey(), longValue(0));
+        AccountAssetStorage.proposal66PhysicalKey(), longValue(0));
     fixture.databases.get("account").put(address,
         assetAccount(address, false, tokenId, 20));
     withArchiveConfig(output, "ROCKSDB", true, () -> invoke(manager, "initStateArchive"));
@@ -441,7 +453,7 @@ public class StateArchiveManagerStartupIntegrationTest {
       try (ISession block = snapshots.buildSession()) {
         if (epoch == 7) {
           fixture.databases.get("properties").put(
-              HistoricalAccountAssetBalanceResolver.proposal66PhysicalKey(), longValue(1));
+              AccountAssetStorage.proposal66PhysicalKey(), longValue(1));
           fixture.databases.get("account").put(address,
               assetAccount(address, true, null, 0));
           fixture.databases.get("account-asset").put(directKey, longValue(30));
@@ -490,7 +502,7 @@ public class StateArchiveManagerStartupIntegrationTest {
     SnapshotFixture restarted = snapshotFixture(recoveredCheckpoint);
     Manager restartedManager = manager(restarted.snapshots, target);
     restarted.databases.get("properties").put(
-        HistoricalAccountAssetBalanceResolver.proposal66PhysicalKey(), longValue(1));
+        AccountAssetStorage.proposal66PhysicalKey(), longValue(1));
     invokeCheckpointRecovery(restarted.snapshots, restarted.checkpoint);
     withArchiveConfig(output, "ROCKSDB", true,
         () -> invoke(restartedManager, "initStateArchive"));
@@ -526,7 +538,7 @@ public class StateArchiveManagerStartupIntegrationTest {
     String tokenId = "1000012";
     byte[] directKey = new P66AccountAssetCodec().assetPhysicalKey(address, tokenId);
     fixture.databases.get("properties").put(
-        HistoricalAccountAssetBalanceResolver.proposal66PhysicalKey(), longValue(0));
+        AccountAssetStorage.proposal66PhysicalKey(), longValue(0));
     fixture.databases.get("account").put(address,
         assetAccount(address, false, tokenId, 20));
     invoke(manager, "initStateArchive");
@@ -535,7 +547,7 @@ public class StateArchiveManagerStartupIntegrationTest {
     BlockSnapshotMeta activation = new BlockSnapshotMeta(7, 7, hash(7), hash(6), 7_000L);
     try (ISession block = fixture.snapshots.buildSession()) {
       fixture.databases.get("properties").put(
-          HistoricalAccountAssetBalanceResolver.proposal66PhysicalKey(), longValue(1));
+          AccountAssetStorage.proposal66PhysicalKey(), longValue(1));
       fixture.databases.get("account").put(address,
           assetAccount(address, false, tokenId, 30));
       block.commit(activation);
@@ -653,7 +665,7 @@ public class StateArchiveManagerStartupIntegrationTest {
     byte[] directKey = new P66AccountAssetCodec().assetPhysicalKey(address, tokenId);
     seedNativeExact27(fixture.databases, 6);
     fixture.databases.get("properties").put(
-        HistoricalAccountAssetBalanceResolver.proposal66PhysicalKey(), longValue(0));
+        AccountAssetStorage.proposal66PhysicalKey(), longValue(0));
     fixture.databases.get("account").put(address,
         assetAccount(address, false, tokenId, 20));
     Map<String, String> sourceIdentities = sourceIdentities(fixture, accountAssetStore);
@@ -668,7 +680,7 @@ public class StateArchiveManagerStartupIntegrationTest {
         mutateNativeExact27(fixture.databases, epoch);
         if (epoch == 7) {
           fixture.databases.get("properties").put(
-              HistoricalAccountAssetBalanceResolver.proposal66PhysicalKey(), longValue(1));
+              AccountAssetStorage.proposal66PhysicalKey(), longValue(1));
           fixture.databases.get("account").put(address,
               assetAccount(address, false, tokenId, 30));
         } else {
@@ -751,7 +763,7 @@ public class StateArchiveManagerStartupIntegrationTest {
     String tokenId = "1000011";
     byte[] directKey = new P66AccountAssetCodec().assetPhysicalKey(address, tokenId);
     fixture.databases.get("properties").put(
-        HistoricalAccountAssetBalanceResolver.proposal66PhysicalKey(), longValue(0));
+        AccountAssetStorage.proposal66PhysicalKey(), longValue(0));
     fixture.databases.get("account").put(address,
         assetAccount(address, false, tokenId, 20));
     invoke(manager, "initStateArchive");
@@ -783,7 +795,7 @@ public class StateArchiveManagerStartupIntegrationTest {
       try (ISession block = fixture.snapshots.buildSession()) {
         if (epoch == 7) {
           fixture.databases.get("properties").put(
-              HistoricalAccountAssetBalanceResolver.proposal66PhysicalKey(), longValue(1));
+              AccountAssetStorage.proposal66PhysicalKey(), longValue(1));
           fixture.databases.get("account").put(address,
               assetAccount(address, false, tokenId, 30));
         } else if (epoch == 8) {
@@ -846,7 +858,7 @@ public class StateArchiveManagerStartupIntegrationTest {
     Manager interruptedManager = manager(interrupted.snapshots, target,
         interruptedAccountAssetStore, targetOptimization);
     interrupted.databases.get("properties").put(
-        HistoricalAccountAssetBalanceResolver.proposal66PhysicalKey(), longValue(1));
+        AccountAssetStorage.proposal66PhysicalKey(), longValue(1));
     invokeCheckpointRecovery(interrupted.snapshots, interrupted.checkpoint);
     AtomicReference<ServingIndexStage> upgradeFailure =
         new AtomicReference<>(ServingIndexStage.GENERATION_INSTALLED);
@@ -869,7 +881,7 @@ public class StateArchiveManagerStartupIntegrationTest {
     Manager restartedManager = manager(restarted.snapshots, target, reopenedAccountAssetStore,
         targetOptimization);
     restarted.databases.get("properties").put(
-        HistoricalAccountAssetBalanceResolver.proposal66PhysicalKey(), longValue(1));
+        AccountAssetStorage.proposal66PhysicalKey(), longValue(1));
     invokeCheckpointRecovery(restarted.snapshots, restarted.checkpoint);
     invoke(restartedManager, "initStateArchive");
     assertAccountAsset(restartedManager, 6, address, tokenId,
@@ -913,12 +925,12 @@ public class StateArchiveManagerStartupIntegrationTest {
 
       withArchiveConfig(output, engine, true, () -> invoke(manager, "initStateArchive"));
       Path runtimeBuilder = archive.resolve(
-          StateArchiveRuntimeOwner.SERVING_INDEX_RUNTIME_DIRECTORY).resolve("keys");
+          RuntimeOwnerTestSupport.servingRuntimeDirectory()).resolve("keys");
       Engine selectedEngine = Engine.valueOf(engine);
 
       assertEquals(State.RUNNING, manager.getStateArchiveRuntime().getState());
       assertEquals(1,
-          StateArchiveIndexDatabase.openReferenceCount(runtimeBuilder, selectedEngine));
+          IndexStorageTestSupport.openReferenceCount(runtimeBuilder, selectedEngine));
       assertEquals(0, manager.getStateArchiveRuntime().getStartupRecoveryActionCount());
       assertEquals(head.getMeta(), manager.getStateArchiveRuntime().getRecoveredHead());
       assertNotNull(manager.getArchiveHistoryWriter());
@@ -963,13 +975,13 @@ public class StateArchiveManagerStartupIntegrationTest {
         assertEquals("ROCKSDB".equals(engine), inspection.getGeneration().getEngine()
             .getPendingCompactionBytes().isAvailable());
         assertEquals(1,
-            StateArchiveIndexDatabase.openReferenceCount(runtimeBuilder, selectedEngine));
+            IndexStorageTestSupport.openReferenceCount(runtimeBuilder, selectedEngine));
         setField(snapshots, "size", 0);
       }
 
       invoke(manager, "closeStateArchive");
       assertEquals(0,
-          StateArchiveIndexDatabase.openReferenceCount(runtimeBuilder, selectedEngine));
+          IndexStorageTestSupport.openReferenceCount(runtimeBuilder, selectedEngine));
       assertEquals(-1, snapshots.getArchiveReadableEpoch());
       assertNull(manager.getStateArchiveRuntime());
       assertNull(manager.getArchiveHistoryWriter());
@@ -1035,7 +1047,7 @@ public class StateArchiveManagerStartupIntegrationTest {
       assertTrue(checkpointDatabases.contains("proposal"));
       assertTrue(checkpointDatabases.contains("block"));
       assertTrue(checkpointDatabases.contains("block-index"));
-      assertTrue(checkpointDatabases.contains(ArchiveWalBinding.CHECKPOINT_DATABASE));
+      assertTrue(checkpointDatabases.contains(ArchiveWalBindingTestSupport.checkpointDatabase()));
       SnapshotFixture recovered = snapshotFixture(checkpointBatch.getValue());
       invokeCheckpointRecovery(recovered.snapshots, recovered.checkpoint);
       assertNotNull(recovered.snapshots.getRecoveredArchiveWalBinding());
@@ -1150,9 +1162,8 @@ public class StateArchiveManagerStartupIntegrationTest {
     ArchiveWalBinding valid = binding(archive, 6, 6);
     byte[] substitutedRefs = valid.getHistoryRefsDigest();
     substitutedRefs[0] ^= 1;
-    ArchiveWalBinding substituted = new ArchiveWalBinding(valid.getFirst(), valid.getLast(),
-        valid.getPredecessorEpoch(), valid.getPredecessorHash(), valid.getBatchDigest(),
-        valid.getStoreScopeDigest(), substitutedRefs, valid.getBlockIndexRefsDigest());
+    ArchiveWalBinding substituted = ArchiveWalBindingTestSupport.withHistoryRefs(valid,
+        substitutedRefs);
     setField(fixture.snapshots, "recoveredArchiveWalBinding", substituted);
     Manager manager = manager(fixture.snapshots, head);
 

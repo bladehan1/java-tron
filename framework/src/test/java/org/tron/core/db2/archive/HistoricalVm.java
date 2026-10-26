@@ -12,6 +12,7 @@ import org.tron.core.capsule.BlockCapsule;
 import org.tron.core.capsule.TransactionCapsule;
 import org.tron.core.db.TransactionContext;
 import org.tron.core.db.TransactionContext.ExecutionMode;
+import org.tron.core.db2.archive.query.session.HistoricalQuerySession;
 import org.tron.core.vm.Op;
 import org.tron.protos.Protocol;
 import org.tron.protos.Protocol.Transaction.Contract.ContractType;

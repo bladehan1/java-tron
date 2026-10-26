@@ -26,6 +26,8 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.tron.core.config.args.Args;
+import org.tron.core.db2.archive.checkpoint.storage.SharedCheckpointDatabase;
+import org.tron.core.db2.archive.storage.index.ArchiveIndexStorage;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointFile;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointMaterializer;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointPayload;
@@ -63,9 +65,9 @@ public class SharedCheckpointDatabaseTest {
       if (corruptBody) {
         encoded[encoded.length - 1] ^= 1;
       }
-      try (StateArchiveIndexDatabase.Writer writer =
-          StateArchiveIndexDatabase.openWriter(root, engine())) {
-        writer.write(Collections.singletonList(StateArchiveIndexDatabase.put(key, encoded)), true);
+      try (ArchiveIndexStorage.Writer writer =
+          ArchiveIndexStorage.openWriter(root, engine())) {
+        writer.write(Collections.singletonList(ArchiveIndexStorage.put(key, encoded)), true);
       }
       // The optimization must retain both checksum validation and key-to-block binding.
       assertThrows(IOException.class, () -> new SharedCheckpointDatabase(root, engine()));
@@ -200,9 +202,9 @@ public class SharedCheckpointDatabaseTest {
     byte[] prefix = "generation/v1/".getBytes(java.nio.charset.StandardCharsets.US_ASCII);
     byte[] key = java.nio.ByteBuffer.allocate(prefix.length + Long.BYTES)
         .put(prefix).putLong(1).array();
-    try (StateArchiveIndexDatabase.Writer writer =
-        StateArchiveIndexDatabase.openWriter(root, engine())) {
-      writer.write(Collections.singletonList(StateArchiveIndexDatabase.delete(key)), true);
+    try (ArchiveIndexStorage.Writer writer =
+        ArchiveIndexStorage.openWriter(root, engine())) {
+      writer.write(Collections.singletonList(ArchiveIndexStorage.delete(key)), true);
     }
     // The first generation anchor must survive: deletion cannot silently reset the base.
     assertThrows(IOException.class, () -> new SharedCheckpointDatabase(root, engine()));

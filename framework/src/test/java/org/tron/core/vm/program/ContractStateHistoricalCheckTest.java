@@ -10,8 +10,8 @@ import static org.mockito.Mockito.when;
 
 import org.junit.Test;
 import org.tron.common.runtime.vm.DataWord;
-import org.tron.core.db2.archive.query.HistoricalQueryException;
-import org.tron.core.db2.archive.query.HistoricalQueryException.Reason;
+import org.tron.core.db2.archive.contract.HistoricalQueryException;
+import org.tron.core.db2.archive.contract.HistoricalQueryException.Reason;
 import org.tron.core.vm.program.invoke.ProgramInvoke;
 import org.tron.core.vm.repository.Repository;
 

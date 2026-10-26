@@ -10,6 +10,7 @@ import org.junit.After;
 import org.junit.Test;
 import org.tron.core.archive.execution.HistoricalCapabilityException;
 import org.tron.core.db2.archive.query.HistoricalQueryBudgetException;
+import org.tron.core.db2.archive.query.session.HistoricalQuerySession;
 import org.tron.core.vm.Op;
 import org.tron.core.vm.config.VMConfig;
 

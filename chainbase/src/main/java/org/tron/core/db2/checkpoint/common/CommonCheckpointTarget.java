@@ -3,7 +3,7 @@ package org.tron.core.db2.checkpoint.common;
 import java.util.Arrays;
 import java.util.Objects;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
-import org.tron.core.db2.archive.StateArchiveHotBatchDescriptor;
+import org.tron.core.db2.archive.history.hot.StateArchiveHotBatchDescriptor;
 
 /** Immutable identity every authority must reach for one common-checkpoint payload. */
 public final class CommonCheckpointTarget {

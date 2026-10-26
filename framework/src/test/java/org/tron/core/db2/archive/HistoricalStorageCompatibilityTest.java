@@ -10,6 +10,7 @@ import org.junit.Test;
 import org.tron.common.runtime.vm.DataWord;
 import org.tron.core.capsule.StorageRowCapsule;
 import org.tron.core.config.Parameter.ForkBlockVersionEnum;
+import org.tron.core.db2.archive.query.session.HistoricalQuerySession;
 import org.tron.core.store.StorageRowKeyCodec;
 import org.tron.core.vm.program.Storage;
 import org.tron.protos.contract.SmartContractOuterClass.SmartContract;

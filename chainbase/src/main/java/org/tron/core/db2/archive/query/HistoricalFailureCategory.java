@@ -1,6 +1,7 @@
 package org.tron.core.db2.archive.query;
 
 import org.tron.core.db2.archive.ArchivePersistenceException;
+import org.tron.core.db2.archive.contract.HistoricalQueryException;
 
 /**
  * Stable external categories of historical query failures (chapter 05 section 3.15), with their

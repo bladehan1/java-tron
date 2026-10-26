@@ -5,12 +5,12 @@ import java.nio.file.Path;
 import java.util.Arrays;
 import lombok.extern.slf4j.Slf4j;
 import org.tron.core.config.args.Storage;
-import org.tron.core.db2.archive.ArchiveFormatAdmissionValidator.Result;
-import org.tron.core.db2.archive.ArchiveFormatAdmissionValidator.Status;
-import org.tron.core.db2.archive.ArchiveHistoryWriter;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
-import org.tron.core.db2.archive.SnapshotOldValueCollector;
-import org.tron.core.db2.archive.StateArchiveRuntimeOwner;
+import org.tron.core.db2.archive.checkpoint.authority.ArchiveFormatAdmissionValidator.Result;
+import org.tron.core.db2.archive.checkpoint.authority.ArchiveFormatAdmissionValidator.Status;
+import org.tron.core.db2.archive.history.store.ArchiveHistoryWriter;
+import org.tron.core.db2.archive.history.write.SnapshotOldValueCollector;
+import org.tron.core.db2.archive.runtime.StateArchiveRuntimeOwner;
 import org.tron.core.db2.core.SnapshotManager;
 import org.tron.core.store.DynamicPropertiesStore;
 

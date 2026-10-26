@@ -64,6 +64,23 @@ public final class ArchiveStoreScope {
     return EXCLUDED_DATABASES.contains(dbName);
   }
 
+  /** Frozen participant order shared by history and serving identities. */
+  public static List<String> getParticipants() {
+    return DESCRIPTOR.getParticipants();
+  }
+
+  public static String getFormatId() {
+    return ArchiveParticipantDescriptor.FORMAT_ID;
+  }
+
+  public static int getStoreId(String database) {
+    return DESCRIPTOR.getStoreId(database);
+  }
+
+  public static void requireExactParticipants(Collection<String> participants) {
+    DESCRIPTOR.requireExactParticipants(participants);
+  }
+
   public static Set<String> getExcludedDatabases() {
     return EXCLUDED_DATABASES;
   }

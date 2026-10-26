@@ -49,6 +49,8 @@ import org.tron.core.config.args.Args;
 import org.tron.core.db.Manager;
 import org.tron.core.db2.archive.BlockReverseDiff.DbGroup;
 import org.tron.core.db2.archive.BlockReverseDiff.Entry;
+import org.tron.core.db2.archive.history.hot.StateArchiveHotBatchDescriptor;
+import org.tron.core.db2.archive.history.v5.StateArchiveAppendCheckpointMaterializerV5;
 import org.tron.core.db2.archive.query.HistoricalQueryAdmission;
 import org.tron.core.db2.archive.query.snapshot.ArchiveReadSnapshot;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointCapture;

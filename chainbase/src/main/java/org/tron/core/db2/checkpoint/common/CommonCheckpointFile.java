@@ -15,7 +15,7 @@ import java.util.Objects;
 /** Standalone durable file lifecycle for one immutable common-checkpoint redo payload. */
 public final class CommonCheckpointFile implements java.io.Closeable {
 
-  private org.tron.core.db2.archive.SharedCheckpointDatabase shared;
+  private org.tron.core.db2.archive.checkpoint.storage.SharedCheckpointDatabase shared;
 
   static final String FILE_NAME = "COMMON_CHECKPOINT";
   static final String TEMPORARY_FILE_NAME = ".COMMON_CHECKPOINT.tmp";
@@ -56,7 +56,7 @@ public final class CommonCheckpointFile implements java.io.Closeable {
       }
       return result;
     }
-    result.shared = new org.tron.core.db2.archive.SharedCheckpointDatabase(
+    result.shared = new org.tron.core.db2.archive.checkpoint.storage.SharedCheckpointDatabase(
         directory.resolve("redo"), engine);
     return result;
   }

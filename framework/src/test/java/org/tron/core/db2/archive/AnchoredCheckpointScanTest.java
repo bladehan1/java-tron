@@ -13,6 +13,8 @@ import java.util.Collections;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
+import org.tron.core.db2.archive.checkpoint.storage.SharedCheckpointDatabase;
+import org.tron.core.db2.archive.storage.index.ArchiveIndexStorage;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointPayloadCodec;
 import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
 
@@ -51,13 +53,13 @@ public class AnchoredCheckpointScanTest {
     for (Engine engine : engines()) {
       Path root = temporary.newFolder().toPath();
       try (SharedCheckpointDatabase db = new SharedCheckpointDatabase(root, engine);
-          StateArchiveIndexDatabase.Writer tamper = StateArchiveIndexDatabase.openWriter(root,
+          ArchiveIndexStorage.Writer tamper = ArchiveIndexStorage.openWriter(root,
               engine)) {
         db.publish(payload(1));
         db.applied();
         db.publish(payload(2));
         db.applied();
-        tamper.write(Collections.singletonList(StateArchiveIndexDatabase.put(
+        tamper.write(Collections.singletonList(ArchiveIndexStorage.put(
             key("first-retained/v1"), generation(2))), true);
         assertThrows(IOException.class, db::retainedForDurableBase);
         assertThrows(IOException.class, db::advanceDurableBase);
@@ -74,13 +76,13 @@ public class AnchoredCheckpointScanTest {
     for (Engine engine : engines()) {
       Path root = temporary.newFolder().toPath();
       try (SharedCheckpointDatabase db = new SharedCheckpointDatabase(root, engine);
-          StateArchiveIndexDatabase.Writer tamper = StateArchiveIndexDatabase.openWriter(root,
+          ArchiveIndexStorage.Writer tamper = ArchiveIndexStorage.openWriter(root,
               engine)) {
         db.publish(payload(1));
         db.applied();
         db.publish(payload(2));
         db.applied();
-        tamper.write(Collections.singletonList(StateArchiveIndexDatabase.delete(generation(1))),
+        tamper.write(Collections.singletonList(ArchiveIndexStorage.delete(generation(1))),
             true);
         assertThrows(IOException.class, db::retainedForDurableBase);
         assertThrows(IOException.class, db::advanceDurableBase);
@@ -102,9 +104,9 @@ public class AnchoredCheckpointScanTest {
         db.applied();
         db.advanceDurableBase();
       }
-      try (StateArchiveIndexDatabase.Writer writer = StateArchiveIndexDatabase.openWriter(root,
+      try (ArchiveIndexStorage.Writer writer = ArchiveIndexStorage.openWriter(root,
           engine)) {
-        writer.write(Collections.singletonList(StateArchiveIndexDatabase.put(generation(1),
+        writer.write(Collections.singletonList(ArchiveIndexStorage.put(generation(1),
             new CommonCheckpointPayloadCodec().encode(payload(1)))), true);
       }
       assertThrows(IOException.class, () -> new SharedCheckpointDatabase(root, engine));
@@ -117,7 +119,7 @@ public class AnchoredCheckpointScanTest {
       for (boolean corruptBody : new boolean[]{true, false}) {
         Path root = temporary.newFolder().toPath();
         try (SharedCheckpointDatabase db = new SharedCheckpointDatabase(root, engine);
-            StateArchiveIndexDatabase.Writer tamper = StateArchiveIndexDatabase.openWriter(root,
+            ArchiveIndexStorage.Writer tamper = ArchiveIndexStorage.openWriter(root,
                 engine)) {
           db.publish(payload(1));
           db.applied();
@@ -125,7 +127,7 @@ public class AnchoredCheckpointScanTest {
           if (corruptBody) {
             body[body.length - 1] ^= 1;
           }
-          tamper.write(Collections.singletonList(StateArchiveIndexDatabase.put(generation(1),
+          tamper.write(Collections.singletonList(ArchiveIndexStorage.put(generation(1),
               body)), true);
           assertThrows(IOException.class, db::retainedForDurableBase);
         }

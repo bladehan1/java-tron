@@ -1,6 +1,6 @@
 package org.tron.core.db2.archive.history.write;
 
-import org.tron.core.db2.archive.DurableHistoryMarkerRangeEvidence;
+import org.tron.core.db2.archive.history.write.DurableHistoryMarkerRangeEvidence;
 
 /** Archive sink whose committed history can gate checkpoint and disk-layer advancement. */
 public interface DurableBlockReverseDiffSink extends BlockReverseDiffSink {

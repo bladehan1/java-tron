@@ -2,6 +2,7 @@ package org.tron.core.db2.archive.query;
 
 import java.util.HashSet;
 import java.util.Set;
+import org.tron.core.db2.archive.contract.HistoricalQueryException;
 
 /** Fail-fast admission; cancellation never closes another thread's native snapshot. */
 public final class HistoricalQueryAdmission {

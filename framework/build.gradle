@@ -137,7 +137,7 @@ def configureTestTask = { Task t ->
 
 test {
     configureTestTask(it)
-    exclude 'org/tron/core/db2/archive/ServingIndexStoreLargeBlockTest.class'
+    exclude 'org/tron/core/db2/archive/serving/ServingIndexStoreLargeBlockTest.class'
     jacoco {
         destinationFile = file("$buildDir/jacoco/jacocoTest.exec")
         classDumpDir = file("$buildDir/jacoco/classpathdumps")
@@ -276,6 +276,6 @@ tasks.register('archiveLargeBlock', Test) {
     maxHeapSize = "1g"
     maxParallelForks = 1
     retry { maxRetries = 0 }
-    include 'org/tron/core/db2/archive/ServingIndexStoreLargeBlockTest.class'
+    include 'org/tron/core/db2/archive/serving/ServingIndexStoreLargeBlockTest.class'
 }
 check.dependsOn archiveLargeBlock

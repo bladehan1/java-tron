@@ -4,7 +4,7 @@ import com.google.common.primitives.Bytes;
 import java.util.HashMap;
 import java.util.Map;
 import org.tron.common.utils.ByteArray;
-import org.tron.core.db2.archive.query.HistoricalExecutionScope;
+import org.tron.core.db2.archive.query.session.HistoricalExecutionScope;
 import org.tron.core.store.AccountAssetStore;
 import org.tron.core.store.DynamicPropertiesStore;
 import org.tron.protos.Protocol.Account;

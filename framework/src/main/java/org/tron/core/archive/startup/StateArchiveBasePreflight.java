@@ -2,9 +2,9 @@ package org.tron.core.archive.startup;
 
 import java.nio.file.Path;
 import java.util.Objects;
-import org.tron.core.db2.archive.ArchiveFormatAdmissionValidator;
-import org.tron.core.db2.archive.ArchiveFormatAdmissionValidator.Result;
-import org.tron.core.db2.archive.ArchiveFormatAdmissionValidator.Status;
+import org.tron.core.db2.archive.checkpoint.authority.ArchiveFormatAdmissionValidator;
+import org.tron.core.db2.archive.checkpoint.authority.ArchiveFormatAdmissionValidator.Result;
+import org.tron.core.db2.archive.checkpoint.authority.ArchiveFormatAdmissionValidator.Status;
 
 /** Read-only base-format gate that must run before the archive writer opens. */
 final class StateArchiveBasePreflight {

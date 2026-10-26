@@ -17,6 +17,9 @@ import org.tron.common.TestConstants;
 import org.tron.common.parameter.CommonParameter;
 import org.tron.core.config.args.Storage;
 import org.tron.core.config.args.StorageConfig;
+import org.tron.core.db2.archive.recovery.wal.ArchiveWalBinding;
+import org.tron.core.db2.archive.recovery.wal.ArchiveWalBindingCodec;
+import org.tron.core.db2.archive.recovery.wal.ArchiveWalBindingTestSupport;
 import org.tron.core.db2.core.SnapshotManager;
 import org.tron.core.store.CheckPointV2Store;
 import org.tron.core.store.CheckTmpStore;
@@ -165,7 +168,7 @@ public class ArchiveCheckpointFileRecoveryTest {
   private static ArchiveWalBinding binding(int epoch) {
     BlockSnapshotMeta meta = new BlockSnapshotMeta(epoch, epoch, hash(epoch),
         hash(epoch - 1), epoch * 1_000L);
-    return new ArchiveWalBinding(meta, meta, epoch - 1L, hash(epoch - 1),
+    return ArchiveWalBindingTestSupport.create(meta, meta, epoch - 1L, hash(epoch - 1),
         digest(epoch), digest(epoch + 10), digest(epoch + 20), digest(epoch + 30));
   }
 

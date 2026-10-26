@@ -3,7 +3,7 @@ package org.tron.core.vm.utils;
 import org.tron.common.utils.ForkController;
 import org.tron.core.capsule.AccountCapsule;
 import org.tron.core.config.Parameter;
-import org.tron.core.db2.archive.query.HistoricalExecutionScope;
+import org.tron.core.db2.archive.query.session.HistoricalExecutionScope;
 import org.tron.core.exception.ContractValidateException;
 import org.tron.core.vm.VMUtils;
 import org.tron.core.vm.program.Program.OutOfTimeException;

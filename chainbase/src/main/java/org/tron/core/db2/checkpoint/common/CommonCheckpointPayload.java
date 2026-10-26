@@ -9,7 +9,7 @@ import java.util.Objects;
 import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.db2.archive.BlockReverseDiff;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
-import org.tron.core.db2.archive.StateArchiveHotBatchDescriptor;
+import org.tron.core.db2.archive.history.hot.StateArchiveHotBatchDescriptor;
 import org.tron.core.db2.core.Chainbase;
 import org.tron.core.db2.stateroot.PathStateFlushTarget;
 import org.tron.core.db2.stateroot.PathStateSnapshotDelta;
