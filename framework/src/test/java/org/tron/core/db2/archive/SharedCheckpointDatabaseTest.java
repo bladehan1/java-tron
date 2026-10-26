@@ -29,6 +29,7 @@ import org.tron.core.config.args.Args;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointFile;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointMaterializer;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointPayload;
+import org.tron.core.db2.checkpoint.common.CommonCheckpointPayloadCodec;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointRedoCoordinator;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointRedoCoordinator.RecoveryAction;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointTarget;
@@ -45,6 +46,30 @@ public class SharedCheckpointDatabaseTest {
   public static void setup() {
     Args.setParam(new String[]{"--output-directory", "output_shared_checkpoint_test"},
         "config-test.conf");
+  }
+
+  @Test
+  public void retainedScanRejectsCorruptBodyAndGenerationIdentity() throws Exception {
+    for (boolean corruptBody : new boolean[]{true, false}) {
+      Path root = temporary.newFolder().toPath();
+      try (SharedCheckpointDatabase database = new SharedCheckpointDatabase(root, engine())) {
+        database.publish(payload(1));
+        database.applied();
+      }
+      byte[] prefix = "generation/v1/".getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+      byte[] key = java.nio.ByteBuffer.allocate(prefix.length + Long.BYTES)
+          .put(prefix).putLong(1).array();
+      byte[] encoded = new CommonCheckpointPayloadCodec().encode(payload(corruptBody ? 1 : 2));
+      if (corruptBody) {
+        encoded[encoded.length - 1] ^= 1;
+      }
+      try (StateArchiveIndexDatabase.Writer writer =
+          StateArchiveIndexDatabase.openWriter(root, engine())) {
+        writer.write(Collections.singletonList(StateArchiveIndexDatabase.put(key, encoded)), true);
+      }
+      // The optimization must retain both checksum validation and key-to-block binding.
+      assertThrows(IOException.class, () -> new SharedCheckpointDatabase(root, engine()));
+    }
   }
 
   @Test

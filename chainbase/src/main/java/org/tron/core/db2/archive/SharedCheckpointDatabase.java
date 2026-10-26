@@ -11,7 +11,6 @@ import java.util.List;
 import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointPayload;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointPayloadCodec;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointTarget;
 import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
 
 /** One synchronously committed database retains both Chainbase and PathState redo generations. */
@@ -58,8 +57,7 @@ public final class SharedCheckpointDatabase implements Closeable {
   /** The payload and commit pointer are one sync batch: no target write precedes this decision. */
   public synchronized void publish(CommonCheckpointPayload payload) throws IOException {
     byte[] encoded = codec.encode(payload);
-    CommonCheckpointTarget target = CommonCheckpointTarget.from(payload);
-    byte[] generation = generation(target.getLastBlock().getBlockNumber());
+    byte[] generation = generation(lastBlock(payload).getBlockNumber());
     byte[] existing = writer.get(generation);
     if (existing != null) {
       if (!Arrays.equals(existing, encoded) || !Arrays.equals(writer.get(HEAD), generation)) {
@@ -69,7 +67,7 @@ public final class SharedCheckpointDatabase implements Closeable {
     }
     CommonCheckpointPayload previous = latest();
     if (previous != null) {
-      requireChild(CommonCheckpointTarget.from(previous), target);
+      requireChild(previous, payload);
       if (isPending()) {
         throw new IOException("previous shared checkpoint is still pending materialization");
       }
@@ -122,8 +120,7 @@ public final class SharedCheckpointDatabase implements Closeable {
         }
         CommonCheckpointPayload payload = decode(rowKey, row.getValue());
         if (!result.isEmpty()) {
-          requireChild(CommonCheckpointTarget.from(result.get(result.size() - 1)),
-              CommonCheckpointTarget.from(payload));
+          requireChild(result.get(result.size() - 1), payload);
         }
         if (firstKey == null) {
           firstKey = rowKey;
@@ -140,7 +137,7 @@ public final class SharedCheckpointDatabase implements Closeable {
     }
     byte[] base = writer.get(BASE);
     if (base != null && (result.isEmpty() || !Arrays.equals(base,
-        generation(CommonCheckpointTarget.from(result.get(0)).getLastBlock().getBlockNumber())))) {
+        generation(lastBlock(result.get(0)).getBlockNumber())))) {
       throw new IOException("shared checkpoint durable base generation is missing");
     }
     byte[] applied = writer.get(APPLIED);
@@ -190,9 +187,8 @@ public final class SharedCheckpointDatabase implements Closeable {
         StateArchiveIndexDatabase.openReader(directory, engine);
         StateArchiveIndexDatabase.Cursor cursor = reader.cursor()) {
       cursor.seek(GENERATION);
-      StateArchiveIndexDatabase.KeyValue row;
-      while ((row = cursor.next()) != null) {
-        byte[] rowKey = row.getKey();
+      byte[] rowKey;
+      while ((rowKey = cursor.nextKey()) != null) {
         if (!startsWith(rowKey, GENERATION)) {
           break;
         }
@@ -208,8 +204,7 @@ public final class SharedCheckpointDatabase implements Closeable {
     }
     try {
       CommonCheckpointPayload payload = codec.decode(encoded);
-      if (!Arrays.equals(generation, generation(CommonCheckpointTarget.from(payload)
-          .getLastBlock().getBlockNumber()))) {
+      if (!Arrays.equals(generation, generation(lastBlock(payload).getBlockNumber()))) {
         throw new IOException("shared checkpoint generation identity mismatch");
       }
       return payload;
@@ -218,12 +213,19 @@ public final class SharedCheckpointDatabase implements Closeable {
     }
   }
 
-  private static void requireChild(CommonCheckpointTarget parent, CommonCheckpointTarget child)
+  private static BlockSnapshotMeta lastBlock(CommonCheckpointPayload payload) {
+    return payload.getBlocks().get(payload.getBlocks().size() - 1).getMeta();
+  }
+
+  // Continuity uses only these metadata fields. Payload bytes have already passed codec checksum
+  // validation; constructing a full target here would re-encode and hash all redo mutations.
+  private static void requireChild(CommonCheckpointPayload parent, CommonCheckpointPayload child)
       throws IOException {
-    if (parent.getLastBlock().getBlockNumber() + 1 != child.getFirstBlock().getBlockNumber()
-        || parent.getLastBlock().getEpoch() + 1 != child.getFirstBlock().getEpoch()
-        || !Arrays.equals(parent.getLastBlock().getBlockHash(),
-            child.getFirstBlock().getParentHash())
+    BlockSnapshotMeta parentLast = lastBlock(parent);
+    BlockSnapshotMeta childFirst = child.getBlocks().get(0).getMeta();
+    if (parentLast.getBlockNumber() + 1 != childFirst.getBlockNumber()
+        || parentLast.getEpoch() + 1 != childFirst.getEpoch()
+        || !Arrays.equals(parentLast.getBlockHash(), childFirst.getParentHash())
         || !Arrays.equals(parent.getStateRoot(), child.getParentStateRoot())
         || !Arrays.equals(parent.getFormatIdentity(), child.getFormatIdentity())) {
       throw new IOException("shared checkpoint generation chain is discontinuous");

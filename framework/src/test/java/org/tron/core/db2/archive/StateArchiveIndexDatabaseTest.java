@@ -3,6 +3,7 @@ package org.tron.core.db2.archive;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
@@ -26,6 +27,34 @@ public class StateArchiveIndexDatabaseTest {
 
   @Rule
   public final TemporaryFolder temporaryFolder = new TemporaryFolder();
+
+  @Test
+  public void keyOnlyCursorPreservesSeekOrderAndMixedTraversal() throws Exception {
+    for (Engine engine : availableEngines()) {
+      Path database = temporaryFolder.newFolder().toPath();
+      try (StateArchiveIndexDatabase.Writer writer =
+          StateArchiveIndexDatabase.openWriter(database, engine)) {
+        writer.write(Arrays.asList(
+            StateArchiveIndexDatabase.put(new byte[]{1}, new byte[1024 * 1024]),
+            StateArchiveIndexDatabase.put(new byte[]{3}, new byte[]{33}),
+            StateArchiveIndexDatabase.put(new byte[]{5}, new byte[]{55})));
+        try (StateArchiveIndexDatabase.Reader reader =
+            StateArchiveIndexDatabase.openReader(database, engine);
+            StateArchiveIndexDatabase.Cursor cursor = reader.cursor()) {
+          cursor.seek(new byte[]{0});
+          byte[] first = cursor.nextKey();
+          assertArrayEquals(new byte[]{1}, first);
+          assertArrayEquals(new byte[]{33}, cursor.next().getValue());
+          assertArrayEquals(new byte[]{5}, cursor.nextKey());
+          assertNull(cursor.nextKey());
+          assertNull(cursor.next());
+          cursor.seek(new byte[]{2});
+          assertArrayEquals(new byte[]{3}, cursor.nextKey());
+          assertArrayEquals(new byte[]{1}, first);
+        }
+      }
+    }
+  }
 
   @Test
   public void supportsConfiguredEngineAndRejectsEngineDrift() throws Exception {

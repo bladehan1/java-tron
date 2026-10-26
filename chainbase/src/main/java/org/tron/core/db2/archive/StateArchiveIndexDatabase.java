@@ -442,6 +442,12 @@ final class StateArchiveIndexDatabase {
     void seek(byte[] key) throws IOException;
 
     KeyValue next() throws IOException;
+
+    /** Advances one row without requiring its value to be copied into Java. */
+    default byte[] nextKey() throws IOException {
+      KeyValue row = next();
+      return row == null ? null : row.getKey();
+    }
   }
 
   static final class Mutation {
@@ -1120,17 +1126,34 @@ final class StateArchiveIndexDatabase {
 
     @Override
     public KeyValue next() throws IOException {
+      if (!valid()) {
+        return null;
+      }
+      KeyValue value = new KeyValue(iterator.key(), iterator.value());
+      iterator.next();
+      return value;
+    }
+
+    @Override
+    public byte[] nextKey() throws IOException {
+      if (!valid()) {
+        return null;
+      }
+      byte[] key = iterator.key();
+      iterator.next();
+      return key;
+    }
+
+    private boolean valid() throws IOException {
       if (!iterator.isValid()) {
         try {
           iterator.status();
         } catch (org.rocksdb.RocksDBException failure) {
           throw new IOException("Failed to scan RocksDB Archive serving index", failure);
         }
-        return null;
+        return false;
       }
-      KeyValue value = new KeyValue(iterator.key(), iterator.value());
-      iterator.next();
-      return value;
+      return true;
     }
 
     @Override
