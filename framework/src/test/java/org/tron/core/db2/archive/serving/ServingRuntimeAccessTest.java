@@ -4,6 +4,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
+import static org.tron.core.db2.NativeCheckpointTestSupport.engine;
 
 import java.io.IOException;
 import java.nio.file.Path;
@@ -11,23 +12,15 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
-import org.junit.BeforeClass;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
-import org.tron.common.TestConstants;
 import org.tron.core.db2.archive.BlockReverseDiff;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
-import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
 
 public class ServingRuntimeAccessTest {
 
   @Rule public final TemporaryFolder temporary = new TemporaryFolder();
-
-  @BeforeClass
-  public static void requireNativeBackend() {
-    TestConstants.assumeLevelDbAvailable();
-  }
 
   @Test
   public void buildsPublishesAndReopensThroughRuntimeBoundary() throws Exception {
@@ -61,7 +54,7 @@ public class ServingRuntimeAccessTest {
           stages);
     }
     try (PersistentServingKeyIndexCatalog reopened =
-            ServingRuntimeAccess.openCatalog(catalogRoot, Engine.LEVELDB, stage -> { });
+            ServingRuntimeAccess.openCatalog(catalogRoot, engine(), stage -> { });
         PersistentServingKeyIndexGeneration pin = reopened.pin()) {
       assertEquals("g2", pin.getGenerationId());
       assertEquals(2, pin.getIndexedThrough());
@@ -83,7 +76,7 @@ public class ServingRuntimeAccessTest {
     try (PersistentServingKeyIndexCatalog faulted =
         ServingRuntimeAccess.openCatalog(
             catalogRoot,
-            Engine.LEVELDB,
+            engine(),
             stage -> {
               if (stage == ServingRuntimeAccess.PublicationStage.GENERATION_INSTALLED) {
                 throw new IOException("publication boundary fault");
@@ -92,7 +85,7 @@ public class ServingRuntimeAccessTest {
       assertThrows(IOException.class, () -> faulted.publish("g1", next));
     }
     try (PersistentServingKeyIndexCatalog reopened =
-            ServingRuntimeAccess.openCatalog(catalogRoot, Engine.LEVELDB, stage -> { });
+            ServingRuntimeAccess.openCatalog(catalogRoot, engine(), stage -> { });
         PersistentServingKeyIndexGeneration pin = reopened.pin()) {
       assertEquals("g1", pin.getGenerationId());
       assertEquals(1, pin.getIndexedThrough());
@@ -103,7 +96,7 @@ public class ServingRuntimeAccessTest {
       throws IOException {
     try (PersistentServingKeyIndexGeneration ignored =
         PersistentServingKeyIndexGeneration.buildExact(
-            path, id, plan, hash(20), Engine.LEVELDB, () -> { })) {
+            path, id, plan, hash(20), engine(), () -> { })) {
       // The runtime opens its own immutable pin from the durable generation.
     }
   }

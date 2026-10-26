@@ -13,6 +13,7 @@ import java.util.Collections;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
+import org.tron.common.arch.Arch;
 import org.tron.core.db2.archive.checkpoint.storage.SharedCheckpointDatabase;
 import org.tron.core.db2.archive.storage.index.ArchiveIndexStorage;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointPayloadCodec;
@@ -137,7 +138,7 @@ public class AnchoredCheckpointScanTest {
 
   /** Allows native backends to be validated in separate JVMs. */
   protected Engine[] engines() {
-    return Engine.values();
+    return Arch.isArm64() ? new Engine[]{Engine.ROCKSDB} : Engine.values();
   }
 
   private static long last(SharedCheckpointDatabase db) throws IOException {
