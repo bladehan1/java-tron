@@ -25,6 +25,8 @@ public final class SharedCheckpointDatabase implements Closeable {
   private final Path directory;
   private final Engine engine;
   private final StateArchiveIndexDatabase.Writer writer;
+  // Validated at open and advanced only after this owner commits START synchronously.
+  private byte[] validatedStart;
   private final CommonCheckpointPayloadCodec codec = new CommonCheckpointPayloadCodec();
 
   public SharedCheckpointDatabase(Path directory, Engine engine) throws IOException {
@@ -48,6 +50,7 @@ public final class SharedCheckpointDatabase implements Closeable {
         throw new IOException("shared checkpoint schema is not supported");
       }
       retained();
+      validatedStart = writer.get(START);
     } catch (IOException | RuntimeException failure) {
       writer.close();
       throw failure;
@@ -79,6 +82,9 @@ public final class SharedCheckpointDatabase implements Closeable {
       commit.add(StateArchiveIndexDatabase.put(START, generation));
     }
     writer.write(commit, true);
+    if (previous == null) {
+      validatedStart = generation;
+    }
   }
 
   public synchronized boolean isPending() throws IOException {
@@ -105,13 +111,27 @@ public final class SharedCheckpointDatabase implements Closeable {
   }
 
   public synchronized List<CommonCheckpointPayload> retained() throws IOException {
+    return readRetained(false);
+  }
+
+  /**
+   * Reads the owned live window after startup has validated the entire generation namespace.
+   * Only this instance may mutate the shared authority during its lifetime. Recovery keeps
+   * using retained(), including its check for unexpected live records before START.
+   */
+  public synchronized List<CommonCheckpointPayload> retainedForDurableBase() throws IOException {
+    requireOwnedStart();
+    return readRetained(true);
+  }
+
+  private List<CommonCheckpointPayload> readRetained(boolean anchored) throws IOException {
     List<CommonCheckpointPayload> result = new ArrayList<>();
     byte[] lastKey = null;
     byte[] firstKey = null;
     try (StateArchiveIndexDatabase.Reader reader =
         StateArchiveIndexDatabase.openReader(directory, engine);
         StateArchiveIndexDatabase.Cursor cursor = reader.cursor()) {
-      cursor.seek(GENERATION);
+      cursor.seek(anchored && validatedStart != null ? validatedStart : GENERATION);
       StateArchiveIndexDatabase.KeyValue row;
       while ((row = cursor.next()) != null) {
         byte[] rowKey = row.getKey();
@@ -178,15 +198,17 @@ public final class SharedCheckpointDatabase implements Closeable {
     mutations.add(StateArchiveIndexDatabase.put(BASE, head));
     mutations.add(StateArchiveIndexDatabase.put(START, head));
     writer.write(mutations, true);
+    validatedStart = head;
   }
 
   /** Lists retained generation keys without decoding payloads; retained() validates the chain. */
   private List<byte[]> retainedGenerationKeys() throws IOException {
+    requireOwnedStart();
     List<byte[]> keys = new ArrayList<>();
     try (StateArchiveIndexDatabase.Reader reader =
         StateArchiveIndexDatabase.openReader(directory, engine);
         StateArchiveIndexDatabase.Cursor cursor = reader.cursor()) {
-      cursor.seek(GENERATION);
+      cursor.seek(validatedStart == null ? GENERATION : validatedStart);
       byte[] rowKey;
       while ((rowKey = cursor.nextKey()) != null) {
         if (!startsWith(rowKey, GENERATION)) {
@@ -195,7 +217,21 @@ public final class SharedCheckpointDatabase implements Closeable {
         keys.add(rowKey);
       }
     }
+    byte[] first = keys.isEmpty() ? null : keys.get(0);
+    byte[] last = keys.isEmpty() ? null : keys.get(keys.size() - 1);
+    if (!Arrays.equals(first, validatedStart)) {
+      throw new IOException("first retained shared checkpoint generation is missing");
+    }
+    if (!Arrays.equals(last, writer.get(HEAD))) {
+      throw new IOException("shared checkpoint head differs from retained generations");
+    }
     return keys;
+  }
+
+  private void requireOwnedStart() throws IOException {
+    if (!Arrays.equals(validatedStart, writer.get(START))) {
+      throw new IOException("shared checkpoint START changed outside its validated owner");
+    }
   }
 
   private CommonCheckpointPayload decode(byte[] generation, byte[] encoded) throws IOException {

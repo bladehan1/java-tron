@@ -259,7 +259,8 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
 
   private void restoreRetained(boolean sync, Timing timing) throws IOException {
     Holder<java.util.List<CommonCheckpointPayload>> held = new Holder<>();
-    long loadUs = timed(() -> held.value = checkpointFile.retained());
+    long loadUs = timed(() -> held.value = sync
+        ? checkpointFile.retainedForDurableBase() : checkpointFile.retained());
     java.util.List<CommonCheckpointPayload> payloads = held.value;
     long chainbaseUs = timed(
         () -> materializers.get(Authority.CHAINBASE).replayRetained(payloads, sync));

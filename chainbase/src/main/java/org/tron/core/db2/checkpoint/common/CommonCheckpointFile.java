@@ -73,6 +73,10 @@ public final class CommonCheckpointFile implements java.io.Closeable {
     return shared == null ? java.util.Collections.emptyList() : shared.retained();
   }
 
+  java.util.List<CommonCheckpointPayload> retainedForDurableBase() throws IOException {
+    return shared == null ? java.util.Collections.emptyList() : shared.retainedForDurableBase();
+  }
+
   public void advanceDurableBase() throws IOException {
     if (shared != null) {
       shared.advanceDurableBase();
