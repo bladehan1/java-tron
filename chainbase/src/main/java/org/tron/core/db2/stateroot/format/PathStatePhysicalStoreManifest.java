@@ -20,6 +20,8 @@ import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
 /** Immutable format identity for the TASK-018 physical 27+1 layout. */
 public final class PathStatePhysicalStoreManifest {
 
+  public static final String CURRENT_FILE = "CURRENT";
+
   private static final String FILE = "MANIFEST";
   private static final int MAGIC = 0x50535046; // PSPF
   private static final short VERSION = 1;

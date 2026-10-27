@@ -14,6 +14,7 @@ import org.tron.core.db2.archive.BlockReverseDiff;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
 import org.tron.core.db2.archive.OldValue;
 import org.tron.core.db2.archive.history.codec.BlockHistoryCodec;
+import org.tron.core.db2.archive.serving.index.ServingIndexIncrementalPlan;
 import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
 
 /**

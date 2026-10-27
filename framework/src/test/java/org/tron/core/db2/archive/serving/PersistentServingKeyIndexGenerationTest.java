@@ -48,6 +48,7 @@ import org.tron.core.db2.archive.query.snapshot.ArchiveReadSnapshot;
 import org.tron.core.db2.archive.query.snapshot.ArchiveReadSnapshot.PinnedLatestState;
 import org.tron.core.db2.archive.query.snapshot.HistoricalRangeOverlay;
 import org.tron.core.db2.archive.serving.index.PinnedServingKeyIndex;
+import org.tron.core.db2.archive.serving.index.ServingIndexIncrementalPlan;
 import org.tron.core.db2.archive.serving.index.ServingKeyIndex;
 import org.tron.core.db2.archive.serving.index.ServingKeyIndexGeneration;
 import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;

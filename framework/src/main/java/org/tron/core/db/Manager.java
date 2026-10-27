@@ -155,14 +155,12 @@ import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointTarget;
 import org.tron.core.db2.checkpoint.common.payload.CommonCheckpointPayload;
 import org.tron.core.db2.core.Chainbase;
 import org.tron.core.db2.core.ChainbaseCheckpointMaterializer;
-import org.tron.core.db2.core.ExecutionAttribution;
-import org.tron.core.db2.core.P66LaneStartup;
 import org.tron.core.db2.core.SnapshotManager;
+import org.tron.core.db2.core.metrics.ExecutionAttribution;
+import org.tron.core.db2.core.p66.P66LaneStartup;
 import org.tron.core.db2.stateroot.PathStateCheckpointMaterializer;
 import org.tron.core.db2.stateroot.PathStateLayerLimits;
 import org.tron.core.db2.stateroot.PathStatePhysicalOverlayHead;
-import org.tron.core.db2.stateroot.PathStatePhysicalRuntimeAdmission;
-import org.tron.core.db2.stateroot.PathStatePhysicalSnapshotHead;
 import org.tron.core.db2.stateroot.PathStatePhysicalStoreSet;
 import org.tron.core.db2.stateroot.PathStateRebuildCoordinator.SnapshotIdentity;
 import org.tron.core.db2.stateroot.PathStateRoot;
@@ -171,6 +169,8 @@ import org.tron.core.db2.stateroot.commitment.PathStateCanonicalizer;
 import org.tron.core.db2.stateroot.commitment.PathStateCanonicalizer.P66Phase;
 import org.tron.core.db2.stateroot.format.PathStateRootMetadata;
 import org.tron.core.db2.stateroot.format.PathStateStoreManifest;
+import org.tron.core.db2.stateroot.physical.PathStatePhysicalRuntimeAdmission;
+import org.tron.core.db2.stateroot.physical.PathStatePhysicalSnapshotHead;
 import org.tron.core.db2.stateroot.rebuild.PathStateNativeSnapshotSource;
 import org.tron.core.db2.stateroot.runtime.PathStateHead;
 import org.tron.core.db2.stateroot.runtime.PathStateRuntimeAttachment;
@@ -598,7 +598,7 @@ public class Manager {
 
   @PostConstruct
   public void init() {
-    org.tron.core.config.args.ArchiveRocksDbPolicy.validate(Args.getInstance().getStorage());
+    org.tron.core.config.archive.ArchiveRocksDbPolicy.validate(Args.getInstance().getStorage());
     ChainBaseManager.init(chainBaseManager);
     Message.setDynamicPropertiesStore(this.getDynamicPropertiesStore());
     mortgageService

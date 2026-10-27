@@ -24,6 +24,7 @@ import org.tron.core.db2.common.Key;
 import org.tron.core.db2.common.Value;
 import org.tron.core.db2.common.Value.Operator;
 import org.tron.core.db2.common.WrappedByteArray;
+import org.tron.core.db2.core.metrics.ExecutionAttribution;
 import org.tron.core.db2.stateroot.PathStateSnapshotDelta;
 
 public class SnapshotImpl extends AbstractSnapshot<Key, Value> {

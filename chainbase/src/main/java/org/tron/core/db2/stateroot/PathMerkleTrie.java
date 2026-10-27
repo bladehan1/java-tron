@@ -17,6 +17,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicLong;
 import org.tron.common.crypto.Hash;
 import org.tron.common.math.StrictMathWrapper;
+import org.tron.core.db2.stateroot.metrics.PathStateObservations;
 import org.tron.core.db2.stateroot.trie.PathNodeStore;
 
 /** Backend-neutral secure-key MPT with path-local immutable node updates. */
@@ -67,14 +68,14 @@ public final class PathMerkleTrie {
   private final AtomicLong hashReferenceCreateCount = new AtomicLong();
   private final AtomicLong hashReferenceResolveCount = new AtomicLong();
 
-  private PathStateOperationTimer readTimer;
-  private PathStateOperationTimer hashTimer;
-  private PathStateOperationTimer decodeTimer;
+  private PathStateObservations.Timer readTimer;
+  private PathStateObservations.Timer hashTimer;
+  private PathStateObservations.Timer decodeTimer;
 
   void enableReadTiming() {
-    readTimer = new PathStateOperationTimer();
-    hashTimer = new PathStateOperationTimer();
-    decodeTimer = new PathStateOperationTimer();
+    readTimer = PathStateObservations.timer();
+    hashTimer = PathStateObservations.timer();
+    decodeTimer = PathStateObservations.timer();
   }
 
   long[][] readTiming() {

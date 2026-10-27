@@ -9,7 +9,7 @@ import java.util.Collections;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import org.junit.Test;
-import org.tron.core.config.args.ArchiveRocksDbPolicy;
+import org.tron.core.config.archive.ArchiveRocksDbPolicy;
 import org.tron.core.config.args.Storage;
 
 public class ArchiveAdmissionTest {

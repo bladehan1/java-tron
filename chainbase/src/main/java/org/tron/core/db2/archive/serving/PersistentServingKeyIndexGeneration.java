@@ -1,10 +1,5 @@
 package org.tron.core.db2.archive.serving;
 
-import com.google.common.hash.Hashing;
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
-import java.io.DataInputStream;
-import java.io.DataOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
@@ -37,8 +32,12 @@ import org.tron.core.db2.archive.history.io.ArchiveFileDurability;
 import org.tron.core.db2.archive.history.model.HistoryCommitMarker;
 import org.tron.core.db2.archive.history.model.HistoryIndexRecord;
 import org.tron.core.db2.archive.history.model.HistoryLocation;
+import org.tron.core.db2.archive.serving.format.ServingIndexKeyCodec;
+import org.tron.core.db2.archive.serving.format.ServingIndexRecordCodec;
 import org.tron.core.db2.archive.serving.index.PinnedServingKeyIndex;
+import org.tron.core.db2.archive.serving.index.ServingIndexIncrementalPlan;
 import org.tron.core.db2.archive.serving.index.ServingKeyIndexGeneration;
+import org.tron.core.db2.archive.serving.telemetry.ServingIndexTiming;
 import org.tron.core.db2.archive.storage.index.ArchiveIndexStorage;
 import org.tron.core.db2.archive.storage.index.StateArchiveIndexEngineManifest;
 import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointTarget;
@@ -47,22 +46,20 @@ import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
 /** Persistent immutable exact-key serving generation backed by the configured database engine. */
 public final class PersistentServingKeyIndexGeneration implements PinnedServingKeyIndex {
 
-  private static final int MAGIC = 0x534b4947; // SKIG
-  private static final short VERSION = 4;
-  static final short EXACT_VERSION = 5;
-  private static final int MAX_MANIFEST_SIZE = 1024 * 1024;
-  private static final byte DATA_PREFIX = 1;
-  private static final byte RANGE_DATA_PREFIX = 2;
-  private static final byte KEY_META_PREFIX = 3;
-  private static final byte KEY_PAGE_PREFIX = 4;
-  private static final byte STORE_COVERAGE_PREFIX = 5;
+  private static final short VERSION = ServingIndexRecordCodec.VERSION;
+  static final short EXACT_VERSION = ServingIndexRecordCodec.EXACT_VERSION;
+  private static final byte DATA_PREFIX = ServingIndexKeyCodec.DATA_PREFIX;
+  private static final byte RANGE_DATA_PREFIX = ServingIndexKeyCodec.RANGE_DATA_PREFIX;
+  private static final byte KEY_META_PREFIX = ServingIndexKeyCodec.KEY_META_PREFIX;
+  private static final byte KEY_PAGE_PREFIX = ServingIndexKeyCodec.KEY_PAGE_PREFIX;
+  private static final byte STORE_COVERAGE_PREFIX = ServingIndexKeyCodec.STORE_COVERAGE_PREFIX;
   static final byte[] ARCHIVE_TAIL_KEY_V5 = V5HistoryTail.key();
   /** Single-DB progress descriptor key (exact v5), ch04 §3.2.1. */
   static final byte[] PROGRESS_KEY = new byte[]{0x7f, 'S', 'I', 1};
-  private static final int INLINE_EPOCH_LIMIT = 4;
-  private static final int EPOCHS_PER_PAGE = 512;
-  private static final byte INLINE = 1;
-  private static final byte PAGED = 2;
+  private static final int INLINE_EPOCH_LIMIT = ServingIndexRecordCodec.INLINE_EPOCH_LIMIT;
+  private static final int EPOCHS_PER_PAGE = ServingIndexRecordCodec.EPOCHS_PER_PAGE;
+  private static final byte INLINE = ServingIndexRecordCodec.INLINE;
+  private static final byte PAGED = ServingIndexRecordCodec.PAGED;
   private static final byte[] PRESENT = new byte[]{1};
   private static final String MANIFEST = "generation.meta";
   private static final String MANIFEST_TEMP = "generation.meta.tmp";
@@ -595,8 +592,7 @@ public final class PersistentServingKeyIndexGeneration implements PinnedServingK
   }
 
   private static byte[] exactPartitionPrefix(byte prefix, String dbName) {
-    int storeId = ArchiveStoreScope.getStoreId(dbName);
-    return ByteBuffer.allocate(1 + Short.BYTES).put(prefix).putShort((short) storeId).array();
+    return ServingIndexKeyCodec.exactPartitionPrefix(prefix, dbName);
   }
 
   private static FileSizeMeasurement measureGenerationFiles(Path root) throws IOException {
@@ -1209,156 +1205,43 @@ public final class PersistentServingKeyIndexGeneration implements PinnedServingK
   }
 
   static byte[] keyMetaKey(String dbName, byte[] rawKey) {
-    return exactKey(KEY_META_PREFIX, dbName, rawKey, null);
+    return ServingIndexKeyCodec.keyMetaKey(dbName, rawKey);
   }
 
   private static byte[] keyPageKey(String dbName, byte[] rawKey, int pageIndex) {
-    if (pageIndex < 0) {
-      throw new IllegalArgumentException("Serving page index must not be negative");
-    }
-    return exactKey(KEY_PAGE_PREFIX, dbName, rawKey, pageIndex);
+    return ServingIndexKeyCodec.keyPageKey(dbName, rawKey, pageIndex);
   }
 
   private static byte[] exactKey(byte prefix, String dbName, byte[] rawKey, Integer pageIndex) {
-    int storeId = ArchiveStoreScope.getStoreId(dbName);
-    byte[] encodedKey = encodeRangeRawKey(rawKey);
-    int suffix = pageIndex == null ? 0 : Integer.BYTES;
-    ByteBuffer key = ByteBuffer.allocate(1 + Short.BYTES + encodedKey.length + 2 + suffix)
-        .put(prefix).putShort((short) storeId).put(encodedKey).put((byte) 0).put((byte) 0);
-    if (pageIndex != null) {
-      key.putInt(pageIndex);
-    }
-    return key.array();
+    return ServingIndexKeyCodec.exactKey(prefix, dbName, rawKey, pageIndex);
   }
 
   static byte[] storeCoverageKey(String dbName) {
-    int storeId = ArchiveStoreScope.getStoreId(dbName);
-    return ByteBuffer.allocate(1 + Short.BYTES).put(STORE_COVERAGE_PREFIX)
-        .putShort((short) storeId).array();
+    return ServingIndexKeyCodec.storeCoverageKey(dbName);
   }
 
   private static byte[] encodeKeyMeta(KeyMeta meta) {
-    try {
-      ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-      DataOutputStream output = new DataOutputStream(bytes);
-      output.writeByte(meta.mode);
-      output.writeLong(meta.count);
-      output.writeLong(meta.firstEpoch);
-      output.writeLong(meta.lastEpoch);
-      if (meta.mode == INLINE) {
-        output.writeInt(meta.inlineEpochs.length);
-        for (long epoch : meta.inlineEpochs) {
-          output.writeLong(epoch);
-        }
-      }
-      output.flush();
-      return withChecksum(bytes.toByteArray());
-    } catch (IOException impossible) {
-      throw new IllegalStateException("Unexpected exact serving metadata encoding failure",
-          impossible);
-    }
+    return ServingIndexRecordCodec.encodeKeyMeta(meta);
   }
 
   private static KeyMeta decodeKeyMeta(byte[] encoded) {
-    byte[] payload = checkedPayload(encoded, "exact serving key metadata");
-    try {
-      DataInputStream input = new DataInputStream(new ByteArrayInputStream(payload));
-      byte mode = input.readByte();
-      long count = input.readLong();
-      long first = input.readLong();
-      long last = input.readLong();
-      if (count <= 0 || first < 0 || last < first || mode != INLINE && mode != PAGED) {
-        throw new ArchivePersistenceException("Invalid exact serving key metadata");
-      }
-      long[] inline = null;
-      if (mode == INLINE) {
-        int size = input.readInt();
-        if (size != count || size <= 0 || size > INLINE_EPOCH_LIMIT) {
-          throw new ArchivePersistenceException("Invalid inline serving metadata");
-        }
-        inline = new long[size];
-        for (int i = 0; i < size; i++) {
-          inline[i] = input.readLong();
-        }
-        requireStrictEpochs(asList(inline), Long.MIN_VALUE);
-      }
-      if (input.available() != 0) {
-        throw new ArchivePersistenceException("Exact serving metadata payload mismatch");
-      }
-      return new KeyMeta(mode, count, first, last, inline);
-    } catch (IOException failure) {
-      throw new ArchivePersistenceException("Exact serving metadata is truncated", failure);
-    }
+    return ServingIndexRecordCodec.decodeKeyMeta(encoded, KeyMeta::new);
   }
 
   private static byte[] encodeEpochPage(long[] epochs) {
-    ByteBuffer payload = ByteBuffer.allocate(Integer.BYTES + epochs.length * Long.BYTES)
-        .putInt(epochs.length);
-    for (long epoch : epochs) {
-      payload.putLong(epoch);
-    }
-    return withChecksum(payload.array());
+    return ServingIndexRecordCodec.encodeEpochPage(epochs);
   }
 
   private static long[] decodeEpochPage(byte[] encoded) {
-    byte[] payload = checkedPayload(encoded, "exact serving epoch page");
-    ByteBuffer input = ByteBuffer.wrap(payload);
-    if (input.remaining() < Integer.BYTES) {
-      throw new ArchivePersistenceException("Exact serving epoch page is truncated");
-    }
-    int count = input.getInt();
-    if (count <= 0 || count > EPOCHS_PER_PAGE
-        || input.remaining() != count * Long.BYTES) {
-      throw new ArchivePersistenceException("Invalid exact serving epoch page");
-    }
-    long[] epochs = new long[count];
-    for (int i = 0; i < count; i++) {
-      epochs[i] = input.getLong();
-    }
-    requireStrictEpochs(asList(epochs), Long.MIN_VALUE);
-    return epochs;
+    return ServingIndexRecordCodec.decodeEpochPage(encoded);
   }
 
   static byte[] encodeCoverage(PersistentStoreCoverage coverage) {
-    try {
-      ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-      DataOutputStream output = new DataOutputStream(bytes);
-      output.writeUTF(coverage.dbName);
-      output.writeLong(coverage.indexedFrom);
-      output.writeLong(coverage.indexedThrough);
-      output.write(coverage.headHash);
-      output.write(coverage.sourceDigest);
-      output.writeUTF(coverage.generationId);
-      output.writeUTF(coverage.comparatorId);
-      output.flush();
-      return withChecksum(bytes.toByteArray());
-    } catch (IOException impossible) {
-      throw new IllegalStateException("Unexpected Store coverage encoding failure", impossible);
-    }
+    return ServingIndexRecordCodec.encodeCoverage(coverage);
   }
 
   static PersistentStoreCoverage decodeCoverage(byte[] encoded) {
-    byte[] payload = checkedPayload(encoded, "serving Store coverage");
-    try {
-      DataInputStream input = new DataInputStream(new ByteArrayInputStream(payload));
-      String database = input.readUTF();
-      long from = input.readLong();
-      long through = input.readLong();
-      byte[] headHash = new byte[32];
-      byte[] sourceDigest = new byte[32];
-      input.readFully(headHash);
-      input.readFully(sourceDigest);
-      String generationId = input.readUTF();
-      String comparatorId = input.readUTF();
-      if (from < 0 || through < from || generationId.isEmpty() || comparatorId.isEmpty()
-          || input.available() != 0) {
-        throw new ArchivePersistenceException("Invalid serving Store coverage");
-      }
-      return new PersistentStoreCoverage(database, from, through, headHash, sourceDigest,
-          generationId, comparatorId);
-    } catch (IOException failure) {
-      throw new ArchivePersistenceException("Serving Store coverage is truncated", failure);
-    }
+    return ServingIndexRecordCodec.decodeCoverage(encoded, PersistentStoreCoverage::new);
   }
 
   static void validateExactStoreCoverage(ArchiveIndexStorage.Reader database,
@@ -1378,30 +1261,8 @@ public final class PersistentServingKeyIndexGeneration implements PinnedServingK
     }
   }
 
-  private static byte[] withChecksum(byte[] payload) {
-    return ByteBuffer.allocate(payload.length + Integer.BYTES).put(payload)
-        .putInt(Hashing.crc32c().hashBytes(payload).asInt()).array();
-  }
-
-  private static byte[] checkedPayload(byte[] encoded, String name) {
-    if (encoded == null || encoded.length <= Integer.BYTES) {
-      throw new ArchivePersistenceException(name + " is missing or truncated");
-    }
-    byte[] payload = Arrays.copyOf(encoded, encoded.length - Integer.BYTES);
-    int checksum = ByteBuffer.wrap(encoded, payload.length, Integer.BYTES).getInt();
-    if (checksum != Hashing.crc32c().hashBytes(payload).asInt()) {
-      throw new ArchivePersistenceException(name + " checksum mismatch");
-    }
-    return payload;
-  }
-
   private static void requireStrictEpochs(List<Long> epochs, long previous) {
-    for (long epoch : epochs) {
-      if (epoch < 0 || epoch <= previous) {
-        throw new ArchivePersistenceException("Serving epochs are not strictly increasing");
-      }
-      previous = epoch;
-    }
+    ServingIndexRecordCodec.requireStrictEpochs(epochs, previous);
   }
 
   private static int pageCount(long count) {
@@ -1479,83 +1340,35 @@ public final class PersistentServingKeyIndexGeneration implements PinnedServingK
   }
 
   private static byte[] dataKey(String dbName, byte[] rawKey, long epoch) {
-    if (epoch < 0) {
-      throw new IllegalArgumentException("Serving index epoch must not be negative");
-    }
-    byte[] prefix = dataPrefix(dbName, rawKey);
-    return ByteBuffer.allocate(prefix.length + Long.BYTES).put(prefix).putLong(epoch).array();
+    return ServingIndexKeyCodec.dataKey(dbName, rawKey, epoch);
   }
 
   private static byte[] dataPrefix(String dbName, byte[] rawKey) {
-    byte[] database = dbName.getBytes(StandardCharsets.UTF_8);
-    return ByteBuffer.allocate(1 + Integer.BYTES + database.length + Integer.BYTES + rawKey.length)
-        .put(DATA_PREFIX).putInt(database.length).put(database).putInt(rawKey.length).put(rawKey)
-        .array();
+    return ServingIndexKeyCodec.dataPrefix(dbName, rawKey);
   }
 
   private static byte[] rangeDataKey(String dbName, byte[] rawKey, long epoch) {
-    if (epoch < 0) {
-      throw new IllegalArgumentException("Serving index epoch must not be negative");
-    }
-    byte[] databasePrefix = rangeDatabasePrefix(dbName);
-    byte[] encodedKey = encodeRangeRawKey(rawKey);
-    return ByteBuffer.allocate(databasePrefix.length + encodedKey.length + 2 + Long.BYTES)
-        .put(databasePrefix).put(encodedKey).put((byte) 0).put((byte) 0).putLong(epoch).array();
+    return ServingIndexKeyCodec.rangeDataKey(dbName, rawKey, epoch);
   }
 
   private static byte[] rangeDatabasePrefix(String dbName) {
-    byte[] name = dbName.getBytes(StandardCharsets.UTF_8);
-    return ByteBuffer.allocate(1 + Integer.BYTES + name.length)
-        .put(RANGE_DATA_PREFIX).putInt(name.length).put(name).array();
+    return ServingIndexKeyCodec.rangeDatabasePrefix(dbName);
   }
 
   private static byte[] encodeRangeRawKey(byte[] rawKey) {
-    ByteArrayOutputStream encoded = new ByteArrayOutputStream(rawKey.length);
-    for (byte value : rawKey) {
-      encoded.write(value);
-      if (value == 0) {
-        encoded.write(0xff);
-      }
-    }
-    return encoded.toByteArray();
+    return ServingIndexKeyCodec.encodeRangeRawKey(rawKey);
   }
 
   private static byte[] rangeAfterRawKey(byte[] databasePrefix, byte[] rawKey) {
-    byte[] encoded = encodeRangeRawKey(rawKey);
-    return ByteBuffer.allocate(databasePrefix.length + encoded.length + 2)
-        .put(databasePrefix).put(encoded).put((byte) 0).put((byte) 1).array();
+    return ServingIndexKeyCodec.rangeAfterRawKey(databasePrefix, rawKey);
   }
 
   private static RangeDataKey decodeRangeDataKey(byte[] key, byte[] databasePrefix) {
-    if (!startsWith(key, databasePrefix) || key.length < databasePrefix.length + 2 + Long.BYTES) {
-      return null;
-    }
-    ByteArrayOutputStream rawKey = new ByteArrayOutputStream();
-    int cursor = databasePrefix.length;
-    int epochOffset = key.length - Long.BYTES;
-    while (cursor < epochOffset) {
-      byte value = key[cursor++];
-      if (value != 0) {
-        rawKey.write(value);
-      } else if (cursor < epochOffset && key[cursor] == (byte) 0xff) {
-        rawKey.write(0);
-        cursor++;
-      } else if (cursor < epochOffset && key[cursor] == 0) {
-        cursor++;
-        if (cursor != epochOffset) {
-          return null;
-        }
-        return new RangeDataKey(rawKey.toByteArray(),
-            ByteBuffer.wrap(key, epochOffset, Long.BYTES).getLong());
-      } else {
-        return null;
-      }
-    }
-    return null;
+    return ServingIndexKeyCodec.decodeRangeDataKey(key, databasePrefix, RangeDataKey::new);
   }
 
   private static byte[] concat(byte[] left, byte[] right) {
-    return ByteBuffer.allocate(left.length + right.length).put(left).put(right).array();
+    return ServingIndexKeyCodec.concat(left, right);
   }
 
   private static final class RangeDataKey {
@@ -1569,15 +1382,7 @@ public final class PersistentServingKeyIndexGeneration implements PinnedServingK
   }
 
   private static boolean startsWith(byte[] value, byte[] prefix) {
-    if (value.length < prefix.length) {
-      return false;
-    }
-    for (int i = 0; i < prefix.length; i++) {
-      if (value[i] != prefix[i]) {
-        return false;
-      }
-    }
-    return true;
+    return ServingIndexKeyCodec.startsWith(value, prefix);
   }
 
   private static void validateNext(HistoryCommitMarker marker, long previousEpoch,
@@ -1614,19 +1419,7 @@ public final class PersistentServingKeyIndexGeneration implements PinnedServingK
   }
 
   private static List<String> sortedParticipants(List<String> databases) {
-    List<String> result = new ArrayList<>(Objects.requireNonNull(databases, "databases"));
-    Collections.sort(result);
-    if (result.isEmpty()) {
-      throw new IllegalArgumentException("Serving index participant set must not be empty");
-    }
-    String previous = null;
-    for (String database : result) {
-      if (database == null || database.isEmpty() || database.equals(previous)) {
-        throw new IllegalArgumentException("Serving index participant set is invalid");
-      }
-      previous = database;
-    }
-    return Collections.unmodifiableList(result);
+    return ServingIndexRecordCodec.sortedParticipants(databases);
   }
 
   private static void updateSourceDigest(MessageDigest digest, HistoryCommitMarker marker) {
@@ -1706,88 +1499,14 @@ public final class PersistentServingKeyIndexGeneration implements PinnedServingK
   }
 
   static byte[] encodeDescriptor(Descriptor descriptor) {
-    try {
-      ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-      DataOutputStream output = new DataOutputStream(bytes);
-      output.writeInt(MAGIC);
-      output.writeShort(descriptor.formatVersion);
-      output.writeShort(0);
-      output.writeUTF(descriptor.scopeIdentity);
-      output.writeUTF(descriptor.generationId);
-      output.writeLong(descriptor.indexedFrom);
-      output.writeLong(descriptor.indexedThrough);
-      output.write(descriptor.headHash);
-      output.write(descriptor.sourceDigest);
-      output.write(descriptor.latestSourceIdentityDigest);
-      output.writeLong(descriptor.keyChanges);
-      output.writeInt(descriptor.participants.size());
-      for (String participant : descriptor.participants) {
-        output.writeUTF(participant);
-      }
-      output.flush();
-      byte[] payload = bytes.toByteArray();
-      output.writeInt(Hashing.crc32c().hashBytes(payload).asInt());
-      output.flush();
-      return bytes.toByteArray();
-    } catch (IOException impossible) {
-      throw new IllegalStateException("Unexpected serving manifest encoding failure", impossible);
-    }
+    return ServingIndexRecordCodec.encodeDescriptor(descriptor);
   }
 
   static Descriptor decodeDescriptor(byte[] encoded) {
-    if (encoded == null || encoded.length < 96 || encoded.length > MAX_MANIFEST_SIZE) {
-      throw new IllegalArgumentException("Serving index manifest length is invalid");
-    }
-    byte[] payload = Arrays.copyOf(encoded, encoded.length - Integer.BYTES);
-    int checksum = ByteBuffer.wrap(encoded, payload.length, Integer.BYTES).getInt();
-    if (checksum != Hashing.crc32c().hashBytes(payload).asInt()) {
-      throw new IllegalArgumentException("Serving index manifest checksum mismatch");
-    }
-    try {
-      DataInputStream input = new DataInputStream(new ByteArrayInputStream(encoded));
-      if (input.readInt() != MAGIC) {
-        throw new IllegalArgumentException("Unsupported serving index manifest");
-      }
-      short version = input.readShort();
-      if ((version != EXACT_VERSION && version != VERSION && version != VERSION - 1)
-          || input.readShort() != 0) {
-        throw new IllegalArgumentException("Unsupported serving index manifest");
-      }
-      String scopeIdentity = input.readUTF();
-      String generationId = input.readUTF();
-      long from = input.readLong();
-      long through = input.readLong();
-      byte[] headHash = new byte[32];
-      byte[] sourceDigest = new byte[32];
-      input.readFully(headHash);
-      input.readFully(sourceDigest);
-      byte[] latestSourceIdentityDigest = new byte[32];
-      input.readFully(latestSourceIdentityDigest);
-      long keyChanges = input.readLong();
-      int count = input.readInt();
-      if (generationId.isEmpty() || from < 0 || through < from || keyChanges < 0
-          || count <= 0 || count > ArchiveStoreScope.getStateDatabases().size() + 16) {
-        throw new IllegalArgumentException("Invalid serving index manifest fields");
-      }
-      List<String> participants = new ArrayList<>(count);
-      for (int i = 0; i < count; i++) {
-        participants.add(input.readUTF());
-      }
-      if (input.available() != Integer.BYTES) {
-        throw new IllegalArgumentException("Serving index manifest payload mismatch");
-      }
-      List<String> sorted = sortedParticipants(participants);
-      if (!scopeIdentity.equals(ArchiveStoreScope.scopeIdentity(sorted))) {
-        throw new IllegalArgumentException("Serving index manifest scope identity mismatch");
-      }
-      return new Descriptor(version, scopeIdentity, generationId, from, through, headHash,
-          sourceDigest, latestSourceIdentityDigest, sorted, keyChanges);
-    } catch (IOException invalid) {
-      throw new IllegalArgumentException("Serving index manifest is truncated", invalid);
-    }
+    return ServingIndexRecordCodec.decodeDescriptor(encoded, Descriptor::new);
   }
 
-  static final class Descriptor {
+  static final class Descriptor implements ServingIndexRecordCodec.DescriptorView {
     private final short formatVersion;
     private final String scopeIdentity;
     private final String generationId;
@@ -1817,43 +1536,53 @@ public final class PersistentServingKeyIndexGeneration implements PinnedServingK
       this.keyChanges = keyChanges;
     }
 
-    short formatVersion() {
+    @Override
+    public short formatVersion() {
       return formatVersion;
     }
 
-    String scopeIdentity() {
+    @Override
+    public String scopeIdentity() {
       return scopeIdentity;
     }
 
-    String generationId() {
+    @Override
+    public String generationId() {
       return generationId;
     }
 
-    long indexedFrom() {
+    @Override
+    public long indexedFrom() {
       return indexedFrom;
     }
 
-    long indexedThrough() {
+    @Override
+    public long indexedThrough() {
       return indexedThrough;
     }
 
-    byte[] headHash() {
+    @Override
+    public byte[] headHash() {
       return Arrays.copyOf(headHash, headHash.length);
     }
 
-    byte[] sourceDigest() {
+    @Override
+    public byte[] sourceDigest() {
       return Arrays.copyOf(sourceDigest, sourceDigest.length);
     }
 
-    byte[] latestSourceIdentityDigest() {
+    @Override
+    public byte[] latestSourceIdentityDigest() {
       return Arrays.copyOf(latestSourceIdentityDigest, latestSourceIdentityDigest.length);
     }
 
-    List<String> participants() {
+    @Override
+    public List<String> participants() {
       return participants;
     }
 
-    long keyChanges() {
+    @Override
+    public long keyChanges() {
       return keyChanges;
     }
   }
@@ -1864,7 +1593,8 @@ public final class PersistentServingKeyIndexGeneration implements PinnedServingK
   }
 
   /** Durable completeness identity for one exact-27 Store partition. */
-  public static final class PersistentStoreCoverage {
+  public static final class PersistentStoreCoverage
+      implements ServingIndexRecordCodec.CoverageView {
     private final String dbName;
     private final long indexedFrom;
     private final long indexedThrough;
@@ -2095,7 +1825,7 @@ public final class PersistentServingKeyIndexGeneration implements PinnedServingK
     OptionalLong read(String name) throws IOException;
   }
 
-  private static final class KeyMeta {
+  private static final class KeyMeta implements ServingIndexRecordCodec.KeyMetadataView {
     private final byte mode;
     private final long count;
     private final long firstEpoch;
@@ -2109,6 +1839,36 @@ public final class PersistentServingKeyIndexGeneration implements PinnedServingK
       this.firstEpoch = firstEpoch;
       this.lastEpoch = lastEpoch;
       this.inlineEpochs = inlineEpochs;
+    }
+
+    @Override
+    public byte mode() {
+      return mode;
+    }
+
+    @Override
+    public long count() {
+      return count;
+    }
+
+    @Override
+    public long firstEpoch() {
+      return firstEpoch;
+    }
+
+    @Override
+    public long lastEpoch() {
+      return lastEpoch;
+    }
+
+    @Override
+    public int inlineEpochCount() {
+      return inlineEpochs.length;
+    }
+
+    @Override
+    public long inlineEpoch(int index) {
+      return inlineEpochs[index];
     }
 
     private static KeyMeta inline(long[] epochs) {

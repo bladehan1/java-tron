@@ -23,6 +23,7 @@ import org.tron.core.db2.archive.BlockReverseDiff.DbGroup;
 import org.tron.core.db2.archive.BlockReverseDiff.Entry;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
 import org.tron.core.db2.archive.OldValue;
+import org.tron.core.db2.archive.history.async.AsyncArchiveHistorySink;
 import org.tron.core.db2.archive.history.model.HistoryCommitMarker;
 import org.tron.core.db2.archive.history.store.ArchiveHistoryWriter.Stage;
 

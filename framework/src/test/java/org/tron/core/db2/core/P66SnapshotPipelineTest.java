@@ -54,6 +54,7 @@ import org.tron.core.db2.checkpoint.common.payload.CommonCheckpointPayload;
 import org.tron.core.db2.checkpoint.common.payload.CommonCheckpointPayloadFactory;
 import org.tron.core.db2.common.LevelDB;
 import org.tron.core.db2.common.WrappedByteArray;
+import org.tron.core.db2.core.p66.P66CoupledMutationMaterializer;
 import org.tron.core.db2.stateroot.PathStateCheckpointMaterializer;
 import org.tron.core.db2.stateroot.PathStateLayerLimits;
 import org.tron.core.db2.stateroot.PathStatePhysicalOverlayHead;

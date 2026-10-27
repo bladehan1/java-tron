@@ -21,6 +21,7 @@ import org.tron.core.db2.stateroot.commitment.PathStateCommitmentCodec;
 import org.tron.core.db2.stateroot.commitment.PathStateMutation;
 import org.tron.core.db2.stateroot.commitment.PathStateParticipant;
 import org.tron.core.db2.stateroot.commitment.PathStateParticipantScope;
+import org.tron.core.db2.stateroot.metrics.PathStateObservations;
 import org.tron.core.db2.stateroot.trie.PathNodeStore;
 import org.tron.core.trie.TrieImpl;
 
@@ -58,7 +59,7 @@ public class PathStateRootTest {
       for (int i = 0; i < 128; i++) {
         restored.put(participant.getDbName(), bytes("key-" + i), bytes("stored-value-" + i));
       }
-      if (!PathStateOperationTimer.observesStore(participant.getStoreId())) {
+      if (!PathStateObservations.observesStore(participant.getStoreId())) {
         continue;
       }
       for (long[] timing : restored.participantReadTiming(participant.getStoreId())) {

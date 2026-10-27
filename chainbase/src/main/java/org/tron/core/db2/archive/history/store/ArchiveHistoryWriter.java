@@ -30,7 +30,7 @@ import org.tron.core.db2.archive.history.write.CommittedHistoryEvidenceSource;
 import org.tron.core.db2.archive.history.write.DurableBlockReverseDiffSink;
 import org.tron.core.db2.archive.history.write.DurableHistoryMarkerRangeEvidence;
 import org.tron.core.db2.archive.serving.PersistentServingKeyIndexGeneration;
-import org.tron.core.db2.archive.serving.ServingIndexIncrementalPlan;
+import org.tron.core.db2.archive.serving.index.ServingIndexIncrementalPlan;
 import org.tron.core.db2.archive.serving.index.ServingKeyIndexGeneration;
 
 /**

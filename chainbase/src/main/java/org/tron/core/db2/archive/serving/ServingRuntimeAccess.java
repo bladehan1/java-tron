@@ -4,6 +4,7 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.Objects;
+import org.tron.core.db2.archive.serving.index.ServingIndexIncrementalPlan;
 import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
 
 /** Runtime assembly boundary; concrete mutable builders and native handles stay in serving. */

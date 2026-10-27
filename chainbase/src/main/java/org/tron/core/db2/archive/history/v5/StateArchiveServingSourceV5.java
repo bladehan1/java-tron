@@ -23,11 +23,11 @@ import org.tron.core.db2.archive.history.format.V5Format;
 import org.tron.core.db2.archive.history.format.V5HistoryTail;
 import org.tron.core.db2.archive.history.v5.StateArchiveBlockFrameCodecV5.DecodedFrame;
 import org.tron.core.db2.archive.history.v5.StateArchiveCommittedViewV5.PointLocation;
-import org.tron.core.db2.archive.serving.ServingFailure.Reason;
-import org.tron.core.db2.archive.serving.ServingFailure.ServingFaultException;
-import org.tron.core.db2.archive.serving.ServingIndexIncrementalPlan;
+import org.tron.core.db2.archive.serving.index.ServingIndexIncrementalPlan;
 import org.tron.core.db2.archive.serving.source.ServingHistorySource;
 import org.tron.core.db2.archive.serving.source.StateArchiveServingSource;
+import org.tron.core.db2.archive.serving.status.ServingFailure.Reason;
+import org.tron.core.db2.archive.serving.status.ServingFailure.ServingFaultException;
 import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointTarget;
 
 /**

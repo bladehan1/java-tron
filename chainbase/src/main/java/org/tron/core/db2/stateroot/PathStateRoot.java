@@ -21,6 +21,7 @@ import org.tron.core.db2.stateroot.commitment.PathStateCommitmentCodec;
 import org.tron.core.db2.stateroot.commitment.PathStateMutation;
 import org.tron.core.db2.stateroot.commitment.PathStateParticipant;
 import org.tron.core.db2.stateroot.commitment.PathStateParticipantScope;
+import org.tron.core.db2.stateroot.metrics.PathStateObservations;
 import org.tron.core.db2.stateroot.trie.PathNodeStore;
 
 /**
@@ -126,7 +127,7 @@ public final class PathStateRoot {
     List<Future<?>> futures = new ArrayList<>(work.size());
     // Preserve the existing wall boundary: grouping/sorting is outside this measurement.
     long startedNanos = System.nanoTime();
-    boolean attribution = PathStateOperationTimer.enabled();
+    boolean attribution = PathStateObservations.enabled();
     for (ParticipantWork participantWork : work) {
       if (attribution) {
         participantWork.submittedNanos = System.nanoTime();
@@ -304,7 +305,7 @@ public final class PathStateRoot {
     void exportAttribution() {
       for (ParticipantWork participant : participantTimings) {
         if (participant.submittedNanos != 0) {
-          PathStateAttributionMetrics.participant(participant.participant.getStoreId(),
+          PathStateObservations.participant(participant.participant.getStoreId(),
               participant.queueNanos, participant.elapsedNanos);
         }
       }
@@ -461,7 +462,7 @@ public final class PathStateRoot {
 
   synchronized void enableParticipantReadTiming() {
     for (PathStateParticipant participant : scope.getParticipants()) {
-      if (PathStateOperationTimer.observesStore(participant.getStoreId())) {
+      if (PathStateObservations.observesStore(participant.getStoreId())) {
         participantTries.get(participant.getDbName()).enableReadTiming();
       }
     }

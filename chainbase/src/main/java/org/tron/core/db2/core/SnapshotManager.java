@@ -66,6 +66,7 @@ import org.tron.core.db2.common.IRevokingDB;
 import org.tron.core.db2.common.Key;
 import org.tron.core.db2.common.Value;
 import org.tron.core.db2.common.WrappedByteArray;
+import org.tron.core.db2.core.p66.P66CoupledMutationMaterializer;
 import org.tron.core.db2.stateroot.PathStateSnapshotDelta;
 import org.tron.core.db2.stateroot.commitment.PathStateBlockTransition;
 import org.tron.core.db2.stateroot.runtime.PathStateRuntimeAttachment;

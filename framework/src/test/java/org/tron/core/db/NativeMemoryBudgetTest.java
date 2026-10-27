@@ -14,7 +14,7 @@ import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.config.args.StorageConfig.PathStateDbSettingsConfig;
-import org.tron.core.db2.stateroot.PathStateNativeBudget;
+import org.tron.core.db2.stateroot.storage.PathStateNativeBudget;
 
 /** WP8-7 (design v2 ch08 §3.8, E9): the budget equation and its inputs. */
 public class NativeMemoryBudgetTest {

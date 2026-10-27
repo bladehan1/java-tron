@@ -61,7 +61,6 @@ import org.tron.core.store.AccountStore;
 import org.tron.p2p.P2pConfig;
 import org.tron.p2p.dns.update.DnsType;
 import org.tron.p2p.dns.update.PublishConfig;
-import org.tron.p2p.utils.NetUtil;
 import org.tron.program.Version;
 
 @Slf4j(topic = "app")
@@ -176,7 +175,7 @@ public class Args extends CommonParameter {
 
     // 5. Apply platform constraints (e.g. ARM64 forces RocksDB)
     applyPlatformConstraints();
-    org.tron.core.config.args.ArchiveRocksDbPolicy.validate(PARAMETER.storage);
+    org.tron.core.config.archive.ArchiveRocksDbPolicy.validate(PARAMETER.storage);
     if (PARAMETER.storage.isArchiveFeaturesEnabled()) {
       org.tron.common.setting.RocksDbThreadBudget.activate(
           org.tron.common.setting.RocksDbSettings.getSettings().getCompactThreads(), 1,

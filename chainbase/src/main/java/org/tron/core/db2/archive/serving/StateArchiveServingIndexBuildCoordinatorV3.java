@@ -12,6 +12,8 @@ import org.bouncycastle.util.encoders.Hex;
 import org.tron.core.db2.archive.BlockReverseDiff;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
 import org.tron.core.db2.archive.history.format.V5HistoryTail;
+import org.tron.core.db2.archive.serving.index.ServingIndexIncrementalPlan;
+import org.tron.core.db2.archive.serving.telemetry.ServingIndexTiming;
 import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointTarget;
 import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
 
@@ -388,7 +390,7 @@ public final class StateArchiveServingIndexBuildCoordinatorV3 implements AutoClo
     CLOSED
   }
 
-  public static final class BuildProgress {
+  public static final class BuildProgress implements ServingIndexTiming.ProgressObservation {
     private final Mode mode;
     private final long indexedFrom;
     private final long indexedThrough;
@@ -413,6 +415,11 @@ public final class StateArchiveServingIndexBuildCoordinatorV3 implements AutoClo
 
     public Mode getMode() {
       return mode;
+    }
+
+    @Override
+    public boolean isLiveBackground() {
+      return mode == Mode.LIVE_BACKGROUND;
     }
 
     public long getIndexedFrom() {

@@ -52,6 +52,12 @@ import org.tron.core.db2.stateroot.commitment.PathStateParticipantScope;
 import org.tron.core.db2.stateroot.format.PathStateRootMetadata;
 import org.tron.core.db2.stateroot.format.PathStateStoreManifest;
 import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
+import org.tron.core.db2.stateroot.physical.PathStatePhysicalHeadStorage;
+import org.tron.core.db2.stateroot.physical.PathStatePhysicalRecords.GlobalIntent;
+import org.tron.core.db2.stateroot.physical.PathStatePhysicalRecords.IngestCheckpoint;
+import org.tron.core.db2.stateroot.physical.PathStatePhysicalRecords.OracleWindow;
+import org.tron.core.db2.stateroot.physical.PathStatePhysicalRecords.ReverseJournal;
+import org.tron.core.db2.stateroot.physical.PathStatePhysicalSnapshotHead;
 import org.tron.core.db2.stateroot.runtime.PathStateAsyncPrepareHead;
 import org.tron.core.db2.stateroot.runtime.PathStateHeadTestSupport;
 import org.tron.core.db2.stateroot.storage.PathStateNativeAccess;
@@ -748,10 +754,57 @@ public class PathStateNativeNodeStoreTest {
       }
       assertFalse(Files.exists(root.resolve(PathStatePhysicalStoreSet.INTENT_FILE)));
       assertTrue(Files.isRegularFile(root.resolve(PathStatePhysicalStoreSet.CURRENT_FILE)));
-      PathStatePhysicalGlobalIntent current = PathStatePhysicalGlobalIntent.decode(
+      GlobalIntent current = GlobalIntent.decode(
           Files.readAllBytes(root.resolve(PathStatePhysicalStoreSet.CURRENT_FILE)));
       assertArrayEquals(expectedRoot, current.getSuperRoot());
       assertEquals(27, current.getParticipants().size());
+    }
+  }
+
+  @Test
+  public void physicalHeadStorageRejectsForeignAndForgedPreparedTokens() throws Exception {
+    PathStateParticipantScope scope = new PathStateCanonicalizer().participantScope();
+    Path firstRoot = temporaryFolder.newFolder("head-owner-first").toPath();
+    Path secondRoot = temporaryFolder.newFolder("head-owner-second").toPath();
+    preparePublishedPhysicalTarget(firstRoot, scope);
+    preparePublishedPhysicalTarget(secondRoot, scope);
+    PathStateLayerLimits limits = PathStateLayerLimits.defaults();
+    try (PathStatePhysicalHeadStorage first = PathStatePhysicalStoreSet.openHeadStorage(firstRoot,
+        Engine.ROCKSDB);
+        PathStatePhysicalHeadStorage second = PathStatePhysicalStoreSet.openHeadStorage(secondRoot,
+            Engine.ROCKSDB)) {
+      first.recoverPublication();
+      second.recoverPublication();
+      first.verifyReverseJournals(limits);
+      second.verifyReverseJournals(limits);
+      PathStateRootMetadata parent = first.currentMetadata();
+      byte[] secondBefore = second.currentMetadata().encode();
+      PathStateBlockTransition transition = new PathStateBlockTransition(1, bytes(101),
+          parent.getBlockHash(), 3, P66Phase.P66_ON,
+          Collections.singletonList(PathStateMutation.put("code", new byte[]{1}, new byte[]{9})));
+      PathStatePhysicalHeadStorage.PreparedTransition prepared = first.prepareSnapshotDelta(
+          BlockSnapshotMeta.forBlock(1, bytes(101), parent.getBlockHash(), 3), transition);
+      assertTrue(prepared.matches(transition));
+      assertThrows(java.io.IOException.class, () -> second.applyAndPublish(prepared, limits));
+      PathStatePhysicalHeadStorage.PreparedTransition forged =
+          new PathStatePhysicalHeadStorage.PreparedTransition() {
+            @Override
+            public boolean matches(PathStateBlockTransition supplied) {
+              return true;
+            }
+
+            @Override
+            public PathStateSnapshotDelta getSnapshotDelta() {
+              return prepared.getSnapshotDelta();
+            }
+          };
+      assertThrows(java.io.IOException.class, () -> second.applyAndPublish(forged, limits));
+      assertArrayEquals(secondBefore, second.currentMetadata().encode());
+      assertEquals(0, first.currentMetadata().getBlockNumber());
+      PathStateRootMetadata published = first.applyAndPublish(prepared, limits);
+      assertEquals(1, published.getBlockNumber());
+      assertArrayEquals(prepared.getSnapshotDelta().getStateRoot(), published.getStateRoot());
+      assertArrayEquals(secondBefore, second.currentMetadata().encode());
     }
   }
 
@@ -1464,7 +1517,7 @@ public class PathStateNativeNodeStoreTest {
 
       byte[] currentBefore = Files.readAllBytes(root.resolve(
           PathStatePhysicalStoreSet.CURRENT_FILE));
-      PathStatePhysicalOracleWindow window = stores.loadOracleWindow(3, limits);
+      OracleWindow window = stores.loadOracleWindow(3, limits);
       assertEquals(3, window.getBlockCount());
       assertEquals(3, window.getCurrentMetadata().getBlockNumber());
       assertEquals(0, window.getOldestMetadata().getBlockNumber());
@@ -1473,12 +1526,12 @@ public class PathStateNativeNodeStoreTest {
       assertNull(stores.participant("code").getFlat(
           PathStateCommitmentCodec.storeLeafKey(scope.require("code").getStoreId(), key)));
 
-      List<PathStatePhysicalReverseJournal> journals = window.journals();
+      List<ReverseJournal> journals = window.journals();
       assertEquals(3, journals.size());
       for (int index = 0; index < journals.size(); index++) {
-        PathStatePhysicalGlobalIntent child = PathStatePhysicalGlobalIntent.decode(
+        GlobalIntent child = GlobalIntent.decode(
             journals.get(index).getChildTarget());
-        PathStatePhysicalGlobalIntent parent = PathStatePhysicalGlobalIntent.decode(
+        GlobalIntent parent = GlobalIntent.decode(
             journals.get(index).getParentTarget());
         assertEquals(3 - index, child.getMetadata().getBlockNumber());
         assertEquals(2 - index, parent.getMetadata().getBlockNumber());
@@ -1520,7 +1573,7 @@ public class PathStateNativeNodeStoreTest {
         Engine.ROCKSDB)) {
       stores.applyAndPublish(new PathStateBlockTransition(1, bytes(99), new byte[32], 3,
           P66Phase.P66_ON, Collections.emptyList()), limits);
-      PathStatePhysicalOracleWindow window = stores.loadOracleWindow(1, limits);
+      OracleWindow window = stores.loadOracleWindow(1, limits);
       byte[] accountKey = PathStateCommitmentCodec.storeLeafKey(
           scope.require("account").getStoreId(), new byte[]{1, 2});
       stores.participant("account").putFlat(accountKey,
@@ -1645,7 +1698,7 @@ public class PathStateNativeNodeStoreTest {
           stores.recoverPublication());
     }
     assertFalse(Files.exists(oldCurrent.resolve(PathStatePhysicalStoreSet.INTENT_FILE)));
-    assertArrayEquals(expectedRoot, PathStatePhysicalGlobalIntent.decode(Files.readAllBytes(
+    assertArrayEquals(expectedRoot, GlobalIntent.decode(Files.readAllBytes(
         oldCurrent.resolve(PathStatePhysicalStoreSet.CURRENT_FILE))).getSuperRoot());
   }
 
@@ -1658,15 +1711,15 @@ public class PathStateNativeNodeStoreTest {
     byte[] encoded = Files.readAllBytes(currentPath);
 
     assertThrows(IllegalArgumentException.class,
-        () -> PathStatePhysicalGlobalIntent.decode(Arrays.copyOf(encoded, encoded.length - 1)));
+        () -> GlobalIntent.decode(Arrays.copyOf(encoded, encoded.length - 1)));
     byte[] corruptBody = Arrays.copyOf(encoded, encoded.length);
     corruptBody[20] ^= 1;
     assertThrows(IllegalArgumentException.class,
-        () -> PathStatePhysicalGlobalIntent.decode(corruptBody));
+        () -> GlobalIntent.decode(corruptBody));
     byte[] corruptChecksum = Arrays.copyOf(encoded, encoded.length);
     corruptChecksum[corruptChecksum.length - 1] ^= 1;
     assertThrows(IllegalArgumentException.class,
-        () -> PathStatePhysicalGlobalIntent.decode(corruptChecksum));
+        () -> GlobalIntent.decode(corruptChecksum));
 
     Files.write(currentPath, corruptChecksum);
     try (PathStatePhysicalStoreSet stores = PathStatePhysicalStoreSet.open(root, scope,
@@ -1748,7 +1801,7 @@ public class PathStateNativeNodeStoreTest {
         Engine.ROCKSDB)) {
       assertEquals(PathStatePhysicalStoreSet.PublicationRecovery.NONE,
           reopened.recoverPublication());
-      PathStatePhysicalGlobalIntent current = PathStatePhysicalGlobalIntent.decode(
+      GlobalIntent current = GlobalIntent.decode(
           Files.readAllBytes(root.resolve(PathStatePhysicalStoreSet.CURRENT_FILE)));
       assertArrayEquals(expectedRoot, current.getSuperRoot());
       PathStateRoot restored = reopened.createRoot();
@@ -1800,7 +1853,7 @@ public class PathStateNativeNodeStoreTest {
         Engine.ROCKSDB)) {
       assertEquals(PathStatePhysicalStoreSet.PublicationRecovery.NONE,
           reopened.recoverPublication());
-      PathStatePhysicalGlobalIntent current = PathStatePhysicalGlobalIntent.decode(
+      GlobalIntent current = GlobalIntent.decode(
           Files.readAllBytes(superFailure.resolve(PathStatePhysicalStoreSet.CURRENT_FILE)));
       assertArrayEquals(expectedRoot, current.getSuperRoot());
       assertThrows(java.io.IOException.class,
@@ -1899,7 +1952,7 @@ public class PathStateNativeNodeStoreTest {
         Engine.ROCKSDB)) {
       assertThrows(java.io.IOException.class,
           () -> stores.ingestAndBuild(interrupted, 1, Long.MAX_VALUE));
-      PathStatePhysicalIngestCheckpoint checkpoint = stores.ingestCheckpoint("proposal");
+      IngestCheckpoint checkpoint = stores.ingestCheckpoint("proposal");
       assertEquals(2, checkpoint.getRows());
       assertArrayEquals(new byte[]{1, 0}, checkpoint.getCursor());
     }
@@ -1913,7 +1966,7 @@ public class PathStateNativeNodeStoreTest {
       assertEquals(1, resumed.getScanCount("proposal"));
       assertEquals(0, resumed.getScanCount("abi"));
       assertArrayEquals(new byte[]{1, 0}, resumed.getLastCursor("proposal"));
-      PathStatePhysicalIngestCheckpoint checkpoint = stores.ingestCheckpoint("proposal");
+      IngestCheckpoint checkpoint = stores.ingestCheckpoint("proposal");
       assertEquals(3, checkpoint.getRows());
       assertArrayEquals(new byte[]{2}, checkpoint.getCursor());
     }
@@ -1961,7 +2014,7 @@ public class PathStateNativeNodeStoreTest {
         Engine.ROCKSDB)) {
       stores.ingestFlat("proposal", resumed, Long.MAX_VALUE, Long.MAX_VALUE);
       assertNull(resumed.getLastCursor("proposal"));
-      PathStatePhysicalIngestCheckpoint checkpoint = stores.ingestCheckpoint("proposal");
+      IngestCheckpoint checkpoint = stores.ingestCheckpoint("proposal");
       assertEquals(3, checkpoint.getRows());
       assertArrayEquals(new byte[]{3}, checkpoint.getCursor());
     }

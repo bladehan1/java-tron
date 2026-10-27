@@ -14,7 +14,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
-import org.tron.common.prometheus.GuavaCacheExports;
+import org.tron.common.prometheus.exporters.GuavaCacheExports;
 
 public class CacheAttributionTest {
 

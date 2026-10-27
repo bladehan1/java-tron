@@ -36,7 +36,7 @@ import org.tron.core.db2.archive.history.model.HistoryIndexRecord;
 import org.tron.core.db2.archive.history.model.HistoryLocation;
 import org.tron.core.db2.archive.history.store.ArchiveHistoryWriter.Stage;
 import org.tron.core.db2.archive.serving.PersistentServingKeyIndexGeneration;
-import org.tron.core.db2.archive.serving.ServingIndexIncrementalPlan;
+import org.tron.core.db2.archive.serving.index.ServingIndexIncrementalPlan;
 import org.tron.protos.Protocol.Account;
 
 public class ArchiveHistoryWriterTest {

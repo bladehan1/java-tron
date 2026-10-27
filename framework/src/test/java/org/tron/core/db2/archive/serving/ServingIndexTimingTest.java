@@ -14,7 +14,10 @@ import org.tron.common.parameter.CommonParameter;
 import org.tron.core.db2.archive.BlockReverseDiff;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
 import org.tron.core.db2.archive.OldValue;
-import org.tron.core.db2.archive.serving.ServingIndexTiming.Stage;
+import org.tron.core.db2.archive.serving.index.ServingIndexIncrementalPlan;
+import org.tron.core.db2.archive.serving.telemetry.ServingIndexTiming;
+import org.tron.core.db2.archive.serving.telemetry.ServingIndexTiming.Stage;
+import org.tron.core.db2.archive.serving.telemetry.ServingTimingTestAccess;
 import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
 
 public class ServingIndexTimingTest {
@@ -37,10 +40,10 @@ public class ServingIndexTimingTest {
             100, hash(100), Collections.singletonList(diff));
         index.append("timing", plan, hash(1), () -> { }, () -> { });
         timing.succeeded();
-        assertEquals(1, timing.calls(Stage.DIGEST));
-        assertEquals(1, timing.calls(Stage.META_GET));
-        assertEquals(0, timing.calls(Stage.TAIL_GET));
-        assertEquals(1, timing.calls(Stage.WRITE_SYNC));
+        assertEquals(1, ServingTimingTestAccess.calls(timing, Stage.DIGEST));
+        assertEquals(1, ServingTimingTestAccess.calls(timing, Stage.META_GET));
+        assertEquals(0, ServingTimingTestAccess.calls(timing, Stage.TAIL_GET));
+        assertEquals(1, ServingTimingTestAccess.calls(timing, Stage.WRITE_SYNC));
       }
       Double duration = CollectorRegistry.defaultRegistry.getSampleValue(
           "tron_archive_serving_stage_seconds_sum", new String[]{"mode", "stage", "result"},

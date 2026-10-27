@@ -56,6 +56,7 @@ import org.tron.core.db2.stateroot.commitment.PathStateParticipantScope;
 import org.tron.core.db2.stateroot.format.PathStatePhysicalStoreManifest;
 import org.tron.core.db2.stateroot.format.PathStateRootMetadata;
 import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
+import org.tron.core.db2.stateroot.physical.PathStatePhysicalSnapshotHead;
 import org.tron.core.db2.stateroot.runtime.PathStateRuntimeAttachment;
 import org.tron.core.store.AccountAssetStore;
 import org.tron.core.store.DynamicPropertiesStore;

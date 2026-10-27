@@ -23,6 +23,9 @@ import org.tron.core.db2.stateroot.commitment.PathStateParticipant;
 import org.tron.core.db2.stateroot.commitment.PathStateParticipantDescriptor;
 import org.tron.core.db2.stateroot.format.PathStateRootMetadata;
 import org.tron.core.db2.stateroot.format.PathStateStoreManifest;
+import org.tron.core.db2.stateroot.physical.PathStatePhysicalRecords.GlobalIntent;
+import org.tron.core.db2.stateroot.physical.PathStatePhysicalRecords.OracleWindow;
+import org.tron.core.db2.stateroot.physical.PathStatePhysicalRecords.ReverseJournal;
 import org.tron.core.db2.stateroot.storage.PathStateNativeAccess;
 import org.tron.core.trie.TrieImpl;
 
@@ -35,10 +38,10 @@ final class PathStatePhysicalOracle {
   }
 
   static Result verify(PathStatePhysicalStoreSet stores,
-      PathStatePhysicalOracleWindow window, Path scratchDirectory, int rowsPerFlush)
+      OracleWindow window, Path scratchDirectory, int rowsPerFlush)
       throws IOException {
     PathStatePhysicalStoreSet source = Objects.requireNonNull(stores, "stores");
-    PathStatePhysicalOracleWindow input = Objects.requireNonNull(window, "window");
+    OracleWindow input = Objects.requireNonNull(window, "window");
     if (rowsPerFlush <= 0) {
       throw new IllegalArgumentException("physical oracle rows per flush must be positive");
     }
@@ -49,8 +52,8 @@ final class PathStatePhysicalOracle {
     }
     Files.createDirectories(scratch);
 
-    List<PathStatePhysicalGlobalIntent> targets = input.targets();
-    List<PathStatePhysicalReverseJournal> journals = input.journals();
+    List<GlobalIntent> targets = input.targets();
+    List<ReverseJournal> journals = input.journals();
     Map<Integer, List<byte[]>> rootsByStore = new LinkedHashMap<>();
     long totalRows = 0;
     boolean complete = false;
@@ -84,10 +87,10 @@ final class PathStatePhysicalOracle {
           roots.add(currentRoot);
 
           for (int index = 0; index < journals.size(); index++) {
-            PathStatePhysicalReverseJournal.StoreReverse reverse = reverseFor(
+            ReverseJournal.StoreReverse reverse = reverseFor(
                 journals.get(index), storeId);
             if (reverse != null) {
-              for (PathStatePhysicalReverseJournal.Entry entry : reverse.getFlatEntries()) {
+              for (ReverseJournal.Entry entry : reverse.getFlatEntries()) {
                 byte[] oldValue = entry.getOldValue();
                 if (oldValue == null) {
                   trie.delete(entry.getKey());
@@ -97,7 +100,7 @@ final class PathStatePhysicalOracle {
               }
             }
             byte[] parentRoot = rootAndFlush(trie, database);
-            PathStatePhysicalGlobalIntent parent = targets.get(index + 1);
+            GlobalIntent parent = targets.get(index + 1);
             requireRoot(participantTarget(parent, storeId).getStoreRoot(), parentRoot,
                 identity.getDbName(), parent.getMetadata().getBlockNumber());
             roots.add(parentRoot);
@@ -126,7 +129,7 @@ final class PathStatePhysicalOracle {
               PathStateCommitmentCodec.superLeafValue(identity.getStoreId(),
                   identity.getDbName(), participant.getStoreFormatVersion(), storeRoot));
         }
-        PathStatePhysicalGlobalIntent target = targets.get(targetIndex);
+        GlobalIntent target = targets.get(targetIndex);
         requireRoot(target.getSuperRoot(), superTrie.getRootHash(), "super",
             target.getMetadata().getBlockNumber());
       }
@@ -140,9 +143,9 @@ final class PathStatePhysicalOracle {
     }
   }
 
-  private static PathStatePhysicalReverseJournal.StoreReverse reverseFor(
-      PathStatePhysicalReverseJournal journal, int storeId) {
-    for (PathStatePhysicalReverseJournal.StoreReverse reverse : journal.getStores()) {
+  private static ReverseJournal.StoreReverse reverseFor(
+      ReverseJournal journal, int storeId) {
+    for (ReverseJournal.StoreReverse reverse : journal.getStores()) {
       if (reverse.getStoreId() == storeId) {
         return reverse;
       }
@@ -150,9 +153,9 @@ final class PathStatePhysicalOracle {
     return null;
   }
 
-  private static PathStatePhysicalGlobalIntent.ParticipantTarget participantTarget(
-      PathStatePhysicalGlobalIntent target, int storeId) throws IOException {
-    for (PathStatePhysicalGlobalIntent.ParticipantTarget participant
+  private static GlobalIntent.ParticipantTarget participantTarget(
+      GlobalIntent target, int storeId) throws IOException {
+    for (GlobalIntent.ParticipantTarget participant
         : target.getParticipants()) {
       if (participant.getStoreId() == storeId) {
         return participant;

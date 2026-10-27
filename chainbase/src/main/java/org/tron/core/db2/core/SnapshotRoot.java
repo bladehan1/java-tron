@@ -22,6 +22,7 @@ import org.tron.core.db2.common.DB;
 import org.tron.core.db2.common.Flusher;
 import org.tron.core.db2.common.TxCacheDB;
 import org.tron.core.db2.common.WrappedByteArray;
+import org.tron.core.db2.core.metrics.ExecutionAttribution;
 import org.tron.core.store.AccountAssetStore;
 
 public class SnapshotRoot extends AbstractSnapshot<byte[], byte[]> {

@@ -1,12 +1,15 @@
 package org.tron.core.db2.archive.serving;
 
 import java.util.Arrays;
+import org.tron.core.db2.archive.serving.status.ServingFailure;
+import org.tron.core.db2.archive.serving.status.ServingState;
+import org.tron.core.db2.archive.serving.telemetry.ServingIndexTiming.ServingObservation;
 
 /**
  * Immutable serving status published through a volatile reference (ch04 §3.4.1, L5). Query
  * threads reach the write handle only through the {@code ServingView} they read (§3.10.1).
  */
-public final class ServingView {
+public final class ServingView implements ServingObservation {
 
   private final ServingState state;
   private final long stateSinceMillis;

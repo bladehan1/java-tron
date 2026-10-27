@@ -8,6 +8,7 @@ import java.util.Map;
 import org.tron.core.db2.stateroot.commitment.PathStateCanonicalizer;
 import org.tron.core.db2.stateroot.commitment.PathStateParticipantScope;
 import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
+import org.tron.core.db2.stateroot.physical.PathStatePhysicalRecords.OracleWindow;
 
 /** Command-line entry for verifying one offline physical-store reverse window. */
 public final class PathStatePhysicalOracleTool {
@@ -43,7 +44,7 @@ public final class PathStatePhysicalOracleTool {
     PathStateParticipantScope scope = new PathStateCanonicalizer().participantScope();
     try (PathStatePhysicalStoreSet stores = PathStatePhysicalStoreSet.openExisting(root, scope,
         engine)) {
-      PathStatePhysicalOracleWindow window = stores.loadOracleWindow(blocks,
+      OracleWindow window = stores.loadOracleWindow(blocks,
           PathStateLayerLimits.defaults());
       return PathStatePhysicalOracle.verify(stores, window, scratch, rowsPerFlush);
     }

@@ -22,7 +22,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.stream.Stream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.tron.common.crypto.Hash;
@@ -43,7 +42,16 @@ import org.tron.core.db2.stateroot.format.PathStatePhysicalStoreManifest;
 import org.tron.core.db2.stateroot.format.PathStateRootMetadata;
 import org.tron.core.db2.stateroot.format.PathStateStoreManifest;
 import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
+import org.tron.core.db2.stateroot.metrics.PathStateObservations;
+import org.tron.core.db2.stateroot.physical.PathStatePhysicalHeadStorage;
+import org.tron.core.db2.stateroot.physical.PathStatePhysicalJournals;
+import org.tron.core.db2.stateroot.physical.PathStatePhysicalRecords;
+import org.tron.core.db2.stateroot.physical.PathStatePhysicalRecords.GlobalIntent;
+import org.tron.core.db2.stateroot.physical.PathStatePhysicalRecords.IngestCheckpoint;
+import org.tron.core.db2.stateroot.physical.PathStatePhysicalRecords.OracleWindow;
+import org.tron.core.db2.stateroot.physical.PathStatePhysicalRecords.ReverseJournal;
 import org.tron.core.db2.stateroot.storage.PathStateNativeAccess;
+import org.tron.core.db2.stateroot.storage.PathStateNativeBudget;
 import org.tron.core.db2.stateroot.trie.PathNodeStore;
 import org.tron.core.db2.stateroot.trie.PathStateTrieBuild;
 
@@ -69,17 +77,13 @@ public final class PathStatePhysicalStoreSet implements Closeable {
   private static final Set<String> LARGE_BOOTSTRAP_STORES = java.util.Collections.unmodifiableSet(
       new HashSet<>(Arrays.asList(
           "account", "account-asset", "delegation", "storage-row")));
-  private static final Set<String> GIANT_NATIVE_STORES = java.util.Collections.unmodifiableSet(
-      new HashSet<>(Arrays.asList("account", "account-asset", "storage-row")));
-  private static final Set<String> LARGE_NATIVE_STORES = java.util.Collections.unmodifiableSet(
-      new HashSet<>(Arrays.asList("code", "contract", "delegation")));
 
   private static final String STORES_DIRECTORY = "stores";
   private static final String SUPER_DIRECTORY = "super";
   private static final String NODES_DIRECTORY = "nodes";
-  private static final String REVERSE_DIRECTORY = "reverse";
+  private static final String REVERSE_DIRECTORY = PathStatePhysicalJournals.DIRECTORY;
   static final String INTENT_FILE = "INTENT";
-  static final String CURRENT_FILE = "CURRENT";
+  static final String CURRENT_FILE = PathStatePhysicalStoreManifest.CURRENT_FILE;
   // Stable persisted keyspace tags. The descriptive names carry semantics; byte values keep ABI.
   private static final byte FLAT_STATE_PREFIX = 'F';
   private static final byte TRIE_NODE_PREFIX = 'N';
@@ -110,7 +114,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
   private final ExecutorService participantPrepareExecutor;
   private final ExecutorService trieBranchExecutor;
   private final ResidentNodeCache residentNodeCache;
-  private Map<BytesKey, ReverseJournalIndexEntry> reverseJournalIndex;
+  private final PathStatePhysicalJournals journals;
   private byte[] cachedTrieTarget;
   private PathStateRoot.Snapshot cachedTrieSnapshot;
   private boolean rootClaimed;
@@ -123,6 +127,18 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     this.manifest = manifest;
     this.directory = manifest.getDirectory();
     this.scope = requireExactScope(scope);
+    this.journals = new PathStatePhysicalJournals(directory,
+        new PathStatePhysicalJournals.JournalFiles() {
+          @Override
+          public byte[] loadImmutableBytes(Path path, int maxLength) throws IOException {
+            return PathStateMetadataFile.loadImmutableBytes(path, maxLength);
+          }
+
+          @Override
+          public void deleteDurable(Path path) throws IOException {
+            PathStateMetadataFile.deleteDurable(path);
+          }
+        });
     this.participantWriteExecutor = newParticipantWriteExecutor();
     this.participantPrepareExecutor = newTrieExecutor("participant-prepare",
         MAX_PARALLEL_PARTICIPANT_PREPARES);
@@ -142,6 +158,95 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     } catch (IOException | RuntimeException failure) {
       closeAfterFailure(failure);
       throw failure;
+    }
+  }
+
+  /** Opens the restricted publication handle used by one physical snapshot head. */
+  public static PathStatePhysicalHeadStorage openHeadStorage(Path directory, Engine engine)
+      throws IOException {
+    return new HeadStorage(
+        openExisting(directory, new PathStateCanonicalizer().participantScope(), engine));
+  }
+
+  private static final class HeadStorage implements PathStatePhysicalHeadStorage {
+    private final PathStatePhysicalStoreSet stores;
+
+    private HeadStorage(PathStatePhysicalStoreSet stores) {
+      this.stores = stores;
+    }
+
+    @Override
+    public void recoverPublication() throws IOException {
+      stores.recoverPublication();
+    }
+
+    @Override
+    public void verifyReverseJournals(PathStateLayerLimits limits) throws IOException {
+      stores.verifyReverseJournals(limits);
+    }
+
+    @Override
+    public PathStateRootMetadata currentMetadata() throws IOException {
+      return stores.currentMetadata();
+    }
+
+    @Override
+    public PathStateRootMetadata previewTransition(PathStateBlockTransition transition)
+        throws IOException {
+      return stores.previewTransition(transition);
+    }
+
+    @Override
+    public PreparedTransition prepareSnapshotDelta(
+        BlockSnapshotMeta meta, PathStateBlockTransition transition) throws IOException {
+      return new OwnedTransition(this, stores.prepareSnapshotDelta(meta, transition));
+    }
+
+    @Override
+    public PathStateRootMetadata applyAndPublish(
+        PreparedTransition prepared, PathStateLayerLimits limits) throws IOException {
+      if (!(prepared instanceof OwnedTransition) || ((OwnedTransition) prepared).owner != this) {
+        throw new IOException("physical path-state prepared transition belongs to another owner");
+      }
+      return stores.applyAndPublish(((OwnedTransition) prepared).prepared, limits);
+    }
+
+    @Override
+    public PathStateRootMetadata applyAndPublish(
+        PathStateBlockTransition transition, PathStateLayerLimits limits) throws IOException {
+      return stores.applyAndPublish(transition, limits);
+    }
+
+    @Override
+    public PathStateRootMetadata rewindTo(
+        long blockNumber, byte[] blockHash, PathStateLayerLimits limits) throws IOException {
+      return stores.rewindTo(blockNumber, blockHash, limits);
+    }
+
+    @Override
+    public void close() throws IOException {
+      stores.close();
+    }
+  }
+
+  private static final class OwnedTransition
+      implements PathStatePhysicalHeadStorage.PreparedTransition {
+    private final HeadStorage owner;
+    private final PreparedPhysicalTransition prepared;
+
+    private OwnedTransition(HeadStorage owner, PreparedPhysicalTransition prepared) {
+      this.owner = owner;
+      this.prepared = prepared;
+    }
+
+    @Override
+    public boolean matches(PathStateBlockTransition transition) {
+      return prepared.matches(transition);
+    }
+
+    @Override
+    public PathStateSnapshotDelta getSnapshotDelta() {
+      return prepared.getSnapshotDelta();
     }
   }
 
@@ -185,25 +290,15 @@ public final class PathStatePhysicalStoreSet implements Closeable {
   }
 
   static String storageProfileNameFor(String dbName) {
-    String supplied = Objects.requireNonNull(dbName, "dbName");
-    if (GIANT_NATIVE_STORES.contains(supplied)) {
-      return "giant";
-    }
-    if (LARGE_NATIVE_STORES.contains(supplied)) {
-      return "large";
-    }
-    return "small";
+    return PathStateNativeBudget.storageProfileNameFor(dbName);
   }
 
   static int cacheShardBitsFor(int storeId, long cacheBytes) {
-    // Stable Store 4 is account. Its measured 1.7MiB filters cannot stay in a 1MiB shard.
-    // Sixteen shards keep the same 64MiB budget and allow 4MiB per shard. Other Stores and
-    // custom budgets keep native defaults until independently validated.
-    return storeId == 4 && cacheBytes == 64L * 1024 * 1024 ? 4 : -1;
+    return PathStateNativeBudget.cacheShardBitsFor(storeId, cacheBytes);
   }
 
   static boolean useLargeReadCache(int storeId, Engine engine, boolean enabled) {
-    return enabled && engine == Engine.ROCKSDB && (storeId == 5 || storeId == 22);
+    return PathStateNativeBudget.useLargeReadCache(storeId, engine, enabled);
   }
 
   private static NativeDbConfig storageProfileFor(String dbName,
@@ -274,14 +369,14 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     return residentNodeCache.evictions();
   }
 
-  synchronized void saveIngestCheckpoint(String dbName, PathStatePhysicalIngestCheckpoint value) {
+  synchronized void saveIngestCheckpoint(String dbName, IngestCheckpoint value) {
     participant(dbName).putMetadata(FLAT_INGEST_CHECKPOINT,
         Objects.requireNonNull(value, "value").encode());
   }
 
-  synchronized PathStatePhysicalIngestCheckpoint ingestCheckpoint(String dbName) {
+  synchronized IngestCheckpoint ingestCheckpoint(String dbName) {
     byte[] encoded = participant(dbName).getMetadata(FLAT_INGEST_CHECKPOINT);
-    return encoded == null ? null : PathStatePhysicalIngestCheckpoint.decode(encoded);
+    return encoded == null ? null : IngestCheckpoint.decode(encoded);
   }
 
   /** Ingests exact physical rows into one F domain and durably advances its source cursor. */
@@ -308,8 +403,8 @@ public final class PathStatePhysicalStoreSet implements Closeable {
       return;
     }
     byte[] encodedCheckpoint = store.getMetadata(FLAT_INGEST_CHECKPOINT);
-    PathStatePhysicalIngestCheckpoint prior = encodedCheckpoint == null ? null
-        : PathStatePhysicalIngestCheckpoint.decode(encodedCheckpoint);
+    IngestCheckpoint prior = encodedCheckpoint == null ? null
+        : IngestCheckpoint.decode(encodedCheckpoint);
     if (prior != null && !Arrays.equals(prior.getSourceIdentity(), identity)) {
       throw new IOException("physical ingest checkpoint source identity differs: " + dbName);
     }
@@ -346,7 +441,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
           || sinceCheckpoint[1] >= byteThreshold;
       if (checkpointDue) {
         pending.add(PhysicalStore.metadataMutation(FLAT_INGEST_CHECKPOINT,
-            new PathStatePhysicalIngestCheckpoint(identity, cursor[0], progress[0], progress[1])
+            PathStatePhysicalRecords.ingestCheckpoint(identity, cursor[0], progress[0], progress[1])
                 .encode()));
       }
       if (checkpointDue || pending.size() >= BOOTSTRAP_WRITE_BATCH_ENTRIES
@@ -368,7 +463,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     });
     if (cursor[0] != null) {
       pending.add(PhysicalStore.metadataMutation(FLAT_INGEST_CHECKPOINT,
-          new PathStatePhysicalIngestCheckpoint(identity, cursor[0], progress[0], progress[1])
+          PathStatePhysicalRecords.ingestCheckpoint(identity, cursor[0], progress[0], progress[1])
               .encode()));
     }
     pending.add(PhysicalStore.metadataMutation(FLAT_INGEST_COMPLETE, identity));
@@ -522,7 +617,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     requireOpen();
     BuildFaultHook hook = Objects.requireNonNull(faultHook, "faultHook");
     PathStateRoot root = createRoot();
-    List<PathStatePhysicalGlobalIntent.ParticipantTarget> targets = new ArrayList<>();
+    List<GlobalIntent.ParticipantTarget> targets = new ArrayList<>();
     for (PathStateParticipant participant : scope.getParticipants()) {
       PhysicalStore store = participant(participant.getDbName());
       byte[] completedRoot = store.getMetadata(FLAT_COMPLETE_METADATA);
@@ -536,7 +631,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
             "path-state physical Store generation is missing or invalid");
         requireSame(generation, participantGeneration(participant, flatDigest, completedRoot),
             "path-state physical Store generation differs");
-        targets.add(new PathStatePhysicalGlobalIntent.ParticipantTarget(participant.getStoreId(),
+        targets.add(new GlobalIntent.ParticipantTarget(participant.getStoreId(),
             generation, flatDigest, completedRoot));
         root.completeRebuildParticipant(participant.getDbName(), completedRoot);
         continue;
@@ -569,7 +664,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
           store.getWriteBatchCalls() - initialBatchCalls,
           store.getWriteBatchMutations() - initialBatchMutations,
           elapsedMillis(startedNanos), rowsPerSecond(rows[0], startedNanos));
-      targets.add(new PathStatePhysicalGlobalIntent.ParticipantTarget(participant.getStoreId(),
+      targets.add(new GlobalIntent.ParticipantTarget(participant.getStoreId(),
           generation, flatDigest, storeRoot));
       root.completeRebuildParticipant(participant.getDbName(), storeRoot);
     }
@@ -597,7 +692,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
       PublicationFaultHook faultHook) throws IOException {
     requireOpen();
     PublicationFaultHook hook = Objects.requireNonNull(faultHook, "faultHook");
-    PathStatePhysicalGlobalIntent target = publicationTarget(
+    GlobalIntent target = publicationTarget(
         Objects.requireNonNull(metadata, "metadata"));
     byte[] encoded = target.encode();
     Path intent = directory.resolve(INTENT_FILE);
@@ -614,13 +709,13 @@ public final class PathStatePhysicalStoreSet implements Closeable {
   /** Returns the exact block-bound metadata bound into the validated physical CURRENT. */
   public synchronized PathStateRootMetadata currentMetadata() throws IOException {
     requireOpen();
-    PathStatePhysicalGlobalIntent current = currentTarget();
+    GlobalIntent current = currentTarget();
     return current.getMetadata();
   }
 
   synchronized void verifyReverseJournals(PathStateLayerLimits limits) throws IOException {
     requireOpen();
-    reverseJournalIndex = loadReverseJournalIndex(Objects.requireNonNull(limits, "limits"));
+    journals.verify(Objects.requireNonNull(limits, "limits"));
   }
 
   /**
@@ -630,7 +725,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
    * validates every retained journal instead of trusting the steady-state in-memory index. Missing
    * ancestry fails rather than returning a shorter window.
    */
-  synchronized PathStatePhysicalOracleWindow loadOracleWindow(int blockCount,
+  synchronized OracleWindow loadOracleWindow(int blockCount,
       PathStateLayerLimits limits) throws IOException {
     requireOpen();
     if (blockCount <= 0) {
@@ -639,25 +734,8 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     if (Files.exists(directory.resolve(INTENT_FILE), LinkOption.NOFOLLOW_LINKS)) {
       throw new IOException("physical oracle requires a settled CURRENT without INTENT");
     }
-    PathStatePhysicalGlobalIntent current = currentTarget();
-    Map<BytesKey, ReverseJournalIndexEntry> indexed = loadReverseJournalIndex(
-        Objects.requireNonNull(limits, "limits"));
-    List<PathStatePhysicalReverseJournal> journals = new ArrayList<>(blockCount);
-    PathStatePhysicalGlobalIntent cursor = current;
-    for (int index = 0; index < blockCount; index++) {
-      ReverseJournalIndexEntry entry = indexed.get(new BytesKey(cursor.encode()));
-      if (entry == null) {
-        throw new IOException("physical oracle fixed window ancestry is missing at height "
-            + cursor.getMetadata().getBlockNumber());
-      }
-      PathStatePhysicalReverseJournal journal = loadReverseJournal(entry.path);
-      if (!Arrays.equals(cursor.encode(), journal.getChildTarget())) {
-        throw new IOException("physical oracle journal child differs from canonical cursor");
-      }
-      journals.add(journal);
-      cursor = PathStatePhysicalGlobalIntent.decode(journal.getParentTarget());
-    }
-    return new PathStatePhysicalOracleWindow(current.encode(), journals);
+    GlobalIntent current = currentTarget();
+    return journals.loadOracleWindow(current, blockCount, Objects.requireNonNull(limits, "limits"));
   }
 
   /** Computes one exact child target without changing F/N/M, INTENT, or CURRENT. */
@@ -806,10 +884,10 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     if (targetHash.length != PathStateRootMetadata.DIGEST_LENGTH) {
       throw new IOException("physical rewind block hash must contain exactly 32 bytes");
     }
-    List<PathStatePhysicalReverseJournal> chain = loadRewindChain(currentTarget(), blockNumber,
+    List<ReverseJournal> chain = loadRewindChain(currentTarget(), blockNumber,
         targetHash, Objects.requireNonNull(limits, "limits"));
     RewindFaultHook hook = Objects.requireNonNull(faultHook, "faultHook");
-    for (PathStatePhysicalReverseJournal journal : chain) {
+    for (ReverseJournal journal : chain) {
       applyReverseJournal(journal, hook);
     }
     PathStateRootMetadata rewound = currentMetadata();
@@ -823,7 +901,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
   private TransitionPlan prepareTransition(PathStateBlockTransition supplied) throws IOException {
     long initialResidentEvictions = residentNodeCache.evictions();
     PathStateBlockTransition transition = Objects.requireNonNull(supplied, "transition");
-    PathStatePhysicalGlobalIntent current = currentTarget();
+    GlobalIntent current = currentTarget();
     PathStateRootMetadata parent = current.getMetadata();
     if (transition.getBlockNumber() != parent.getBlockNumber() + 1
         || !Arrays.equals(transition.getParentHash(), parent.getBlockHash())) {
@@ -871,12 +949,12 @@ public final class PathStatePhysicalStoreSet implements Closeable {
               previousEncodedValue));
     }
 
-    List<PathStatePhysicalGlobalIntent.ParticipantTarget> targets = new ArrayList<>();
+    List<GlobalIntent.ParticipantTarget> targets = new ArrayList<>();
     List<ParticipantTransition> participantTransitions = new ArrayList<>();
-    List<PathStatePhysicalReverseJournal.StoreReverse> reverseStores = new ArrayList<>();
+    List<ReverseJournal.StoreReverse> reverseStores = new ArrayList<>();
     long flatReverseReads = 0;
     long flatReverseReused = 0;
-    for (PathStatePhysicalGlobalIntent.ParticipantTarget oldTarget
+    for (GlobalIntent.ParticipantTarget oldTarget
         : current.getParticipants()) {
       List<FlatMutation> flatMutations = flatByStore.get(oldTarget.getStoreId());
       if (flatMutations == null) {
@@ -888,13 +966,13 @@ public final class PathStatePhysicalStoreSet implements Closeable {
       byte[] flatDigest = nextFlatDigest(participant, oldTarget.getFlatDigest(), transition,
           flatMutations);
       byte[] generation = participantGeneration(participant, flatDigest, storeRoot);
-      targets.add(new PathStatePhysicalGlobalIntent.ParticipantTarget(participant.getStoreId(),
+      targets.add(new GlobalIntent.ParticipantTarget(participant.getStoreId(),
           generation, flatDigest, storeRoot));
       participantTransitions.add(new ParticipantTransition(participant,
           participant(participant.getDbName()), flatMutations,
           recordings.get(participant.getStoreId()).mutations(), flatDigest, generation,
           storeRoot));
-      List<PathStatePhysicalReverseJournal.Entry> reverseFlat = new ArrayList<>();
+      List<ReverseJournal.Entry> reverseFlat = new ArrayList<>();
       for (FlatMutation mutation : flatMutations) {
         byte[] oldValue;
         if (mutation.previousValueKnown) {
@@ -904,10 +982,10 @@ public final class PathStatePhysicalStoreSet implements Closeable {
           oldValue = participant(participant.getDbName()).getFlat(mutation.secureKey);
           flatReverseReads++;
         }
-        reverseFlat.add(new PathStatePhysicalReverseJournal.Entry(mutation.secureKey,
+        reverseFlat.add(new ReverseJournal.Entry(mutation.secureKey,
             oldValue));
       }
-      reverseStores.add(new PathStatePhysicalReverseJournal.StoreReverse(
+      reverseStores.add(new ReverseJournal.StoreReverse(
           participant.getStoreId(), reverseFlat,
           recordings.get(participant.getStoreId()).reverseEntries()));
     }
@@ -916,9 +994,9 @@ public final class PathStatePhysicalStoreSet implements Closeable {
         transition.getBlockHash(), transition.getParentHash(), transition.getTimestamp(),
         transition.getPhase(), manifest.getIdentityDigest(), parent.getStateRoot(), stateRoot,
         transition.getPayloadDigest());
-    PathStatePhysicalGlobalIntent target = new PathStatePhysicalGlobalIntent(
+    GlobalIntent target = PathStatePhysicalRecords.globalIntent(
         manifest.getIdentityDigest(), metadata, targets, superGeneration, stateRoot);
-    PathStatePhysicalReverseJournal journal = new PathStatePhysicalReverseJournal(target.encode(),
+    ReverseJournal journal = PathStatePhysicalRecords.reverseJournal(target.encode(),
         current.encode(), reverseStores, recordings.get(0).reverseEntries());
     long nodeReadMisses = recordings.values().stream()
         .mapToLong(RecordingNodeStore::getBaseReadMisses).sum();
@@ -951,7 +1029,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
           snapshotNodeMutations(participant.nodeMutations)));
     }
     return PathStateSnapshotDelta.fromPhysical(meta,
-        PathStatePhysicalGlobalIntent.decode(plan.parentTarget).getMetadata(), transition,
+        GlobalIntent.decode(plan.parentTarget).getMetadata(), transition,
         plan.trieSnapshot, stores, snapshotNodeMutations(plan.superNodeMutations));
   }
 
@@ -1036,11 +1114,11 @@ public final class PathStatePhysicalStoreSet implements Closeable {
         participant.storeRoot);
   }
 
-  private void applyReverseJournal(PathStatePhysicalReverseJournal journal,
+  private void applyReverseJournal(ReverseJournal journal,
       RewindFaultHook hook) throws IOException {
-    PathStatePhysicalGlobalIntent child = PathStatePhysicalGlobalIntent.decode(
+    GlobalIntent child = GlobalIntent.decode(
         journal.getChildTarget());
-    PathStatePhysicalGlobalIntent parent = PathStatePhysicalGlobalIntent.decode(
+    GlobalIntent parent = GlobalIntent.decode(
         journal.getParentTarget());
     if (!Arrays.equals(currentTarget().encode(), child.encode())) {
       throw new IOException("physical reverse journal child differs from CURRENT");
@@ -1049,8 +1127,8 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     Path current = directory.resolve(CURRENT_FILE);
     PathStateMetadataFile.publishImmutableBytes(intent, parent.encode());
     hook.after(RewindStage.AFTER_INTENT);
-    for (PathStatePhysicalReverseJournal.StoreReverse reverse : journal.getStores()) {
-      PathStatePhysicalGlobalIntent.ParticipantTarget target = participantTarget(parent,
+    for (ReverseJournal.StoreReverse reverse : journal.getStores()) {
+      GlobalIntent.ParticipantTarget target = participantTarget(parent,
           reverse.getStoreId());
       PhysicalStore store = participant(participant(reverse.getStoreId()).getDbName());
       store.applyParticipantTransition(flatMutations(reverse.getFlatEntries()),
@@ -1069,189 +1147,37 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     hook.after(RewindStage.AFTER_RETIRE);
   }
 
-  private List<PathStatePhysicalReverseJournal> loadRewindChain(
-      PathStatePhysicalGlobalIntent current, long targetNumber, byte[] targetHash,
+  private List<ReverseJournal> loadRewindChain(
+      GlobalIntent current, long targetNumber, byte[] targetHash,
       PathStateLayerLimits limits) throws IOException {
-    if (targetNumber < 0 || targetNumber > current.getMetadata().getBlockNumber()) {
-      throw new IOException("physical rewind target height is outside CURRENT ancestry");
-    }
-    Map<BytesKey, ReverseJournalIndexEntry> journals = reverseJournalIndex(limits);
-    List<PathStatePhysicalReverseJournal> chain = new ArrayList<>();
-    PathStatePhysicalGlobalIntent cursor = current;
-    while (cursor.getMetadata().getBlockNumber() > targetNumber) {
-      ReverseJournalIndexEntry entry = journals.get(new BytesKey(cursor.encode()));
-      if (entry == null) {
-        throw new IOException("physical reverse journal ancestry is missing");
-      }
-      PathStatePhysicalReverseJournal journal = loadReverseJournal(entry.path);
-      chain.add(journal);
-      cursor = PathStatePhysicalGlobalIntent.decode(entry.parentTarget);
-    }
-    if (cursor.getMetadata().getBlockNumber() != targetNumber
-        || !Arrays.equals(cursor.getMetadata().getBlockHash(), targetHash)) {
-      throw new IOException("physical rewind target is not an exact ancestor");
-    }
-    return chain;
+    return journals.loadRewindChain(current, targetNumber, targetHash, limits);
   }
 
-  private Map<BytesKey, ReverseJournalIndexEntry> loadReverseJournalIndex(
-      PathStateLayerLimits limits) throws IOException {
-    Map<BytesKey, ReverseJournalIndexEntry> journals = new LinkedHashMap<>();
-    Path reverse = directory.resolve(REVERSE_DIRECTORY);
-    if (!Files.exists(reverse, LinkOption.NOFOLLOW_LINKS)) {
-      return journals;
-    }
-    if (!Files.isDirectory(reverse, LinkOption.NOFOLLOW_LINKS) || Files.isSymbolicLink(reverse)) {
-      throw new IOException("physical reverse journal root is not a direct directory");
-    }
-    long total = 0;
-    int count = 0;
-    try (Stream<Path> files = Files.list(reverse)) {
-      for (Path file : (Iterable<Path>) files::iterator) {
-        if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) {
-          throw new IOException("physical reverse journal is not a regular file: " + file);
-        }
-        long length = Files.size(file);
-        total = StrictMathWrapper.addExact(total, length);
-        count = StrictMathWrapper.addExact(count, 1);
-        PathStatePhysicalReverseJournal journal = loadReverseJournal(file);
-        ReverseJournalIndexEntry entry = new ReverseJournalIndexEntry(file, length,
-            journal.getChildTarget(), journal.getParentTarget());
-        if (journals.put(new BytesKey(entry.childTarget), entry) != null) {
-          throw new IOException("physical reverse journal child identity is duplicated");
-        }
-      }
-    } catch (ArithmeticException overflow) {
-      throw new IOException("physical reverse journal usage overflow", overflow);
-    }
-    if (count > limits.getMaxLayers() || total > limits.getMaxLogicalBytes()) {
-      throw new IOException("physical reverse journal exceeds configured bounds");
-    }
-    return journals;
-  }
-
-  private PathStatePhysicalReverseJournal loadReverseJournal(Path file) throws IOException {
-    try {
-      return PathStatePhysicalReverseJournal.decode(
-          PathStateMetadataFile.loadImmutableBytes(file,
-              PathStatePhysicalReverseJournal.MAX_ENCODED_LENGTH));
-    } catch (IllegalArgumentException invalid) {
-      throw new IOException("physical reverse journal is corrupt: " + file, invalid);
-    }
-  }
-
-  private Map<BytesKey, ReverseJournalIndexEntry> reverseJournalIndex(
-      PathStateLayerLimits limits) throws IOException {
-    if (reverseJournalIndex == null) {
-      reverseJournalIndex = loadReverseJournalIndex(limits);
-    } else {
-      requireReverseJournalLimits(reverseJournalIndex, limits);
-    }
-    return reverseJournalIndex;
-  }
-
-  private static void requireReverseJournalLimits(
-      Map<BytesKey, ReverseJournalIndexEntry> journals, PathStateLayerLimits limits)
-      throws IOException {
-    long total = 0;
-    try {
-      for (ReverseJournalIndexEntry entry : journals.values()) {
-        total = StrictMathWrapper.addExact(total, entry.length);
-      }
-    } catch (ArithmeticException overflow) {
-      throw new IOException("physical reverse journal usage overflow", overflow);
-    }
-    if (journals.size() > limits.getMaxLayers() || total > limits.getMaxLogicalBytes()) {
-      throw new IOException("physical reverse journal exceeds configured bounds");
-    }
-  }
-
-  private void rememberReverseJournal(PathStatePhysicalReverseJournal journal, Path path,
+  private void rememberReverseJournal(ReverseJournal journal, Path path,
       long length) throws IOException {
-    Map<BytesKey, ReverseJournalIndexEntry> journals = reverseJournalIndex(
-        new PathStateLayerLimits(Integer.MAX_VALUE, Long.MAX_VALUE));
-    ReverseJournalIndexEntry entry = new ReverseJournalIndexEntry(path, length,
-        journal.getChildTarget(), journal.getParentTarget());
-    BytesKey identity = new BytesKey(entry.childTarget);
-    ReverseJournalIndexEntry previous = journals.put(identity, entry);
-    if (previous != null && !previous.path.equals(entry.path)) {
-      journals.put(identity, previous);
-      throw new IOException("physical reverse journal child identity is duplicated");
-    }
+    journals.rememberReverseJournal(journal, path, length);
   }
 
   private int reverseJournalCount() {
-    return reverseJournalIndex == null ? 0 : reverseJournalIndex.size();
+    return journals.reverseJournalCount();
   }
 
   private long reverseJournalBytes() throws IOException {
-    if (reverseJournalIndex == null) {
-      return 0;
-    }
-    long total = 0;
-    try {
-      for (ReverseJournalIndexEntry entry : reverseJournalIndex.values()) {
-        total = StrictMathWrapper.addExact(total, entry.length);
-      }
-      return total;
-    } catch (ArithmeticException overflow) {
-      throw new IOException("physical reverse journal usage overflow", overflow);
-    }
+    return journals.reverseJournalBytes();
   }
 
-  private void pruneReverseJournals(PathStatePhysicalGlobalIntent current,
+  private void pruneReverseJournals(GlobalIntent current,
       PathStateLayerLimits limits, Path candidate, long candidateBytes) throws IOException {
-    if (candidateBytes > limits.getMaxLogicalBytes()) {
-      throw new IOException("physical reverse journal candidate exceeds byte limit");
-    }
-    Path reverse = directory.resolve(REVERSE_DIRECTORY);
-    if (!Files.exists(reverse, LinkOption.NOFOLLOW_LINKS)) {
-      return;
-    }
-    Map<BytesKey, ReverseJournalIndexEntry> indexed = reverseJournalIndex(
-        new PathStateLayerLimits(Integer.MAX_VALUE, Long.MAX_VALUE));
-    Set<BytesKey> keep = new HashSet<>();
-    byte[] cursor = current.encode();
-    int remainingCount = limits.getMaxLayers() - 1;
-    long remainingBytes = limits.getMaxLogicalBytes() - candidateBytes;
-    while (remainingCount > 0) {
-      BytesKey identity = new BytesKey(cursor);
-      ReverseJournalIndexEntry entry = indexed.get(identity);
-      if (entry == null) {
-        break;
-      }
-      if (entry.length > remainingBytes) {
-        break;
-      }
-      keep.add(identity);
-      remainingCount--;
-      remainingBytes -= entry.length;
-      cursor = entry.parentTarget;
-    }
-    java.util.Iterator<Map.Entry<BytesKey, ReverseJournalIndexEntry>> iterator =
-        indexed.entrySet().iterator();
-    while (iterator.hasNext()) {
-      Map.Entry<BytesKey, ReverseJournalIndexEntry> indexedJournal = iterator.next();
-      ReverseJournalIndexEntry entry = indexedJournal.getValue();
-      if (!entry.path.equals(candidate) && !keep.contains(indexedJournal.getKey())) {
-        PathStateMetadataFile.deleteDurable(entry.path);
-        iterator.remove();
-      }
-    }
+    journals.pruneReverseJournals(current, limits, candidate, candidateBytes);
   }
 
   private Path reverseJournalPath(PathStateRootMetadata child) {
-    StringBuilder hash = new StringBuilder(child.getBlockHash().length * 2);
-    for (byte value : child.getBlockHash()) {
-      hash.append(String.format("%02x", value & 0xff));
-    }
-    return directory.resolve(REVERSE_DIRECTORY).resolve(String.format("%020d-%s.journal",
-        child.getBlockNumber(), hash));
+    return journals.reverseJournalPath(child);
   }
 
-  private static PathStatePhysicalGlobalIntent.ParticipantTarget participantTarget(
-      PathStatePhysicalGlobalIntent target, int storeId) throws IOException {
-    for (PathStatePhysicalGlobalIntent.ParticipantTarget participant : target.getParticipants()) {
+  private static GlobalIntent.ParticipantTarget participantTarget(
+      GlobalIntent target, int storeId) throws IOException {
+    for (GlobalIntent.ParticipantTarget participant : target.getParticipants()) {
       if (participant.getStoreId() == storeId) {
         return participant;
       }
@@ -1260,18 +1186,18 @@ public final class PathStatePhysicalStoreSet implements Closeable {
   }
 
   private static List<FlatMutation> flatMutations(
-      List<PathStatePhysicalReverseJournal.Entry> entries) {
+      List<ReverseJournal.Entry> entries) {
     List<FlatMutation> mutations = new ArrayList<>();
-    for (PathStatePhysicalReverseJournal.Entry entry : entries) {
+    for (ReverseJournal.Entry entry : entries) {
       mutations.add(new FlatMutation(entry.getKey(), entry.getOldValue()));
     }
     return mutations;
   }
 
   private static List<NodeMutation> nodeMutations(
-      List<PathStatePhysicalReverseJournal.Entry> entries) {
+      List<ReverseJournal.Entry> entries) {
     List<NodeMutation> mutations = new ArrayList<>();
-    for (PathStatePhysicalReverseJournal.Entry entry : entries) {
+    for (ReverseJournal.Entry entry : entries) {
       mutations.add(new NodeMutation(entry.getKey(), entry.getOldValue()));
     }
     return mutations;
@@ -1318,7 +1244,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
       return PublicationRecovery.NONE;
     }
 
-    PathStatePhysicalGlobalIntent intent;
+    GlobalIntent intent;
     boolean intentValid;
     try {
       intent = loadGlobalTarget(intentPath);
@@ -1353,7 +1279,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     requireOpen();
     DeleteFaultHook hook = Objects.requireNonNull(faultHook, "faultHook");
     recoverPublication();
-    PathStatePhysicalGlobalIntent current = currentTarget();
+    GlobalIntent current = currentTarget();
     PathStateRoot restored = createRoot();
     restored.restoreStoredRoots(current.getSuperRoot());
     requireParticipantRoots(restored, current);
@@ -1385,7 +1311,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
         generation, storeRoot);
     hook.after(DeleteStage.AFTER_PARTICIPANT_BATCH);
 
-    List<PathStatePhysicalGlobalIntent.ParticipantTarget> targets = replaceParticipantTarget(
+    List<GlobalIntent.ParticipantTarget> targets = replaceParticipantTarget(
         current.getParticipants(), targetParticipant.getStoreId(), generation, flatDigest,
         storeRoot);
     RecordingNodeStore superChanges = recordings.get(0);
@@ -1399,12 +1325,12 @@ public final class PathStatePhysicalStoreSet implements Closeable {
         participantChanges.deleteCount(), superChanges.putCount(), superChanges.deleteCount());
   }
 
-  private PathStatePhysicalGlobalIntent currentTarget() throws IOException {
+  private GlobalIntent currentTarget() throws IOException {
     Path currentPath = directory.resolve(CURRENT_FILE);
     if (!Files.exists(currentPath, LinkOption.NOFOLLOW_LINKS)) {
       throw new IOException("path-state physical CURRENT is missing");
     }
-    PathStatePhysicalGlobalIntent current = loadGlobalTarget(currentPath);
+    GlobalIntent current = loadGlobalTarget(currentPath);
     if (!matchesPreparedTarget(current)) {
       throw new IOException("path-state physical CURRENT differs from prepared target");
     }
@@ -1412,8 +1338,8 @@ public final class PathStatePhysicalStoreSet implements Closeable {
   }
 
   private void requireParticipantRoots(PathStateRoot root,
-      PathStatePhysicalGlobalIntent current) throws IOException {
-    for (PathStatePhysicalGlobalIntent.ParticipantTarget target : current.getParticipants()) {
+      GlobalIntent current) throws IOException {
+    for (GlobalIntent.ParticipantTarget target : current.getParticipants()) {
       PathStateParticipant participant = participant(target.getStoreId());
       requireSame(target.getStoreRoot(), root.participantRoot(participant.getDbName()),
           "path-state physical participant root differs from CURRENT: "
@@ -1431,14 +1357,14 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     }
   }
 
-  private static List<PathStatePhysicalGlobalIntent.ParticipantTarget> replaceParticipantTarget(
-      List<PathStatePhysicalGlobalIntent.ParticipantTarget> current, int storeId,
+  private static List<GlobalIntent.ParticipantTarget> replaceParticipantTarget(
+      List<GlobalIntent.ParticipantTarget> current, int storeId,
       byte[] generation, byte[] flatDigest, byte[] storeRoot) {
-    List<PathStatePhysicalGlobalIntent.ParticipantTarget> targets = new ArrayList<>();
+    List<GlobalIntent.ParticipantTarget> targets = new ArrayList<>();
     boolean replaced = false;
-    for (PathStatePhysicalGlobalIntent.ParticipantTarget target : current) {
+    for (GlobalIntent.ParticipantTarget target : current) {
       if (target.getStoreId() == storeId) {
-        targets.add(new PathStatePhysicalGlobalIntent.ParticipantTarget(storeId, generation,
+        targets.add(new GlobalIntent.ParticipantTarget(storeId, generation,
             flatDigest, storeRoot));
         replaced = true;
       } else {
@@ -1476,9 +1402,9 @@ public final class PathStatePhysicalStoreSet implements Closeable {
         "path-state physical super root is missing or invalid");
   }
 
-  private PathStatePhysicalGlobalIntent publicationTarget(PathStateRootMetadata metadata)
+  private GlobalIntent publicationTarget(PathStateRootMetadata metadata)
       throws IOException {
-    List<PathStatePhysicalGlobalIntent.ParticipantTarget> targets = new ArrayList<>();
+    List<GlobalIntent.ParticipantTarget> targets = new ArrayList<>();
     for (PathStateParticipant participant : scope.getParticipants()) {
       PhysicalStore store = participant(participant.getDbName());
       byte[] storeRoot = requireDigest(store.getMetadata(FLAT_COMPLETE_METADATA),
@@ -1492,7 +1418,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
               + participant.getDbName());
       requireSame(generation, participantGeneration(participant, flatDigest, storeRoot),
           "path-state physical Store generation differs: " + participant.getDbName());
-      targets.add(new PathStatePhysicalGlobalIntent.ParticipantTarget(participant.getStoreId(),
+      targets.add(new GlobalIntent.ParticipantTarget(participant.getStoreId(),
           generation, flatDigest, storeRoot));
     }
     byte[] superRoot = requireDigest(superStore.getMetadata(FLAT_ROOT_METADATA),
@@ -1503,11 +1429,11 @@ public final class PathStatePhysicalStoreSet implements Closeable {
         "path-state physical super generation is missing or invalid");
     requireSame(generation, superGeneration(targets, superRoot),
         "path-state physical super generation differs");
-    return new PathStatePhysicalGlobalIntent(manifest.getIdentityDigest(), metadata, targets,
+    return PathStatePhysicalRecords.globalIntent(manifest.getIdentityDigest(), metadata, targets,
         generation, superRoot);
   }
 
-  private boolean matchesPreparedTarget(PathStatePhysicalGlobalIntent target) throws IOException {
+  private boolean matchesPreparedTarget(GlobalIntent target) throws IOException {
     try {
       return Arrays.equals(target.encode(), publicationTarget(target.getMetadata()).encode());
     } catch (IllegalArgumentException invalidTarget) {
@@ -1535,10 +1461,10 @@ public final class PathStatePhysicalStoreSet implements Closeable {
         previous.getPayloadDigest());
   }
 
-  private static PathStatePhysicalGlobalIntent loadGlobalTarget(Path path) throws IOException {
+  private static GlobalIntent loadGlobalTarget(Path path) throws IOException {
     try {
-      return PathStatePhysicalGlobalIntent.decode(PathStateMetadataFile.loadImmutableBytes(path,
-          PathStatePhysicalGlobalIntent.MAX_ENCODED_LENGTH));
+      return GlobalIntent.decode(PathStateMetadataFile.loadImmutableBytes(path,
+          GlobalIntent.MAX_ENCODED_LENGTH));
     } catch (IllegalArgumentException invalid) {
       throw new IOException("path-state physical global target is corrupt: " + path, invalid);
     }
@@ -1553,11 +1479,11 @@ public final class PathStatePhysicalStoreSet implements Closeable {
   }
 
   private byte[] superGeneration(
-      List<PathStatePhysicalGlobalIntent.ParticipantTarget> targets, byte[] superRoot) {
+      List<GlobalIntent.ParticipantTarget> targets, byte[] superRoot) {
     Hasher hasher = Hashing.sha256().newHasher()
         .putString("java-tron/path-state/super-generation/v1", StandardCharsets.US_ASCII)
         .putBytes(manifest.getIdentityDigest()).putInt(targets.size());
-    for (PathStatePhysicalGlobalIntent.ParticipantTarget target : targets) {
+    for (GlobalIntent.ParticipantTarget target : targets) {
       hasher.putInt(target.getStoreId()).putBytes(target.getGeneration())
           .putBytes(target.getFlatDigest()).putBytes(target.getStoreRoot());
     }
@@ -1565,7 +1491,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
   }
 
   private static byte[] requireDigest(byte[] value, String error) throws IOException {
-    if (value == null || value.length != PathStatePhysicalGlobalIntent.DIGEST_LENGTH) {
+    if (value == null || value.length != GlobalIntent.DIGEST_LENGTH) {
       throw new IOException(error);
     }
     return Arrays.copyOf(value, value.length);
@@ -1722,7 +1648,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
       long cacheBytes = largeReadCache ? 256L << 20 : dbSettings.getCacheSize();
       nativeStore = PathStateNativeAccess.open(directory, engine, storageProfile, dbSettings,
           largeReadCache ? 2 : cacheShardBitsFor(storeId, cacheBytes),
-          PathStateOperationTimer.observesRocksDb(storeId), cacheBytes);
+          PathStateObservations.observesRocksDb(storeId), cacheBytes);
       nodeStore = new ResidentNodeStore(new PhysicalNodeStore(nativeStore), residentNodeCache,
           storeId);
     }
@@ -2013,7 +1939,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     private final PathNodeStore base;
     private final ResidentNodeCache cache;
     private final int storeId;
-    private final PathStateOperationTimer nativeTimer;
+    private final PathStateObservations.Timer nativeTimer;
     private final AtomicLong hits = new AtomicLong();
     private final AtomicLong cleanHits = new AtomicLong();
     private final AtomicLong updatedHits = new AtomicLong();
@@ -2023,8 +1949,8 @@ public final class PathStatePhysicalStoreSet implements Closeable {
       this.base = Objects.requireNonNull(base, "base");
       this.cache = Objects.requireNonNull(cache, "cache");
       this.storeId = storeId;
-      nativeTimer = PathStateOperationTimer.observesStore(storeId) && PathStateOperationTimer.enabled()
-          ? new PathStateOperationTimer() : null;
+      nativeTimer = PathStateObservations.observesStore(storeId) && PathStateObservations.enabled()
+          ? PathStateObservations.timer() : null;
     }
 
     @Override
@@ -2403,10 +2329,10 @@ public final class PathStatePhysicalStoreSet implements Closeable {
       return mutations;
     }
 
-    private List<PathStatePhysicalReverseJournal.Entry> reverseEntries() {
-      List<PathStatePhysicalReverseJournal.Entry> entries = new ArrayList<>();
+    private List<ReverseJournal.Entry> reverseEntries() {
+      List<ReverseJournal.Entry> entries = new ArrayList<>();
       for (BytesKey key : changes.keySet()) {
-        entries.add(new PathStatePhysicalReverseJournal.Entry(key.bytes, baseValue(key)));
+        entries.add(new ReverseJournal.Entry(key.bytes, baseValue(key)));
       }
       return entries;
     }
@@ -2531,11 +2457,11 @@ public final class PathStatePhysicalStoreSet implements Closeable {
 
     private final PathStateBlockTransition transition;
     private final byte[] parentTarget;
-    private final PathStatePhysicalGlobalIntent target;
+    private final GlobalIntent target;
     private final List<ParticipantTransition> participants;
     private final PhysicalStore superStore;
     private final List<NodeMutation> superNodeMutations;
-    private final PathStatePhysicalReverseJournal journal;
+    private final ReverseJournal journal;
     private final long nodeReadMisses;
     private final long nodeReadHits;
     private final long residentNodeHits;
@@ -2553,9 +2479,9 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     private final boolean reusedTrieSnapshot;
 
     private TransitionPlan(PathStateBlockTransition transition, byte[] parentTarget,
-        PathStatePhysicalGlobalIntent target,
+        GlobalIntent target,
         List<ParticipantTransition> participants, PhysicalStore superStore,
-        List<NodeMutation> superNodeMutations, PathStatePhysicalReverseJournal journal,
+        List<NodeMutation> superNodeMutations, ReverseJournal journal,
         long nodeReadMisses, long nodeReadHits, long residentNodeHits,
         long residentCleanHits, long residentUpdatedHits, long nativeNodeReads,
         long initialResidentEvictions, long nodeDecodes, long nodeHashVerifies,
@@ -2630,27 +2556,6 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     @Override
     public int hashCode() {
       return Arrays.hashCode(bytes);
-    }
-  }
-
-  private static final class ReverseJournalIndexEntry {
-
-    private final Path path;
-    private final long length;
-    private final byte[] childTarget;
-    private final byte[] parentTarget;
-
-    private ReverseJournalIndexEntry(Path path, long length, byte[] childTarget,
-        byte[] parentTarget) {
-      this.path = Objects.requireNonNull(path, "path").toAbsolutePath().normalize();
-      if (length <= 0) {
-        throw new IllegalArgumentException("reverse journal length must be positive");
-      }
-      this.length = length;
-      this.childTarget = Arrays.copyOf(Objects.requireNonNull(childTarget, "childTarget"),
-          childTarget.length);
-      this.parentTarget = Arrays.copyOf(Objects.requireNonNull(parentTarget, "parentTarget"),
-          parentTarget.length);
     }
   }
 

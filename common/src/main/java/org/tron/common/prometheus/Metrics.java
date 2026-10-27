@@ -7,6 +7,9 @@ import io.prometheus.client.exporter.HTTPServer;
 import io.prometheus.client.hotspot.DefaultExports;
 import lombok.extern.slf4j.Slf4j;
 import org.tron.common.parameter.CommonParameter;
+import org.tron.common.prometheus.exporters.ChainbaseRocksDbExports;
+import org.tron.common.prometheus.exporters.GuavaCacheExports;
+import org.tron.common.prometheus.exporters.OperatingSystemExports;
 import org.tron.core.exception.TronError;
 
 @Slf4j(topic = "metrics")

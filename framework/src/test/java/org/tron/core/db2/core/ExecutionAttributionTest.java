@@ -20,6 +20,7 @@ import org.junit.rules.TemporaryFolder;
 import org.tron.common.parameter.CommonParameter;
 import org.tron.common.storage.rocksdb.RocksDbDataSourceImpl;
 import org.tron.core.db2.common.DB;
+import org.tron.core.db2.core.metrics.ExecutionAttribution;
 
 public class ExecutionAttributionTest {
   @Rule

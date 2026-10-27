@@ -22,7 +22,7 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.rocksdb.FlushOptions;
-import org.tron.common.prometheus.ChainbaseRocksDbExports;
+import org.tron.common.prometheus.exporters.ChainbaseRocksDbExports;
 import org.tron.core.exception.TronError;
 
 public class ChainbaseRocksDbAttributionTest {

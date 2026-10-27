@@ -30,6 +30,7 @@ import org.tron.core.db2.stateroot.commitment.PathStateParticipant;
 import org.tron.core.db2.stateroot.commitment.PathStateParticipantScope;
 import org.tron.core.db2.stateroot.format.PathStateRootMetadata;
 import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
+import org.tron.core.db2.stateroot.metrics.PathStateObservations;
 import org.tron.core.db2.stateroot.runtime.PathStateHead;
 import org.tron.core.db2.stateroot.storage.PathStateNativeAccess;
 import org.tron.core.db2.stateroot.trie.PathNodeStore;
@@ -493,7 +494,7 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
                 snapshot, participant.getStoreId())),
         recordings.computeIfAbsent(0, ignored ->
             new RecordingStore(stores.superStore().nodeStore(), snapshot, 0)), snapshot);
-    boolean attribution = PathStateOperationTimer.enabled();
+    boolean attribution = PathStateObservations.enabled();
     if (attribution) {
       candidate.enableParticipantReadTiming();
     }
@@ -543,7 +544,7 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
         if (timing != null) {
           for (int i = 0; i < timing.length; i++) {
             String operation = i == 0 ? "node_read" : i == 1 ? "hash_verify" : "decode";
-            PathStateAttributionMetrics.operation(storeId, operation,
+            PathStateObservations.operation(storeId, operation,
                 timing[i][0], timing[i][1], timing[i][2]);
             logger.info("Path-state read attribution: head={}, blockHash={}, status=prepared, "
                     + "store={}, operation={}, sampleEvery=64, calls={}, samples={}, sampledNanos={}",
@@ -559,7 +560,7 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
       if (parallelStats != null) {
         parallelStats.exportAttribution();
       }
-      PathStateAttributionMetrics.prepared(transition.getBlockNumber());
+      PathStateObservations.prepared(transition.getBlockNumber());
       logger.info("Path-state participant attribution: head={}, status=prepared, "
               + "layout=store:mutations:submitToStartNanos:workNanos, perStore={}",
           transition.getBlockNumber(), parallelStats == null ? "" : parallelStats.perStoreTiming());
@@ -903,8 +904,8 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
       initialNativeTiming = nativeReadSource == null ? null : nativeReadSource.nativeReadTiming();
       initialReadStatistics = nativeReadSource == null ? null : nativeReadSource.readStatistics();
       initialReadPerf = nativeReadSource == null ? null : nativeReadSource.readPerfStatistics();
-      boolean attribution = PathStateOperationTimer.observesStore(storeId)
-          && PathStateOperationTimer.enabled();
+      boolean attribution = PathStateObservations.observesStore(storeId)
+          && PathStateObservations.enabled();
       readRequests = attribution ? new AtomicLong() : null;
       changedReadHits = attribution ? new AtomicLong() : null;
       initialNativeReads = base instanceof PathStatePhysicalStoreSet.ResidentNodeStore
@@ -956,7 +957,7 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
         initialReadStatistics.forEach((ticker, before) -> {
           long delta = after.get(ticker) - before;
           deltas.put(ticker, delta);
-          PathStateAttributionMetrics.rocksDb(storeId, ticker, delta);
+          PathStateObservations.rocksDb(storeId, ticker, delta);
         });
         logger.info("Path-state RocksDB attribution: head={}, blockHash={}, status=prepared, "
                 + "store={}, scope=database, tickers={}", head, blockHash, storeId, deltas);
@@ -967,7 +968,7 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
         initialReadPerf.forEach((kind, before) -> {
           long delta = after.get(kind) - before;
           deltas.put(kind, delta);
-          PathStateAttributionMetrics.nativeGetPerf(storeId, kind, delta);
+          PathStateObservations.nativeGetPerf(storeId, kind, delta);
         });
         logger.info("Path-state native get perf attribution: head={}, blockHash={}, "
                 + "status=prepared, store={}, scope=database_get, sampleEvery={}, counters={}",
@@ -982,13 +983,13 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
       long updated = nativeReadSource == null ? -1
           : nativeReadSource.getUpdatedHits() - initialUpdatedHits;
       long nativeCount = nativeReadSource == null ? -1 : nativeReads();
-      PathStateAttributionMetrics.cache(storeId, "requests", requests);
-      PathStateAttributionMetrics.cache(storeId, "changed_hits", changed);
-      PathStateAttributionMetrics.cache(storeId, "local_read_hits", local);
-      PathStateAttributionMetrics.cache(storeId, "base_reads", baseReads);
-      PathStateAttributionMetrics.cache(storeId, "resident_clean", clean);
-      PathStateAttributionMetrics.cache(storeId, "resident_updated", updated);
-      PathStateAttributionMetrics.cache(storeId, "native_reads", nativeCount);
+      PathStateObservations.cache(storeId, "requests", requests);
+      PathStateObservations.cache(storeId, "changed_hits", changed);
+      PathStateObservations.cache(storeId, "local_read_hits", local);
+      PathStateObservations.cache(storeId, "base_reads", baseReads);
+      PathStateObservations.cache(storeId, "resident_clean", clean);
+      PathStateObservations.cache(storeId, "resident_updated", updated);
+      PathStateObservations.cache(storeId, "native_reads", nativeCount);
       logger.info("Path-state cache attribution: head={}, status=prepared, store={}, "
               + "requests={}, changedHits={}, localReadHits={}, baseReads={}, residentClean={}, "
               + "residentUpdated={}, nativeReads={}", head, storeId, requests, changed, local,
@@ -998,7 +999,7 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
         long calls = after[0] - initialNativeTiming[0];
         long samples = after[1] - initialNativeTiming[1];
         long nanos = after[2] - initialNativeTiming[2];
-        PathStateAttributionMetrics.operation(storeId, "native_get", calls, samples, nanos);
+        PathStateObservations.operation(storeId, "native_get", calls, samples, nanos);
         logger.info("Path-state read attribution: head={}, blockHash={}, status=prepared, store={}, "
                 + "operation=native_get, sampleEvery=64, calls={}, samples={}, sampledNanos={}",
             head, blockHash, storeId, calls, samples, nanos);

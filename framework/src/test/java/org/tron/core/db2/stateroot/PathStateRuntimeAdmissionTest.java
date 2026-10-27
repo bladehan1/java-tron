@@ -16,6 +16,8 @@ import org.tron.core.db2.stateroot.commitment.PathStateCanonicalizer.P66Phase;
 import org.tron.core.db2.stateroot.format.PathStateRootMetadata;
 import org.tron.core.db2.stateroot.format.PathStateStoreManifest;
 import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
+import org.tron.core.db2.stateroot.physical.PathStatePhysicalRuntimeAdmission;
+import org.tron.core.db2.stateroot.physical.PathStatePhysicalSnapshotHead;
 import org.tron.core.db2.stateroot.runtime.PathStateRuntimeAdmission;
 import org.tron.core.db2.stateroot.runtime.PathStateRuntimeAdmission.Status;
 

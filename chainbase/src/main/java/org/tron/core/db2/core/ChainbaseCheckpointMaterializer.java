@@ -33,6 +33,7 @@ import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointMateriali
 import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointTarget;
 import org.tron.core.db2.checkpoint.common.payload.CommonCheckpointPayload;
 import org.tron.core.db2.common.WrappedByteArray;
+import org.tron.core.db2.core.metrics.ExecutionAttribution;
 
 /** Chainbase participant for common-checkpoint idempotent materialization and publication. */
 public final class ChainbaseCheckpointMaterializer implements CommonCheckpointMaterializer {

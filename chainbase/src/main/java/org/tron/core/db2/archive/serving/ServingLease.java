@@ -6,6 +6,7 @@ import java.util.OptionalLong;
 import org.tron.core.db2.archive.ArchivePersistenceException;
 import org.tron.core.db2.archive.contract.HistoricalQueryException;
 import org.tron.core.db2.archive.serving.PersistentServingKeyIndexGeneration.Descriptor;
+import org.tron.core.db2.archive.serving.status.ServingState;
 import org.tron.core.db2.archive.storage.index.ArchiveIndexStorage;
 
 /**
