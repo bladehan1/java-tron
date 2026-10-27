@@ -61,7 +61,6 @@ import org.tron.core.store.AccountStore;
 import org.tron.p2p.P2pConfig;
 import org.tron.p2p.dns.update.DnsType;
 import org.tron.p2p.dns.update.PublishConfig;
-import org.tron.p2p.utils.NetUtil;
 import org.tron.program.Version;
 
 @Slf4j(topic = "app")
@@ -176,6 +175,12 @@ public class Args extends CommonParameter {
 
     // 5. Apply platform constraints (e.g. ARM64 forces RocksDB)
     applyPlatformConstraints();
+    org.tron.core.config.archive.ArchiveRocksDbPolicy.validate(PARAMETER.storage);
+    if (PARAMETER.storage.isArchiveFeaturesEnabled()) {
+      org.tron.common.setting.RocksDbThreadBudget.activate(
+          org.tron.common.setting.RocksDbSettings.getSettings().getCompactThreads(), 1,
+          org.tron.common.setting.RocksDbSettings.getSettings().getCompactThreads(), true);
+    }
 
     // 6. Init witness (depends on CLI witness flag)
     initLocalWitnesses(config, cmd);
@@ -217,6 +222,48 @@ public class Args extends CommonParameter {
     // contractParse is set in applyConfigParams alongside event config, not here
     PARAMETER.storage.setCheckpointVersion(sc.getCheckpoint().getVersion());
     PARAMETER.storage.setCheckpointSync(sc.getCheckpoint().isSync());
+    PARAMETER.storage.setStateArchiveEnabled(sc.getStateArchive().isEnabled());
+    PARAMETER.storage.setStateArchiveDirectory(sc.getStateArchive().getDirectory());
+    PARAMETER.storage.setStateArchiveMaxSegmentSize(sc.getStateArchive().getMaxSegmentSize());
+    PARAMETER.storage.setStateArchiveQueueCapacity(sc.getStateArchive().getQueueCapacity());
+    PARAMETER.storage.setStateArchiveServingIndexEngine(
+        sc.getStateArchive().getServingIndexEngine());
+    PARAMETER.storage.setStateArchiveServingIndexDbSettings(
+        sc.getStateArchive().getServingIndex());
+    PARAMETER.storage.setStateArchiveHotStoreSettings(sc.getStateArchive().getHotStore());
+    PARAMETER.storage.setStateArchiveAppendFileSettings(sc.getStateArchive().getAppendFile());
+    PARAMETER.storage.setCommonCheckpointEnabled(sc.getCommonCheckpoint().isEnabled());
+    PARAMETER.storage.setCommonCheckpointDirectory(sc.getCommonCheckpoint().getDirectory());
+    PARAMETER.storage.setCommonCheckpointDurableBaseGenerations(
+        sc.getCommonCheckpoint().getDurableBaseGenerations());
+    PARAMETER.storage.setPathStateRootEnabled(sc.getPathStateRoot().isEnabled());
+    PARAMETER.storage.setPathStateRootMode(sc.getPathStateRoot().getMode());
+    PARAMETER.storage.setPathStateRootDirectory(sc.getPathStateRoot().getDirectory());
+    PARAMETER.storage.setPathStateRootEngine(sc.getPathStateRoot().getEngine());
+    PARAMETER.storage.setPathStateRootFormatVersion(sc.getPathStateRoot().getFormatVersion());
+    PARAMETER.storage.setPathStateRootReversibleLayerLimit(
+        sc.getPathStateRoot().getReversibleLayerLimit());
+    PARAMETER.storage.setPathStateRootReversibleLayerBytes(
+        sc.getPathStateRoot().getReversibleLayerBytes());
+    PARAMETER.storage.setPathStateRootWriteBufferBytes(
+        sc.getPathStateRoot().getWriteBufferBytes());
+    PARAMETER.storage.setPathStateRootNodeCacheBytes(
+        sc.getPathStateRoot().getNodeCacheBytes());
+    PARAMETER.storage.setPathStateRootParticipantThreads(
+        sc.getPathStateRoot().getParticipantThreads());
+    PARAMETER.storage.setPathStateRootBranchThreads(
+        sc.getPathStateRoot().getBranchThreads());
+    PARAMETER.storage.setPathStateRootSecondLevelParallelThreshold(
+        sc.getPathStateRoot().getSecondLevelParallelThreshold());
+    PARAMETER.storage.setPathStateRootRebuildFromGenesis(
+        sc.getPathStateRoot().isRebuildFromGenesis());
+    PARAMETER.storage.setPathStateRootVerifyEveryBlock(
+        sc.getPathStateRoot().isVerifyEveryBlock());
+    PARAMETER.storage.setPathStateRootVolatileSnapshotBenchmark(
+        sc.getPathStateRoot().isVolatileSnapshotBenchmark());
+    PARAMETER.storage.setPathStateRootAsyncPrepareBenchmark(
+        sc.getPathStateRoot().isAsyncPrepareBenchmark());
+    PARAMETER.storage.setPathStateRootDbSettings(sc.getPathStateRoot().getDbSettings());
 
     // estimatedTransactions / maxFlushCount clamping & validation run inside
     // TxCacheConfig.postProcess / SnapshotConfig.postProcess during bean load.
@@ -933,6 +980,7 @@ public class Args extends CommonParameter {
 
   @VisibleForTesting
   public static void clearParam() {
+    org.tron.common.setting.RocksDbThreadBudget.deactivate();
     CommonParameter.reset();
     configFilePath = "";
     localWitnesses = null;
@@ -1315,4 +1363,3 @@ public class Args extends CommonParameter {
     return optionGroupMap;
   }
 }
-

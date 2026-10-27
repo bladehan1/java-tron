@@ -58,6 +58,7 @@ public class FullNode {
     context.register(DefaultConfig.class);
     context.refresh();
     Application appT = ApplicationFactory.create(context);
+    runArchiveStateDiagnostic(() -> ArchiveStateDiagnostic.runIfEnabled(context));
     context.registerShutdownHook();
     appT.startup();
     if (parameter.isSolidityNode()) {
@@ -65,6 +66,15 @@ public class FullNode {
       node.run();
     }
     appT.blockUntilShutdown();
+  }
+
+  static void runArchiveStateDiagnostic(Runnable diagnostic) {
+    try {
+      diagnostic.run();
+    } catch (RuntimeException failure) {
+      throw new TronError("State Archive startup diagnostic failed", failure,
+          TronError.ErrCode.STATE_ARCHIVE_INIT);
+    }
   }
 
   private static void checkJdkVersion() {

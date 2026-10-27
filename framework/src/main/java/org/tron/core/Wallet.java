@@ -134,6 +134,8 @@ import org.tron.core.actuator.ActuatorConstant;
 import org.tron.core.actuator.ActuatorFactory;
 import org.tron.core.actuator.UnfreezeBalanceV2Actuator;
 import org.tron.core.actuator.VMActuator;
+import org.tron.core.archive.execution.HistoricalConstantExecution;
+import org.tron.core.archive.repository.HistoricalRepositoryProvider;
 import org.tron.core.capsule.AbiCapsule;
 import org.tron.core.capsule.AccountCapsule;
 import org.tron.core.capsule.AssetIssueCapsule;
@@ -166,6 +168,8 @@ import org.tron.core.db.BlockIndexStore;
 import org.tron.core.db.EnergyProcessor;
 import org.tron.core.db.Manager;
 import org.tron.core.db.TransactionContext;
+import org.tron.core.db.TransactionContext.ExecutionMode;
+import org.tron.core.db2.archive.query.session.HistoricalQuerySession;
 import org.tron.core.db2.core.Chainbase;
 import org.tron.core.db2.core.Chainbase.Cursor;
 import org.tron.core.exception.AccountResourceInsufficientException;
@@ -2217,7 +2221,6 @@ public class Wallet {
     return result.build();
   }
 
-
   public long getShieldedTransactionFee() {
     return chainBaseManager.getDynamicPropertiesStore().getShieldedTransactionFee();
   }
@@ -2951,7 +2954,6 @@ public class Wallet {
     return builder.build();
   }
 
-
   public Transaction triggerContract(TriggerSmartContract
       triggerSmartContract,
       TransactionCapsule trxCap, Builder builder,
@@ -3153,14 +3155,48 @@ public class Wallet {
       headBlock = blockCapsuleList.get(0).getInstance();
     }
 
-    BlockCapsule headBlockCapsule = new BlockCapsule(headBlock);
-    TransactionContext context = new TransactionContext(headBlockCapsule, trxCap,
-        StoreFactory.getInstance(), true, false);
-    VMActuator vmActuator = new VMActuator(true);
+    return executeConstantContract(trxCap, builder, retBuilder, isEstimating,
+        new BlockCapsule(headBlock), null);
+  }
+
+  public Transaction callHistoricalConstantContract(TransactionCapsule trxCap,
+      Builder builder, Return.Builder retBuilder, HistoricalQuerySession session)
+      throws ContractValidateException, ContractExeException, HeaderNotFound, VMIllegalException {
+    if (!Args.getInstance().isSupportConstant()) {
+      throw new ContractValidateException("this node does not support constant");
+    }
+    BlockCapsule targetBlock;
+    try {
+      targetBlock = chainBaseManager.getBlockByNum(session.getTargetBlock());
+    } catch (BadItemException | ItemNotFoundException failure) {
+      throw new HeaderNotFound("historical block not found");
+    }
+    if (targetBlock == null
+        || !Arrays.equals(targetBlock.getBlockId().getBytes(), session.getTargetBlockHash())) {
+      throw new HeaderNotFound("historical block identity changed");
+    }
+    session.requirePinnedIdentity();
+    return executeConstantContract(trxCap, builder, retBuilder, false, targetBlock, session);
+  }
+
+  private Transaction executeConstantContract(TransactionCapsule trxCap,
+      Builder builder, Return.Builder retBuilder, boolean isEstimating,
+      BlockCapsule blockCapsule, HistoricalQuerySession session)
+      throws ContractValidateException, ContractExeException, VMIllegalException {
+    TransactionContext context = session == null
+        ? new TransactionContext(blockCapsule, trxCap, StoreFactory.getInstance(), true, false)
+        : new TransactionContext(blockCapsule, trxCap, StoreFactory.getInstance(), true, false,
+            ExecutionMode.HISTORICAL_CONSTANT, session);
+    VMActuator vmActuator = session == null
+        ? new VMActuator(true) : new VMActuator(true, HistoricalRepositoryProvider.INSTANCE);
 
     try {
-      vmActuator.validate(context);
-      vmActuator.execute(context);
+      if (session == null) {
+        vmActuator.validate(context);
+        vmActuator.execute(context);
+      } else {
+        org.tron.core.archive.execution.HistoricalConstantExecution.run(vmActuator, context);
+      }
     } finally {
       // constant call runs on a pooled RPC worker; drop its thread-local VM config view so it
       // can never leak into a later (block/broadcast) execution on the same thread.
@@ -4430,6 +4466,30 @@ public class Wallet {
 
     builder.setBalance(pair.getRight());
     return builder.build();
+  }
+
+  /** Experimental state-archive balance query used for trace-oracle validation. */
+  public BalanceContract.AccountBalanceResponse getAccountBalanceFromStateArchive(
+      BalanceContract.AccountBalanceRequest request)
+      throws ItemNotFoundException, BadItemException {
+    BalanceContract.AccountIdentifier accountIdentifier = request.getAccountIdentifier();
+    checkAccountIdentifier(accountIdentifier);
+    BlockBalanceTrace.BlockIdentifier blockIdentifier = request.getBlockIdentifier();
+    checkBlockIdentifier(blockIdentifier);
+    BlockId blockId = chainBaseManager.getBlockIndexStore().get(blockIdentifier.getNumber());
+    if (!blockId.getByteString().equals(blockIdentifier.getHash())) {
+      throw new IllegalArgumentException("number and hash do not match");
+    }
+    org.tron.core.db2.archive.query.account.HistoricalAccountBalanceReader.Result result =
+        dbManager.getArchiveAccountBalance(blockIdentifier.getNumber(),
+            accountIdentifier.getAddress().toByteArray());
+    if (!result.isPresent()) {
+      throw new ItemNotFoundException("Account is absent at the requested block");
+    }
+    return BalanceContract.AccountBalanceResponse.newBuilder()
+        .setBlockIdentifier(blockIdentifier)
+        .setBalance(result.getBalance())
+        .build();
   }
 
   public BalanceContract.BlockBalanceTrace getBlockBalance(

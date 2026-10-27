@@ -116,6 +116,7 @@ def configureTestTask = { Task t ->
     }
     t.testLogging {
         exceptionFormat = 'full'
+        events 'started', 'passed', 'failed', 'skipped'
     }
     if (isWindows()) {
         t.exclude '**/ShieldedTransferActuatorTest.class'
@@ -136,6 +137,7 @@ def configureTestTask = { Task t ->
 
 test {
     configureTestTask(it)
+    exclude 'org/tron/core/db2/archive/serving/ServingIndexStoreLargeBlockTest.class'
     jacoco {
         destinationFile = file("$buildDir/jacoco/jacocoTest.exec")
         classDumpDir = file("$buildDir/jacoco/classpathdumps")
@@ -265,3 +267,15 @@ task copyToParent(type: Copy) {
 }
 
 build.finalizedBy(copyToParent)
+
+// The >64 MiB fixture needs a separate heap and must still run in verification.
+tasks.register('archiveLargeBlock', Test) {
+    description = 'Verify serving indexing beyond the old 64 MiB record cap'
+    group = 'verification'
+    configureTestTask(it)
+    maxHeapSize = "1g"
+    maxParallelForks = 1
+    retry { maxRetries = 0 }
+    include 'org/tron/core/db2/archive/serving/ServingIndexStoreLargeBlockTest.class'
+}
+check.dependsOn archiveLargeBlock
