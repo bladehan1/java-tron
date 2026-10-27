@@ -21,7 +21,7 @@ import java.util.Optional;
 import java.util.UUID;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
 import org.tron.core.db2.archive.history.io.ArchiveFileDurability;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointTarget;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointTarget;
 
 /** Shared checkpoint target codec and forced atomic file-publication protocol. */
 public final class ArchiveCheckpointFiles {

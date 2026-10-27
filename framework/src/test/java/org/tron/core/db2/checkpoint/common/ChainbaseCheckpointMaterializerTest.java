@@ -36,14 +36,20 @@ import org.tron.core.db2.archive.BlockSnapshotMeta;
 import org.tron.core.db2.archive.OldValue;
 import org.tron.core.db2.archive.checkpoint.StateArchiveCheckpointMaterializer;
 import org.tron.core.db2.archive.checkpoint.StateArchiveHotCheckpointMaterializer;
-import org.tron.core.db2.archive.contract.HistoricalQueryException;
 import org.tron.core.db2.archive.history.hot.StateArchiveHotStore;
 import org.tron.core.db2.archive.history.v5.StateArchiveAppendCheckpointMaterializerV5;
 import org.tron.core.db2.archive.query.snapshot.ArchiveReadSnapshot.PinnedLatestState;
 import org.tron.core.db2.archive.query.snapshot.HistoricalRangeOverlay;
 import org.tron.core.db2.archive.query.snapshot.StateArchiveCheckpointReadSnapshot;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointMaterializer.Authority;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointMaterializer.Status;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointMaterializedStore;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointMaterializer;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointMaterializer.Authority;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointMaterializer.Status;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointTarget;
+import org.tron.core.db2.checkpoint.common.payload.CommonCheckpointCapture;
+import org.tron.core.db2.checkpoint.common.payload.CommonCheckpointPayload;
+import org.tron.core.db2.checkpoint.common.payload.CommonCheckpointPayloadCodec;
+import org.tron.core.db2.checkpoint.common.payload.CommonCheckpointPayloadFactory;
 import org.tron.core.db2.common.DB;
 import org.tron.core.db2.common.Flusher;
 import org.tron.core.db2.common.WrappedByteArray;
@@ -52,13 +58,13 @@ import org.tron.core.db2.core.ChainbaseCheckpointMaterializer;
 import org.tron.core.db2.core.ChainbaseCheckpointTestSupport;
 import org.tron.core.db2.core.SnapshotImpl;
 import org.tron.core.db2.core.SnapshotRoot;
-import org.tron.core.db2.stateroot.PathStateCanonicalizer;
 import org.tron.core.db2.stateroot.PathStateCheckpointMaterializer;
 import org.tron.core.db2.stateroot.PathStateFlushTarget;
-import org.tron.core.db2.stateroot.PathStateParticipantScope;
 import org.tron.core.db2.stateroot.PathStatePhysicalStoreSet;
 import org.tron.core.db2.stateroot.PathStateSnapshotDelta;
-import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
+import org.tron.core.db2.stateroot.commitment.PathStateCanonicalizer;
+import org.tron.core.db2.stateroot.commitment.PathStateParticipantScope;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
 
 public class ChainbaseCheckpointMaterializerTest {
 
@@ -579,6 +585,7 @@ public class ChainbaseCheckpointMaterializerTest {
 
     assertEquals(CommonCheckpointRedoCoordinator.RecoveryAction.NO_CHECKPOINT,
         runtime.recoverBeforeServing());
+    assertThrows(IOException.class, () -> runtime.pinPoint(1));
     CommonCheckpointTarget target = runtime.checkpointAndRebase(1);
 
     assertEquals(snapshots.meta, target.getLastBlock());
@@ -591,9 +598,12 @@ public class ChainbaseCheckpointMaterializerTest {
         snapshots.propertiesDatabase.getHead());
     assertEquals(1, timings.size());
     assertEquals(1, timings.get(0).getHotPrepareUs());
-    HistoricalQueryException unavailable = assertThrows(HistoricalQueryException.class,
-        () -> runtime.pinPoint(1));
-    assertEquals(HistoricalQueryException.Reason.UNAVAILABLE, unavailable.getReason());
+    append.completeServingInitialSync(target);
+    try (StateArchiveCheckpointReadSnapshot snapshot = runtime.pinPoint(1)) {
+      assertEquals(1, snapshot.getTargetBlock());
+      assertEquals(1, snapshot.getPinnedBlock());
+      assertArrayEquals(new byte[]{2}, snapshot.get("code", new byte[]{1}).getValue());
+    }
     runtime.close();
 
     try (StateArchiveAppendCheckpointMaterializerV5 reopened =

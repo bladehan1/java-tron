@@ -5,6 +5,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import org.tron.core.db2.common.WrappedByteArray;
+import org.tron.core.db2.stateroot.commitment.PathStateParticipantScope;
+import org.tron.core.db2.stateroot.trie.PathNodeStore;
 
 /**
  * Immutable, memory-only encoded-node layers above one published checkpoint.

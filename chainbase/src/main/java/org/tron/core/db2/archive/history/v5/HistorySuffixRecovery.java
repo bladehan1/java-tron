@@ -13,7 +13,7 @@ import java.util.stream.Stream;
 import org.tron.core.db2.archive.history.format.V5Format;
 import org.tron.core.db2.archive.history.format.V5HistoryTail;
 import org.tron.core.db2.archive.history.io.ArchiveFileDurability;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointTarget;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointTarget;
 
 /** Trims only physical bytes/files after the boundary proved by a durable Common commit. */
 final class HistorySuffixRecovery {

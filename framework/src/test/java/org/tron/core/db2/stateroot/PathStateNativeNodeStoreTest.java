@@ -34,15 +34,28 @@ import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.config.args.StorageConfig.NativeDbConfig;
 import org.tron.core.db2.archive.BlockReverseDiff;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointBaseline;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointPayload;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointTarget;
+import org.tron.core.db2.checkpoint.common.format.CommonCheckpointBaseline;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointTarget;
+import org.tron.core.db2.checkpoint.common.payload.CommonCheckpointPayload;
 import org.tron.core.db2.common.WrappedByteArray;
-import org.tron.core.db2.stateroot.PathStateCanonicalizer.P66Phase;
 import org.tron.core.db2.stateroot.PathStateRebuildCoordinator.EntryConsumer;
 import org.tron.core.db2.stateroot.PathStateRebuildCoordinator.SnapshotIdentity;
 import org.tron.core.db2.stateroot.PathStateRebuildCoordinator.SnapshotSource;
-import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
+import org.tron.core.db2.stateroot.commitment.PathStateBlockTransition;
+import org.tron.core.db2.stateroot.commitment.PathStateCanonicalizer;
+import org.tron.core.db2.stateroot.commitment.PathStateCanonicalizer.P66Phase;
+import org.tron.core.db2.stateroot.commitment.PathStateCommitmentCodec;
+import org.tron.core.db2.stateroot.commitment.PathStateMutation;
+import org.tron.core.db2.stateroot.commitment.PathStateParticipant;
+import org.tron.core.db2.stateroot.commitment.PathStateParticipantDescriptor;
+import org.tron.core.db2.stateroot.commitment.PathStateParticipantScope;
+import org.tron.core.db2.stateroot.format.PathStateRootMetadata;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
+import org.tron.core.db2.stateroot.runtime.PathStateAsyncPrepareHead;
+import org.tron.core.db2.stateroot.runtime.PathStateHeadTestSupport;
+import org.tron.core.db2.stateroot.storage.PathStateNativeAccess;
+import org.tron.core.db2.stateroot.trie.PathNodeStore;
 
 public class PathStateNativeNodeStoreTest {
 
@@ -65,7 +78,7 @@ public class PathStateNativeNodeStoreTest {
       database.put(key, value);
       database.flush(flush);
     }
-    try (PathStateNativeNodeStore store = PathStateNativeNodeStore.open(directory, Engine.ROCKSDB,
+    try (PathStateNativeAccess store = PathStateNativeAccess.open(directory, Engine.ROCKSDB,
         "small", NativeDbConfig.small(), -1, true)) {
       Map<String, Long> before = store.readStatistics();
       assertArrayEquals(value, store.get(key));
@@ -78,8 +91,8 @@ public class PathStateNativeNodeStoreTest {
       assertEquals(11, second.size());
       assertEquals(Long.valueOf(0), before.get("bytes_read"));
     }
-    try (PathStateNativeNodeStore store =
-        PathStateNativeNodeStore.open(directory, Engine.ROCKSDB)) {
+    try (PathStateNativeAccess store =
+        PathStateNativeAccess.open(directory, Engine.ROCKSDB)) {
       assertNull(store.readStatistics());
       assertArrayEquals(value, store.get(key));
     }
@@ -91,7 +104,7 @@ public class PathStateNativeNodeStoreTest {
       Path directory = new File(temporaryFolder.getRoot(), "native-" + engine).toPath();
       byte[] path = new byte[]{1, 2, 3};
       byte[] node = new byte[]{4, 5, 6};
-      try (PathStateNativeNodeStore store = PathStateNativeNodeStore.open(directory, engine)) {
+      try (PathStateNativeAccess store = PathStateNativeAccess.open(directory, engine)) {
         store.put(path, node);
         path[0] = 15;
         node[0] = 15;
@@ -99,11 +112,11 @@ public class PathStateNativeNodeStoreTest {
         returned[0] = 15;
         assertArrayEquals(new byte[]{4, 5, 6}, store.get(new byte[]{1, 2, 3}));
       }
-      try (PathStateNativeNodeStore reopened = PathStateNativeNodeStore.open(directory, engine)) {
+      try (PathStateNativeAccess reopened = PathStateNativeAccess.open(directory, engine)) {
         assertArrayEquals(new byte[]{4, 5, 6}, reopened.get(new byte[]{1, 2, 3}));
         reopened.delete(new byte[]{1, 2, 3});
       }
-      try (PathStateNativeNodeStore reopened = PathStateNativeNodeStore.open(directory, engine)) {
+      try (PathStateNativeAccess reopened = PathStateNativeAccess.open(directory, engine)) {
         assertNull(reopened.get(new byte[]{1, 2, 3}));
       }
     }
@@ -112,7 +125,7 @@ public class PathStateNativeNodeStoreTest {
   @Test
   public void nativeStoreRejectsInvalidEntriesAndUseAfterClose() throws Exception {
     Path directory = temporaryFolder.newFolder("native-invalid").toPath();
-    PathStateNativeNodeStore store = PathStateNativeNodeStore.open(directory, Engine.ROCKSDB);
+    PathStateNativeAccess store = PathStateNativeAccess.open(directory, Engine.ROCKSDB);
     assertThrows(IllegalArgumentException.class, () -> store.put(new byte[0], new byte[]{1}));
     assertThrows(IllegalArgumentException.class, () -> store.put(new byte[]{1}, new byte[0]));
     store.close();
@@ -134,7 +147,7 @@ public class PathStateNativeNodeStoreTest {
   @Test
   public void rocksProfileIsPersistedInNativeOptions() throws Exception {
     Path directory = temporaryFolder.newFolder("rocks-profile-options").toPath();
-    try (PathStateNativeNodeStore store = PathStateNativeNodeStore.open(directory,
+    try (PathStateNativeAccess store = PathStateNativeAccess.open(directory,
         Engine.ROCKSDB, "giant", NativeDbConfig.giant())) {
       assertEquals("giant", store.getStorageProfile());
       store.put(new byte[]{1}, new byte[]{2});
@@ -169,7 +182,7 @@ public class PathStateNativeNodeStoreTest {
     NativeDbConfig settings = NativeDbConfig.giant();
     Path directory = temporaryFolder.newFolder("large-read-cache").toPath();
     for (int pass = 0; pass < 2; pass++) {
-      try (PathStateNativeNodeStore store = PathStateNativeNodeStore.open(directory,
+      try (PathStateNativeAccess store = PathStateNativeAccess.open(directory,
           Engine.ROCKSDB, "giant", settings, 2, true, 256L << 20)) {
         if (pass == 0) {
           store.put(new byte[]{1}, new byte[]{2});
@@ -189,7 +202,7 @@ public class PathStateNativeNodeStoreTest {
     assertEquals(-1, PathStatePhysicalStoreSet.cacheShardBitsFor(22, 64L << 20));
     Path directory = temporaryFolder.newFolder("account-cache-shards").toPath();
     for (int pass = 0; pass < 2; pass++) {
-      try (PathStateNativeNodeStore store = PathStateNativeNodeStore.open(directory,
+      try (PathStateNativeAccess store = PathStateNativeAccess.open(directory,
           Engine.ROCKSDB, "giant", NativeDbConfig.giant(),
           PathStatePhysicalStoreSet.cacheShardBitsFor(4, 64L << 20))) {
         if (pass == 0) {
@@ -348,12 +361,12 @@ public class PathStateNativeNodeStoreTest {
   public void streamsNativeScansWithoutCollectingTheResultSet() throws Exception {
     for (Engine engine : availableEngines()) {
       Path directory = new File(temporaryFolder.getRoot(), "stream-" + engine).toPath();
-      List<PathStateNativeNodeStore.BatchMutation> mutations = new ArrayList<>();
+      List<PathStateNativeAccess.BatchMutation> mutations = new ArrayList<>();
       for (int index = 0; index < 64; index++) {
-        mutations.add(PathStateNativeNodeStore.BatchMutation.put(
+        mutations.add(PathStateNativeAccess.BatchMutation.put(
             new byte[]{1, (byte) index}, new byte[]{(byte) (index + 1)}));
       }
-      try (PathStateNativeNodeStore store = PathStateNativeNodeStore.open(directory, engine)) {
+      try (PathStateNativeAccess store = PathStateNativeAccess.open(directory, engine)) {
         store.writeBatch(mutations);
         AtomicInteger prefixCount = new AtomicInteger();
         AtomicInteger allCount = new AtomicInteger();
@@ -384,7 +397,7 @@ public class PathStateNativeNodeStoreTest {
     }
 
     assertEquals(1, childDirectoryCount(manifest.getBaseDirectory()));
-    try (PathStateNativeNodeStore nodes = PathStateNativeNodeStore.open(
+    try (PathStateNativeAccess nodes = PathStateNativeAccess.open(
         manifest.getBaseDirectory().resolve("nodes"), Engine.ROCKSDB)) {
       assertNotNull(nodes.get(namespaceRootKey(21)));
       assertNotNull(nodes.get(namespaceRootKey(0)));
@@ -409,7 +422,7 @@ public class PathStateNativeNodeStoreTest {
       stores.commit(PathStateRootMetadata.base(100, bytes(1), bytes(2), 300,
           P66Phase.P66_ON, manifest.getIdentityDigest(), stateRoot, bytes(3)));
     }
-    try (PathStateNativeNodeStore nodes = PathStateNativeNodeStore.open(
+    try (PathStateNativeAccess nodes = PathStateNativeAccess.open(
         manifest.getBaseDirectory().resolve("nodes"), Engine.ROCKSDB)) {
       nodes.delete(durableLeafKey(21,
           PathStateCommitmentCodec.storeLeafKey(21, new byte[]{1})));
@@ -468,7 +481,7 @@ public class PathStateNativeNodeStoreTest {
       assertNull(stores.getProgress());
     }
 
-    try (PathStateNativeNodeStore nodes = PathStateNativeNodeStore.open(
+    try (PathStateNativeAccess nodes = PathStateNativeAccess.open(
         manifest.getBaseDirectory().resolve("nodes"), Engine.ROCKSDB)) {
       assertNull(nodes.get(namespaceRootKey(21)));
       assertNull(nodes.get(namespaceRootKey(0)));
@@ -1212,7 +1225,7 @@ public class PathStateNativeNodeStoreTest {
 
     PathStatePhysicalOverlayHead overlay = PathStatePhysicalOverlayHead.open(root,
         Engine.ROCKSDB, new PathStateLayerLimits(4, 1L << 20));
-    try (PathStateAsyncPrepareHead async = new PathStateAsyncPrepareHead(overlay, 2)) {
+    try (PathStateAsyncPrepareHead async = PathStateHeadTestSupport.async(overlay, 2)) {
       assertNull(async.prepareSnapshotDelta(
           BlockSnapshotMeta.forBlock(1, blockHash, new byte[32], 3), transition));
       assertEquals(0, async.advance(transition).getBlockNumber());

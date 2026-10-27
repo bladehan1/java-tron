@@ -9,9 +9,8 @@ import java.util.List;
 import java.util.Objects;
 import org.tron.core.db2.archive.OldValue;
 import org.tron.core.db2.archive.contract.ArchiveQueryLimitExceededException;
-import org.tron.core.db2.archive.serving.ServingKeyIndex;
-import org.tron.core.db2.archive.serving.ServingKeyIndexGeneration;
-import org.tron.core.db2.archive.serving.ServingKeyIndexGeneration.ChangedKey;
+import org.tron.core.db2.archive.serving.index.ServingKeyIndex;
+import org.tron.core.db2.archive.serving.index.ServingKeyIndexGeneration.ChangedKey;
 
 /**
  * Backend-neutral prototype for one-store historical range materialization.

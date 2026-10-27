@@ -19,8 +19,8 @@ import org.tron.core.config.args.StorageConfig.StateArchiveAppendFileConfig;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
 import org.tron.core.db2.archive.checkpoint.StateArchiveAppendFileRuntime;
 import org.tron.core.db2.archive.history.v5.StateArchiveAppendCheckpointMaterializerV5;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointBaseline;
-import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
+import org.tron.core.db2.checkpoint.common.format.CommonCheckpointBaseline;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
 import org.tron.core.store.DynamicPropertiesStore;
 
 public class StateArchiveCheckpointStartupTest {

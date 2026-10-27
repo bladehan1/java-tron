@@ -24,7 +24,7 @@ import org.tron.core.db2.archive.query.ArchiveRuntimeQueryGate.Lease;
 import org.tron.core.db2.archive.query.ArchiveRuntimeQueryGate.State;
 import org.tron.core.db2.archive.query.snapshot.ArchiveReadSnapshot;
 import org.tron.core.db2.archive.query.snapshot.ArchiveReadSnapshot.PinnedLatestState;
-import org.tron.core.db2.archive.serving.ServingKeyIndex;
+import org.tron.core.db2.archive.serving.index.ServingKeyIndex;
 
 public class ArchiveRuntimeQueryGateTest {
 

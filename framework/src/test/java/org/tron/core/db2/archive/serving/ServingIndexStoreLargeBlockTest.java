@@ -14,7 +14,7 @@ import org.tron.core.db2.archive.BlockReverseDiff;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
 import org.tron.core.db2.archive.OldValue;
 import org.tron.core.db2.archive.history.codec.BlockHistoryCodec;
-import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
 
 /**
  * T5 / S-INV-11 (ch04 §3.5.2): a block whose re-encoded, compressed bytes exceed the old 64 MiB

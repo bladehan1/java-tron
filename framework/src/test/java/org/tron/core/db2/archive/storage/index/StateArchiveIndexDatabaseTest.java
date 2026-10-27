@@ -21,7 +21,7 @@ import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.tron.common.arch.Arch;
 import org.tron.core.config.args.StorageConfig.NativeDbConfig;
-import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
 
 public class StateArchiveIndexDatabaseTest {
 

@@ -17,7 +17,7 @@ import org.tron.core.db2.archive.history.model.HistoryCommitMarker;
 import org.tron.core.db2.archive.history.model.HistoryIndexRecord;
 import org.tron.core.db2.archive.history.model.HistoryIndexRecord.KeyGroup;
 import org.tron.core.db2.archive.history.model.HistoryLocation;
-import org.tron.core.db2.archive.serving.ServingKeyIndexGeneration;
+import org.tron.core.db2.archive.serving.index.ServingKeyIndexGeneration;
 
 /**
  * Fail-closed authoritative old-value reader for one immutable committed prefix.

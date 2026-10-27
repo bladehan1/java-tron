@@ -25,10 +25,12 @@ import org.tron.core.db2.archive.checkpoint.StateArchiveHotCheckpointMaterialize
 import org.tron.core.db2.archive.history.hot.StateArchiveHotBatchDescriptor;
 import org.tron.core.db2.archive.history.hot.StateArchiveHotStore;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointHotRecovery.PersistentDynamicHead;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointMaterializer.Authority;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointMaterializer;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointMaterializer.Authority;
+import org.tron.core.db2.checkpoint.common.payload.CommonCheckpointPayload;
 import org.tron.core.db2.core.Chainbase;
 import org.tron.core.db2.stateroot.PathStateFlushTarget;
-import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
 
 public class CommonCheckpointHotRecoveryTest {
 

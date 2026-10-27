@@ -29,11 +29,11 @@ import org.tron.core.db2.archive.history.format.StateArchiveFileFormatV3;
 import org.tron.core.db2.archive.history.format.V5Format;
 import org.tron.core.db2.archive.history.hot.StateArchiveHotBatchDescriptor;
 import org.tron.core.db2.archive.history.v5.StateArchiveReaderGenerationHolderV5.PinnedReader;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointCapture;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointPayload;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointTarget;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointTarget;
+import org.tron.core.db2.checkpoint.common.payload.CommonCheckpointCapture;
+import org.tron.core.db2.checkpoint.common.payload.CommonCheckpointPayload;
 import org.tron.core.db2.stateroot.PathStateFlushTarget;
-import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
 
 public class StateArchiveColdReopenV5Test {
 

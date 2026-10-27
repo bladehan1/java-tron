@@ -1,7 +1,6 @@
 package org.tron.core.db2.stateroot;
 
 import static org.junit.Assert.assertArrayEquals;
-import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
@@ -16,8 +15,13 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.tron.common.arch.Arch;
-import org.tron.core.db2.stateroot.PathStateCanonicalizer.P66Phase;
-import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
+import org.tron.core.db2.stateroot.commitment.PathStateCanonicalizer.P66Phase;
+import org.tron.core.db2.stateroot.commitment.PathStateCommitmentCodec;
+import org.tron.core.db2.stateroot.commitment.PathStateMutation;
+import org.tron.core.db2.stateroot.format.PathStateRootMetadata;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
+import org.tron.core.db2.stateroot.storage.PathStateNativeAccess;
 
 public class PathStateCanonicalSwitchTest {
 
@@ -73,7 +77,7 @@ public class PathStateCanonicalSwitchTest {
     PathStateLayerLimits limits = new PathStateLayerLimits(10, Long.MAX_VALUE);
     PathStateRootMetadata current = append(fixture.manifest, fixture.base, 101, 11, limits);
     Path nodes = fixture.manifest.getBaseDirectory().resolve(PathStateNodeStoreSet.NODES_DIRECTORY);
-    try (PathStateNativeNodeStore store = PathStateNativeNodeStore.open(nodes, Engine.ROCKSDB)) {
+    try (PathStateNativeAccess store = PathStateNativeAccess.open(nodes, Engine.ROCKSDB)) {
       store.delete(durableLeafKey(21,
           PathStateCommitmentCodec.storeLeafKey(21, new byte[]{1})));
     }

@@ -17,9 +17,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointMaterializer.Authority;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointMaterializer;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointMaterializer.Authority;
 import org.tron.core.db2.core.Chainbase;
-import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
 
 public class CommonCheckpointRuntimeAttachmentTest {
 

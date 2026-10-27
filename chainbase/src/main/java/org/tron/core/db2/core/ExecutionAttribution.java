@@ -7,7 +7,7 @@ import java.util.Locale;
 import java.util.Map;
 import lombok.extern.slf4j.Slf4j;
 import org.tron.common.prometheus.Metrics;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointTarget;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointTarget;
 
 /** Thread-confined successful transaction-loop attempts; never canonical/durable counters. */
 @Slf4j(topic = "DB")

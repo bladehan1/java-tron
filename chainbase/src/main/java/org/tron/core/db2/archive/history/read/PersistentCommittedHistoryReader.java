@@ -16,7 +16,7 @@ import org.tron.core.db2.archive.history.model.HistoryIndexRecord;
 import org.tron.core.db2.archive.history.model.HistoryIndexRecord.KeyGroup;
 import org.tron.core.db2.archive.history.model.HistoryLocation;
 import org.tron.core.db2.archive.history.store.ArchiveHistoryReadHandles;
-import org.tron.core.db2.archive.serving.PinnedServingKeyIndex;
+import org.tron.core.db2.archive.serving.index.PinnedServingKeyIndex;
 
 /** Request-owned commit/index/segment handles pinned to one persistent serving generation. */
 public final class PersistentCommittedHistoryReader

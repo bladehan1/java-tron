@@ -12,6 +12,7 @@ import java.nio.file.StandardOpenOption;
 import java.util.Arrays;
 import java.util.Objects;
 import java.util.UUID;
+import org.tron.core.db2.stateroot.format.PathStateRootMetadata;
 
 /** Atomic-file boundary for immutable BASE/LAYER metadata and the replaceable CURRENT authority. */
 final class PathStateMetadataFile {

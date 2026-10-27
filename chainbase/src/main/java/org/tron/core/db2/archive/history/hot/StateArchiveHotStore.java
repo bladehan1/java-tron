@@ -42,7 +42,7 @@ import org.tron.core.db2.archive.history.codec.BlockHistoryCodec;
 import org.tron.core.db2.archive.history.io.ArchiveFileDurability;
 import org.tron.core.db2.archive.storage.index.ArchiveIndexStorage;
 import org.tron.core.db2.archive.storage.index.StateArchiveIndexEngineManifest;
-import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
 
 /**
  * Independent hot State Archive database with one writable and bounded sealed generations.

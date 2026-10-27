@@ -83,7 +83,7 @@ import org.tron.core.db2.common.WrappedByteArray;
 import org.tron.core.db2.core.Chainbase;
 import org.tron.core.db2.core.SnapshotManager;
 import org.tron.core.db2.core.SnapshotRoot;
-import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
 import org.tron.core.store.AccountAssetStore;
 import org.tron.core.store.CheckTmpStore;
 import org.tron.core.store.DynamicPropertiesStore;

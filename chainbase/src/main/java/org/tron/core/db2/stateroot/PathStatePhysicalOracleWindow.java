@@ -5,6 +5,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
+import org.tron.core.db2.stateroot.format.PathStateRootMetadata;
 
 /**
  * Validated, read-only input for one fixed physical-store oracle window.

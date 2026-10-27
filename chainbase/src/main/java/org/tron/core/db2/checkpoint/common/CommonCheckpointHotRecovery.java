@@ -6,6 +6,8 @@ import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Objects;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointTarget;
+import org.tron.core.db2.checkpoint.common.payload.CommonCheckpointPayload;
 
 /** Selects one externally verified Hot DB recovery ceiling before common-checkpoint redo. */
 public final class CommonCheckpointHotRecovery {

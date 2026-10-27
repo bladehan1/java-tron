@@ -26,7 +26,7 @@ import org.tron.core.db2.archive.serving.ServingFailure.ServingFaultException;
 import org.tron.core.db2.archive.storage.index.ArchiveIndexStorage;
 import org.tron.core.db2.archive.storage.index.ArchiveIndexStorage.Mutation;
 import org.tron.core.db2.archive.storage.index.StateArchiveIndexEngineManifest;
-import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
 
 /**
  * The single long-lived write handle of the V5 serving index (ch04 §3.2, WP-S2).

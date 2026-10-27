@@ -31,9 +31,9 @@ import org.tron.core.db2.archive.history.v5.StateArchiveCommittedViewV5.PointLoc
 import org.tron.core.db2.archive.serving.ServingTestSupport.Worker;
 import org.tron.core.db2.archive.serving.StateArchiveServingIndexBuildCoordinatorV3;
 import org.tron.core.db2.archive.serving.StateArchiveServingIndexBuildCoordinatorV3.Mode;
-import org.tron.core.db2.archive.serving.StateArchiveServingSource;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointTarget;
-import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
+import org.tron.core.db2.archive.serving.source.StateArchiveServingSource;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointTarget;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
 
 public class StateArchiveServingSourceV5Test {
 

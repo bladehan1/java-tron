@@ -36,8 +36,8 @@ import org.tron.core.db2.archive.recovery.wal.ArchiveWalBinding;
 import org.tron.core.db2.archive.serving.PersistentServingKeyIndexCatalog;
 import org.tron.core.db2.archive.serving.PersistentServingKeyIndexGeneration;
 import org.tron.core.db2.archive.serving.ServingIndexIncrementalPlan;
-import org.tron.core.db2.archive.serving.ServingKeyIndexGeneration;
 import org.tron.core.db2.archive.serving.ServingRuntimeAccess;
+import org.tron.core.db2.archive.serving.index.ServingKeyIndexGeneration;
 import org.tron.core.db2.archive.storage.index.ArchiveIndexStorage;
 import org.tron.core.db2.core.SnapshotManager;
 

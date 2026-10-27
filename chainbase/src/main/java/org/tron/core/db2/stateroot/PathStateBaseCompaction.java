@@ -12,14 +12,16 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
 import java.util.stream.Stream;
-import org.tron.core.db2.stateroot.PathStateRootMetadata.Kind;
+import org.tron.core.db2.stateroot.format.PathStateRootMetadata;
+import org.tron.core.db2.stateroot.format.PathStateRootMetadata.Kind;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest;
 
 /** Crash-recoverable materialization of a canonical layer prefix into the single durable BASE. */
 public final class PathStateBaseCompaction {
 
   public static final String INTENT_FILE = "BASE_FLUSH_INTENT";
-  static final String NEXT_DIRECTORY = "base.next";
-  static final String PREVIOUS_DIRECTORY = "base.previous";
+  static final String NEXT_DIRECTORY = PathStateStoreManifest.NEXT_BASE_DIRECTORY;
+  static final String PREVIOUS_DIRECTORY = PathStateStoreManifest.PREVIOUS_BASE_DIRECTORY;
 
   private final PathStateStoreManifest manifest;
   private final PathStateLayerLimits limits;

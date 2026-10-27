@@ -8,7 +8,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 import org.tron.common.math.StrictMathWrapper;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointTarget;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointTarget;
 
 /** Exact 672-byte publication-ready tail for one Common-bound V5 archive prefix. */
 final class StateArchiveTailV5 implements V5HistoryTail {

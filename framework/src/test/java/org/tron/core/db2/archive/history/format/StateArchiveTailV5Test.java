@@ -11,7 +11,7 @@ import java.util.List;
 import org.junit.Test;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
 import org.tron.core.db2.archive.history.format.StateArchiveTailV5.LaneTerminal;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointTarget;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointTarget;
 
 public class StateArchiveTailV5Test {
 

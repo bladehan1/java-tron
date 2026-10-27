@@ -36,7 +36,7 @@ import org.tron.core.db2.archive.storage.index.ArchiveIndexStorage.KeyValue;
 import org.tron.core.db2.archive.storage.index.ArchiveIndexStorage.Mutation;
 import org.tron.core.db2.archive.storage.index.ArchiveIndexStorage.Reader;
 import org.tron.core.db2.archive.storage.index.ArchiveIndexStorage.Writer;
-import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
 
 /** Engine-neutral native store for Archive indexes and independent hot-history generations. */
 final class StateArchiveIndexDatabase {

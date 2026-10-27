@@ -19,8 +19,12 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.tron.common.arch.Arch;
-import org.tron.core.db2.stateroot.PathStateCanonicalizer.P66Phase;
-import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
+import org.tron.core.db2.stateroot.commitment.PathStateCanonicalizer.P66Phase;
+import org.tron.core.db2.stateroot.commitment.PathStateMutation;
+import org.tron.core.db2.stateroot.format.PathStateRootMetadata;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
+import org.tron.core.db2.stateroot.storage.PathStateNativeAccess;
 
 public class PathStateLayerLimitsTest {
 
@@ -87,7 +91,7 @@ public class PathStateLayerLimitsTest {
         PathStateLayerLimits.defaults());
     Path nodes = fixture.manifest.getLayerDirectory(101, layer.getBlockHash())
         .resolve(PathStateNodeStoreSet.NODES_DIRECTORY);
-    try (PathStateNativeNodeStore store = PathStateNativeNodeStore.open(nodes, Engine.ROCKSDB)) {
+    try (PathStateNativeAccess store = PathStateNativeAccess.open(nodes, Engine.ROCKSDB)) {
       store.put(logicalBytesKey(), ByteBuffer.allocate(Long.BYTES).putLong(1).array());
     }
 

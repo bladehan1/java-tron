@@ -13,9 +13,9 @@ import org.tron.core.db2.archive.history.read.PersistentCommittedHistoryReader;
 import org.tron.core.db2.archive.query.snapshot.HistoricalRangeOverlay.Entry;
 import org.tron.core.db2.archive.query.snapshot.HistoricalRangeOverlay.KeyRange;
 import org.tron.core.db2.archive.query.snapshot.HistoricalRangeOverlay.Limits;
-import org.tron.core.db2.archive.serving.PinnedServingKeyIndex;
-import org.tron.core.db2.archive.serving.ServingKeyIndex;
-import org.tron.core.db2.archive.serving.ServingKeyIndexSource;
+import org.tron.core.db2.archive.serving.index.PinnedServingKeyIndex;
+import org.tron.core.db2.archive.serving.index.ServingKeyIndex;
+import org.tron.core.db2.archive.serving.index.ServingKeyIndexSource;
 
 /** One immutable physical-key archive read context pinned at {@code S(P)}. */
 public final class ArchiveReadSnapshot implements ArchivePointSnapshot {

@@ -41,7 +41,7 @@ import org.tron.core.db2.archive.query.snapshot.ArchiveReadSnapshot.PinnedLatest
 import org.tron.core.db2.archive.query.snapshot.HistoricalRangeOverlay;
 import org.tron.core.db2.archive.serving.PersistentServingKeyIndexCatalog;
 import org.tron.core.db2.archive.serving.PersistentServingKeyIndexGeneration;
-import org.tron.core.db2.archive.serving.PinnedServingKeyIndex;
+import org.tron.core.db2.archive.serving.index.PinnedServingKeyIndex;
 
 public class ArchiveAuthorityHandleSourcesTest {
 

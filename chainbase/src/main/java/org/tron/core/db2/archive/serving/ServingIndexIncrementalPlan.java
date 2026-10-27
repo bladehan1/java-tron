@@ -20,6 +20,7 @@ import org.tron.core.db2.archive.history.codec.BlockHistoryCodec;
 import org.tron.core.db2.archive.history.model.HistoryCommitMarker;
 import org.tron.core.db2.archive.history.model.HistoryIndexRecord;
 import org.tron.core.db2.archive.history.model.HistoryLocation;
+import org.tron.core.db2.archive.serving.index.ServingKeyIndexGeneration;
 
 /**
  * Backend-neutral logical plan for advancing the exact-27 serving index over {@code (I,H]}.

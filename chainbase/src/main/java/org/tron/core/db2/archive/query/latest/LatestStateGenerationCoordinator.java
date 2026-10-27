@@ -18,7 +18,7 @@ import org.tron.core.db2.archive.query.latest.LatestStateGenerationAdapter.Snaps
 import org.tron.core.db2.archive.query.snapshot.ArchiveReadSnapshot.PinnedLatestState;
 import org.tron.core.db2.archive.query.snapshot.ArchiveReadSnapshot.PinnedLatestStateFactory;
 import org.tron.core.db2.archive.query.snapshot.HistoricalRangeOverlay;
-import org.tron.core.db2.archive.serving.PinnedServingKeyIndex;
+import org.tron.core.db2.archive.serving.index.PinnedServingKeyIndex;
 
 /** Two-phase publisher for a latest-state generation acquired under one global state barrier. */
 public final class LatestStateGenerationCoordinator

@@ -21,12 +21,12 @@ import org.tron.core.db2.archive.BlockSnapshotMeta;
 import org.tron.core.db2.archive.checkpoint.storage.ArchiveCheckpointFiles;
 import org.tron.core.db2.archive.checkpoint.storage.ArchiveCheckpointFiles.TargetMarker;
 import org.tron.core.db2.archive.history.codec.BlockHistoryCodec;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointBaseline;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointMaterializedStore;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointMaterializer;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointPayload;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointTarget;
-import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
+import org.tron.core.db2.checkpoint.common.format.CommonCheckpointBaseline;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointMaterializedStore;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointMaterializer;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointTarget;
+import org.tron.core.db2.checkpoint.common.payload.CommonCheckpointPayload;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
 
 /** Next-format State Archive participant for the common-checkpoint two-barrier protocol. */
 public final class StateArchiveCheckpointMaterializer implements CommonCheckpointMaterializer {

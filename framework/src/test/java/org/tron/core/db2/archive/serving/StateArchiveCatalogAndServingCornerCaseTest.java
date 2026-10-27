@@ -21,8 +21,8 @@ import org.tron.core.db2.archive.BlockSnapshotMeta;
 import org.tron.core.db2.archive.OldValue;
 import org.tron.core.db2.archive.serving.PersistentServingKeyIndexGeneration.MutableIndex;
 import org.tron.core.db2.archive.serving.StateArchiveServingIndexBuildCoordinatorV3.LiveServingIndexer;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointTarget;
-import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointTarget;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
 
 public class StateArchiveCatalogAndServingCornerCaseTest {
 

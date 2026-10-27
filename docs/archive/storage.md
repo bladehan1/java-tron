@@ -12,7 +12,7 @@ functional groups migrated so far; Java packages follow the directories.
 | [history/store/](../../chainbase/src/main/java/org/tron/core/db2/archive/history/store) | Physical Store owners, durable writer, bootstrap and recovery | `ArchiveHistoryWriter`, `AsyncArchiveHistorySink`, `ArchiveHistoryAdmission`, `ArchiveHistoryBootstrap` |
 | [history/read/](../../chainbase/src/main/java/org/tron/core/db2/archive/history/read) | Read old values from an immutable committed prefix, checking marker/index/body identity | `CommittedHistoryReader`, `PersistentCommittedHistoryReader` |
 | [contract/](../../chainbase/src/main/java/org/tron/core/db2/archive/contract) | Shared pinned-history and query-limit contracts | `PinnedHistory`, `ArchiveQueryLimitExceededException` |
-| [serving/](../../chainbase/src/main/java/org/tron/core/db2/archive/serving) | Backend-neutral key-index model, generation publication and read-only acquisition contracts | `ServingKeyIndexGeneration`, `ServingKeyIndexCatalog`, `ServingKeyIndex`, `PinnedServingKeyIndex`, `ServingKeyIndexSource` |
+| [serving/index/](../../chainbase/src/main/java/org/tron/core/db2/archive/serving/index) | Backend-neutral key-index model, generation publication and read-only acquisition contracts | `ServingKeyIndexGeneration`, `ServingKeyIndexCatalog`, `ServingKeyIndex`, `PinnedServingKeyIndex`, `ServingKeyIndexSource` |
 | [recovery/](../../chainbase/src/main/java/org/tron/core/db2/archive/recovery) | Validate the intent-proven commit marker and durably shrink its commit log before Store recovery | `ArchiveCommitLogRecovery` |
 | [checkpoint/](../../chainbase/src/main/java/org/tron/core/db2/archive/checkpoint) | Submit the non-revertible history range and obtain durable marker evidence before checkpoint publication | `ArchiveHistoryFlush`, `StateArchiveCheckpointPlanner`, `ArchiveCommittedPrefixPublisher` |
 | [query/](../../chainbase/src/main/java/org/tron/core/db2/archive/query) | Runtime quiescence/drain, admission, cancellation/deadline control and failure classification | `ArchiveRuntimeQueryGate`, `HistoricalQueryAdmission`, `HistoricalQueryControl`, `HistoricalFailureCategory`, `HistoricalQueryException`, `HistoricalQueryBudgetException`, `HistoricalQueryCapabilityException` |
@@ -49,8 +49,8 @@ implementations in `history/write/`. `history/store/ArchiveHistoryWriter` is the
 The async writer integration test follows the Store package so fault-injection hooks remain internal. Checkpoint planning and committed-prefix publication
 contracts live in `checkpoint/`; their method signatures and the host call order are preserved.
 
-`serving/` currently contains the backend-neutral model and its query contract. The persistent
-index, service, worker and build coordinator remain in the root package as a cohesive
+`serving/index/` contains the backend-neutral model and its read contracts. The persistent
+index, service, worker and build coordinator remain in the parent `serving/` package as a cohesive
 implementation group with package-private dependencies. `ArchiveStoreScope.scopeIdentity` delegates participant
 identity to the existing root descriptor without exposing that descriptor. The in-memory model
 uses Guava unsigned lexicographic ordering for variable-length keys, preserving range semantics.
@@ -123,8 +123,8 @@ Store, anchor, recovery stage or native handle is exposed merely to create anoth
 implement this contract without depending on `query/snapshot`. `ArchivePointSnapshot` lives beside
 its snapshot implementation so request controls can depend on snapshots in one direction.
 
-`serving/PinnedServingKeyIndex` exposes read metadata and one owned generation lease;
-`serving/ServingKeyIndexSource` acquires that lease. Snapshot and history readers, and latest-state
+`serving/index/PinnedServingKeyIndex` exposes read metadata and one owned generation lease;
+`serving/index/ServingKeyIndexSource` acquires that lease. Snapshot and history readers, and latest-state
 coordination, depend on these interfaces rather than persistent generation/catalog classes.
 Closing a snapshot releases its history, latest-state and serving leases in that order. The shared
 catalog owner retains its lifecycle. `CheckpointLatestStateFactory` shares latest-state pinning and
@@ -179,3 +179,31 @@ Public type imports change as recorded in the path manifest.
 checkpoint and serving. Its method bodies are the former helper bodies; Store-local directory
 sync delegates to the same leaf operation. No file names, format bytes, force order or defaults
 change as part of this package migration.
+
+
+## Serving index package follow-up
+
+Five public contracts and in-memory index types now live in `serving/index/`:
+`ServingKeyIndex`, `PinnedServingKeyIndex`, `ServingKeyIndexSource`,
+`ServingKeyIndexGeneration` and `ServingKeyIndexCatalog`.
+Their class bodies, generation checks, unsigned ordering and CAS publication semantics are unchanged.
+The index generation test follows that package; callers only update imports.
+
+The parent production directory has 17 files, down from 22, and its test directory has 13,
+down from 14. Persistent generations, native writers, leases and lifecycle accounting retain
+parent-package ownership. The [32-directory backlog](directory-split-plan-20261027.md) still
+tracks further serving decomposition. Historical path mappings compose repeated moves so
+older source paths resolve to the final current path.
+
+
+## Serving History source contracts
+
+`serving/source/` owns the two existing read-only History source interfaces:
+`ServingHistorySource` and `StateArchiveServingSource`. Their immutable boundaries, byte budgets,
+exceptions and method bodies are unchanged. History publishers implement these contracts without
+exposing their mutable Store handles. The serving parent directory now has 15 production files.
+
+`ServingIndexIncrementalPlan` remains in the parent package: its DIGEST timing calls depend on
+`ServingIndexTiming`, which also observes service state and coordinator progress. Moving only the
+plan into `index/` would introduce a package cycle. The timing behavior is retained for a later
+cohesive review. The [directory backlog](directory-split-plan-20261027.md) keeps this work open.

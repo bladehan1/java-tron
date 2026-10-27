@@ -8,6 +8,9 @@ integration points and package boundaries; implementation comments stay beside t
 | History storage, serving and queries | [Storage](storage.md) |
 | Root implementation groups and remaining boundaries | [Root boundaries](root-boundaries.md) |
 | Shared read contracts | [Read contracts](read-contracts.md) |
+| PathStateRoot packages | [PathStateRoot layout](stateroot-layout.md) |
+| Directory split backlog and candidates | [All 32 directory tasks](directory-split-plan-20261027.md) |
+| Archive branch directories over 10 files | [Directory inventory](directory-inventory-20261027.md) |
 | Common checkpoint | [Checkpoint coordination](common-checkpoint.md) |
 | Snapshot host | [Snapshot ownership](snapshot-host.md) |
 | Historical execution | [Execution](execution.md) |

@@ -12,8 +12,8 @@ import org.bouncycastle.util.encoders.Hex;
 import org.tron.core.db2.archive.BlockReverseDiff;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
 import org.tron.core.db2.archive.history.format.V5HistoryTail;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointTarget;
-import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointTarget;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
 
 /** Single-owner bulk-to-live coordinator for the append-file v3 exact-27 serving index. */
 public final class StateArchiveServingIndexBuildCoordinatorV3 implements AutoCloseable {

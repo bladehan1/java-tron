@@ -11,6 +11,13 @@ import java.util.Objects;
 import java.util.Set;
 import org.tron.common.crypto.Hash;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
+import org.tron.core.db2.stateroot.commitment.PathStateBlockTransition;
+import org.tron.core.db2.stateroot.commitment.PathStateCanonicalizer;
+import org.tron.core.db2.stateroot.commitment.PathStateCommitmentCodec;
+import org.tron.core.db2.stateroot.commitment.PathStateParticipant;
+import org.tron.core.db2.stateroot.commitment.PathStateParticipantScope;
+import org.tron.core.db2.stateroot.format.PathStateRootMetadata;
+import org.tron.core.db2.stateroot.trie.PathNodeStore;
 
 /** Immutable, memory-only candidate trie result for one exact block transition. */
 public final class PreparedPathStateTransition {

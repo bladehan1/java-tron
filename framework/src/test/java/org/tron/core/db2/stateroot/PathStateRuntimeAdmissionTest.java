@@ -11,9 +11,13 @@ import java.nio.file.Path;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
-import org.tron.core.db2.stateroot.PathStateCanonicalizer.P66Phase;
-import org.tron.core.db2.stateroot.PathStateRuntimeAdmission.Status;
-import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
+import org.tron.core.db2.stateroot.commitment.PathStateCanonicalizer;
+import org.tron.core.db2.stateroot.commitment.PathStateCanonicalizer.P66Phase;
+import org.tron.core.db2.stateroot.format.PathStateRootMetadata;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
+import org.tron.core.db2.stateroot.runtime.PathStateRuntimeAdmission;
+import org.tron.core.db2.stateroot.runtime.PathStateRuntimeAdmission.Status;
 
 public class PathStateRuntimeAdmissionTest {
 

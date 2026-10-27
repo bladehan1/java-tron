@@ -10,7 +10,7 @@ import org.tron.core.db2.archive.history.format.V5HistoryTail;
 import org.tron.core.db2.archive.history.v5.StateArchiveCommittedViewV5.ReadObserver;
 import org.tron.core.db2.archive.history.v5.StateArchiveDataHandlePoolV5.ChannelOpener;
 import org.tron.core.db2.archive.history.v5.StateArchiveDataHandlePoolV5.ProcessFdAdmission;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointTarget;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointTarget;
 
 /** One immutable committed reader generation and all handles owned by it. */
 final class StateArchiveReaderGenerationV5 implements StateArchivePointSource, Closeable {

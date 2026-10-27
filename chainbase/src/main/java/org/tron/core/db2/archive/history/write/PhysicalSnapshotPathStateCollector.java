@@ -5,10 +5,10 @@ import java.util.Arrays;
 import java.util.List;
 import org.tron.core.db2.archive.BlockChangeView;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
-import org.tron.core.db2.stateroot.PathStateBlockTransition;
-import org.tron.core.db2.stateroot.PathStateCanonicalizer.P66Phase;
-import org.tron.core.db2.stateroot.PathStateMutation;
-import org.tron.core.db2.stateroot.PathStateTransitionCollector;
+import org.tron.core.db2.stateroot.commitment.PathStateBlockTransition;
+import org.tron.core.db2.stateroot.commitment.PathStateCanonicalizer.P66Phase;
+import org.tron.core.db2.stateroot.commitment.PathStateMutation;
+import org.tron.core.db2.stateroot.commitment.PathStateTransitionCollector;
 
 /** Consumes exact physical mutations after P66 materialization; no projection or scans. */
 public final class PhysicalSnapshotPathStateCollector implements PathStateTransitionCollector {

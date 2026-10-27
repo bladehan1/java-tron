@@ -19,8 +19,9 @@ import org.springframework.test.util.ReflectionTestUtils;
 import org.tron.core.db2.archive.contract.HistoricalQueryException;
 import org.tron.core.db2.archive.contract.HistoricalQueryException.Reason;
 import org.tron.core.db2.archive.query.HistoricalQueryControl;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointMaterializer.Authority;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointRuntimeOwner.ReadLease;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointMaterializer;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointMaterializer.Authority;
 
 public class CommonCheckpointRuntimeOwnerLeaseTest {
 

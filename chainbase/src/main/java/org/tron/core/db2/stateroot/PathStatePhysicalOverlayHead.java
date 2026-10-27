@@ -17,12 +17,22 @@ import java.util.concurrent.atomic.AtomicLong;
 import lombok.extern.slf4j.Slf4j;
 import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointBaseline;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointMaterializedStore;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointMemoryRebaser;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointTarget;
-import org.tron.core.db2.stateroot.PathStateCanonicalizer.P66Phase;
-import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
+import org.tron.core.db2.checkpoint.common.format.CommonCheckpointBaseline;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointMaterializedStore;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointTarget;
+import org.tron.core.db2.stateroot.commitment.PathStateBlockTransition;
+import org.tron.core.db2.stateroot.commitment.PathStateCanonicalizer;
+import org.tron.core.db2.stateroot.commitment.PathStateCanonicalizer.P66Phase;
+import org.tron.core.db2.stateroot.commitment.PathStateCommitmentCodec;
+import org.tron.core.db2.stateroot.commitment.PathStateMutation;
+import org.tron.core.db2.stateroot.commitment.PathStateParticipant;
+import org.tron.core.db2.stateroot.commitment.PathStateParticipantScope;
+import org.tron.core.db2.stateroot.format.PathStateRootMetadata;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
+import org.tron.core.db2.stateroot.runtime.PathStateHead;
+import org.tron.core.db2.stateroot.storage.PathStateNativeAccess;
+import org.tron.core.db2.stateroot.trie.PathNodeStore;
 
 /**
  * PathState head that reads one durable physical checkpoint and advances in memory.
@@ -961,7 +971,7 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
         });
         logger.info("Path-state native get perf attribution: head={}, blockHash={}, "
                 + "status=prepared, store={}, scope=database_get, sampleEvery={}, counters={}",
-            head, blockHash, storeId, PathStateNativeGetPerf.SAMPLE_EVERY, deltas);
+            head, blockHash, storeId, PathStateNativeAccess.READ_SAMPLE_EVERY, deltas);
       }
       long requests = readRequests.get();
       long changed = changedReadHits.get();

@@ -11,6 +11,8 @@ import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.util.Arrays;
 import java.util.Objects;
+import org.tron.core.db2.checkpoint.common.payload.CommonCheckpointPayload;
+import org.tron.core.db2.checkpoint.common.payload.CommonCheckpointPayloadCodec;
 
 /** Standalone durable file lifecycle for one immutable common-checkpoint redo payload. */
 public final class CommonCheckpointFile implements java.io.Closeable {
@@ -47,7 +49,7 @@ public final class CommonCheckpointFile implements java.io.Closeable {
   }
 
   public static CommonCheckpointFile openDatabase(Path directory,
-      org.tron.core.db2.stateroot.PathStateStoreManifest.Engine engine) throws IOException {
+      org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine engine) throws IOException {
     CommonCheckpointFile result = new CommonCheckpointFile(directory);
     if (Files.exists(result.checkpoint, LinkOption.NOFOLLOW_LINKS)) {
       // Finish the legacy durable WAL before opening a new shared authority.

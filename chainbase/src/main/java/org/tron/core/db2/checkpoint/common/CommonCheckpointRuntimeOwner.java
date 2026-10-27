@@ -7,6 +7,9 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.db2.archive.contract.HistoricalQueryException;
 import org.tron.core.db2.archive.query.HistoricalQueryControl;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointMaterializer;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointTarget;
+import org.tron.core.db2.checkpoint.common.payload.CommonCheckpointPayload;
 
 /** Explicit lifecycle and read gate for the next-format common-checkpoint runtime. */
 public final class CommonCheckpointRuntimeOwner implements AutoCloseable {

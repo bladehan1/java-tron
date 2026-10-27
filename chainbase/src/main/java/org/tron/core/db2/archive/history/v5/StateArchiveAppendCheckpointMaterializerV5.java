@@ -33,10 +33,10 @@ import org.tron.core.db2.archive.history.v5.StateArchiveReaderGenerationHolderV5
 import org.tron.core.db2.archive.serving.ServingIndexService;
 import org.tron.core.db2.archive.serving.ServingView;
 import org.tron.core.db2.archive.serving.StateArchiveServingIndexBuildCoordinatorV3;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointCapture;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointPayload;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointTarget;
-import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointTarget;
+import org.tron.core.db2.checkpoint.common.payload.CommonCheckpointCapture;
+import org.tron.core.db2.checkpoint.common.payload.CommonCheckpointPayload;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
 
 /** Default-off fresh-root V5 participant through the tail/Common publication barriers. */
 public final class StateArchiveAppendCheckpointMaterializerV5

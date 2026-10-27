@@ -10,8 +10,8 @@ import org.tron.core.db2.archive.checkpoint.StateArchiveAppendFileRuntime;
 import org.tron.core.db2.archive.checkpoint.StateArchiveCheckpointReadAdapter;
 import org.tron.core.db2.archive.contract.CheckpointPointReader;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointRuntimeOwner;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointTarget;
-import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointTarget;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
 
 /** Request-owned, point-only view whose keys independently use the current published head. */
 public final class StateArchiveCheckpointReadSnapshot implements ArchivePointSnapshot {

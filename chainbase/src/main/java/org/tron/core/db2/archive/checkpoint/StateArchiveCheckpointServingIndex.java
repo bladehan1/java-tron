@@ -25,9 +25,9 @@ import org.tron.core.db2.archive.OldValue;
 import org.tron.core.db2.archive.history.io.ArchiveFileDurability;
 import org.tron.core.db2.archive.storage.index.ArchiveIndexStorage;
 import org.tron.core.db2.archive.storage.index.StateArchiveIndexEngineManifest;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointPayload;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointTarget;
-import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointTarget;
+import org.tron.core.db2.checkpoint.common.payload.CommonCheckpointPayload;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
 
 /** Persistent exact-key locator for next-format per-block checkpoint history files. */
 final class StateArchiveCheckpointServingIndex {

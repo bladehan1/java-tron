@@ -8,10 +8,10 @@ import org.tron.core.db2.archive.BlockReverseDiff;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
 import org.tron.core.db2.archive.history.hot.StateArchiveHotBatchDescriptor;
 import org.tron.core.db2.archive.history.hot.StateArchiveHotStore;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointCapture;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointMaterializer;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointPayload;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointTarget;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointMaterializer;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointTarget;
+import org.tron.core.db2.checkpoint.common.payload.CommonCheckpointCapture;
+import org.tron.core.db2.checkpoint.common.payload.CommonCheckpointPayload;
 
 /** Default-off State Archive participant backed only by the independent Hot DB. */
 public final class StateArchiveHotCheckpointMaterializer

@@ -17,8 +17,14 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.tron.common.arch.Arch;
-import org.tron.core.db2.stateroot.PathStateCanonicalizer.P66Phase;
-import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
+import org.tron.core.db2.stateroot.commitment.PathStateBlockTransition;
+import org.tron.core.db2.stateroot.commitment.PathStateCanonicalizer.P66Phase;
+import org.tron.core.db2.stateroot.commitment.PathStateCommitmentCodec;
+import org.tron.core.db2.stateroot.commitment.PathStateMutation;
+import org.tron.core.db2.stateroot.format.PathStateRootMetadata;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
+import org.tron.core.db2.stateroot.storage.PathStateNativeAccess;
 
 public class PathStateLayerTest {
 
@@ -136,8 +142,8 @@ public class PathStateLayerTest {
 
     Path nodes = fixture.manifest.getLayerDirectory(101, layer.getBlockHash())
         .resolve(PathStateNodeStoreSet.NODES_DIRECTORY);
-    try (PathStateNativeNodeStore nativeStore =
-        PathStateNativeNodeStore.open(nodes, Engine.ROCKSDB)) {
+    try (PathStateNativeAccess nativeStore =
+        PathStateNativeAccess.open(nodes, Engine.ROCKSDB)) {
       nativeStore.delete(durableLeafKey(21,
           PathStateCommitmentCodec.storeLeafKey(21, new byte[]{1})));
     }
@@ -186,7 +192,7 @@ public class PathStateLayerTest {
   }
 
   private static long nodeEntryCount(Path owner, Engine engine) throws Exception {
-    try (PathStateNativeNodeStore store = PathStateNativeNodeStore.open(
+    try (PathStateNativeAccess store = PathStateNativeAccess.open(
         owner.resolve(PathStateNodeStoreSet.NODES_DIRECTORY), engine)) {
       return store.scanAll().stream()
           .filter(entry -> java.nio.ByteBuffer.wrap(entry.getKey()).getInt() >= 0)
@@ -195,7 +201,7 @@ public class PathStateLayerTest {
   }
 
   private static long nodeTombstoneCount(Path owner, Engine engine) throws Exception {
-    try (PathStateNativeNodeStore store = PathStateNativeNodeStore.open(
+    try (PathStateNativeAccess store = PathStateNativeAccess.open(
         owner.resolve(PathStateNodeStoreSet.NODES_DIRECTORY), engine)) {
       return store.scanAll().stream()
           .filter(entry -> java.nio.ByteBuffer.wrap(entry.getKey()).getInt() == -3)
@@ -212,7 +218,7 @@ public class PathStateLayerTest {
   }
 
   private static long domainEntryCount(Path owner, Engine engine, int domain) throws Exception {
-    try (PathStateNativeNodeStore store = PathStateNativeNodeStore.open(
+    try (PathStateNativeAccess store = PathStateNativeAccess.open(
         owner.resolve(PathStateNodeStoreSet.NODES_DIRECTORY), engine)) {
       return store.scanAll().stream()
           .filter(entry -> java.nio.ByteBuffer.wrap(entry.getKey()).getInt() == domain)

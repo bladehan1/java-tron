@@ -29,9 +29,13 @@ import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.tron.core.db2.archive.BlockReverseDiff;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointMaterializer.Authority;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointMaterializer.Status;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointRedoCoordinator.RecoveryAction;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointMaterializer;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointMaterializer.Authority;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointMaterializer.Status;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointTarget;
+import org.tron.core.db2.checkpoint.common.payload.CommonCheckpointPayload;
+import org.tron.core.db2.checkpoint.common.payload.CommonCheckpointPayloadCodec;
 import org.tron.core.db2.stateroot.PathStateFlushTarget;
 
 /**

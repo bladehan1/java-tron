@@ -24,12 +24,12 @@ import org.tron.core.db2.archive.query.snapshot.ArchiveReadSnapshot.PinnedLatest
 import org.tron.core.db2.archive.query.snapshot.HistoricalRangeOverlay;
 import org.tron.core.db2.archive.query.snapshot.StateArchiveCheckpointReadSnapshot;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointFile;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointMaterializer;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointMaterializer.Authority;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointPayload;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointRedoCoordinator;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointRuntimeOwner;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointTarget;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointMaterializer;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointMaterializer.Authority;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointTarget;
+import org.tron.core.db2.checkpoint.common.payload.CommonCheckpointPayload;
 import org.tron.core.db2.stateroot.PathStateFlushTarget;
 
 public class StateArchiveCheckpointReadSnapshotTest {

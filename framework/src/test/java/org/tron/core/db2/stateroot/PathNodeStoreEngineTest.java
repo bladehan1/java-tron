@@ -26,6 +26,10 @@ import org.junit.rules.TemporaryFolder;
 import org.rocksdb.RocksDBException;
 import org.rocksdb.RocksIterator;
 import org.tron.common.arch.Arch;
+import org.tron.core.db2.stateroot.commitment.PathStateMutation;
+import org.tron.core.db2.stateroot.commitment.PathStateParticipant;
+import org.tron.core.db2.stateroot.commitment.PathStateParticipantScope;
+import org.tron.core.db2.stateroot.trie.PathNodeStore;
 
 /** Test-only LevelDB/RocksDB evidence for the backend-neutral TASK-016 node boundary. */
 public class PathNodeStoreEngineTest {

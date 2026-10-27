@@ -11,9 +11,9 @@ import java.util.List;
 import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
 import org.tron.core.db2.archive.storage.index.ArchiveIndexStorage;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointPayload;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointPayloadCodec;
-import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
+import org.tron.core.db2.checkpoint.common.payload.CommonCheckpointPayload;
+import org.tron.core.db2.checkpoint.common.payload.CommonCheckpointPayloadCodec;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
 
 /** One synchronously committed database retains both Chainbase and PathState redo generations. */
 public final class SharedCheckpointDatabase implements Closeable {

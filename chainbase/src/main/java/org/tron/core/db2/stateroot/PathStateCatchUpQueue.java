@@ -8,7 +8,11 @@ import java.util.Deque;
 import java.util.Objects;
 import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.db2.stateroot.PathStateRebuildCoordinator.SnapshotIdentity;
-import org.tron.core.db2.stateroot.PathStateRootMetadata.Kind;
+import org.tron.core.db2.stateroot.commitment.PathStateBlockTransition;
+import org.tron.core.db2.stateroot.commitment.PathStateMutation;
+import org.tron.core.db2.stateroot.format.PathStateRootMetadata;
+import org.tron.core.db2.stateroot.format.PathStateRootMetadata.Kind;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest;
 
 /**
  * Bounded handoff from a fixed rebuild snapshot to normal block-final path-state processing.

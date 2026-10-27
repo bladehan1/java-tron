@@ -7,6 +7,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
+import org.tron.core.db2.stateroot.format.PathStateRootMetadata;
 
 /** Exact 27-participant plus super target used by TASK-018 INTENT and CURRENT. */
 final class PathStatePhysicalGlobalIntent {

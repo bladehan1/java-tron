@@ -4,6 +4,10 @@ import java.io.IOException;
 import java.util.Arrays;
 import java.util.Objects;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
+import org.tron.core.db2.stateroot.commitment.PathStateBlockTransition;
+import org.tron.core.db2.stateroot.format.PathStateRootMetadata;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest;
+import org.tron.core.db2.stateroot.runtime.PathStateHead;
 
 /** In-process snapshot authority that advances only with the durable block-final CURRENT head. */
 public final class PathStateSnapshotHead implements PathStateHead {

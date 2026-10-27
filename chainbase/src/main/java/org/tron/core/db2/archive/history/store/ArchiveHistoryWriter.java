@@ -31,7 +31,7 @@ import org.tron.core.db2.archive.history.write.DurableBlockReverseDiffSink;
 import org.tron.core.db2.archive.history.write.DurableHistoryMarkerRangeEvidence;
 import org.tron.core.db2.archive.serving.PersistentServingKeyIndexGeneration;
 import org.tron.core.db2.archive.serving.ServingIndexIncrementalPlan;
-import org.tron.core.db2.archive.serving.ServingKeyIndexGeneration;
+import org.tron.core.db2.archive.serving.index.ServingKeyIndexGeneration;
 
 /**
  * Ordered history body/index/marker writer. A marker is the durable history boundary H; reader

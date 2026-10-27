@@ -6,6 +6,8 @@ import java.util.List;
 import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.config.args.StorageConfig.NativeDbConfig;
 import org.tron.core.config.args.StorageConfig.PathStateDbSettingsConfig;
+import org.tron.core.db2.stateroot.commitment.PathStateParticipantDescriptor;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest;
 
 /**
  * Native memory upper bounds of the 28 PathState databases for the closed budget (design v2

@@ -21,8 +21,8 @@ import org.tron.core.db2.archive.history.format.V5HistoryTail;
 import org.tron.core.db2.archive.history.format.V5HistoryTail.LaneTerminal;
 import org.tron.core.db2.archive.serving.ServingTestSupport.MutableIndex;
 import org.tron.core.db2.archive.storage.index.ArchiveIndexStorage;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointTarget;
-import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointTarget;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
 
 public class StateArchiveTailPersistenceV5Test {
 

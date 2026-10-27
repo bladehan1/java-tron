@@ -24,7 +24,7 @@ import org.tron.core.db2.archive.history.format.V5HistoryTail.LaneTerminal;
 import org.tron.core.db2.archive.history.io.ArchiveFileDurability;
 import org.tron.core.db2.archive.history.v5.StateArchiveBlockFrameCodecV5.EncodedFrame;
 import org.tron.core.db2.archive.history.v5.StateArchiveCommittedViewV5.ReadObserver;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointTarget;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointTarget;
 
 /** Fresh-root five-lane V5 append writer before tail/Common publication is wired. */
 final class StateArchiveFiveLaneWriterV5 implements Closeable {

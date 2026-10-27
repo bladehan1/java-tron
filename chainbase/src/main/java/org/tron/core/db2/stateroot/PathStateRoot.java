@@ -17,6 +17,11 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import org.tron.common.math.StrictMathWrapper;
+import org.tron.core.db2.stateroot.commitment.PathStateCommitmentCodec;
+import org.tron.core.db2.stateroot.commitment.PathStateMutation;
+import org.tron.core.db2.stateroot.commitment.PathStateParticipant;
+import org.tron.core.db2.stateroot.commitment.PathStateParticipantScope;
+import org.tron.core.db2.stateroot.trie.PathNodeStore;
 
 /**
  * Current-only per-Store trie and super-trie aggregator for TASK-016.

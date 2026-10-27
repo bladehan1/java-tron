@@ -13,9 +13,11 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
-import org.tron.core.db2.stateroot.PathStateCanonicalizer.P66Phase;
 import org.tron.core.db2.stateroot.PathStateRebuildCoordinator.SnapshotIdentity;
 import org.tron.core.db2.stateroot.PathStateRebuildCoordinator.StoreResult;
+import org.tron.core.db2.stateroot.commitment.PathStateCanonicalizer.P66Phase;
+import org.tron.core.db2.stateroot.commitment.PathStateParticipantDescriptor;
+import org.tron.core.db2.stateroot.format.PathStateRootMetadata;
 
 /** Durable, non-authoritative per-Store rebuild checkpoint stored inside the BASE native DB. */
 final class PathStateRebuildCheckpoint {

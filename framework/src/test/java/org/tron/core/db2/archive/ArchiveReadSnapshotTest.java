@@ -75,9 +75,9 @@ import org.tron.core.db2.archive.query.snapshot.ArchiveReadSnapshot.PinnedLatest
 import org.tron.core.db2.archive.query.snapshot.HistoricalRangeOverlay;
 import org.tron.core.db2.archive.query.snapshot.HistoricalRangeOverlay.KeyRange;
 import org.tron.core.db2.archive.query.snapshot.HistoricalRangeOverlay.Limits;
-import org.tron.core.db2.archive.serving.PinnedServingKeyIndex;
-import org.tron.core.db2.archive.serving.ServingKeyIndexGeneration;
-import org.tron.core.db2.archive.serving.ServingKeyIndexSource;
+import org.tron.core.db2.archive.serving.index.PinnedServingKeyIndex;
+import org.tron.core.db2.archive.serving.index.ServingKeyIndexGeneration;
+import org.tron.core.db2.archive.serving.index.ServingKeyIndexSource;
 import org.tron.core.exception.ContractValidateException;
 import org.tron.core.store.DynamicPropertiesStore;
 import org.tron.core.store.StorageRowKeyCodec;

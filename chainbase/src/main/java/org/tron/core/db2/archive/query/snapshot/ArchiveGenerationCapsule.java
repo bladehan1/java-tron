@@ -7,7 +7,7 @@ import org.tron.core.db2.archive.ArchivePersistenceException;
 import org.tron.core.db2.archive.checkpoint.progress.ArchiveProgressEnvelope;
 import org.tron.core.db2.archive.checkpoint.progress.ArchiveProgressReader;
 import org.tron.core.db2.archive.serving.PersistentServingKeyIndexCatalog;
-import org.tron.core.db2.archive.serving.PinnedServingKeyIndex;
+import org.tron.core.db2.archive.serving.index.PinnedServingKeyIndex;
 
 /** Acquires one reader-visible serving/history/latest resource capsule from durable R. */
 public final class ArchiveGenerationCapsule {

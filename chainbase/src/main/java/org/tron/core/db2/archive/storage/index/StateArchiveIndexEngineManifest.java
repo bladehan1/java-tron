@@ -14,7 +14,7 @@ import java.nio.file.StandardOpenOption;
 import java.util.Arrays;
 import java.util.Objects;
 import org.tron.core.db2.archive.history.io.ArchiveFileDurability;
-import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
 
 /** Durable engine identity that prevents a checkpoint serving index from changing engine. */
 public final class StateArchiveIndexEngineManifest {

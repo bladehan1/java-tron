@@ -9,7 +9,9 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
-import org.tron.core.db2.stateroot.PathStateRootMetadata.Kind;
+import org.tron.core.db2.stateroot.format.PathStateRootMetadata;
+import org.tron.core.db2.stateroot.format.PathStateRootMetadata.Kind;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest;
 
 /**
  * Current-head authority over one durable base and its immutable reversible metadata chain.

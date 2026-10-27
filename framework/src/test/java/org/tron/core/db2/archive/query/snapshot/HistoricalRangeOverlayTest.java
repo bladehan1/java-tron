@@ -29,7 +29,7 @@ import org.tron.core.db2.archive.history.store.HistoryStoreTestSupport;
 import org.tron.core.db2.archive.query.snapshot.HistoricalRangeOverlay.Entry;
 import org.tron.core.db2.archive.query.snapshot.HistoricalRangeOverlay.KeyRange;
 import org.tron.core.db2.archive.query.snapshot.HistoricalRangeOverlay.Limits;
-import org.tron.core.db2.archive.serving.ServingKeyIndexGeneration;
+import org.tron.core.db2.archive.serving.index.ServingKeyIndexGeneration;
 
 public class HistoricalRangeOverlayTest {
 

@@ -10,7 +10,7 @@ import java.util.Objects;
 import java.util.OptionalLong;
 import org.tron.common.parameter.CommonParameter;
 import org.tron.core.config.args.StorageConfig.NativeDbConfig;
-import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
 
 /** Native index storage protocol shared by checkpoint, hot history, and derived serving indexes. */
 public final class ArchiveIndexStorage {

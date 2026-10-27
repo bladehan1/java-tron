@@ -19,7 +19,7 @@ import org.tron.core.db2.archive.history.model.HistoryIndexRecord;
 import org.tron.core.db2.archive.history.model.HistoryLocation;
 import org.tron.core.db2.archive.query.snapshot.ArchiveReadSnapshot;
 import org.tron.core.db2.archive.query.snapshot.HistoricalRangeOverlay;
-import org.tron.core.db2.archive.serving.ServingKeyIndexGeneration;
+import org.tron.core.db2.archive.serving.index.ServingKeyIndexGeneration;
 import org.tron.protos.Protocol.Account;
 import org.tron.protos.Protocol.AccountType;
 

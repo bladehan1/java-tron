@@ -139,41 +139,41 @@ import org.tron.core.db2.archive.query.session.HistoricalQuerySession;
 import org.tron.core.db2.archive.query.snapshot.ArchivePointSnapshot;
 import org.tron.core.db2.archive.query.snapshot.StateArchiveCheckpointReadSnapshot;
 import org.tron.core.db2.archive.runtime.StateArchiveRuntimeOwner;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointBaseline;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointBaselineFile;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointFile;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointFormat;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointHotRecovery;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointMaterializedStore;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointMaterializer;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointPayload;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointRecoveryStateAdapter;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointRedoCoordinator;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointRuntime;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointRuntimeAttachment;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointRuntimeOwner;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointTarget;
+import org.tron.core.db2.checkpoint.common.format.CommonCheckpointBaseline;
+import org.tron.core.db2.checkpoint.common.format.CommonCheckpointBaselineFile;
+import org.tron.core.db2.checkpoint.common.format.CommonCheckpointFormat;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointMaterializedStore;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointMaterializer;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointTarget;
+import org.tron.core.db2.checkpoint.common.payload.CommonCheckpointPayload;
 import org.tron.core.db2.core.Chainbase;
 import org.tron.core.db2.core.ChainbaseCheckpointMaterializer;
 import org.tron.core.db2.core.ExecutionAttribution;
 import org.tron.core.db2.core.P66LaneStartup;
 import org.tron.core.db2.core.SnapshotManager;
-import org.tron.core.db2.stateroot.PathStateBlockTransition;
-import org.tron.core.db2.stateroot.PathStateCanonicalizer;
-import org.tron.core.db2.stateroot.PathStateCanonicalizer.P66Phase;
 import org.tron.core.db2.stateroot.PathStateCheckpointMaterializer;
-import org.tron.core.db2.stateroot.PathStateHead;
 import org.tron.core.db2.stateroot.PathStateLayerLimits;
-import org.tron.core.db2.stateroot.PathStateNativeSnapshotSource;
 import org.tron.core.db2.stateroot.PathStatePhysicalOverlayHead;
 import org.tron.core.db2.stateroot.PathStatePhysicalRuntimeAdmission;
 import org.tron.core.db2.stateroot.PathStatePhysicalSnapshotHead;
 import org.tron.core.db2.stateroot.PathStatePhysicalStoreSet;
 import org.tron.core.db2.stateroot.PathStateRebuildCoordinator.SnapshotIdentity;
 import org.tron.core.db2.stateroot.PathStateRoot;
-import org.tron.core.db2.stateroot.PathStateRootMetadata;
-import org.tron.core.db2.stateroot.PathStateRuntimeAttachment;
-import org.tron.core.db2.stateroot.PathStateStoreManifest;
+import org.tron.core.db2.stateroot.commitment.PathStateBlockTransition;
+import org.tron.core.db2.stateroot.commitment.PathStateCanonicalizer;
+import org.tron.core.db2.stateroot.commitment.PathStateCanonicalizer.P66Phase;
+import org.tron.core.db2.stateroot.format.PathStateRootMetadata;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest;
+import org.tron.core.db2.stateroot.rebuild.PathStateNativeSnapshotSource;
+import org.tron.core.db2.stateroot.runtime.PathStateHead;
+import org.tron.core.db2.stateroot.runtime.PathStateRuntimeAttachment;
 import org.tron.core.exception.AccountResourceInsufficientException;
 import org.tron.core.exception.BadBlockException;
 import org.tron.core.exception.BadItemException;
@@ -939,7 +939,7 @@ public class Manager {
           checkpointDirectory, archiveRuntimeEngine);
       openedCheckpointFile = checkpointFile;
       StateArchiveHotCheckpointMaterializer hotMaterializer = null;
-      org.tron.core.db2.checkpoint.common.CommonCheckpointMaterializer archiveMaterializer;
+      CommonCheckpointMaterializer archiveMaterializer;
       if (appendEnabled) {
         appendMaterializer = createAppendMaterializer(appendDirectory, formatIdentity,
             archiveRuntimeEngine, baseline, appendConfig,
@@ -1199,7 +1199,7 @@ public class Manager {
         ChainbaseCheckpointMaterializer.loadPublishedHead(checkpointDirectory, formatIdentity);
     PathStateCheckpointMaterializer.PublishedHead path =
         PathStateCheckpointMaterializer.loadPublishedHead(pathDirectory, formatIdentity);
-    org.tron.core.db2.checkpoint.common.CommonCheckpointTarget archive =
+    CommonCheckpointTarget archive =
         StateArchiveCheckpointMaterializer.loadPublishedTarget(archiveDirectory, formatIdentity,
             engine, materializedStore);
     BlockSnapshotMeta last = archive.getLastBlock();
@@ -1244,7 +1244,7 @@ public class Manager {
         ChainbaseCheckpointMaterializer.loadPublishedHead(checkpointDirectory, formatIdentity);
     PathStateCheckpointMaterializer.PublishedHead path =
         PathStateCheckpointMaterializer.loadPublishedHead(pathDirectory, formatIdentity);
-    org.tron.core.db2.checkpoint.common.CommonCheckpointTarget archive = materializer
+    CommonCheckpointTarget archive = materializer
         .loadPublishedTargetIfPresent().orElseThrow(() ->
             new java.io.IOException("Append-file Archive readable target is missing"));
     BlockSnapshotMeta last = archive.getLastBlock();
@@ -1373,7 +1373,7 @@ public class Manager {
       throw new IllegalStateException(
           "Path-state block-final capture requires account-asset Store");
     }
-    org.tron.core.db2.stateroot.PathStateTransitionCollector collector =
+    org.tron.core.db2.stateroot.commitment.PathStateTransitionCollector collector =
         new org.tron.core.db2.archive.history.write.PhysicalSnapshotPathStateCollector();
     org.tron.core.config.args.Storage storage = Args.getInstance().getStorage();
     PathStateRuntimeAttachment attachment = storage.isCommonCheckpointEnabled()

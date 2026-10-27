@@ -15,7 +15,7 @@ import org.tron.core.db2.archive.BlockReverseDiff;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
 import org.tron.core.db2.archive.OldValue;
 import org.tron.core.db2.archive.serving.ServingIndexTiming.Stage;
-import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
 
 public class ServingIndexTimingTest {
   @Rule

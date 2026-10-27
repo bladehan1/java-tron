@@ -37,10 +37,12 @@ import org.tron.core.db2.archive.history.io.ArchiveFileDurability;
 import org.tron.core.db2.archive.history.model.HistoryCommitMarker;
 import org.tron.core.db2.archive.history.model.HistoryIndexRecord;
 import org.tron.core.db2.archive.history.model.HistoryLocation;
+import org.tron.core.db2.archive.serving.index.PinnedServingKeyIndex;
+import org.tron.core.db2.archive.serving.index.ServingKeyIndexGeneration;
 import org.tron.core.db2.archive.storage.index.ArchiveIndexStorage;
 import org.tron.core.db2.archive.storage.index.StateArchiveIndexEngineManifest;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointTarget;
-import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointTarget;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
 
 /** Persistent immutable exact-key serving generation backed by the configured database engine. */
 public final class PersistentServingKeyIndexGeneration implements PinnedServingKeyIndex {

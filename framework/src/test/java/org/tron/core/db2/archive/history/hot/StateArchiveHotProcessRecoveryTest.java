@@ -30,7 +30,7 @@ import org.tron.core.db2.archive.OldValue;
 import org.tron.core.db2.archive.storage.index.ArchiveIndexStorage;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointFile;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointHotRecovery;
-import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
 
 /** Verifies recovery after an actual JVM halt, not only an injected in-process exception. */
 public class StateArchiveHotProcessRecoveryTest {

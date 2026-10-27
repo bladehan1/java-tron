@@ -18,7 +18,14 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
 import org.tron.common.math.StrictMathWrapper;
-import org.tron.core.db2.stateroot.PathStateRootMetadata.Kind;
+import org.tron.core.db2.stateroot.commitment.PathStateCanonicalizer;
+import org.tron.core.db2.stateroot.commitment.PathStateParticipant;
+import org.tron.core.db2.stateroot.commitment.PathStateParticipantScope;
+import org.tron.core.db2.stateroot.format.PathStateRootMetadata;
+import org.tron.core.db2.stateroot.format.PathStateRootMetadata.Kind;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest;
+import org.tron.core.db2.stateroot.storage.PathStateNativeAccess;
+import org.tron.core.db2.stateroot.trie.PathNodeStore;
 
 /** Exact-27 participant and super-trie namespace views over one BASE or LAYER native database. */
 public final class PathStateNodeStoreSet implements Closeable {
@@ -62,7 +69,7 @@ public final class PathStateNodeStoreSet implements Closeable {
   private final Map<BytesKey, byte[]> persistedLeaves = new LinkedHashMap<>();
   private final Map<BytesKey, byte[]> resolvedLeafValues = new LinkedHashMap<>();
   private final Set<BytesKey> leafTombstones = new LinkedHashSet<>();
-  private final PathStateNativeNodeStore nativeStore;
+  private final PathStateNativeAccess nativeStore;
   private final PathStateNodeStoreSet parentStores;
   private final PathNodeStore superStore;
   private final byte[] manifestDigest;
@@ -91,7 +98,7 @@ public final class PathStateNodeStoreSet implements Closeable {
     this.parentStores = parentStores;
     this.sealed = Files.exists(directory.resolve(PathStateCurrentStore.METADATA_FILE),
         LinkOption.NOFOLLOW_LINKS);
-    nativeStore = PathStateNativeNodeStore.open(this.directory, manifest.getEngine());
+    nativeStore = PathStateNativeAccess.open(this.directory, manifest.getEngine());
     try {
       progress = decodeProgress(nativeStore.get(PROGRESS_KEY));
       logicalBytes = decodeLogicalBytes(nativeStore.get(LOGICAL_BYTES_KEY));
@@ -374,19 +381,19 @@ public final class PathStateNodeStoreSet implements Closeable {
     PathStateRootMetadata next = Objects.requireNonNull(metadata, "metadata");
     long nextLogicalBytes = projectedLogicalBytes(next);
     List<PathStateRoot.LeafMutationRecord> leafMutations = root.pendingLeafMutations();
-    List<PathStateNativeNodeStore.BatchMutation> mutations =
+    List<PathStateNativeAccess.BatchMutation> mutations =
         new ArrayList<>(pendingSize() + leafMutations.size() + 4);
     appendPendingMutations(mutations);
     appendLeafMutations(mutations, leafMutations);
-    mutations.add(PathStateNativeNodeStore.BatchMutation.put(PROGRESS_KEY, next.encode()));
+    mutations.add(PathStateNativeAccess.BatchMutation.put(PROGRESS_KEY, next.encode()));
     if (leafOverlay) {
-      mutations.add(PathStateNativeNodeStore.BatchMutation.put(
+      mutations.add(PathStateNativeAccess.BatchMutation.put(
           LEAF_OVERLAY_KEY, LEAF_OVERLAY_VALUE));
     }
-    mutations.add(PathStateNativeNodeStore.BatchMutation.put(LOGICAL_BYTES_KEY,
+    mutations.add(PathStateNativeAccess.BatchMutation.put(LOGICAL_BYTES_KEY,
         ByteBuffer.allocate(Long.BYTES).putLong(nextLogicalBytes).array()));
     if (rebuildCheckpoint != null) {
-      mutations.add(PathStateNativeNodeStore.BatchMutation.delete(REBUILD_CHECKPOINT_KEY));
+      mutations.add(PathStateNativeAccess.BatchMutation.delete(REBUILD_CHECKPOINT_KEY));
     }
     nativeStore.writeBatch(mutations);
     clearPending();
@@ -436,7 +443,7 @@ public final class PathStateNodeStoreSet implements Closeable {
       requireParticipant(storeId);
       leafMutations.addAll(root.pendingLeafMutations(storeId));
     }
-    List<PathStateNativeNodeStore.BatchMutation> mutations =
+    List<PathStateNativeAccess.BatchMutation> mutations =
         durableStateMutations(next.encode(), leafMutations, storeIds);
     nativeStore.writeBatch(mutations);
     for (Integer storeId : storeIds) {
@@ -461,7 +468,7 @@ public final class PathStateNodeStoreSet implements Closeable {
     requireParticipant(storeId);
     if (!streamedRebuild) {
       nativeStore.writeBatch(Collections.singletonList(
-          PathStateNativeNodeStore.BatchMutation.put(
+          PathStateNativeAccess.BatchMutation.put(
               STREAMED_REBUILD_KEY, STREAMED_REBUILD_VALUE)));
       streamedRebuild = true;
     }
@@ -472,10 +479,10 @@ public final class PathStateNodeStoreSet implements Closeable {
   }
 
   private void clearRebuildPrefix(byte[] prefix) throws IOException {
-    List<PathStateNativeNodeStore.BatchMutation> deletes =
+    List<PathStateNativeAccess.BatchMutation> deletes =
         new ArrayList<>(REBUILD_WRITE_BATCH_ENTRIES);
     nativeStore.scanPrefix(prefix, entry -> {
-      deletes.add(PathStateNativeNodeStore.BatchMutation.delete(entry.getKey()));
+      deletes.add(PathStateNativeAccess.BatchMutation.delete(entry.getKey()));
       if (deletes.size() >= REBUILD_WRITE_BATCH_ENTRIES) {
         nativeStore.writeBatch(new ArrayList<>(deletes));
         deletes.clear();
@@ -516,7 +523,7 @@ public final class PathStateNodeStoreSet implements Closeable {
       }
     }
     nativeStore.writeBatch(Collections.singletonList(
-        PathStateNativeNodeStore.BatchMutation.put(REBUILD_CHECKPOINT_KEY, next.encode())));
+        PathStateNativeAccess.BatchMutation.put(REBUILD_CHECKPOINT_KEY, next.encode())));
     rebuildCheckpoint = next;
   }
 
@@ -558,7 +565,7 @@ public final class PathStateNodeStoreSet implements Closeable {
     if (!Files.isDirectory(nodes, LinkOption.NOFOLLOW_LINKS) || Files.isSymbolicLink(nodes)) {
       throw new IOException("path-state node database is not a direct directory: " + nodes);
     }
-    try (PathStateNativeNodeStore store = PathStateNativeNodeStore.open(nodes,
+    try (PathStateNativeAccess store = PathStateNativeAccess.open(nodes,
         Objects.requireNonNull(manifest, "manifest").getEngine())) {
       return decodeProgress(store.get(PROGRESS_KEY));
     }
@@ -573,7 +580,7 @@ public final class PathStateNodeStoreSet implements Closeable {
     if (!Files.isDirectory(nodes, LinkOption.NOFOLLOW_LINKS) || Files.isSymbolicLink(nodes)) {
       throw new IOException("path-state node database is not a direct directory: " + nodes);
     }
-    try (PathStateNativeNodeStore store = PathStateNativeNodeStore.open(nodes,
+    try (PathStateNativeAccess store = PathStateNativeAccess.open(nodes,
         Objects.requireNonNull(manifest, "manifest").getEngine())) {
       Long expected = decodeLogicalBytes(store.get(LOGICAL_BYTES_KEY));
       if (expected == null) {
@@ -798,14 +805,14 @@ public final class PathStateNodeStoreSet implements Closeable {
     });
   }
 
-  private List<PathStateNativeNodeStore.BatchMutation> durableStateMutations(
+  private List<PathStateNativeAccess.BatchMutation> durableStateMutations(
       byte[] rebuildValue, List<PathStateRoot.LeafMutationRecord> leafMutations,
       Collection<Integer> storeIds) {
-    List<PathStateNativeNodeStore.BatchMutation> mutations =
+    List<PathStateNativeAccess.BatchMutation> mutations =
         new ArrayList<>(pendingSize(storeIds) + leafMutations.size() + 1);
     appendPendingMutations(mutations, storeIds);
     appendLeafMutations(mutations, leafMutations);
-    mutations.add(PathStateNativeNodeStore.BatchMutation.put(REBUILD_CHECKPOINT_KEY,
+    mutations.add(PathStateNativeAccess.BatchMutation.put(REBUILD_CHECKPOINT_KEY,
         rebuildValue));
     return mutations;
   }
@@ -908,11 +915,11 @@ public final class PathStateNodeStoreSet implements Closeable {
   }
 
   private void appendPendingMutations(
-      List<PathStateNativeNodeStore.BatchMutation> mutations) {
+      List<PathStateNativeAccess.BatchMutation> mutations) {
     appendPendingMutations(mutations, pending.keySet());
   }
 
-  private void appendPendingMutations(List<PathStateNativeNodeStore.BatchMutation> mutations,
+  private void appendPendingMutations(List<PathStateNativeAccess.BatchMutation> mutations,
       Collection<Integer> storeIds) {
     for (Integer storeId : storeIds) {
       Map<BytesKey, byte[]> participantPending = pending.get(storeId);
@@ -922,28 +929,28 @@ public final class PathStateNodeStoreSet implements Closeable {
     }
   }
 
-  private void appendPendingMutations(List<PathStateNativeNodeStore.BatchMutation> mutations,
+  private void appendPendingMutations(List<PathStateNativeAccess.BatchMutation> mutations,
       Map<BytesKey, byte[]> participantPending) {
     for (Map.Entry<BytesKey, byte[]> entry : participantPending.entrySet()) {
       byte[] key = entry.getKey().copy();
       byte[] value = entry.getValue();
       if (kind == Kind.LAYER) {
         mutations.add(value == null
-            ? PathStateNativeNodeStore.BatchMutation.delete(key)
-            : PathStateNativeNodeStore.BatchMutation.put(key, value));
+            ? PathStateNativeAccess.BatchMutation.delete(key)
+            : PathStateNativeAccess.BatchMutation.put(key, value));
         byte[] tombstone = tombstoneKey(key);
         mutations.add(value == null
-            ? PathStateNativeNodeStore.BatchMutation.put(tombstone, TOMBSTONE_VALUE)
-            : PathStateNativeNodeStore.BatchMutation.delete(tombstone));
+            ? PathStateNativeAccess.BatchMutation.put(tombstone, TOMBSTONE_VALUE)
+            : PathStateNativeAccess.BatchMutation.delete(tombstone));
       } else {
         mutations.add(value == null
-            ? PathStateNativeNodeStore.BatchMutation.delete(key)
-            : PathStateNativeNodeStore.BatchMutation.put(key, value));
+            ? PathStateNativeAccess.BatchMutation.delete(key)
+            : PathStateNativeAccess.BatchMutation.put(key, value));
       }
     }
   }
 
-  private void appendLeafMutations(List<PathStateNativeNodeStore.BatchMutation> mutations,
+  private void appendLeafMutations(List<PathStateNativeAccess.BatchMutation> mutations,
       List<PathStateRoot.LeafMutationRecord> leafMutations) {
     for (PathStateRoot.LeafMutationRecord mutation : leafMutations) {
       byte[] key = leafKey(mutation);
@@ -954,16 +961,16 @@ public final class PathStateNodeStoreSet implements Closeable {
     }
   }
 
-  private void appendLeafMutation(List<PathStateNativeNodeStore.BatchMutation> mutations,
+  private void appendLeafMutation(List<PathStateNativeAccess.BatchMutation> mutations,
       byte[] key, byte[] value) {
     mutations.add(value == null
-        ? PathStateNativeNodeStore.BatchMutation.delete(key)
-        : PathStateNativeNodeStore.BatchMutation.put(key, value));
+        ? PathStateNativeAccess.BatchMutation.delete(key)
+        : PathStateNativeAccess.BatchMutation.put(key, value));
     if (leafOverlay) {
       byte[] tombstone = leafTombstoneKey(key);
       mutations.add(value == null
-          ? PathStateNativeNodeStore.BatchMutation.put(tombstone, TOMBSTONE_VALUE)
-          : PathStateNativeNodeStore.BatchMutation.delete(tombstone));
+          ? PathStateNativeAccess.BatchMutation.put(tombstone, TOMBSTONE_VALUE)
+          : PathStateNativeAccess.BatchMutation.delete(tombstone));
     }
   }
 
@@ -1232,7 +1239,7 @@ public final class PathStateNodeStoreSet implements Closeable {
 
     private final int storeId;
     private final NamespacedNodeStore namespace;
-    private final List<PathStateNativeNodeStore.BatchMutation> mutations =
+    private final List<PathStateNativeAccess.BatchMutation> mutations =
         new ArrayList<>(REBUILD_WRITE_BATCH_ENTRIES);
     private long nodeEntries;
     private long leafEntries;
@@ -1244,12 +1251,12 @@ public final class PathStateNodeStoreSet implements Closeable {
     }
 
     void putNode(byte[] path, byte[] encodedNode) {
-      add(PathStateNativeNodeStore.BatchMutation.put(namespace.key(path), encodedNode));
+      add(PathStateNativeAccess.BatchMutation.put(namespace.key(path), encodedNode));
       nodeEntries = StrictMathWrapper.addExact(nodeEntries, 1L);
     }
 
     void putLeaf(byte[] secureKey, byte[] encodedValue) {
-      add(PathStateNativeNodeStore.BatchMutation.put(
+      add(PathStateNativeAccess.BatchMutation.put(
           rebuildLeafKey(storeId, secureKey), encodedValue));
       leafEntries = StrictMathWrapper.addExact(leafEntries, 1L);
     }
@@ -1262,7 +1269,7 @@ public final class PathStateNodeStoreSet implements Closeable {
       return leafEntries;
     }
 
-    private void add(PathStateNativeNodeStore.BatchMutation mutation) {
+    private void add(PathStateNativeAccess.BatchMutation mutation) {
       if (writerClosed) {
         throw new IllegalStateException("path-state rebuild writer is closed");
       }

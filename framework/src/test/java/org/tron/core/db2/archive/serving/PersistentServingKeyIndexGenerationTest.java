@@ -47,7 +47,10 @@ import org.tron.core.db2.archive.query.snapshot.ArchiveGenerationCapsule;
 import org.tron.core.db2.archive.query.snapshot.ArchiveReadSnapshot;
 import org.tron.core.db2.archive.query.snapshot.ArchiveReadSnapshot.PinnedLatestState;
 import org.tron.core.db2.archive.query.snapshot.HistoricalRangeOverlay;
-import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
+import org.tron.core.db2.archive.serving.index.PinnedServingKeyIndex;
+import org.tron.core.db2.archive.serving.index.ServingKeyIndex;
+import org.tron.core.db2.archive.serving.index.ServingKeyIndexGeneration;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
 
 public class PersistentServingKeyIndexGenerationTest {
 

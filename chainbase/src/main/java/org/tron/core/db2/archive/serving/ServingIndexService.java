@@ -28,11 +28,13 @@ import org.tron.core.db2.archive.contract.StateArchivePointSource;
 import org.tron.core.db2.archive.history.io.ArchiveFileDurability;
 import org.tron.core.db2.archive.serving.ServingFailure.Reason;
 import org.tron.core.db2.archive.serving.ServingFailure.ServingFaultException;
-import org.tron.core.db2.archive.serving.ServingHistorySource.Committed;
-import org.tron.core.db2.archive.serving.ServingHistorySource.CommittedBlock;
+import org.tron.core.db2.archive.serving.source.ServingHistorySource;
+import org.tron.core.db2.archive.serving.source.ServingHistorySource.Committed;
+import org.tron.core.db2.archive.serving.source.ServingHistorySource.CommittedBlock;
+import org.tron.core.db2.archive.serving.source.StateArchiveServingSource;
 import org.tron.core.db2.archive.storage.index.ArchiveIndexStorage;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointTarget;
-import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointTarget;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
 
 /**
  * The derived V5 serving index (ch04): one build thread, one long-lived write handle, the state

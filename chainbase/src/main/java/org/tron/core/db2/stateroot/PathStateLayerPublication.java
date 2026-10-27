@@ -10,7 +10,9 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
 import java.util.stream.Stream;
-import org.tron.core.db2.stateroot.PathStateRootMetadata.Kind;
+import org.tron.core.db2.stateroot.format.PathStateRootMetadata;
+import org.tron.core.db2.stateroot.format.PathStateRootMetadata.Kind;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest;
 
 /** Crash-recoverable publication boundary for one immutable reversible path-state layer. */
 public final class PathStateLayerPublication {

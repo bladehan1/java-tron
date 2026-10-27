@@ -7,9 +7,9 @@ import java.util.List;
 import org.tron.core.db2.archive.BlockReverseDiff;
 import org.tron.core.db2.archive.contract.StateArchiveCanonicalBlockMetaSource;
 import org.tron.core.db2.archive.history.format.V5HistoryTail;
-import org.tron.core.db2.archive.serving.ServingHistorySource;
-import org.tron.core.db2.archive.serving.StateArchiveServingSource;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointTarget;
+import org.tron.core.db2.archive.serving.source.ServingHistorySource;
+import org.tron.core.db2.archive.serving.source.StateArchiveServingSource;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointTarget;
 
 public final class V5TestSupport {
   private V5TestSupport() {}

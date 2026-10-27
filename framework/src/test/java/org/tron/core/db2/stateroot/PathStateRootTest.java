@@ -17,6 +17,11 @@ import java.util.concurrent.Future;
 import org.bouncycastle.util.encoders.Hex;
 import org.junit.Test;
 import org.tron.common.crypto.Hash;
+import org.tron.core.db2.stateroot.commitment.PathStateCommitmentCodec;
+import org.tron.core.db2.stateroot.commitment.PathStateMutation;
+import org.tron.core.db2.stateroot.commitment.PathStateParticipant;
+import org.tron.core.db2.stateroot.commitment.PathStateParticipantScope;
+import org.tron.core.db2.stateroot.trie.PathNodeStore;
 import org.tron.core.trie.TrieImpl;
 
 public class PathStateRootTest {

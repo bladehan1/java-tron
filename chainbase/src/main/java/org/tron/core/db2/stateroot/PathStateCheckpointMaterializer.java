@@ -19,13 +19,17 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointBaseline;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointMaterializedStore;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointMaterializer;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointPayload;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointTarget;
+import org.tron.core.db2.checkpoint.common.format.CommonCheckpointBaseline;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointMaterializedStore;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointMaterializer;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointTarget;
+import org.tron.core.db2.checkpoint.common.payload.CommonCheckpointPayload;
 import org.tron.core.db2.common.WrappedByteArray;
-import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
+import org.tron.core.db2.stateroot.commitment.PathStateCanonicalizer;
+import org.tron.core.db2.stateroot.commitment.PathStateParticipant;
+import org.tron.core.db2.stateroot.commitment.PathStateParticipantScope;
+import org.tron.core.db2.stateroot.format.PathStateRootMetadata;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
 
 /** Next-format PathState participant for the common-checkpoint two-barrier protocol. */
 public final class PathStateCheckpointMaterializer implements CommonCheckpointMaterializer {

@@ -44,8 +44,8 @@ import org.tron.core.db2.archive.history.v5.V5TestSupport.Writer;
 import org.tron.core.db2.archive.serving.ServingFailure.Reason;
 import org.tron.core.db2.archive.storage.index.ArchiveIndexStorage;
 import org.tron.core.db2.archive.storage.index.StateArchiveIndexEngineManifest;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointTarget;
-import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointTarget;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
 
 /**
  * ServingIndexService state machine and isolation (ch04 §3.4–§3.10; T1, T3, T4, T5 service

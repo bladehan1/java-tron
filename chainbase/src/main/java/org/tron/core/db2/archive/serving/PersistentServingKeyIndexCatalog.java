@@ -26,8 +26,9 @@ import java.util.stream.Stream;
 import org.tron.core.db2.archive.ArchivePersistenceException;
 import org.tron.core.db2.archive.checkpoint.progress.ArchiveProgressEnvelope;
 import org.tron.core.db2.archive.history.io.ArchiveFileDurability;
+import org.tron.core.db2.archive.serving.index.ServingKeyIndexSource;
 import org.tron.core.db2.archive.storage.index.StateArchiveIndexEngineManifest;
-import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
 
 /** Durable generation catalog with request refcounts and safe retired-generation reaping. */
 public final class PersistentServingKeyIndexCatalog implements Closeable, ServingKeyIndexSource {

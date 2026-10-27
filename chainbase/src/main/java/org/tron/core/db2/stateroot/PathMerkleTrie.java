@@ -17,6 +17,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicLong;
 import org.tron.common.crypto.Hash;
 import org.tron.common.math.StrictMathWrapper;
+import org.tron.core.db2.stateroot.trie.PathNodeStore;
 
 /** Backend-neutral secure-key MPT with path-local immutable node updates. */
 public final class PathMerkleTrie {

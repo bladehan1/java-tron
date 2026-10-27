@@ -349,7 +349,7 @@
   },
   {
     "from": "chainbase/src/main/java/org/tron/core/db2/archive/ServingHistorySource.java",
-    "to": "chainbase/src/main/java/org/tron/core/db2/archive/serving/ServingHistorySource.java"
+    "to": "chainbase/src/main/java/org/tron/core/db2/archive/serving/source/ServingHistorySource.java"
   },
   {
     "from": "chainbase/src/main/java/org/tron/core/db2/archive/ServingIndexIncrementalPlan.java",
@@ -413,7 +413,7 @@
   },
   {
     "from": "chainbase/src/main/java/org/tron/core/db2/archive/StateArchiveServingSource.java",
-    "to": "chainbase/src/main/java/org/tron/core/db2/archive/serving/StateArchiveServingSource.java"
+    "to": "chainbase/src/main/java/org/tron/core/db2/archive/serving/source/StateArchiveServingSource.java"
   },
   {
     "from": "chainbase/src/main/java/org/tron/core/db2/archive/StateArchiveServingSourceV5.java",
@@ -545,7 +545,7 @@
   },
   {
     "from": "framework/src/test/java/org/tron/core/db2/archive/ServingKeyIndexGenerationTest.java",
-    "to": "framework/src/test/java/org/tron/core/db2/archive/serving/ServingKeyIndexGenerationTest.java"
+    "to": "framework/src/test/java/org/tron/core/db2/archive/serving/index/ServingKeyIndexGenerationTest.java"
   },
   {
     "from": "framework/src/test/java/org/tron/core/db2/archive/StateArchiveServingWorkerV3Test.java",
@@ -590,5 +590,205 @@
   {
     "from": "chainbase/src/main/java/org/tron/core/db2/archive/query/HistoricalQueryException.java",
     "to": "chainbase/src/main/java/org/tron/core/db2/archive/contract/HistoricalQueryException.java"
+  },
+  {
+    "from": "chainbase/src/main/java/org/tron/core/db2/stateroot/PathStateAsyncPrepareHead.java",
+    "to": "chainbase/src/main/java/org/tron/core/db2/stateroot/runtime/PathStateAsyncPrepareHead.java"
+  },
+  {
+    "from": "chainbase/src/main/java/org/tron/core/db2/stateroot/PathStateBlockTransition.java",
+    "to": "chainbase/src/main/java/org/tron/core/db2/stateroot/commitment/PathStateBlockTransition.java"
+  },
+  {
+    "from": "chainbase/src/main/java/org/tron/core/db2/stateroot/PathStateCanonicalizer.java",
+    "to": "chainbase/src/main/java/org/tron/core/db2/stateroot/commitment/PathStateCanonicalizer.java"
+  },
+  {
+    "from": "chainbase/src/main/java/org/tron/core/db2/stateroot/PathStateCommitmentCodec.java",
+    "to": "chainbase/src/main/java/org/tron/core/db2/stateroot/commitment/PathStateCommitmentCodec.java"
+  },
+  {
+    "from": "chainbase/src/main/java/org/tron/core/db2/stateroot/PathStateHead.java",
+    "to": "chainbase/src/main/java/org/tron/core/db2/stateroot/runtime/PathStateHead.java"
+  },
+  {
+    "from": "chainbase/src/main/java/org/tron/core/db2/stateroot/PathStateMutation.java",
+    "to": "chainbase/src/main/java/org/tron/core/db2/stateroot/commitment/PathStateMutation.java"
+  },
+  {
+    "from": "chainbase/src/main/java/org/tron/core/db2/stateroot/PathStateNativeSnapshotSource.java",
+    "to": "chainbase/src/main/java/org/tron/core/db2/stateroot/rebuild/PathStateNativeSnapshotSource.java"
+  },
+  {
+    "from": "chainbase/src/main/java/org/tron/core/db2/stateroot/PathStateParticipant.java",
+    "to": "chainbase/src/main/java/org/tron/core/db2/stateroot/commitment/PathStateParticipant.java"
+  },
+  {
+    "from": "chainbase/src/main/java/org/tron/core/db2/stateroot/PathStateParticipantDescriptor.java",
+    "to": "chainbase/src/main/java/org/tron/core/db2/stateroot/commitment/PathStateParticipantDescriptor.java"
+  },
+  {
+    "from": "chainbase/src/main/java/org/tron/core/db2/stateroot/PathStateParticipantScope.java",
+    "to": "chainbase/src/main/java/org/tron/core/db2/stateroot/commitment/PathStateParticipantScope.java"
+  },
+  {
+    "from": "chainbase/src/main/java/org/tron/core/db2/stateroot/PathStateRuntimeAdmission.java",
+    "to": "chainbase/src/main/java/org/tron/core/db2/stateroot/runtime/PathStateRuntimeAdmission.java"
+  },
+  {
+    "from": "chainbase/src/main/java/org/tron/core/db2/stateroot/PathStateRuntimeAttachment.java",
+    "to": "chainbase/src/main/java/org/tron/core/db2/stateroot/runtime/PathStateRuntimeAttachment.java"
+  },
+  {
+    "from": "chainbase/src/main/java/org/tron/core/db2/stateroot/PathStateTransitionCollector.java",
+    "to": "chainbase/src/main/java/org/tron/core/db2/stateroot/commitment/PathStateTransitionCollector.java"
+  },
+  {
+    "from": "chainbase/src/main/java/org/tron/core/db2/stateroot/PathStateNativeNodeStore.java",
+    "to": "chainbase/src/main/java/org/tron/core/db2/stateroot/storage/PathStateNativeNodeStore.java"
+  },
+  {
+    "from": "chainbase/src/main/java/org/tron/core/db2/stateroot/PathStateNativeGetPerf.java",
+    "to": "chainbase/src/main/java/org/tron/core/db2/stateroot/storage/PathStateNativeGetPerf.java"
+  },
+  {
+    "from": "framework/src/test/java/org/tron/core/db2/stateroot/PathStateBlockTransitionTest.java",
+    "to": "framework/src/test/java/org/tron/core/db2/stateroot/commitment/PathStateBlockTransitionTest.java"
+  },
+  {
+    "from": "framework/src/test/java/org/tron/core/db2/stateroot/PathStateCanonicalizerTest.java",
+    "to": "framework/src/test/java/org/tron/core/db2/stateroot/commitment/PathStateCanonicalizerTest.java"
+  },
+  {
+    "from": "framework/src/test/java/org/tron/core/db2/stateroot/PathStateCommitmentCodecTest.java",
+    "to": "framework/src/test/java/org/tron/core/db2/stateroot/commitment/PathStateCommitmentCodecTest.java"
+  },
+  {
+    "from": "framework/src/test/java/org/tron/core/db2/stateroot/PathStateParticipantDescriptorTest.java",
+    "to": "framework/src/test/java/org/tron/core/db2/stateroot/commitment/PathStateParticipantDescriptorTest.java"
+  },
+  {
+    "from": "framework/src/test/java/org/tron/core/db2/stateroot/PathStateNativeGetPerfTest.java",
+    "to": "framework/src/test/java/org/tron/core/db2/stateroot/storage/PathStateNativeGetPerfTest.java"
+  },
+  {
+    "from": "framework/src/test/java/org/tron/core/db2/stateroot/PathStateNativeSnapshotSourceTest.java",
+    "to": "framework/src/test/java/org/tron/core/db2/stateroot/rebuild/PathStateNativeSnapshotSourceTest.java"
+  },
+  {
+    "from": "chainbase/src/main/java/org/tron/core/db2/stateroot/PathStatePhysicalStoreManifest.java",
+    "to": "chainbase/src/main/java/org/tron/core/db2/stateroot/format/PathStatePhysicalStoreManifest.java"
+  },
+  {
+    "from": "chainbase/src/main/java/org/tron/core/db2/stateroot/PathStateStoreManifest.java",
+    "to": "chainbase/src/main/java/org/tron/core/db2/stateroot/format/PathStateStoreManifest.java"
+  },
+  {
+    "from": "chainbase/src/main/java/org/tron/core/db2/stateroot/PathNodeStore.java",
+    "to": "chainbase/src/main/java/org/tron/core/db2/stateroot/trie/PathNodeStore.java"
+  },
+  {
+    "from": "chainbase/src/main/java/org/tron/core/db2/stateroot/PathStateRootMetadata.java",
+    "to": "chainbase/src/main/java/org/tron/core/db2/stateroot/format/PathStateRootMetadata.java"
+  },
+  {
+    "from": "chainbase/src/main/java/org/tron/core/db2/stateroot/PathStateStackTrie.java",
+    "to": "chainbase/src/main/java/org/tron/core/db2/stateroot/trie/PathStateStackTrie.java"
+  },
+  {
+    "from": "chainbase/src/main/java/org/tron/core/db2/stateroot/PathStateStoreTrieBuilder.java",
+    "to": "chainbase/src/main/java/org/tron/core/db2/stateroot/trie/PathStateStoreTrieBuilder.java"
+  },
+  {
+    "from": "framework/src/test/java/org/tron/core/db2/stateroot/PathStateStackTrieTest.java",
+    "to": "framework/src/test/java/org/tron/core/db2/stateroot/trie/PathStateStackTrieTest.java"
+  },
+  {
+    "from": "framework/src/test/java/org/tron/core/db2/stateroot/PathStateStoreTrieBuilderTest.java",
+    "to": "framework/src/test/java/org/tron/core/db2/stateroot/trie/PathStateStoreTrieBuilderTest.java"
+  },
+  {
+    "from": "chainbase/src/main/java/org/tron/core/db2/checkpoint/common/CommonCheckpointCapture.java",
+    "to": "chainbase/src/main/java/org/tron/core/db2/checkpoint/common/payload/CommonCheckpointCapture.java"
+  },
+  {
+    "from": "chainbase/src/main/java/org/tron/core/db2/checkpoint/common/CommonCheckpointPayload.java",
+    "to": "chainbase/src/main/java/org/tron/core/db2/checkpoint/common/payload/CommonCheckpointPayload.java"
+  },
+  {
+    "from": "chainbase/src/main/java/org/tron/core/db2/checkpoint/common/CommonCheckpointPayloadCodec.java",
+    "to": "chainbase/src/main/java/org/tron/core/db2/checkpoint/common/payload/CommonCheckpointPayloadCodec.java"
+  },
+  {
+    "from": "chainbase/src/main/java/org/tron/core/db2/checkpoint/common/CommonCheckpointPayloadFactory.java",
+    "to": "chainbase/src/main/java/org/tron/core/db2/checkpoint/common/payload/CommonCheckpointPayloadFactory.java"
+  },
+  {
+    "from": "framework/src/test/java/org/tron/core/db2/checkpoint/common/CommonCheckpointPayloadV2Test.java",
+    "to": "framework/src/test/java/org/tron/core/db2/checkpoint/common/payload/CommonCheckpointPayloadV2Test.java"
+  },
+  {
+    "from": "chainbase/src/main/java/org/tron/core/db2/checkpoint/common/CommonCheckpointBaseline.java",
+    "to": "chainbase/src/main/java/org/tron/core/db2/checkpoint/common/format/CommonCheckpointBaseline.java"
+  },
+  {
+    "from": "chainbase/src/main/java/org/tron/core/db2/checkpoint/common/CommonCheckpointBaselineFile.java",
+    "to": "chainbase/src/main/java/org/tron/core/db2/checkpoint/common/format/CommonCheckpointBaselineFile.java"
+  },
+  {
+    "from": "chainbase/src/main/java/org/tron/core/db2/checkpoint/common/CommonCheckpointFormat.java",
+    "to": "chainbase/src/main/java/org/tron/core/db2/checkpoint/common/format/CommonCheckpointFormat.java"
+  },
+  {
+    "from": "framework/src/test/java/org/tron/core/db2/checkpoint/common/CommonCheckpointBaselineFileTest.java",
+    "to": "framework/src/test/java/org/tron/core/db2/checkpoint/common/format/CommonCheckpointBaselineFileTest.java"
+  },
+  {
+    "from": "chainbase/src/main/java/org/tron/core/db2/archive/serving/PinnedServingKeyIndex.java",
+    "to": "chainbase/src/main/java/org/tron/core/db2/archive/serving/index/PinnedServingKeyIndex.java"
+  },
+  {
+    "from": "chainbase/src/main/java/org/tron/core/db2/archive/serving/ServingKeyIndex.java",
+    "to": "chainbase/src/main/java/org/tron/core/db2/archive/serving/index/ServingKeyIndex.java"
+  },
+  {
+    "from": "chainbase/src/main/java/org/tron/core/db2/archive/serving/ServingKeyIndexCatalog.java",
+    "to": "chainbase/src/main/java/org/tron/core/db2/archive/serving/index/ServingKeyIndexCatalog.java"
+  },
+  {
+    "from": "chainbase/src/main/java/org/tron/core/db2/archive/serving/ServingKeyIndexGeneration.java",
+    "to": "chainbase/src/main/java/org/tron/core/db2/archive/serving/index/ServingKeyIndexGeneration.java"
+  },
+  {
+    "from": "chainbase/src/main/java/org/tron/core/db2/archive/serving/ServingKeyIndexSource.java",
+    "to": "chainbase/src/main/java/org/tron/core/db2/archive/serving/index/ServingKeyIndexSource.java"
+  },
+  {
+    "from": "framework/src/test/java/org/tron/core/db2/archive/serving/ServingKeyIndexGenerationTest.java",
+    "to": "framework/src/test/java/org/tron/core/db2/archive/serving/index/ServingKeyIndexGenerationTest.java"
+  },
+  {
+    "from": "chainbase/src/main/java/org/tron/core/db2/archive/serving/ServingHistorySource.java",
+    "to": "chainbase/src/main/java/org/tron/core/db2/archive/serving/source/ServingHistorySource.java"
+  },
+  {
+    "from": "chainbase/src/main/java/org/tron/core/db2/archive/serving/StateArchiveServingSource.java",
+    "to": "chainbase/src/main/java/org/tron/core/db2/archive/serving/source/StateArchiveServingSource.java"
+  },
+  {
+    "from": "chainbase/src/main/java/org/tron/core/db2/checkpoint/common/CommonCheckpointMaterializedStore.java",
+    "to": "chainbase/src/main/java/org/tron/core/db2/checkpoint/common/materialize/CommonCheckpointMaterializedStore.java"
+  },
+  {
+    "from": "chainbase/src/main/java/org/tron/core/db2/checkpoint/common/CommonCheckpointMaterializer.java",
+    "to": "chainbase/src/main/java/org/tron/core/db2/checkpoint/common/materialize/CommonCheckpointMaterializer.java"
+  },
+  {
+    "from": "chainbase/src/main/java/org/tron/core/db2/checkpoint/common/CommonCheckpointTarget.java",
+    "to": "chainbase/src/main/java/org/tron/core/db2/checkpoint/common/materialize/CommonCheckpointTarget.java"
+  },
+  {
+    "from": "framework/src/test/java/org/tron/core/db2/checkpoint/common/CommonCheckpointMaterializedStoreTest.java",
+    "to": "framework/src/test/java/org/tron/core/db2/checkpoint/common/materialize/CommonCheckpointMaterializedStoreTest.java"
   }
 ]

@@ -19,11 +19,16 @@ import org.tron.core.db2.archive.checkpoint.StateArchiveHotCheckpointMaterialize
 import org.tron.core.db2.archive.query.HistoricalQueryControl;
 import org.tron.core.db2.archive.query.snapshot.CheckpointLatestStateFactory;
 import org.tron.core.db2.archive.query.snapshot.StateArchiveCheckpointReadSnapshot;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointMaterializedStore;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointTarget;
+import org.tron.core.db2.checkpoint.common.payload.CommonCheckpointCapture;
+import org.tron.core.db2.checkpoint.common.payload.CommonCheckpointPayload;
+import org.tron.core.db2.checkpoint.common.payload.CommonCheckpointPayloadFactory;
 import org.tron.core.db2.core.Chainbase;
 import org.tron.core.db2.core.Snapshot;
 import org.tron.core.db2.core.SnapshotImpl;
 import org.tron.core.db2.core.SnapshotManager;
-import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
 
 /** Isolated composition boundary for the next-format common-checkpoint runtime. */
 public final class CommonCheckpointRuntime implements AutoCloseable {

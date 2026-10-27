@@ -7,7 +7,8 @@ import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.db2.archive.BlockReverseDiff;
 import org.tron.core.db2.archive.history.format.V5HistoryTail;
 import org.tron.core.db2.archive.serving.StateArchiveServingIndexBuildCoordinatorV3.BuildProgress;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointTarget;
+import org.tron.core.db2.archive.serving.source.StateArchiveServingSource;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointTarget;
 
 /** Single owner with a constant-size committed watermark mailbox, never a queue of bodies. */
 final class StateArchiveServingWorkerV3 implements AutoCloseable {

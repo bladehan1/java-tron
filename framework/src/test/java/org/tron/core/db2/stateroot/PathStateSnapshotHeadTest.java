@@ -22,12 +22,17 @@ import org.tron.common.arch.Arch;
 import org.tron.core.db2.archive.BlockReverseDiff;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
 import org.tron.core.db2.archive.OldValue;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointPayload;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointPayload.Mutation;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointPayload.StoreMutations;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointPayloadCodec;
-import org.tron.core.db2.stateroot.PathStateCanonicalizer.P66Phase;
-import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
+import org.tron.core.db2.checkpoint.common.payload.CommonCheckpointPayload;
+import org.tron.core.db2.checkpoint.common.payload.CommonCheckpointPayload.Mutation;
+import org.tron.core.db2.checkpoint.common.payload.CommonCheckpointPayload.StoreMutations;
+import org.tron.core.db2.checkpoint.common.payload.CommonCheckpointPayloadCodec;
+import org.tron.core.db2.stateroot.commitment.PathStateBlockTransition;
+import org.tron.core.db2.stateroot.commitment.PathStateCanonicalizer.P66Phase;
+import org.tron.core.db2.stateroot.commitment.PathStateCommitmentCodec;
+import org.tron.core.db2.stateroot.commitment.PathStateMutation;
+import org.tron.core.db2.stateroot.format.PathStateRootMetadata;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
 
 public class PathStateSnapshotHeadTest {
 

@@ -16,8 +16,8 @@ import org.junit.rules.TemporaryFolder;
 import org.tron.common.arch.Arch;
 import org.tron.core.db2.archive.checkpoint.storage.SharedCheckpointDatabase;
 import org.tron.core.db2.archive.storage.index.ArchiveIndexStorage;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointPayloadCodec;
-import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
+import org.tron.core.db2.checkpoint.common.payload.CommonCheckpointPayloadCodec;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
 
 public class AnchoredCheckpointScanTest {
   @Rule

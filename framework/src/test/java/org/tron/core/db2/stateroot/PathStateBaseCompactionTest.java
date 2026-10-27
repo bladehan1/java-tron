@@ -16,9 +16,12 @@ import org.junit.rules.TemporaryFolder;
 import org.tron.common.arch.Arch;
 import org.tron.core.db2.stateroot.PathStateBaseCompaction.RecoveryAction;
 import org.tron.core.db2.stateroot.PathStateBaseCompaction.Stage;
-import org.tron.core.db2.stateroot.PathStateCanonicalizer.P66Phase;
-import org.tron.core.db2.stateroot.PathStateRootMetadata.Kind;
-import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
+import org.tron.core.db2.stateroot.commitment.PathStateCanonicalizer.P66Phase;
+import org.tron.core.db2.stateroot.commitment.PathStateMutation;
+import org.tron.core.db2.stateroot.format.PathStateRootMetadata;
+import org.tron.core.db2.stateroot.format.PathStateRootMetadata.Kind;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
 
 public class PathStateBaseCompactionTest {
 

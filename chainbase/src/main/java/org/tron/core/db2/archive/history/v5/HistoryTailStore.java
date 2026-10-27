@@ -14,7 +14,7 @@ import java.util.Arrays;
 import org.tron.core.db2.archive.history.format.V5Format;
 import org.tron.core.db2.archive.history.format.V5HistoryTail;
 import org.tron.core.db2.archive.history.io.ArchiveFileDurability;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointTarget;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointTarget;
 
 /** History-owned two-slot record: a prepared suffix preserves the Common boundary. */
 final class HistoryTailStore implements Closeable {

@@ -25,10 +25,10 @@ import org.tron.core.db2.archive.history.v5.StateArchiveBlockFrameCodecV5.Decode
 import org.tron.core.db2.archive.history.v5.StateArchiveCommittedViewV5.PointLocation;
 import org.tron.core.db2.archive.serving.ServingFailure.Reason;
 import org.tron.core.db2.archive.serving.ServingFailure.ServingFaultException;
-import org.tron.core.db2.archive.serving.ServingHistorySource;
 import org.tron.core.db2.archive.serving.ServingIndexIncrementalPlan;
-import org.tron.core.db2.archive.serving.StateArchiveServingSource;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointTarget;
+import org.tron.core.db2.archive.serving.source.ServingHistorySource;
+import org.tron.core.db2.archive.serving.source.StateArchiveServingSource;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointTarget;
 
 /**
  * Five-lane V5 replay source and the committed History view of serving (ch04 §3.3.1 rule 4).

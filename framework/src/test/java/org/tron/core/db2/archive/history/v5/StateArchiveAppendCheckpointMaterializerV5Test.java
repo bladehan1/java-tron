@@ -29,10 +29,10 @@ import org.tron.core.db2.archive.history.hot.StateArchiveHotBatchDescriptor;
 import org.tron.core.db2.archive.history.v5.StateArchiveAppendCheckpointMaterializerV5.PublicationStage;
 import org.tron.core.db2.archive.serving.ServingTestSupport.MutableIndex;
 import org.tron.core.db2.archive.serving.StateArchiveServingIndexBuildCoordinatorV3;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointCapture;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointMaterializer.Status;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointPayload;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointTarget;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointMaterializer.Status;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointTarget;
+import org.tron.core.db2.checkpoint.common.payload.CommonCheckpointCapture;
+import org.tron.core.db2.checkpoint.common.payload.CommonCheckpointPayload;
 import org.tron.core.db2.stateroot.PathStateFlushTarget;
 
 public class StateArchiveAppendCheckpointMaterializerV5Test {

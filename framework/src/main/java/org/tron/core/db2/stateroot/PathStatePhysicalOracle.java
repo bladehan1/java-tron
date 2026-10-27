@@ -18,6 +18,12 @@ import java.util.Objects;
 import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.capsule.BytesCapsule;
 import org.tron.core.db2.common.DB;
+import org.tron.core.db2.stateroot.commitment.PathStateCommitmentCodec;
+import org.tron.core.db2.stateroot.commitment.PathStateParticipant;
+import org.tron.core.db2.stateroot.commitment.PathStateParticipantDescriptor;
+import org.tron.core.db2.stateroot.format.PathStateRootMetadata;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest;
+import org.tron.core.db2.stateroot.storage.PathStateNativeAccess;
 import org.tron.core.trie.TrieImpl;
 
 /** Independent {@link TrieImpl} verifier for one offline physical-store oracle window. */
@@ -246,11 +252,11 @@ final class PathStatePhysicalOracle {
   private static final class NativeTrieDatabase implements DB<byte[], BytesCapsule>,
       AutoCloseable {
 
-    private final PathStateNativeNodeStore store;
+    private final PathStateNativeAccess store;
     private final Map<Key, byte[]> pending = new LinkedHashMap<>();
 
     private NativeTrieDatabase(Path directory) throws IOException {
-      store = PathStateNativeNodeStore.open(directory, PathStateStoreManifest.Engine.ROCKSDB);
+      store = PathStateNativeAccess.open(directory, PathStateStoreManifest.Engine.ROCKSDB);
     }
 
     @Override
@@ -287,11 +293,11 @@ final class PathStatePhysicalOracle {
       if (pending.isEmpty()) {
         return;
       }
-      List<PathStateNativeNodeStore.BatchMutation> mutations = new ArrayList<>(pending.size());
+      List<PathStateNativeAccess.BatchMutation> mutations = new ArrayList<>(pending.size());
       for (Map.Entry<Key, byte[]> entry : pending.entrySet()) {
         mutations.add(entry.getValue() == null
-            ? PathStateNativeNodeStore.BatchMutation.delete(entry.getKey().value)
-            : PathStateNativeNodeStore.BatchMutation.put(entry.getKey().value,
+            ? PathStateNativeAccess.BatchMutation.delete(entry.getKey().value)
+            : PathStateNativeAccess.BatchMutation.put(entry.getKey().value,
                 entry.getValue()));
       }
       store.writeBatchUnsynced(mutations);

@@ -3,8 +3,9 @@ package org.tron.core.db2.archive.serving;
 import java.io.IOException;
 import java.util.List;
 import org.tron.common.math.StrictMathWrapper;
-import org.tron.core.db2.archive.serving.ServingHistorySource.Committed;
-import org.tron.core.db2.archive.serving.ServingHistorySource.CommittedBlock;
+import org.tron.core.db2.archive.serving.source.ServingHistorySource;
+import org.tron.core.db2.archive.serving.source.ServingHistorySource.Committed;
+import org.tron.core.db2.archive.serving.source.ServingHistorySource.CommittedBlock;
 
 /**
  * Deterministic batch selection (ch04 §3.5.3, S3/S4). Budgets only choose batch boundaries; they

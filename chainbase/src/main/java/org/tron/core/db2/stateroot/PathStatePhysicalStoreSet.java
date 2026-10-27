@@ -31,8 +31,21 @@ import org.tron.common.parameter.CommonParameter;
 import org.tron.core.config.args.StorageConfig.NativeDbConfig;
 import org.tron.core.config.args.StorageConfig.PathStateDbSettingsConfig;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointPayload;
-import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
+import org.tron.core.db2.checkpoint.common.payload.CommonCheckpointPayload;
+import org.tron.core.db2.stateroot.commitment.PathStateBlockTransition;
+import org.tron.core.db2.stateroot.commitment.PathStateCanonicalizer;
+import org.tron.core.db2.stateroot.commitment.PathStateCommitmentCodec;
+import org.tron.core.db2.stateroot.commitment.PathStateMutation;
+import org.tron.core.db2.stateroot.commitment.PathStateParticipant;
+import org.tron.core.db2.stateroot.commitment.PathStateParticipantDescriptor;
+import org.tron.core.db2.stateroot.commitment.PathStateParticipantScope;
+import org.tron.core.db2.stateroot.format.PathStatePhysicalStoreManifest;
+import org.tron.core.db2.stateroot.format.PathStateRootMetadata;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
+import org.tron.core.db2.stateroot.storage.PathStateNativeAccess;
+import org.tron.core.db2.stateroot.trie.PathNodeStore;
+import org.tron.core.db2.stateroot.trie.PathStateTrieBuild;
 
 /**
  * Fresh-format physical owner for the TASK-018 27 participant databases and one super database.
@@ -302,7 +315,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     }
     long[] progress = prior == null ? new long[]{0, 0} : new long[]{prior.getRows(), prior.getBytes()};
     byte[][] cursor = new byte[][]{prior == null ? null : prior.getCursor()};
-    List<PathStateNativeNodeStore.BatchMutation> pending =
+    List<PathStateNativeAccess.BatchMutation> pending =
         new ArrayList<>(BOOTSTRAP_WRITE_BATCH_ENTRIES + 2);
     long[] pendingBytes = new long[1];
     long[] sinceCheckpoint = new long[2];
@@ -322,7 +335,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
         pending.clear();
         pendingBytes[0] = 0;
       }
-      pending.add(PathStateNativeNodeStore.BatchMutation.put(storedKey, encodedLeaf));
+      pending.add(PathStateNativeAccess.BatchMutation.put(storedKey, encodedLeaf));
       pendingBytes[0] = StrictMathWrapper.addExact(pendingBytes[0], mutationBytes);
       cursor[0] = key;
       progress[0]++;
@@ -534,7 +547,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
       long initialBatchMutations = store.getWriteBatchMutations();
       long[] rows = new long[1];
       PhysicalNodeBatchWriter nodeWriter = store.nodeBatchWriter();
-      PathStateStackTrie trie = new PathStateStackTrie(nodeWriter::put);
+      PathStateTrieBuild.Ordered trie = PathStateTrieBuild.ordered(nodeWriter::put);
       Hasher flatHasher = Hashing.sha256().newHasher();
       store.scanFlat(entry -> {
         byte[] secureKey = unprefixedFlatKey(entry.getKey());
@@ -1697,7 +1710,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
   /** One participant or super database with independent F/N/M key domains. */
   public static final class PhysicalStore implements Closeable {
 
-    private final PathStateNativeNodeStore nativeStore;
+    private final PathStateNativeAccess nativeStore;
     private final ResidentNodeStore nodeStore;
 
     private PhysicalStore(Path directory, Engine engine, int storeId,
@@ -1707,7 +1720,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
       boolean largeReadCache = useLargeReadCache(storeId, engine,
           Boolean.getBoolean("tron.pathstate.largeReadCacheBenchmark"));
       long cacheBytes = largeReadCache ? 256L << 20 : dbSettings.getCacheSize();
-      nativeStore = PathStateNativeNodeStore.open(directory, engine, storageProfile, dbSettings,
+      nativeStore = PathStateNativeAccess.open(directory, engine, storageProfile, dbSettings,
           largeReadCache ? 2 : cacheShardBitsFor(storeId, cacheBytes),
           PathStateOperationTimer.observesRocksDb(storeId), cacheBytes);
       nodeStore = new ResidentNodeStore(new PhysicalNodeStore(nativeStore), residentNodeCache,
@@ -1718,7 +1731,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
       nativeStore.put(prefixed(FLAT_STATE_PREFIX, secureKey, "secureKey"), encodedLeaf);
     }
 
-    private void writeBatch(List<PathStateNativeNodeStore.BatchMutation> mutations) {
+    private void writeBatch(List<PathStateNativeAccess.BatchMutation> mutations) {
       nativeStore.writeBatch(new ArrayList<>(mutations));
     }
 
@@ -1730,7 +1743,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
       nativeStore.delete(prefixed(FLAT_STATE_PREFIX, secureKey, "secureKey"));
     }
 
-    void scanFlat(PathStateNativeNodeStore.EntryConsumer consumer) throws IOException {
+    void scanFlat(PathStateNativeAccess.EntryConsumer consumer) throws IOException {
       nativeStore.scanPrefix(new byte[]{FLAT_STATE_PREFIX},
           Objects.requireNonNull(consumer, "consumer"));
     }
@@ -1744,7 +1757,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     }
 
     private void completeFlatBuild(byte[] flatDigest, byte[] generation, byte[] storeRoot) {
-      List<PathStateNativeNodeStore.BatchMutation> mutations = new ArrayList<>(3);
+      List<PathStateNativeAccess.BatchMutation> mutations = new ArrayList<>(3);
       mutations.add(metadataMutation(FLAT_DIGEST_METADATA, flatDigest));
       mutations.add(metadataMutation(STORE_GENERATION_METADATA, generation));
       mutations.add(metadataMutation(FLAT_COMPLETE_METADATA, storeRoot));
@@ -1769,9 +1782,9 @@ public final class PathStatePhysicalStoreSet implements Closeable {
 
     void clearNodes() throws IOException {
       nodeStore.clear();
-      List<PathStateNativeNodeStore.BatchMutation> pending = new ArrayList<>(4096);
+      List<PathStateNativeAccess.BatchMutation> pending = new ArrayList<>(4096);
       nativeStore.scanPrefix(new byte[]{TRIE_NODE_PREFIX}, entry -> {
-        pending.add(PathStateNativeNodeStore.BatchMutation.delete(entry.getKey()));
+        pending.add(PathStateNativeAccess.BatchMutation.delete(entry.getKey()));
         if (pending.size() == 4096) {
           nativeStore.writeBatch(new ArrayList<>(pending));
           pending.clear();
@@ -1784,8 +1797,8 @@ public final class PathStatePhysicalStoreSet implements Closeable {
 
     void applyParticipantDelete(byte[] secureKey, List<NodeMutation> nodeMutations,
         byte[] flatDigest, byte[] generation, byte[] storeRoot) {
-      List<PathStateNativeNodeStore.BatchMutation> mutations = new ArrayList<>();
-      mutations.add(PathStateNativeNodeStore.BatchMutation.delete(
+      List<PathStateNativeAccess.BatchMutation> mutations = new ArrayList<>();
+      mutations.add(PathStateNativeAccess.BatchMutation.delete(
           prefixed(FLAT_STATE_PREFIX, secureKey, "secureKey")));
       appendNodeMutations(mutations, nodeMutations);
       mutations.add(metadataMutation(FLAT_DIGEST_METADATA, flatDigest));
@@ -1798,12 +1811,12 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     void applyParticipantTransition(List<FlatMutation> flatMutations,
         List<NodeMutation> nodeMutations, byte[] flatDigest, byte[] generation,
         byte[] storeRoot) {
-      List<PathStateNativeNodeStore.BatchMutation> mutations = new ArrayList<>();
+      List<PathStateNativeAccess.BatchMutation> mutations = new ArrayList<>();
       for (FlatMutation mutation : Objects.requireNonNull(flatMutations, "flatMutations")) {
         byte[] key = prefixed(FLAT_STATE_PREFIX, mutation.secureKey, "secureKey");
         mutations.add(mutation.encodedValue == null
-            ? PathStateNativeNodeStore.BatchMutation.delete(key)
-            : PathStateNativeNodeStore.BatchMutation.put(key, mutation.encodedValue));
+            ? PathStateNativeAccess.BatchMutation.delete(key)
+            : PathStateNativeAccess.BatchMutation.put(key, mutation.encodedValue));
       }
       appendNodeMutations(mutations, nodeMutations);
       mutations.add(metadataMutation(FLAT_DIGEST_METADATA, flatDigest));
@@ -1815,7 +1828,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
 
     void applySuperTransition(List<NodeMutation> nodeMutations, byte[] generation,
         byte[] superRoot) {
-      List<PathStateNativeNodeStore.BatchMutation> mutations = new ArrayList<>();
+      List<PathStateNativeAccess.BatchMutation> mutations = new ArrayList<>();
       appendNodeMutations(mutations, nodeMutations);
       mutations.add(metadataMutation(SUPER_GENERATION_METADATA, generation));
       mutations.add(metadataMutation(FLAT_ROOT_METADATA, superRoot));
@@ -1830,7 +1843,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
 
     void applyCheckpointParticipant(CommonCheckpointPayload.PathStoreTarget target,
         byte[] marker, boolean sync) {
-      List<PathStateNativeNodeStore.BatchMutation> mutations = checkpointDataMutations(target);
+      List<PathStateNativeAccess.BatchMutation> mutations = checkpointDataMutations(target);
       mutations.add(metadataMutation(CHECKPOINT_TARGET_METADATA, marker));
       nativeStore.writeBatch(mutations, sync);
       nodeStore.apply(checkpointCacheMutations(target));
@@ -1838,7 +1851,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
 
     /** Writes one checkpoint participant payload without its marker or durability barrier. */
     void applyCheckpointParticipantData(CommonCheckpointPayload.PathStoreTarget target) {
-      List<PathStateNativeNodeStore.BatchMutation> mutations = checkpointDataMutations(target);
+      List<PathStateNativeAccess.BatchMutation> mutations = checkpointDataMutations(target);
       if (!mutations.isEmpty()) {
         nativeStore.writeBatchUnsynced(mutations);
       }
@@ -1850,27 +1863,27 @@ public final class PathStatePhysicalStoreSet implements Closeable {
      * written after the data batch in the same WAL, so a durable marker implies durable data.
      */
     void commitCheckpointMarker(byte[] marker) {
-      List<PathStateNativeNodeStore.BatchMutation> mutations = new ArrayList<>(1);
+      List<PathStateNativeAccess.BatchMutation> mutations = new ArrayList<>(1);
       mutations.add(metadataMutation(CHECKPOINT_TARGET_METADATA, marker));
       nativeStore.writeBatch(mutations, true);
     }
 
-    private static List<PathStateNativeNodeStore.BatchMutation> checkpointDataMutations(
+    private static List<PathStateNativeAccess.BatchMutation> checkpointDataMutations(
         CommonCheckpointPayload.PathStoreTarget target) {
-      List<PathStateNativeNodeStore.BatchMutation> mutations = new ArrayList<>();
+      List<PathStateNativeAccess.BatchMutation> mutations = new ArrayList<>();
       for (CommonCheckpointPayload.Mutation mutation : target.getFlatMutations()) {
         byte[] key = prefixed(FLAT_STATE_PREFIX, mutation.getKey(), "secureKey");
         mutations.add(mutation.isDelete()
-            ? PathStateNativeNodeStore.BatchMutation.delete(key)
-            : PathStateNativeNodeStore.BatchMutation.put(key, mutation.getValue()));
+            ? PathStateNativeAccess.BatchMutation.delete(key)
+            : PathStateNativeAccess.BatchMutation.put(key, mutation.getValue()));
       }
       for (CommonCheckpointPayload.Mutation mutation : target.getNodeMutations()) {
         byte[] path = mutation.getKey();
         byte[] value = mutation.getValue();
         mutations.add(mutation.isDelete()
-            ? PathStateNativeNodeStore.BatchMutation.delete(
+            ? PathStateNativeAccess.BatchMutation.delete(
                 prefixed(TRIE_NODE_PREFIX, path, "path"))
-            : PathStateNativeNodeStore.BatchMutation.put(
+            : PathStateNativeAccess.BatchMutation.put(
                 prefixed(TRIE_NODE_PREFIX, path, "path"),
                 value));
       }
@@ -1892,7 +1905,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
 
     void applyCheckpointSuper(List<CommonCheckpointPayload.Mutation> supplied, byte[] marker,
         boolean sync) {
-      List<PathStateNativeNodeStore.BatchMutation> mutations = new ArrayList<>();
+      List<PathStateNativeAccess.BatchMutation> mutations = new ArrayList<>();
       List<NodeMutation> cacheMutations = new ArrayList<>();
       appendSuperMutations(supplied, mutations, cacheMutations);
       mutations.add(metadataMutation(CHECKPOINT_TARGET_METADATA, marker));
@@ -1902,7 +1915,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
 
     /** Writes checkpoint super-node mutations without the marker or durability barrier. */
     void applyCheckpointSuperData(List<CommonCheckpointPayload.Mutation> supplied) {
-      List<PathStateNativeNodeStore.BatchMutation> mutations = new ArrayList<>();
+      List<PathStateNativeAccess.BatchMutation> mutations = new ArrayList<>();
       List<NodeMutation> cacheMutations = new ArrayList<>();
       appendSuperMutations(supplied, mutations, cacheMutations);
       if (!mutations.isEmpty()) {
@@ -1912,15 +1925,15 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     }
 
     private static void appendSuperMutations(List<CommonCheckpointPayload.Mutation> supplied,
-        List<PathStateNativeNodeStore.BatchMutation> mutations,
+        List<PathStateNativeAccess.BatchMutation> mutations,
         List<NodeMutation> cacheMutations) {
       for (CommonCheckpointPayload.Mutation mutation : supplied) {
         byte[] path = mutation.getKey();
         byte[] value = mutation.getValue();
         mutations.add(mutation.isDelete()
-            ? PathStateNativeNodeStore.BatchMutation.delete(
+            ? PathStateNativeAccess.BatchMutation.delete(
                 prefixed(TRIE_NODE_PREFIX, path, "path"))
-            : PathStateNativeNodeStore.BatchMutation.put(
+            : PathStateNativeAccess.BatchMutation.put(
                 prefixed(TRIE_NODE_PREFIX, path, "path"),
                 value));
         cacheMutations.add(new NodeMutation(path, value));
@@ -1932,19 +1945,19 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     }
 
     private static void appendNodeMutations(
-        List<PathStateNativeNodeStore.BatchMutation> target,
+        List<PathStateNativeAccess.BatchMutation> target,
         List<NodeMutation> nodeMutations) {
       for (NodeMutation mutation : Objects.requireNonNull(nodeMutations, "nodeMutations")) {
         byte[] key = prefixed(TRIE_NODE_PREFIX, mutation.path, "path");
         target.add(mutation.encodedNode == null
-            ? PathStateNativeNodeStore.BatchMutation.delete(key)
-            : PathStateNativeNodeStore.BatchMutation.put(key, mutation.encodedNode));
+            ? PathStateNativeAccess.BatchMutation.delete(key)
+            : PathStateNativeAccess.BatchMutation.put(key, mutation.encodedNode));
       }
     }
 
-    private static PathStateNativeNodeStore.BatchMutation metadataMutation(byte[] name,
+    private static PathStateNativeAccess.BatchMutation metadataMutation(byte[] name,
         byte[] value) {
-      return PathStateNativeNodeStore.BatchMutation.put(prefixed(METADATA_PREFIX, name,
+      return PathStateNativeAccess.BatchMutation.put(prefixed(METADATA_PREFIX, name,
           "metadata name"), value);
     }
 
@@ -1973,9 +1986,9 @@ public final class PathStatePhysicalStoreSet implements Closeable {
 
   private static final class PhysicalNodeStore implements PathNodeStore {
 
-    private final PathStateNativeNodeStore nativeStore;
+    private final PathStateNativeAccess nativeStore;
 
-    private PhysicalNodeStore(PathStateNativeNodeStore nativeStore) {
+    private PhysicalNodeStore(PathStateNativeAccess nativeStore) {
       this.nativeStore = nativeStore;
     }
 
@@ -2277,12 +2290,12 @@ public final class PathStatePhysicalStoreSet implements Closeable {
 
   private static final class PhysicalNodeBatchWriter implements PathNodeStore {
 
-    private final PathStateNativeNodeStore nativeStore;
-    private final List<PathStateNativeNodeStore.BatchMutation> pending =
+    private final PathStateNativeAccess nativeStore;
+    private final List<PathStateNativeAccess.BatchMutation> pending =
         new ArrayList<>(BOOTSTRAP_WRITE_BATCH_ENTRIES);
     private long pendingBytes;
 
-    private PhysicalNodeBatchWriter(PathStateNativeNodeStore nativeStore) {
+    private PhysicalNodeBatchWriter(PathStateNativeAccess nativeStore) {
       this.nativeStore = nativeStore;
     }
 
@@ -2298,7 +2311,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
       byte[] value = Arrays.copyOf(Objects.requireNonNull(encodedNode, "encodedNode"),
           encodedNode.length);
       flushBeforeOversizedMutation(key.length + value.length);
-      pending.add(PathStateNativeNodeStore.BatchMutation.put(key, value));
+      pending.add(PathStateNativeAccess.BatchMutation.put(key, value));
       pendingBytes = StrictMathWrapper.addExact(pendingBytes, key.length + value.length);
       flushIfFull();
     }
@@ -2307,7 +2320,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     public void delete(byte[] path) {
       byte[] key = prefixed(TRIE_NODE_PREFIX, path, "path");
       flushBeforeOversizedMutation(key.length);
-      pending.add(PathStateNativeNodeStore.BatchMutation.delete(key));
+      pending.add(PathStateNativeAccess.BatchMutation.delete(key));
       pendingBytes = StrictMathWrapper.addExact(pendingBytes, key.length);
       flushIfFull();
     }

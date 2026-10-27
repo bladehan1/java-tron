@@ -26,7 +26,7 @@ import org.tron.core.db2.archive.history.format.V5HistoryTail.LaneTerminal;
 import org.tron.core.db2.archive.history.v5.StateArchiveDataHandlePoolV5.ProcessFdAdmission;
 import org.tron.core.db2.archive.history.v5.StateArchiveLaneIndexV5.Boundary;
 import org.tron.core.db2.archive.history.v5.StateArchiveLaneIndexV5.FrameRange;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointTarget;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointTarget;
 
 /** Strict read-only view of exactly the V5 prefix bound by one committed tail and Common. */
 final class StateArchiveCommittedViewV5 implements Closeable {

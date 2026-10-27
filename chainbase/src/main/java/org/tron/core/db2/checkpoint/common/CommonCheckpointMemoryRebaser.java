@@ -1,6 +1,7 @@
 package org.tron.core.db2.checkpoint.common;
 
 import java.io.IOException;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointTarget;
 
 /** Builds an in-memory completion plan after every durable authority published one target. */
 @FunctionalInterface

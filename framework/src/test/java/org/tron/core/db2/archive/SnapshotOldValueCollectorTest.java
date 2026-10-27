@@ -11,12 +11,10 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.withSettings;
 
-import com.google.common.primitives.Bytes;
 import com.google.common.primitives.Longs;
 import com.google.protobuf.ByteString;
 import java.io.Closeable;
@@ -70,19 +68,19 @@ import org.tron.core.db2.core.SnapshotImpl;
 import org.tron.core.db2.core.SnapshotManager;
 import org.tron.core.db2.core.SnapshotRoot;
 import org.tron.core.db2.stateroot.PathStateBasePublication;
-import org.tron.core.db2.stateroot.PathStateBlockTransition;
-import org.tron.core.db2.stateroot.PathStateCanonicalizer.P66Phase;
 import org.tron.core.db2.stateroot.PathStateLayerLimits;
-import org.tron.core.db2.stateroot.PathStateMutation;
 import org.tron.core.db2.stateroot.PathStateNodeStoreSet;
 import org.tron.core.db2.stateroot.PathStateRoot;
-import org.tron.core.db2.stateroot.PathStateRootMetadata;
-import org.tron.core.db2.stateroot.PathStateRuntimeAdmission;
-import org.tron.core.db2.stateroot.PathStateRuntimeAttachment;
 import org.tron.core.db2.stateroot.PathStateSnapshotDelta;
 import org.tron.core.db2.stateroot.PathStateSnapshotHead;
-import org.tron.core.db2.stateroot.PathStateStoreManifest;
-import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
+import org.tron.core.db2.stateroot.commitment.PathStateBlockTransition;
+import org.tron.core.db2.stateroot.commitment.PathStateCanonicalizer.P66Phase;
+import org.tron.core.db2.stateroot.commitment.PathStateMutation;
+import org.tron.core.db2.stateroot.format.PathStateRootMetadata;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
+import org.tron.core.db2.stateroot.runtime.PathStateRuntimeAdmission;
+import org.tron.core.db2.stateroot.runtime.PathStateRuntimeAttachment;
 import org.tron.core.exception.TronError;
 import org.tron.core.store.CheckTmpStore;
 import org.tron.protos.Protocol.Transaction;
@@ -368,8 +366,8 @@ public class SnapshotOldValueCollectorTest extends BaseMethodTest {
     PathStateRootMetadata base;
     try (PathStateNodeStoreSet stores = PathStateNodeStoreSet.openBase(manifest)) {
       PathStateRoot root = stores.createRoot();
-      org.tron.core.db2.stateroot.PathStateCanonicalizer canonicalizer =
-          new org.tron.core.db2.stateroot.PathStateCanonicalizer();
+      org.tron.core.db2.stateroot.commitment.PathStateCanonicalizer canonicalizer =
+          new org.tron.core.db2.stateroot.commitment.PathStateCanonicalizer();
       root.apply(Arrays.asList(
           canonicalizer.put(P66Phase.P66_ON, "properties",
               AccountAssetStorage.proposal66PhysicalKey(),

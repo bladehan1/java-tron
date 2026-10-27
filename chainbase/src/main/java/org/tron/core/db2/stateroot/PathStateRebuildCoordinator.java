@@ -33,8 +33,15 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.capsule.utils.MarketUtils;
-import org.tron.core.db2.stateroot.PathStateCanonicalizer.P66Phase;
-import org.tron.core.db2.stateroot.PathStateParticipantDescriptor.StoreIdentity;
+import org.tron.core.db2.stateroot.commitment.PathStateCanonicalizer;
+import org.tron.core.db2.stateroot.commitment.PathStateCanonicalizer.P66Phase;
+import org.tron.core.db2.stateroot.commitment.PathStateCommitmentCodec;
+import org.tron.core.db2.stateroot.commitment.PathStateMutation;
+import org.tron.core.db2.stateroot.commitment.PathStateParticipantDescriptor;
+import org.tron.core.db2.stateroot.commitment.PathStateParticipantDescriptor.StoreIdentity;
+import org.tron.core.db2.stateroot.format.PathStateRootMetadata;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest;
+import org.tron.core.db2.stateroot.trie.PathStateTrieBuild;
 
 /** Builds and atomically publishes the first current path-state root from one admitted snapshot. */
 public final class PathStateRebuildCoordinator {
@@ -527,7 +534,7 @@ public final class PathStateRebuildCoordinator {
       PathStateNodeStoreSet.RebuildWriter writer = stores.openRebuildWriter(
           identity.getStoreId());
       try {
-        PathStateStoreTrieBuilder builder = new PathStateStoreTrieBuilder(spool,
+        PathStateTrieBuild.Spooled builder = PathStateTrieBuild.spooled(spool,
             manifest.getEngine(), generation, writer::putNode, writer::putLeaf,
             (sortedRows, elapsedMillis) -> logBuildProgress(identity, writer, sortedRows,
                 elapsedMillis));
@@ -613,10 +620,10 @@ public final class PathStateRebuildCoordinator {
 
   private static final class BuilderHandle {
 
-    private final PathStateStoreTrieBuilder builder;
+    private final PathStateTrieBuild.Spooled builder;
     private final PathStateNodeStoreSet.RebuildWriter writer;
 
-    private BuilderHandle(PathStateStoreTrieBuilder builder,
+    private BuilderHandle(PathStateTrieBuild.Spooled builder,
         PathStateNodeStoreSet.RebuildWriter writer) {
       this.builder = builder;
       this.writer = writer;

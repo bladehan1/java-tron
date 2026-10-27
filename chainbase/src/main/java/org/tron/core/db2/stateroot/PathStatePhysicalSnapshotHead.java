@@ -4,7 +4,11 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.util.Objects;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
-import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
+import org.tron.core.db2.stateroot.commitment.PathStateBlockTransition;
+import org.tron.core.db2.stateroot.commitment.PathStateCanonicalizer;
+import org.tron.core.db2.stateroot.format.PathStateRootMetadata;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
+import org.tron.core.db2.stateroot.runtime.PathStateHead;
 
 /** Runtime owner for a block-bound physical 27+1 CURRENT. */
 public final class PathStatePhysicalSnapshotHead implements PathStateHead {

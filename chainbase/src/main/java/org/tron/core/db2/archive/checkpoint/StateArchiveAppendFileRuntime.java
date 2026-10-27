@@ -5,7 +5,7 @@ import java.util.List;
 import java.util.Optional;
 import org.tron.core.db2.archive.BlockReverseDiff;
 import org.tron.core.db2.archive.contract.CheckpointPointReader;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointTarget;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointTarget;
 
 /** Runtime capabilities shared by append-file Archive format implementations. */
 public interface StateArchiveAppendFileRuntime extends StateArchiveCheckpointPlanner {

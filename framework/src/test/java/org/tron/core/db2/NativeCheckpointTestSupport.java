@@ -7,7 +7,7 @@ import org.tron.common.storage.rocksdb.RocksDbDataSourceImpl;
 import org.tron.core.db2.common.DB;
 import org.tron.core.db2.common.LevelDB;
 import org.tron.core.db2.common.RocksDB;
-import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
 
 /** Runs native checkpoint contracts on the backend supported by the current test platform. */
 public final class NativeCheckpointTestSupport {

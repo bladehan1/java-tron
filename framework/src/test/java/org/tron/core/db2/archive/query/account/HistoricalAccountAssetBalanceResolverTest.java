@@ -15,7 +15,6 @@ import java.util.OptionalLong;
 import org.junit.Test;
 import org.tron.common.utils.ByteArray;
 import org.tron.core.db2.archive.ArchivePersistenceException;
-import org.tron.core.db2.archive.BlockReverseDiff;
 import org.tron.core.db2.archive.OldValue;
 import org.tron.core.db2.archive.contract.AccountAssetStorage;
 import org.tron.core.db2.archive.contract.ArchiveQueryLimitExceededException;
@@ -27,8 +26,8 @@ import org.tron.core.db2.archive.query.account.HistoricalAccountAssetPrefixResol
 import org.tron.core.db2.archive.query.account.HistoricalAccountAssetPrefixResolver.Limits;
 import org.tron.core.db2.archive.query.snapshot.ArchiveReadSnapshot;
 import org.tron.core.db2.archive.query.snapshot.HistoricalRangeOverlay;
-import org.tron.core.db2.archive.serving.ServingKeyIndex;
-import org.tron.core.db2.archive.serving.ServingKeyIndexGeneration;
+import org.tron.core.db2.archive.serving.index.ServingKeyIndex;
+import org.tron.core.db2.archive.serving.index.ServingKeyIndexGeneration;
 import org.tron.protos.Protocol.Account;
 import org.tron.protos.Protocol.AccountType;
 

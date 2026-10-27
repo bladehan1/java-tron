@@ -5,7 +5,8 @@ import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.util.Objects;
-import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
+import org.tron.core.db2.stateroot.format.PathStatePhysicalStoreManifest;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
 
 /** Non-creating startup gate for the fresh physical 27+1 format. */
 public final class PathStatePhysicalRuntimeAdmission {

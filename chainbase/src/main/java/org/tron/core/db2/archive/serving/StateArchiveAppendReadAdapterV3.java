@@ -10,7 +10,8 @@ import org.tron.core.db2.archive.BlockReverseDiff;
 import org.tron.core.db2.archive.OldValue;
 import org.tron.core.db2.archive.contract.CheckpointPointReader;
 import org.tron.core.db2.archive.contract.StateArchivePointSource;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointTarget;
+import org.tron.core.db2.archive.serving.source.StateArchiveServingSource;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointTarget;
 
 /** Same-DB index snapshot with bounded point reads and a legacy bundle-replay fallback. */
 final class StateArchiveAppendReadAdapterV3 implements CheckpointPointReader {

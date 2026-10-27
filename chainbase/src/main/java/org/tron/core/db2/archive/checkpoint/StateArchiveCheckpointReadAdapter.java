@@ -7,9 +7,9 @@ import java.util.Optional;
 import java.util.OptionalLong;
 import org.tron.core.db2.archive.OldValue;
 import org.tron.core.db2.archive.contract.CheckpointPointReader;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointMaterializer.Status;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointTarget;
-import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointMaterializer.Status;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointTarget;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
 
 /** Request-owned exact-key reader for one published next-format checkpoint target. */
 public final class StateArchiveCheckpointReadAdapter implements CheckpointPointReader {

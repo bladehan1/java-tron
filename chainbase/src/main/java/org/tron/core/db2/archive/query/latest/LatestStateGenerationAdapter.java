@@ -23,7 +23,7 @@ import org.tron.core.db2.archive.query.snapshot.ArchiveReadSnapshot.PinnedLatest
 import org.tron.core.db2.archive.query.snapshot.ArchiveReadSnapshot.PinnedLatestStateFactory;
 import org.tron.core.db2.archive.query.snapshot.CheckpointLatestStateFactory;
 import org.tron.core.db2.archive.query.snapshot.HistoricalRangeOverlay;
-import org.tron.core.db2.archive.serving.PinnedServingKeyIndex;
+import org.tron.core.db2.archive.serving.index.PinnedServingKeyIndex;
 import org.tron.core.db2.common.DB;
 
 /** Fail-closed adapter for one exact latest-state engine generation. */

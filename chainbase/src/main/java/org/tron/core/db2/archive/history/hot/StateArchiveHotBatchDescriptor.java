@@ -9,7 +9,7 @@ import java.util.List;
 import java.util.Objects;
 import org.tron.core.db2.archive.BlockReverseDiff;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
-import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
 
 /** Immutable logical binding between transient Archive diffs and one Hot DB prepare batch. */
 public final class StateArchiveHotBatchDescriptor {

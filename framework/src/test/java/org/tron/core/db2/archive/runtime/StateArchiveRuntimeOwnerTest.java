@@ -38,7 +38,7 @@ import org.tron.core.db2.archive.query.ArchiveRuntimeQueryGate.Lease;
 import org.tron.core.db2.archive.query.snapshot.ArchiveReadSnapshot;
 import org.tron.core.db2.archive.query.snapshot.ArchiveReadSnapshot.PinnedLatestState;
 import org.tron.core.db2.archive.runtime.StateArchiveRuntimeOwner.State;
-import org.tron.core.db2.archive.serving.ServingKeyIndex;
+import org.tron.core.db2.archive.serving.index.ServingKeyIndex;
 import org.tron.core.db2.core.SnapshotManager;
 
 public class StateArchiveRuntimeOwnerTest {

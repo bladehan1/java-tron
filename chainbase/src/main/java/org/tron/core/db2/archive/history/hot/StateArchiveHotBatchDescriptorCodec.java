@@ -13,7 +13,7 @@ import java.util.List;
 import org.tron.core.db2.archive.ArchivePersistenceException;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
 import org.tron.core.db2.archive.history.hot.StateArchiveHotBatchDescriptor.BlockDigest;
-import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
 
 /** Checksummed persistent encoding for one exact Hot Archive batch descriptor. */
 final class StateArchiveHotBatchDescriptorCodec {

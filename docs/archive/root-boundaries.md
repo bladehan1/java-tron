@@ -26,7 +26,9 @@ would add package boundaries without clarifying ownership.
 | Shared point-read and canonical metadata contracts | `contract` |
 | Historical session lifetime and latest-state acquisition | `query.session`, `query.latest` |
 | Generation capsules and checkpoint read snapshots | `query.snapshot` |
-| Serving indexes, plans, leases and lifecycle | `serving` |
+| Backend-neutral index contracts and in-memory generation/catalog | `serving.index` |
+| Read-only committed History source contracts | `serving.source` |
+| Persistent indexes, plans, leases and lifecycle | `serving` |
 | Normal-write attachment, recovery host and publication assembly | `runtime` |
 
 Mutable native backends, Store constructors and fault hooks retain package-local ownership.

@@ -8,7 +8,9 @@ import java.util.Arrays;
 import java.util.Objects;
 import java.util.stream.Stream;
 import org.tron.common.math.StrictMathWrapper;
-import org.tron.core.db2.stateroot.PathStateRootMetadata.Kind;
+import org.tron.core.db2.stateroot.format.PathStateRootMetadata;
+import org.tron.core.db2.stateroot.format.PathStateRootMetadata.Kind;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest;
 
 /** Explicit count and logical-byte admission limits for current-only reversible layers. */
 public final class PathStateLayerLimits {

@@ -11,8 +11,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.tron.common.parameter.CommonParameter;
 import org.tron.core.db2.archive.ArchiveStoreScope;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointBaselineFile;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointFile;
+import org.tron.core.db2.checkpoint.common.format.CommonCheckpointBaselineFile;
 import org.tron.core.db2.common.WrappedByteArray;
 
 /**

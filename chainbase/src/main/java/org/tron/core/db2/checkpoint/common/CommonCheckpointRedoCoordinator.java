@@ -13,8 +13,11 @@ import java.util.function.LongSupplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.tron.common.math.StrictMathWrapper;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointMaterializer.Authority;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointMaterializer.Status;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointMaterializer;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointMaterializer.Authority;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointMaterializer.Status;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointTarget;
+import org.tron.core.db2.checkpoint.common.payload.CommonCheckpointPayload;
 
 /**
  * Two-barrier, idempotent redo coordinator for one durable common checkpoint.

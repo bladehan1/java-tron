@@ -1,7 +1,7 @@
 package org.tron.core.db2.archive.history.format;
 
 import java.util.List;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointTarget;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointTarget;
 
 /** Immutable publication identity shared by history and serving; no file handles or writes. */
 public interface V5HistoryTail {

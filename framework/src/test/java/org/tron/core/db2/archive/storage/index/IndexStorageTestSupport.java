@@ -1,7 +1,7 @@
 package org.tron.core.db2.archive.storage.index;
 
 import java.nio.file.Path;
-import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
 
 /** Package-private native ownership diagnostics for regression fixtures. */
 public final class IndexStorageTestSupport {

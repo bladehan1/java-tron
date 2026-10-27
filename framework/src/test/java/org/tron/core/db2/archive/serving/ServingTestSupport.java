@@ -4,8 +4,9 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.nio.file.Path;
 import org.tron.core.db2.archive.history.format.V5HistoryTail;
-import org.tron.core.db2.checkpoint.common.CommonCheckpointTarget;
-import org.tron.core.db2.stateroot.PathStateStoreManifest.Engine;
+import org.tron.core.db2.archive.serving.source.StateArchiveServingSource;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointTarget;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
 
 public final class ServingTestSupport {
   private ServingTestSupport() {}

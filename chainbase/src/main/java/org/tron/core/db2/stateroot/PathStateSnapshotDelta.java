@@ -10,6 +10,12 @@ import java.util.Map;
 import java.util.Objects;
 import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
+import org.tron.core.db2.stateroot.commitment.PathStateBlockTransition;
+import org.tron.core.db2.stateroot.commitment.PathStateCommitmentCodec;
+import org.tron.core.db2.stateroot.commitment.PathStateMutation;
+import org.tron.core.db2.stateroot.commitment.PathStateParticipant;
+import org.tron.core.db2.stateroot.commitment.PathStateParticipantScope;
+import org.tron.core.db2.stateroot.format.PathStateRootMetadata;
 
 /**
  * Immutable Snapshot-owned path-state forward delta for one successfully applied block.

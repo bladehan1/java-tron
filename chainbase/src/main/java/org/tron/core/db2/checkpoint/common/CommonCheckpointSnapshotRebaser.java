@@ -6,6 +6,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
+import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointTarget;
 import org.tron.core.db2.core.Chainbase;
 import org.tron.core.db2.core.Snapshot;
 import org.tron.core.db2.core.SnapshotImpl;
