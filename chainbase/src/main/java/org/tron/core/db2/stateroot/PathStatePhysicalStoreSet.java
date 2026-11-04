@@ -334,13 +334,46 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     return superStore;
   }
 
-  /** Per-batch consolidation (phase 2.2): barriers across all participant and super stores. */
-  public void syncCheckpointBarriers() {
+  /**
+   * Per-batch consolidation (phase 2.2): explicit WAL barriers across all participant and super
+   * stores. Barriers only force each store's own WAL, so they carry no cross-store ordering and
+   * run in parallel on the participant write pool.
+   */
+  public void syncCheckpointBarriers() throws IOException {
     requireOpen();
-    for (PhysicalStore store : participants.values()) {
-      store.syncCheckpointBarrier();
+    List<PhysicalStore> stores = new ArrayList<>(participants.size() + 1);
+    stores.addAll(participants.values());
+    stores.add(superStore);
+    List<Future<?>> futures = new ArrayList<>(stores.size());
+    for (PhysicalStore store : stores) {
+      futures.add(participantWriteExecutor.submit(store::syncCheckpointBarrier));
     }
-    superStore.syncCheckpointBarrier();
+    IOException failure = null;
+    for (Future<?> future : futures) {
+      try {
+        future.get();
+      } catch (InterruptedException interrupted) {
+        Thread.currentThread().interrupt();
+        failure = appendBarrierFailure(failure,
+            new IOException("path-state checkpoint barrier wait was interrupted", interrupted));
+      } catch (ExecutionException barrierFailure) {
+        Throwable cause = barrierFailure.getCause();
+        failure = appendBarrierFailure(failure, cause instanceof IOException
+            ? (IOException) cause
+            : new IOException("path-state checkpoint store barrier failed", cause));
+      }
+    }
+    if (failure != null) {
+      throw failure;
+    }
+  }
+
+  private static IOException appendBarrierFailure(IOException head, IOException next) {
+    if (head == null) {
+      return next;
+    }
+    head.addSuppressed(next);
+    return head;
   }
 
   /** Creates the one in-memory root owner backed by this set's physically separate node stores. */
