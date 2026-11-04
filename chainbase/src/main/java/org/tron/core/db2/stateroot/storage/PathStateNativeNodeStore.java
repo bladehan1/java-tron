@@ -175,6 +175,12 @@ final class PathStateNativeNodeStore implements PathStateNativeAccess {
     writeBatch(mutations, false);
   }
 
+  /** Forces this store's WAL to disk without writing data (per-batch consolidation barrier). */
+  public synchronized void syncBarrier() {
+    requireOpen();
+    delegate.syncBarrier();
+  }
+
   @Override
   public synchronized long getWriteBatchCalls() {
     return writeBatchCalls;
@@ -265,6 +271,9 @@ final class PathStateNativeNodeStore implements PathStateNativeAccess {
 
     void writeBatch(List<BatchMutation> mutations, boolean sync);
 
+    /** Forces the WAL to disk without writing data (per-batch consolidation barrier). */
+    void syncBarrier();
+
     void scanPrefix(byte[] prefix, EntryConsumer consumer) throws IOException;
 
     void scanAll(EntryConsumer consumer) throws IOException;
@@ -308,6 +317,15 @@ final class PathStateNativeNodeStore implements PathStateNativeAccess {
         database.write(batch, sync ? syncWrites : unsyncedWrites);
       } catch (IOException failure) {
         throw new IllegalStateException("failed to apply path-state LevelDB node batch", failure);
+      }
+    }
+
+    @Override
+    public void syncBarrier() {
+      try (org.iq80.leveldb.WriteBatch batch = database.createWriteBatch()) {
+        database.write(batch, syncWrites);
+      } catch (IOException failure) {
+        throw new IllegalStateException("failed to force path-state LevelDB node WAL", failure);
       }
     }
 
@@ -459,6 +477,15 @@ final class PathStateNativeNodeStore implements PathStateNativeAccess {
         database.write(sync ? syncWrites : unsyncedWrites, batch);
       } catch (RocksDBException failure) {
         throw new IllegalStateException("failed to apply path-state RocksDB node batch", failure);
+      }
+    }
+
+    @Override
+    public void syncBarrier() {
+      try {
+        database.syncWal();
+      } catch (RocksDBException failure) {
+        throw new IllegalStateException("failed to force path-state RocksDB node WAL", failure);
       }
     }
 

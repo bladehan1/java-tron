@@ -1808,7 +1808,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
      * store's WAL so every unsynced write that preceded it becomes durable.
      */
     void syncCheckpointBarrier() {
-      nativeStore.writeBatch(java.util.Collections.emptyList(), true);
+      nativeStore.syncBarrier();
     }
 
     private static List<PathStateNativeAccess.BatchMutation> checkpointDataMutations(

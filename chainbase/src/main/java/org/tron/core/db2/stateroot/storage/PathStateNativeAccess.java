@@ -75,6 +75,9 @@ public interface PathStateNativeAccess extends Closeable {
 
   void writeBatchUnsynced(List<BatchMutation> mutations);
 
+  /** Forces this store's WAL to disk without writing data (per-batch consolidation barrier). */
+  void syncBarrier();
+
   long getWriteBatchCalls();
 
   long getWriteBatchMutations();
