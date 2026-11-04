@@ -258,6 +258,18 @@ public final class StateArchiveCheckpointMaterializer implements CommonCheckpoin
     faultHook.after(Stage.AFTER_MATERIALIZED_TARGET, -1);
   }
 
+  /**
+   * Per-batch consolidation (phase 2.2): nothing to barrier. Block files and the readable marker
+   * are forced during materialization/publication, and the serving index is derived data — it is
+   * backfilled by the background owner while catching up and is written synchronously for
+   * historical queries only in steady state, where the serving layer owns its own durability
+   * cadence. It is intentionally not part of the per-batch consolidation contract.
+   */
+  @Override
+  public synchronized void syncCheckpoint(CommonCheckpointTarget target) throws IOException {
+    CommonCheckpointTarget admitted = requireTarget(target);
+  }
+
   @Override
   public synchronized void publish(CommonCheckpointTarget target) throws IOException {
     requireOpen();

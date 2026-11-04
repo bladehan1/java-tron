@@ -42,6 +42,15 @@ public interface CommonCheckpointMaterializer extends AutoCloseable {
   default void useRetainedRedo(boolean enabled) {
   }
 
+  /**
+   * Per-batch consolidation (phase 2.2): makes this authority's already-materialized writes
+   * durable up to the exact target without republishing or replaying. Implementations issue one
+   * explicit sync barrier per backing store; WAL ordering guarantees a synced write forces every
+   * write that preceded it. Default: no store to sync.
+   */
+  default void syncCheckpoint(CommonCheckpointTarget target) throws IOException {
+  }
+
   /** Restore retained committed mutations before inspecting physical publication markers. */
   default void replayRetained(java.util.List<CommonCheckpointPayload> payloads, boolean sync)
       throws IOException {

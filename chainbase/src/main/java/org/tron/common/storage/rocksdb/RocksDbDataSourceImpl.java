@@ -386,6 +386,22 @@ public class RocksDbDataSourceImpl extends DbStat implements DbSourceInter<byte[
     return false;
   }
 
+  /** Forces the write-ahead log to disk without writing data (checkpoint sync barrier). */
+  public void syncWal() {
+    resetDbLock.readLock().lock();
+    try {
+      if (database != null && alive) {
+        try {
+          database.syncWal();
+        } catch (org.rocksdb.RocksDBException failure) {
+          throw new TronDBException("DB " + this.getDBName() + " syncWal failed.", failure);
+        }
+      }
+    } finally {
+      resetDbLock.readLock().unlock();
+    }
+  }
+
   /**
    * Returns an iterator over the database.
    *

@@ -96,6 +96,30 @@ public class CommonCheckpointRedoCoordinatorTest {
   }
 
   @Test
+  public void perBatchConsolidationEmitsSyncStagTimings() throws Exception {
+    Fixture fixture = fixture("per-batch-consolidation", null);
+    AtomicLong clock = new AtomicLong();
+    List<CommonCheckpointRedoCoordinator.Timing> timings = new ArrayList<>();
+    CommonCheckpointRedoCoordinator coordinator = new CommonCheckpointRedoCoordinator(
+        fixture.file, fixture.materializers.get(0), fixture.materializers.get(1),
+        fixture.materializers.get(2), stage -> { }, () -> clock.addAndGet(1_000L),
+        timings::add);
+    coordinator.enablePerBatchConsolidation();
+
+    assertEquals(RecoveryAction.COMPLETED_REDO, coordinator.apply(fixture.payload));
+    coordinator.awaitDurableBaseIdle();
+    assertEquals(2, timings.size());
+    CommonCheckpointRedoCoordinator.Timing timing = timings.get(1);
+    assertEquals("consolidate", timing.getMode());
+    assertEquals(1, timing.getHead());
+    for (Authority authority : Authority.values()) {
+      assertEquals(1, timing.sync(authority));
+    }
+    assertEquals(1, timing.getDurableBaseAdvanceUs());
+    assertTrue(timing.getTotalUs() > 0);
+  }
+
+  @Test
   public void derivedFailureOccursAfterRetirementAndCannotFailCommon() throws Exception {
     Fixture fixture = fixture("derived-failure", null);
     FakeMaterializer archive = fixture.materializers.get(2);

@@ -374,6 +374,16 @@ public final class StateArchiveAppendCheckpointMaterializerV5
     }
   }
 
+  /**
+   * Per-batch consolidation (phase 2.2): every V5 write is already forced inline — five-lane
+   * bodies and lane indexes during Archive prepare, the dual-slot tail during publication — so
+   * there is no unsynced tail for consolidation to barrier.
+   */
+  @Override
+  public synchronized void syncCheckpoint(CommonCheckpointTarget target) throws IOException {
+    requireTarget(target);
+  }
+
   @Override
   public synchronized void publish(CommonCheckpointTarget target) throws IOException {
     CommonCheckpointTarget admitted = requireTarget(target);

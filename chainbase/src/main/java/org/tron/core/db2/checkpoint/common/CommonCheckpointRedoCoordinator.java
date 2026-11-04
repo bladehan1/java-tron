@@ -50,6 +50,7 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
   private boolean closed;
   private int durableBaseCadence;
   private int completedSinceBase;
+  private boolean perBatchConsolidation;
 
   public CommonCheckpointRedoCoordinator(CommonCheckpointFile checkpointFile,
       CommonCheckpointMaterializer chainbase, CommonCheckpointMaterializer pathState,
@@ -118,9 +119,18 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
   /** Resumes the only durable checkpoint, or performs no work when none exists. */
   public RecoveryAction recover() throws IOException {
     awaitPendingDurableBase();
+    RecoveryAction action;
     synchronized (this) {
-      return recoverLocked();
+      action = recoverLocked();
     }
+    // Per-batch consolidation startup seal: the redo retirement scheduled one consolidation when
+    // a checkpoint exists; waiting for it here converts legacy multi-generation retained data on
+    // the first open and leaves the common database with one crash-redo record.
+    if (perBatchConsolidation && checkpointFile.retainsGenerations()
+        && action == RecoveryAction.COMPLETED_REDO) {
+      awaitPendingDurableBase();
+    }
+    return action;
   }
 
   private RecoveryAction recoverLocked() throws IOException {
@@ -287,6 +297,16 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
     durableBaseCadence = generations;
   }
 
+  /**
+   * Consolidates every committed batch instead of advancing the durable base on a cadence: after
+   * WAL retirement, a background worker issues one explicit sync barrier per authority store
+   * (phase 2.2), then prunes every older generation so the common database keeps only the latest
+   * crash-redo record. Startup recovery redoes that record into all authorities idempotently.
+   */
+  public synchronized void enablePerBatchConsolidation() {
+    perBatchConsolidation = true;
+  }
+
   /** Force the retained target data before advancing the durable base and pruning generations. */
   public void checkpointDurableBase() throws IOException {
     awaitPendingDurableBase();
@@ -424,10 +444,45 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
     faultHook.after(Stage.BEFORE_CHECKPOINT_RETIRE);
     timing.walRetireUs = timed(checkpointFile::retire);
     faultHook.after(Stage.AFTER_CHECKPOINT_RETIRE);
-    if (durableBaseCadence > 0 && ++completedSinceBase >= durableBaseCadence) {
+    if (perBatchConsolidation) {
+      scheduleConsolidation(target);
+    } else if (durableBaseCadence > 0 && ++completedSinceBase >= durableBaseCadence) {
       scheduleDurableBase(target, timing.blocks);
     }
     return RecoveryAction.COMPLETED_REDO;
+  }
+
+  /**
+   * Hands per-batch consolidation to the background worker: explicit sync barriers across every
+   * authority, then generation pruning behind the coordinator monitor. A sync failure surfaces at
+   * the next await point with the retained WAL untouched, exactly like a synchronous redo
+   * failure.
+   */
+  private void scheduleConsolidation(CommonCheckpointTarget target) {
+    pendingDurableBase = durableBaseExecutor.submit(() -> {
+      runAsyncConsolidation(target);
+      return null;
+    });
+  }
+
+  private void runAsyncConsolidation(CommonCheckpointTarget target) throws IOException {
+    long totalStart = nanoTime.getAsLong();
+    Timing timing = new Timing("consolidate", target, 0);
+    try {
+      for (Authority authority : ORDER) {
+        int ordinal = authority.ordinal();
+        timing.syncUs[ordinal] += timed(
+            () -> materializers.get(authority).syncCheckpoint(target));
+      }
+      synchronized (this) {
+        if (!closed) {
+          timing.durableBaseAdvanceUs += timed(checkpointFile::advanceDurableBase);
+        }
+      }
+    } finally {
+      timing.totalUs = elapsedUs(totalStart);
+      emitTiming(timing);
+    }
   }
 
   private final class CheckpointScope implements AutoCloseable {
@@ -532,7 +587,8 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
             + "pathStatePublishUs={}/{}, archivePublishUs={}/{}, walRetireUs={}, "
             + "chainbaseEndUs={}, pathStateEndUs={}, archiveEndUs={}, targetBuildUs={}/{}, "
             + "retainedLoadUs={}/{}, chainbaseRetainedReplayUs={}/{}, "
-            + "pathStateRetainedReplayUs={}/{}, durableBaseAdvanceUs={}, totalUs={}",
+            + "pathStateRetainedReplayUs={}/{}, durableBaseAdvanceUs={}, totalUs={}, "
+            + "chainbaseSyncUs={}, pathStateSyncUs={}, archiveSyncUs={}",
         timing.mode, timing.head, timing.blocks, timing.walPublishUs, timing.walLoadUs,
         timing.begin(Authority.CHAINBASE), timing.begin(Authority.PATH_STATE),
         timing.begin(Authority.STATE_ARCHIVE), timing.inspect(Authority.CHAINBASE),
@@ -549,7 +605,9 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
         timing.end(Authority.STATE_ARCHIVE), timing.targetBuildUs, timing.targetBuildCount,
         timing.retainedLoadUs, timing.retainedLoadCount, timing.chainbaseRetainedReplayUs,
         timing.chainbaseRetainedReplayCount, timing.pathStateRetainedReplayUs,
-        timing.pathStateRetainedReplayCount, timing.durableBaseAdvanceUs, timing.totalUs);
+        timing.pathStateRetainedReplayCount, timing.durableBaseAdvanceUs, timing.totalUs,
+        timing.sync(Authority.CHAINBASE), timing.sync(Authority.PATH_STATE),
+        timing.sync(Authority.STATE_ARCHIVE));
   }
 
   private void admit(Authority expected, CommonCheckpointMaterializer materializer) {
@@ -582,6 +640,7 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
     private final long[] publishUs = new long[Authority.values().length];
     private final int[] publishCount = new int[Authority.values().length];
     private final long[] endUs = new long[Authority.values().length];
+    private final long[] syncUs = new long[Authority.values().length];
     private long walPublishUs;
     private long walLoadUs;
     private long walRetireUs;
@@ -696,6 +755,10 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
 
     long end(Authority authority) {
       return endUs[authority.ordinal()];
+    }
+
+    long sync(Authority authority) {
+      return syncUs[authority.ordinal()];
     }
   }
 

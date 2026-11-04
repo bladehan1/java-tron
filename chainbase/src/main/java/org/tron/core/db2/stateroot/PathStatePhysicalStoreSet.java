@@ -334,6 +334,15 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     return superStore;
   }
 
+  /** Per-batch consolidation (phase 2.2): barriers across all participant and super stores. */
+  public void syncCheckpointBarriers() {
+    requireOpen();
+    for (PhysicalStore store : participants.values()) {
+      store.syncCheckpointBarrier();
+    }
+    superStore.syncCheckpointBarrier();
+  }
+
   /** Creates the one in-memory root owner backed by this set's physically separate node stores. */
   public synchronized PathStateRoot createRoot() {
     requireOpen();
@@ -1792,6 +1801,14 @@ public final class PathStatePhysicalStoreSet implements Closeable {
       List<PathStateNativeAccess.BatchMutation> mutations = new ArrayList<>(1);
       mutations.add(metadataMutation(CHECKPOINT_TARGET_METADATA, marker));
       nativeStore.writeBatch(mutations, true);
+    }
+
+    /**
+     * Per-batch consolidation barrier without touching the checkpoint marker: forces this
+     * store's WAL so every unsynced write that preceded it becomes durable.
+     */
+    void syncCheckpointBarrier() {
+      nativeStore.writeBatch(java.util.Collections.emptyList(), true);
     }
 
     private static List<PathStateNativeAccess.BatchMutation> checkpointDataMutations(

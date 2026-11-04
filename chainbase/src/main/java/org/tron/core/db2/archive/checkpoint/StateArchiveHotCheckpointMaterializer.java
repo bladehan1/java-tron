@@ -50,6 +50,12 @@ public final class StateArchiveHotCheckpointMaterializer
   }
 
   /** Prepares transient bodies only when their computed identity equals the v2 binding. */
+  @Override
+  public synchronized void syncCheckpoint(CommonCheckpointTarget target) throws IOException {
+    // The Hot store commits every write with sync=true already (append and publish paths), so
+    // there is no unsynced tail for per-batch consolidation to barrier.
+  }
+
   synchronized void prepare(CommonCheckpointTarget target,
       StateArchiveHotBatchDescriptor descriptor, List<BlockReverseDiff> diffs)
       throws IOException {

@@ -251,6 +251,19 @@ public final class ChainbaseCheckpointMaterializer implements CommonCheckpointMa
         .applyCheckpointMutationsDeferred(storeBatch);
   }
 
+  @Override
+  public void syncCheckpoint(CommonCheckpointTarget target) throws IOException {
+    requireTarget(target);
+    List<Runnable> barriers = new ArrayList<>();
+    for (Chainbase database : databases.values()) {
+      if (database.getHead().getRoot() instanceof SnapshotRoot) {
+        SnapshotRoot root = (SnapshotRoot) database.getHead().getRoot();
+        barriers.add(root::syncCheckpointBarrier);
+      }
+    }
+    awaitParallelWrites(barriers);
+  }
+
   private static void awaitParallelWrites(List<Runnable> writes) throws IOException {
     List<Future<?>> futures = new ArrayList<>();
     for (Runnable write : writes) {

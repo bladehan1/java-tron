@@ -7,6 +7,7 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
+import static org.tron.core.db2.NativeCheckpointTestSupport.engine;
 
 import java.io.File;
 import java.net.URL;
@@ -151,6 +152,65 @@ public class CommonCheckpointWalKillProcessTest {
     }
   }
 
+  @Test
+  public void jvmHaltDuringPerBatchConsolidationSyncSealsTwoRecordsOnRecovery()
+      throws Exception {
+    Path root = temporaryFolder.newFolder("perbatch-halt-during-sync").toPath();
+    runChild("perbatch-halt-during-consolidation", root);
+
+    Path wal = root.resolve("wal-shared");
+    try (CommonCheckpointFile file = CommonCheckpointFile.openDatabase(wal, engine());
+        DurableMaterializers materializers = new DurableMaterializers(root)) {
+      // The child died mid phase-2.2 of batch 2: batch 2 retired but nothing was pruned, and
+      // the archive barrier never ran because the halt fired at PATH_STATE.
+      // Batch 1 consolidated every authority (count 1); batch 2's round completed the chainbase
+      // and path-state barriers before the halt, so nothing was pruned.
+      assertEquals(2, file.retained().size());
+      assertEquals(2, materializers.syncCount(Authority.CHAINBASE));
+      assertEquals(2, materializers.syncCount(Authority.PATH_STATE));
+      assertEquals(1, materializers.syncCount(Authority.STATE_ARCHIVE));
+      CommonCheckpointRedoCoordinator coordinator = materializers.coordinator(file);
+      coordinator.enablePerBatchConsolidation();
+      assertEquals(RecoveryAction.COMPLETED_REDO, coordinator.recover());
+      // Recovery redoes the latest checkpoint idempotently and the startup seal prunes to one.
+      // The archive barrier only ever ran once (batch 1), so the seal is its second.
+      materializers.assertAllPublished(CommonCheckpointTarget.from(payload(2)));
+      assertEquals(3, materializers.syncCount(Authority.CHAINBASE));
+      assertEquals(3, materializers.syncCount(Authority.PATH_STATE));
+      assertEquals(2, materializers.syncCount(Authority.STATE_ARCHIVE));
+      assertEquals(1, file.retained().size());
+      assertEquals(2, CommonCheckpointTarget.from(file.latestCommitted())
+          .getLastBlock().getBlockNumber());
+      coordinator.requirePublished(CommonCheckpointTarget.from(payload(2)));
+      // Shared-mode semantics keep the head generation after sealing, so a second recover
+      // replays it idempotently (this matches the pre-existing durable-base design).
+      assertEquals(RecoveryAction.COMPLETED_REDO, coordinator.recover());
+      assertEquals(1, file.retained().size());
+      materializers.assertAllPublished(CommonCheckpointTarget.from(payload(2)));
+    }
+  }
+
+  @Test
+  public void jvmHaltAfterPerBatchRetireWithPendingConsolidationSealsOnRecovery()
+      throws Exception {
+    Path root = temporaryFolder.newFolder("perbatch-halt-after-retire").toPath();
+    runChild("perbatch-halt-after-retire", root);
+
+    Path wal = root.resolve("wal-shared");
+    try (CommonCheckpointFile file = CommonCheckpointFile.openDatabase(wal, engine());
+        DurableMaterializers materializers = new DurableMaterializers(root)) {
+      // The child died after batch 2 retired but before its consolidation was scheduled work
+      // completed: two redo records survive and recovery seals them into one.
+      assertEquals(2, file.retained().size());
+      CommonCheckpointRedoCoordinator coordinator = materializers.coordinator(file);
+      coordinator.enablePerBatchConsolidation();
+      assertEquals(RecoveryAction.COMPLETED_REDO, coordinator.recover());
+      materializers.assertAllPublished(CommonCheckpointTarget.from(payload(2)));
+      assertEquals(1, file.retained().size());
+      coordinator.requirePublished(CommonCheckpointTarget.from(payload(2)));
+    }
+  }
+
   private static void runChild(String mode, Path root) throws Exception {
     Process child = new ProcessBuilder(javaExecutable(), "-cp", runtimeClasspath(),
         CommonCheckpointWalKillProcessTest.class.getName(), mode, root.toString())
@@ -158,7 +218,13 @@ public class CommonCheckpointWalKillProcessTest {
         .redirectOutput(root.resolve(mode + ".log").toFile()).start();
     try {
       assertTrue("child process timed out", child.waitFor(60, TimeUnit.SECONDS));
-      assertEquals(HALT_CODE, child.exitValue());
+      int exit = child.exitValue();
+      if (exit != HALT_CODE) {
+        String log = new String(Files.readAllBytes(root.resolve(mode + ".log")),
+            StandardCharsets.UTF_8);
+        throw new AssertionError("child exited with " + exit + " instead of halt " + HALT_CODE
+            + "; child log:\n" + log);
+      }
     } finally {
       if (child.isAlive()) {
         child.destroyForcibly();
@@ -206,6 +272,45 @@ public class CommonCheckpointWalKillProcessTest {
               .apply(payload);
         }
         break;
+      case "perbatch-halt-during-consolidation":
+        try (DurableMaterializers materializers = new DurableMaterializers(root)) {
+          CommonCheckpointFile shared =
+              CommonCheckpointFile.openDatabase(root.resolve("wal-shared"), engine());
+          CommonCheckpointRedoCoordinator coordinator = materializers.coordinator(shared);
+          coordinator.enablePerBatchConsolidation();
+          coordinator.apply(payload(1));
+          coordinator.awaitDurableBaseIdle();
+          // Halt inside the batch-2 consolidation round after the chainbase barrier:
+          // phase-2.2 power loss with partial per-store barriers.
+          materializers.admitPreviousTarget(CommonCheckpointTarget.from(payload(1)));
+          materializers.haltInSync(Authority.PATH_STATE);
+          coordinator.apply(payload(2));
+          coordinator.awaitDurableBaseIdle();
+        }
+        break;
+      case "perbatch-halt-after-retire":
+        try (DurableMaterializers materializers = new DurableMaterializers(root)) {
+          CommonCheckpointFile shared =
+              CommonCheckpointFile.openDatabase(root.resolve("wal-shared"), engine());
+          java.util.concurrent.atomic.AtomicBoolean haltAfterRetire =
+              new java.util.concurrent.atomic.AtomicBoolean(false);
+          CommonCheckpointRedoCoordinator coordinator = materializers.coordinator(shared,
+              stage -> {
+                if (stage == CommonCheckpointRedoCoordinator.Stage.AFTER_CHECKPOINT_RETIRE
+                    && haltAfterRetire.get()) {
+                  Runtime.getRuntime().halt(HALT_CODE);
+                }
+              });
+          coordinator.enablePerBatchConsolidation();
+          coordinator.apply(payload(1));
+          coordinator.awaitDurableBaseIdle();
+          materializers.admitPreviousTarget(CommonCheckpointTarget.from(payload(1)));
+          // Halt right after batch 2 retires but before its consolidation runs: the crash
+          // window where two redo records must both survive until the next startup seal.
+          haltAfterRetire.set(true);
+          coordinator.apply(payload(2));
+        }
+        break;
       default:
         throw new IllegalArgumentException("unknown common checkpoint wal kill process mode");
     }
@@ -230,23 +335,29 @@ public class CommonCheckpointWalKillProcessTest {
   }
 
   private static CommonCheckpointPayload payload() {
-    BlockSnapshotMeta meta = BlockSnapshotMeta.forBlock(1, hash(1), hash(0), 3_000L);
+    return payload(1);
+  }
+
+  private static CommonCheckpointPayload payload(int block) {
+    BlockSnapshotMeta meta = BlockSnapshotMeta.forBlock(block, hash(block), hash(block - 1),
+        3_000L + block);
     PathStateFlushTarget.BlockBinding binding = mock(PathStateFlushTarget.BlockBinding.class);
     when(binding.getMeta()).thenReturn(meta);
-    when(binding.getParentStateRoot()).thenReturn(hash(5));
-    when(binding.getStateRoot()).thenReturn(hash(6));
-    when(binding.getTransitionPayloadDigest()).thenReturn(hash(3));
+    when(binding.getParentStateRoot()).thenReturn(hash(block - 1));
+    when(binding.getStateRoot()).thenReturn(hash(block));
+    when(binding.getTransitionPayloadDigest()).thenReturn(hash(block + 10));
     PathStateFlushTarget target = mock(PathStateFlushTarget.class);
     when(target.getBlocks()).thenReturn(Collections.singletonList(binding));
-    when(target.getParentStateRoot()).thenReturn(hash(5));
-    when(target.getStateRoot()).thenReturn(hash(6));
+    when(target.getParentStateRoot()).thenReturn(hash(block - 1));
+    when(target.getStateRoot()).thenReturn(hash(block));
     when(target.getStores()).thenReturn(Collections.emptyList());
     when(target.getSuperNodeMutations()).thenReturn(Collections.emptyList());
     return CommonCheckpointPayload.create(hash(7), target,
         Collections.singletonList(new BlockReverseDiff(meta, Collections.emptyList())),
         Collections.singletonList(new CommonCheckpointPayload.StoreMutations("code",
             Collections.singletonList(
-                new CommonCheckpointPayload.Mutation(new byte[]{1}, new byte[]{2})))));
+                new CommonCheckpointPayload.Mutation(new byte[]{(byte) block},
+                    new byte[]{(byte) (block + 10)})))));
   }
 
   private static String javaExecutable() {
@@ -320,14 +431,36 @@ public class CommonCheckpointWalKillProcessTest {
       materializers.get(authority).haltAfterDurablePublish = true;
     }
 
+    private void haltInSync(Authority authority) {
+      materializers.get(authority).haltInSyncCheckpoint = true;
+    }
+
+    private void admitPreviousTarget(CommonCheckpointTarget target) {
+      for (DurableMaterializer materializer : materializers.values()) {
+        materializer.previousDigestHex = hex(target.getPayloadDigest());
+      }
+    }
+
+    private int syncCount(Authority authority) throws java.io.IOException {
+      return materializers.get(authority).syncCount();
+    }
+
     private void assertStatus(Authority authority, Status expected) throws Exception {
-      assertEquals(expected, materializers.get(authority)
-          .inspect(CommonCheckpointTarget.from(payload())));
+      assertStatus(authority, CommonCheckpointTarget.from(payload()), expected);
+    }
+
+    private void assertStatus(Authority authority, CommonCheckpointTarget target, Status expected)
+        throws Exception {
+      assertEquals(expected, materializers.get(authority).inspect(target));
     }
 
     private void assertAllPublished() throws Exception {
+      assertAllPublished(CommonCheckpointTarget.from(payload()));
+    }
+
+    private void assertAllPublished(CommonCheckpointTarget target) throws Exception {
       for (Authority authority : Authority.values()) {
-        assertStatus(authority, Status.PUBLISHED);
+        assertStatus(authority, target, Status.PUBLISHED);
       }
     }
 
@@ -346,6 +479,8 @@ public class CommonCheckpointWalKillProcessTest {
     private final Path directory;
     private final Path statusFile;
     private boolean haltAfterDurablePublish;
+    private boolean haltInSyncCheckpoint;
+    private String previousDigestHex;
 
     private DurableMaterializer(Path directory, Authority authority) {
       this.directory = directory;
@@ -368,6 +503,12 @@ public class CommonCheckpointWalKillProcessTest {
         throw new java.io.IOException("durable authority status is corrupt");
       }
       if (!lines.get(0).equals(hex(target.getPayloadDigest()))) {
+        if (previousDigestHex != null && lines.get(0).equals(previousDigestHex)
+            && lines.get(1).equals(Status.PUBLISHED.name())) {
+          // The stored publication is the admitted parent target: this authority simply has
+          // not applied the new target yet.
+          return Status.NEEDS_MATERIALIZATION;
+        }
         throw new java.io.IOException("durable authority status belongs to a different target");
       }
       return Status.valueOf(lines.get(1));
@@ -391,6 +532,38 @@ public class CommonCheckpointWalKillProcessTest {
         // The publication is durable; the ack to the coordinator is lost with the process.
         Runtime.getRuntime().halt(HALT_CODE);
       }
+    }
+
+    @Override
+    public void syncCheckpoint(CommonCheckpointTarget target) throws java.io.IOException {
+      Files.createDirectories(directory);
+      Path countFile = directory.resolve("sync-count");
+      int count = Files.isRegularFile(countFile)
+          ? Integer.parseInt(new String(Files.readAllBytes(countFile), StandardCharsets.UTF_8))
+          : 0;
+      Files.write(countFile, Integer.toString(count + 1).getBytes(StandardCharsets.UTF_8));
+      if (haltInSyncCheckpoint) {
+        // The barrier round dies between authorities; earlier stores stay barriered.
+        Runtime.getRuntime().halt(HALT_CODE);
+      }
+    }
+
+    @Override
+    public void replayRetained(List<CommonCheckpointPayload> payloads, boolean sync)
+        throws java.io.IOException {
+      // Model retained replay: the authority's durable state is restored to the last retained
+      // generation, so the coordinator's following redo republishes that exact target.
+      if (!payloads.isEmpty()) {
+        writeDurable(Status.PUBLISHED,
+            CommonCheckpointTarget.from(payloads.get(payloads.size() - 1)));
+      }
+    }
+
+    private int syncCount() throws java.io.IOException {
+      Path countFile = directory.resolve("sync-count");
+      return Files.isRegularFile(countFile)
+          ? Integer.parseInt(new String(Files.readAllBytes(countFile), StandardCharsets.UTF_8))
+          : 0;
     }
 
     private void writeDurable(Status status, CommonCheckpointTarget target)

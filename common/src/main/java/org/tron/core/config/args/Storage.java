@@ -130,6 +130,11 @@ public class Storage {
   @Setter
   private int commonCheckpointDurableBaseGenerations = 0;
 
+  /** Consolidate every committed common checkpoint batch instead of cadence-based durable base. */
+  @Getter
+  @Setter
+  private boolean commonCheckpointPerBatchSync = false;
+
   @Getter
   @Setter
   private boolean pathStateRootEnabled;

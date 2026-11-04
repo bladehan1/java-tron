@@ -247,6 +247,9 @@ public class StorageConfig {
     private String directory = "common-checkpoint";
     // 0 = follow storage.snapshot.maxFlushCount; >0 overrides the durable-base cadence.
     private int durableBaseGenerations = 0;
+    // true = consolidate every committed batch (per-authority sync barriers + prune) instead of
+    // advancing the durable base on a cadence; the common database keeps one crash-redo record.
+    private boolean perBatchSync = false;
 
     void postProcess() {
       if (directory == null || directory.trim().isEmpty()) {

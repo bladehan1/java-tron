@@ -177,6 +177,89 @@ public class SharedCheckpointDatabaseTest {
   }
 
   @Test
+  public void perBatchConsolidationSyncsEveryAuthorityAndPrunesToLatestRecord()
+      throws Exception {
+    Path common = temporary.newFolder().toPath();
+    Fake chain = new Fake(CommonCheckpointMaterializer.Authority.CHAINBASE);
+    Fake path = new Fake(CommonCheckpointMaterializer.Authority.PATH_STATE);
+    Fake history = new Fake(CommonCheckpointMaterializer.Authority.STATE_ARCHIVE);
+    try (CommonCheckpointFile file = CommonCheckpointFile.openDatabase(common, engine());
+        CommonCheckpointRedoCoordinator coordinator =
+            new CommonCheckpointRedoCoordinator(file, chain, path, history)) {
+      coordinator.enablePerBatchConsolidation();
+      coordinator.apply(payload(1));
+      coordinator.awaitDurableBaseIdle();
+      assertEquals(1, file.retained().size());
+      assertEquals(1, chain.syncCheckpointCount);
+      assertEquals(1, path.syncCheckpointCount);
+      assertEquals(1, history.syncCheckpointCount);
+      coordinator.apply(payload(2));
+      coordinator.awaitDurableBaseIdle();
+      // Every batch is consolidated: the common database keeps only the latest redo record.
+      assertEquals(1, file.retained().size());
+      assertEquals(2, chain.syncCheckpointCount);
+      assertEquals(2, CommonCheckpointTarget.from(file.latestCommitted())
+          .getLastBlock().getBlockNumber());
+    }
+  }
+
+  @Test
+  public void perBatchSyncFailureFailsClosedAndKeepsEveryRetainedRecord() throws Exception {
+    Path common = temporary.newFolder().toPath();
+    Fake chain = new Fake(CommonCheckpointMaterializer.Authority.CHAINBASE);
+    Fake path = new Fake(CommonCheckpointMaterializer.Authority.PATH_STATE);
+    Fake history = new Fake(CommonCheckpointMaterializer.Authority.STATE_ARCHIVE);
+    try (CommonCheckpointFile file = CommonCheckpointFile.openDatabase(common, engine());
+        CommonCheckpointRedoCoordinator coordinator =
+            new CommonCheckpointRedoCoordinator(file, chain, path, history)) {
+      coordinator.enablePerBatchConsolidation();
+      coordinator.apply(payload(1));
+      coordinator.awaitDurableBaseIdle();
+      path.failSyncCheckpoint = true;
+      coordinator.apply(payload(2));
+      // The failed consolidation surfaces at the await point exactly like a redo failure.
+      assertThrows(IOException.class, coordinator::awaitDurableBaseIdle);
+      // No prune happened: both redo records are still retained for crash recovery.
+      assertEquals(2, file.retained().size());
+      path.failSyncCheckpoint = false;
+      assertEquals(RecoveryAction.COMPLETED_REDO, coordinator.recover());
+      assertEquals(1, file.retained().size());
+    }
+  }
+
+  @Test
+  public void startupSealConsolidatesLegacyRetainedGenerationsOnFirstOpen() throws Exception {
+    Path common = temporary.newFolder().toPath();
+    Fake legacyChain = new Fake(CommonCheckpointMaterializer.Authority.CHAINBASE);
+    Fake legacyPath = new Fake(CommonCheckpointMaterializer.Authority.PATH_STATE);
+    Fake legacyHistory = new Fake(CommonCheckpointMaterializer.Authority.STATE_ARCHIVE);
+    try (CommonCheckpointFile file = CommonCheckpointFile.openDatabase(common, engine());
+        CommonCheckpointRedoCoordinator coordinator =
+            new CommonCheckpointRedoCoordinator(file, legacyChain, legacyPath, legacyHistory)) {
+      coordinator.apply(payload(1));
+      coordinator.apply(payload(2));
+      coordinator.apply(payload(3));
+      assertEquals(3, file.retained().size());
+    }
+    Fake chain = new Fake(CommonCheckpointMaterializer.Authority.CHAINBASE);
+    Fake path = new Fake(CommonCheckpointMaterializer.Authority.PATH_STATE);
+    Fake history = new Fake(CommonCheckpointMaterializer.Authority.STATE_ARCHIVE);
+    try (CommonCheckpointFile file = CommonCheckpointFile.openDatabase(common, engine());
+        CommonCheckpointRedoCoordinator coordinator =
+            new CommonCheckpointRedoCoordinator(file, chain, path, history)) {
+      coordinator.enablePerBatchConsolidation();
+      assertEquals(RecoveryAction.COMPLETED_REDO, coordinator.recover());
+      // The startup seal barriers every authority and prunes the legacy chain to one record.
+      assertEquals(1, file.retained().size());
+      assertEquals(3, CommonCheckpointTarget.from(file.latestCommitted())
+          .getLastBlock().getBlockNumber());
+      assertEquals(1, chain.syncCheckpointCount);
+      assertEquals(1, path.syncCheckpointCount);
+      assertEquals(1, history.syncCheckpointCount);
+    }
+  }
+
+  @Test
   public void rejectsConflictsGapsAndPruneBeforeMaterialization() throws Exception {
     Path root = temporary.newFolder().toPath();
     try (SharedCheckpointDatabase database = new SharedCheckpointDatabase(root, engine())) {
@@ -262,6 +345,8 @@ public class SharedCheckpointDatabaseTest {
     private CommonCheckpointTarget materialized;
     private CommonCheckpointTarget published;
     private boolean failSync;
+    private boolean failSyncCheckpoint;
+    private int syncCheckpointCount;
     private volatile CountDownLatch syncReplayStarted;
     private volatile CountDownLatch syncReplayRelease;
 
@@ -272,6 +357,14 @@ public class SharedCheckpointDatabaseTest {
     @Override
     public Authority authority() {
       return authority;
+    }
+
+    @Override
+    public void syncCheckpoint(CommonCheckpointTarget target) throws IOException {
+      syncCheckpointCount++;
+      if (failSyncCheckpoint) {
+        throw new IOException("injected per-batch sync failure");
+      }
     }
 
     @Override

@@ -962,6 +962,9 @@ public class Manager {
       int durableBaseGenerations = storage.getCommonCheckpointDurableBaseGenerations();
       coordinator.configureDurableBaseCadence(durableBaseGenerations > 0
           ? durableBaseGenerations : StrictMathWrapper.max(1, storage.getMaxFlushCount()));
+      if (storage.isCommonCheckpointPerBatchSync()) {
+        coordinator.enablePerBatchConsolidation();
+      }
       PathStatePhysicalOverlayHead admittedOwner = pathOwner;
       StateArchiveHotCheckpointMaterializer admittedHotMaterializer = hotMaterializer;
       StateArchiveHotStore admittedHotStore = hotStore;
@@ -1156,6 +1159,9 @@ public class Manager {
                   snapshots.getDbs(), baseline, materializedStore),
               pathRecovery.getMaterializer(),
               admittedArchive)) {
+        if (Args.getInstance().getStorage().isCommonCheckpointPerBatchSync()) {
+          coordinator.enablePerBatchConsolidation();
+        }
         CommonCheckpointRedoCoordinator.RecoveryAction action = coordinator.recover();
         logger.info("Common checkpoint startup redo completed before PathState open: action={}",
             action);

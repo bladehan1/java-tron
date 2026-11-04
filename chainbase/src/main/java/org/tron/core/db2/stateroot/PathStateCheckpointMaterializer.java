@@ -260,6 +260,12 @@ public final class PathStateCheckpointMaterializer implements CommonCheckpointMa
   }
 
   @Override
+  public synchronized void syncCheckpoint(CommonCheckpointTarget target) throws IOException {
+    requireTarget(target);
+    stores.syncCheckpointBarriers();
+  }
+
+  @Override
   public synchronized void replayRetained(java.util.List<CommonCheckpointPayload> payloads,
       boolean sync) throws IOException {
     if (payloads.isEmpty()) {

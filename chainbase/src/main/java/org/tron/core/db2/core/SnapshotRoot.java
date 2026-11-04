@@ -15,6 +15,7 @@ import org.tron.common.cache.CacheManager;
 import org.tron.common.cache.CacheType;
 import org.tron.common.cache.TronCache;
 import org.tron.common.parameter.CommonParameter;
+import org.tron.common.storage.rocksdb.RocksDbDataSourceImpl;
 import org.tron.common.utils.ByteArray;
 import org.tron.core.ChainBaseManager;
 import org.tron.core.capsule.AccountCapsule;
@@ -215,6 +216,22 @@ public class SnapshotRoot extends AbstractSnapshot<byte[], byte[]> {
     } else {
       flushSplit((Flusher) db, batch);
       putCache(batch);
+    }
+  }
+
+  /**
+   * Per-batch consolidation barrier (phase 2.2): forces this store's WAL to disk without writing
+   * data, so every unsynced checkpoint write that preceded it becomes durable. When the P66
+   * account-asset lane is installed, its store is barriered in the same round.
+   */
+  void syncCheckpointBarrier() {
+    ((Flusher) db).flushBarrier();
+    if (needOptAsset()) {
+      AccountAssetStore assetStore = ChainBaseManager.getInstance().getAccountAssetStore();
+      if (assetStore != null
+          && assetStore.getDbSource() instanceof RocksDbDataSourceImpl) {
+        ((RocksDbDataSourceImpl) assetStore.getDbSource()).syncWal();
+      }
     }
   }
 
