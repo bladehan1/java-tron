@@ -1688,9 +1688,12 @@ public final class PathStatePhysicalStoreSet implements Closeable {
       boolean largeReadCache = useLargeReadCache(storeId, engine,
           Boolean.getBoolean("tron.pathstate.largeReadCacheBenchmark"));
       long cacheBytes = largeReadCache ? 256L << 20 : dbSettings.getCacheSize();
+      int requestedShardBits = dbSettings.getCacheShardBits();
+      int resolvedShardBits = largeReadCache ? 2
+          : requestedShardBits != -2 ? requestedShardBits
+              : cacheShardBitsFor(storeId, cacheBytes);
       nativeStore = PathStateNativeAccess.open(directory, engine, storageProfile, dbSettings,
-          largeReadCache ? 2 : cacheShardBitsFor(storeId, cacheBytes),
-          PathStateObservations.observesRocksDb(storeId), cacheBytes);
+          resolvedShardBits, PathStateObservations.observesRocksDb(storeId), cacheBytes);
       nodeStore = new ResidentNodeStore(new PhysicalNodeStore(nativeStore), residentNodeCache,
           storeId);
     }

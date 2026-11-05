@@ -353,6 +353,10 @@ public class StorageConfig {
     private int level0StopWritesTrigger = 36;
     private int backgroundFlushes = 1;
     private int backgroundCompactions = 1;
+    // RocksDB block-cache shard bits (2^n caches) for this tier: -2 keeps the
+    // built-in per-store default (e.g. account keeps its 16-shard layout at 64MiB),
+    // -1 forces one unsharded cache, >= 0 shards explicitly.
+    private int cacheShardBits = -2;
 
     public static NativeDbConfig small() {
       return new NativeDbConfig();
