@@ -29,6 +29,7 @@ ext.archInfo = [
         name    : arch,
         java    : javaVersion,
         isArm64 : isArm64,
+        archSource: archSource,
         sourceSets: [
             main: [
                 java: [

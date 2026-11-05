@@ -392,7 +392,7 @@ public class RocksDbDataSourceImpl extends DbStat implements DbSourceInter<byte[
     try {
       if (database != null && alive) {
         try {
-          database.syncWal();
+          RocksDbWal.syncWal(database);
         } catch (org.rocksdb.RocksDBException failure) {
           throw new TronDBException("DB " + this.getDBName() + " syncWal failed.", failure);
         }

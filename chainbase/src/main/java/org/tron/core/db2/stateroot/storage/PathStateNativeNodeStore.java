@@ -29,6 +29,7 @@ import org.rocksdb.TickerType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.tron.common.math.StrictMathWrapper;
+import org.tron.common.storage.rocksdb.RocksDbWal;
 import org.tron.core.config.args.StorageConfig.NativeDbConfig;
 import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
 import org.tron.core.db2.stateroot.storage.PathStateNativeAccess.BatchMutation;
@@ -483,7 +484,7 @@ final class PathStateNativeNodeStore implements PathStateNativeAccess {
     @Override
     public void syncBarrier() {
       try {
-        database.syncWal();
+        RocksDbWal.syncWal(database);
       } catch (RocksDBException failure) {
         throw new IllegalStateException("failed to force path-state RocksDB node WAL", failure);
       }

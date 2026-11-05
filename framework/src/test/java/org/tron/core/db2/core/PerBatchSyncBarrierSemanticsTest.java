@@ -16,6 +16,7 @@ import org.junit.BeforeClass;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
+import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.config.args.Args;
 import org.tron.core.db2.common.WrappedByteArray;
 
@@ -157,7 +158,7 @@ public class PerBatchSyncBarrierSemanticsTest {
   private static long percentile(List<Long> samples, double quantile) {
     List<Long> sorted = new ArrayList<>(samples);
     sorted.sort(Long::compareTo);
-    return sorted.get((int) Math.ceil(quantile * sorted.size()) - 1);
+    return sorted.get((int) StrictMathWrapper.ceil(quantile * sorted.size()) - 1);
   }
 
   private static long mean(List<Long> samples) {
