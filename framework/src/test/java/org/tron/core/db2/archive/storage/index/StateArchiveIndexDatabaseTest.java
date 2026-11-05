@@ -1,0 +1,153 @@
+package org.tron.core.db2.archive.storage.index;
+
+import static org.junit.Assert.assertArrayEquals;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertThrows;
+import static org.junit.Assert.assertTrue;
+
+import com.google.common.hash.Hashing;
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Arrays;
+import java.util.Locale;
+import java.util.stream.Stream;
+import org.junit.Rule;
+import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
+import org.tron.common.arch.Arch;
+import org.tron.core.config.args.StorageConfig.NativeDbConfig;
+import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
+
+public class StateArchiveIndexDatabaseTest {
+
+  @Rule
+  public final TemporaryFolder temporaryFolder = new TemporaryFolder();
+
+  @Test
+  public void keyOnlyCursorPreservesSeekOrderAndMixedTraversal() throws Exception {
+    for (Engine engine : availableEngines()) {
+      Path database = temporaryFolder.newFolder().toPath();
+      try (ArchiveIndexStorage.Writer writer =
+          StateArchiveIndexDatabase.openWriter(database, engine)) {
+        writer.write(Arrays.asList(
+            StateArchiveIndexDatabase.put(new byte[]{1}, new byte[1024 * 1024]),
+            StateArchiveIndexDatabase.put(new byte[]{3}, new byte[]{33}),
+            StateArchiveIndexDatabase.put(new byte[]{5}, new byte[]{55})));
+        try (ArchiveIndexStorage.Reader reader =
+            StateArchiveIndexDatabase.openReader(database, engine);
+            ArchiveIndexStorage.Cursor cursor = reader.cursor()) {
+          cursor.seek(new byte[]{0});
+          byte[] first = cursor.nextKey();
+          assertArrayEquals(new byte[]{1}, first);
+          assertArrayEquals(new byte[]{33}, cursor.next().getValue());
+          assertArrayEquals(new byte[]{5}, cursor.nextKey());
+          assertNull(cursor.nextKey());
+          assertNull(cursor.next());
+          cursor.seek(new byte[]{2});
+          assertArrayEquals(new byte[]{3}, cursor.nextKey());
+          assertArrayEquals(new byte[]{1}, first);
+        }
+      }
+    }
+  }
+
+  @Test
+  public void supportsConfiguredEngineAndRejectsEngineDrift() throws Exception {
+    for (Engine engine : availableEngines()) {
+      Path root = temporaryFolder.newFolder(engine.name().toLowerCase(Locale.ROOT)).toPath();
+      Path database = root.resolve("keys");
+      StateArchiveIndexEngineManifest.openOrCreate(root, engine);
+      assertEquals(12, Files.size(root.resolve(StateArchiveIndexEngineManifest.FILE)));
+      try (ArchiveIndexStorage.Writer writer =
+          StateArchiveIndexDatabase.openWriter(database, engine)) {
+        writer.write(Arrays.asList(
+            StateArchiveIndexDatabase.put(new byte[]{1}, new byte[]{11}),
+            StateArchiveIndexDatabase.put(new byte[]{3}, new byte[]{33})));
+      }
+      try (ArchiveIndexStorage.Reader reader =
+          StateArchiveIndexDatabase.openReader(database, engine)) {
+        assertArrayEquals(new byte[]{11}, reader.get(new byte[]{1}));
+        ArchiveIndexStorage.KeyValue found = reader.seek(new byte[]{2});
+        assertNotNull(found);
+        assertArrayEquals(new byte[]{3}, found.getKey());
+        assertArrayEquals(new byte[]{33}, found.getValue());
+      }
+      Engine other = engine == Engine.LEVELDB ? Engine.ROCKSDB : Engine.LEVELDB;
+      assertThrows(IOException.class, () -> StateArchiveIndexEngineManifest.require(root, other));
+    }
+  }
+
+  @Test
+  public void rocksReaderAndWriterShareConfiguredDatabaseHandle() throws Exception {
+    Path database = temporaryFolder.newFolder("rocks-shared-handle").toPath().resolve("keys");
+    try (ArchiveIndexStorage.Writer writer =
+        StateArchiveIndexDatabase.openWriter(database, Engine.ROCKSDB)) {
+      writer.write(Arrays.asList(StateArchiveIndexDatabase.put(new byte[]{1}, new byte[]{2})));
+      try (ArchiveIndexStorage.Reader reader =
+          StateArchiveIndexDatabase.openReader(database, Engine.ROCKSDB)) {
+        assertArrayEquals(new byte[]{2}, reader.get(new byte[]{1}));
+      }
+    }
+
+    String nativeOptions = new String(Files.readAllBytes(latestOptionsFile(database)),
+        StandardCharsets.US_ASCII);
+    assertTrue(nativeOptions.contains("write_buffer_size=67108864"));
+    assertTrue(nativeOptions.contains("block_size=4096"));
+    assertTrue(nativeOptions, nativeOptions.contains("filter_policy=rocksdb.BuiltinBloomFilter")
+        || nativeOptions.contains("filter_policy=bloomfilter"));
+  }
+
+  @Test
+  public void hotRocksRejectsLegacySingleColumnFamilyLayout() throws Exception {
+    Path database = temporaryFolder.newFolder("rocks-flat-hot-reject").toPath().resolve("keys");
+    try (ArchiveIndexStorage.Writer writer =
+        StateArchiveIndexDatabase.openWriter(database, Engine.ROCKSDB)) {
+      writer.write(Arrays.asList(StateArchiveIndexDatabase.put(new byte[]{1}, new byte[]{2})));
+    }
+
+    assertThrows(IOException.class, () -> StateArchiveIndexDatabase.openHotWriter(
+        database, Engine.ROCKSDB, NativeDbConfig.large()));
+  }
+
+  @Test
+  public void rejectsExistingDatabaseWithoutEngineIdentity() throws Exception {
+    Path root = temporaryFolder.newFolder("missing-manifest").toPath();
+    Files.createDirectory(root.resolve("keys"));
+    assertThrows(IOException.class,
+        () -> StateArchiveIndexEngineManifest.openOrCreate(root, Engine.LEVELDB));
+  }
+
+  @Test
+  public void acceptsPriorShaIdentityAndRejectsCrcCorruption() throws Exception {
+    Path legacy = temporaryFolder.newFolder("legacy-sha").toPath();
+    byte[] body = ByteBuffer.allocate(8).putInt(0x53414945).putShort((short) 1)
+        .putShort((short) 2).array();
+    Files.write(legacy.resolve(StateArchiveIndexEngineManifest.FILE),
+        ByteBuffer.allocate(40).put(body).put(Hashing.sha256().hashBytes(body).asBytes()).array());
+    assertEquals(Engine.ROCKSDB, StateArchiveIndexEngineManifest.load(legacy));
+
+    Path current = temporaryFolder.newFolder("current-crc").toPath();
+    StateArchiveIndexEngineManifest.openOrCreate(current, Engine.LEVELDB);
+    byte[] corrupt = Files.readAllBytes(current.resolve(StateArchiveIndexEngineManifest.FILE));
+    corrupt[7] = 2;
+    Files.write(current.resolve(StateArchiveIndexEngineManifest.FILE), corrupt);
+    assertThrows(IOException.class, () -> StateArchiveIndexEngineManifest.load(current));
+  }
+
+  private static Engine[] availableEngines() {
+    return Arch.isArm64() ? new Engine[]{Engine.ROCKSDB} : Engine.values();
+  }
+
+  private static Path latestOptionsFile(Path directory) throws IOException {
+    try (Stream<Path> files = Files.list(directory)) {
+      return files.filter(path -> path.getFileName().toString().startsWith("OPTIONS-"))
+          .max(java.util.Comparator.comparing(path -> path.getFileName().toString()))
+          .orElseThrow(() -> new IOException("RocksDB OPTIONS file is missing"));
+    }
+  }
+}

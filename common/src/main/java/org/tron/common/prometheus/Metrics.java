@@ -7,6 +7,9 @@ import io.prometheus.client.exporter.HTTPServer;
 import io.prometheus.client.hotspot.DefaultExports;
 import lombok.extern.slf4j.Slf4j;
 import org.tron.common.parameter.CommonParameter;
+import org.tron.common.prometheus.exporters.ChainbaseRocksDbExports;
+import org.tron.common.prometheus.exporters.GuavaCacheExports;
+import org.tron.common.prometheus.exporters.OperatingSystemExports;
 import org.tron.core.exception.TronError;
 
 @Slf4j(topic = "metrics")
@@ -19,8 +22,8 @@ public class Metrics {
     throw new IllegalStateException("Metrics");
   }
 
-  public static synchronized  void init() {
-    if(initialized) {
+  public static synchronized void init() {
+    if (initialized) {
       return;
     }
     if (CommonParameter.getInstance().isMetricsPrometheusEnable()) {
@@ -28,6 +31,7 @@ public class Metrics {
         DefaultExports.initialize();
         new OperatingSystemExports().register(CollectorRegistry.defaultRegistry);
         new GuavaCacheExports().register(CollectorRegistry.defaultRegistry);
+        new ChainbaseRocksDbExports().register(CollectorRegistry.defaultRegistry);
         int port = CommonParameter.getInstance().getMetricsPrometheusPort();
         new HTTPServer.Builder().withPort(port).build();
         logger.info("prometheus exposed on port : {}", port);

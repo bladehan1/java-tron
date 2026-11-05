@@ -261,6 +261,21 @@ public class TxCacheDB implements DB<byte[], byte[]>, Flusher {
   }
 
   @Override
+  public void flushSynced(Map<WrappedByteArray, WrappedByteArray> batch) {
+    ((Flusher) persistentStore).flushSynced(batch);
+  }
+
+  @Override
+  public void flushUnsynced(Map<WrappedByteArray, WrappedByteArray> batch) {
+    ((Flusher) persistentStore).flushUnsynced(batch);
+  }
+
+  @Override
+  public void flushBarrier() {
+    ((Flusher) persistentStore).flushBarrier();
+  }
+
+  @Override
   public void close() {
     if (!isAlive()) {
       return;
