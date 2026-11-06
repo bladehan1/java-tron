@@ -77,7 +77,7 @@ public class StorageTest {
     Assert.assertNotNull(storage.getPathStateRootDbSettings());
     Assert.assertEquals(16 * 1024 * 1024,
         storage.getPathStateRootDbSettings().getSmall().getWriteBufferSize());
-    Assert.assertEquals(64 * 1024 * 1024L,
+    Assert.assertEquals(512 * 1024 * 1024L,
         storage.getPathStateRootDbSettings().getGiant().getCacheSize());
     Assert.assertNotNull(storage.getStateArchiveServingIndexDbSettings());
     Assert.assertEquals("ROCKSDB", storage.getStateArchiveServingIndexEngine());

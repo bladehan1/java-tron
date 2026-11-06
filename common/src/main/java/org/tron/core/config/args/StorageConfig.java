@@ -372,7 +372,11 @@ public class StorageConfig {
 
     public static NativeDbConfig giant() {
       NativeDbConfig config = large();
-      config.cacheSize = 64L * 1024 * 1024;
+      // Adopted 2026-11-06 (user decision, minimal-entity principle): 512 MiB
+      // without cacheShardBits override; validated by the sync-compare long
+      // window A/B (B 512MiB auto vs A 64MiB: +9.5% block/s, p99 -8.5%; D
+      // 512MiB+cacheShardBits=4 equivalent to B, rejected as unnecessary).
+      config.cacheSize = 512L * 1024 * 1024;
       config.targetFileSizeBase = 128L * 1024 * 1024;
       config.maxBytesForLevelBase = 512L * 1024 * 1024;
       return config;

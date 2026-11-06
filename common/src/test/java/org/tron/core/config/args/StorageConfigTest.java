@@ -114,7 +114,7 @@ public class StorageConfigTest {
         defaults.getPathStateRoot().getDbSettings().getSmall().getWriteBufferSize());
     assertEquals(67108864,
         defaults.getPathStateRoot().getDbSettings().getGiant().getWriteBufferSize());
-    assertEquals(67108864L,
+    assertEquals(536870912L,
         defaults.getPathStateRoot().getDbSettings().getGiant().getCacheSize());
 
     StorageConfig configured = StorageConfig.fromConfig(withRef(

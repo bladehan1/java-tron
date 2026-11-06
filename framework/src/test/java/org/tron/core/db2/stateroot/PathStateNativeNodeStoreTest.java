@@ -194,7 +194,7 @@ public class PathStateNativeNodeStoreTest {
           store.put(new byte[]{1}, new byte[]{2});
         }
         assertArrayEquals(new byte[]{2}, store.get(new byte[]{1}));
-        assertEquals(64L << 20, settings.getCacheSize());
+        assertEquals(512L << 20, settings.getCacheSize());
       }
     }
   }
@@ -206,10 +206,14 @@ public class PathStateNativeNodeStoreTest {
     assertEquals(-1, PathStatePhysicalStoreSet.cacheShardBitsFor(4, 128L << 20));
     assertEquals(-1, PathStatePhysicalStoreSet.cacheShardBitsFor(5, 64L << 20));
     assertEquals(-1, PathStatePhysicalStoreSet.cacheShardBitsFor(22, 64L << 20));
+    // This case pins the 64 MiB budget it tests (account's built-in 4-shard layout);
+    // the giant() default is 512 MiB since 2026-11-06 and must not leak into it.
+    NativeDbConfig budget = NativeDbConfig.giant();
+    budget.setCacheSize(64L << 20);
     Path directory = temporaryFolder.newFolder("account-cache-shards").toPath();
     for (int pass = 0; pass < 2; pass++) {
       try (PathStateNativeAccess store = PathStateNativeAccess.open(directory,
-          Engine.ROCKSDB, "giant", NativeDbConfig.giant(),
+          Engine.ROCKSDB, "giant", budget,
           PathStatePhysicalStoreSet.cacheShardBitsFor(4, 64L << 20))) {
         if (pass == 0) {
           store.put(new byte[]{1}, new byte[]{2});
