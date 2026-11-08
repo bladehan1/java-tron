@@ -82,7 +82,7 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
   /** Opens the physical CURRENT as a read-only base for a volatile benchmark overlay. */
   public static PathStatePhysicalOverlayHead open(Path directory, Engine engine,
       PathStateLayerLimits limits) throws IOException {
-    return open(directory, engine, limits, PathStatePhysicalStoreSet.STEADY_NODE_CACHE_BYTES);
+    return open(directory, engine, limits, PathStatePhysicalStoreSet.configuredNodeCacheBytes());
   }
 
   /** Opens a next-format published target without invoking legacy journal/CURRENT recovery. */

@@ -254,7 +254,7 @@ public class StorageConfigTest {
     assertEquals(128, defaults.getPathStateRoot().getReversibleLayerLimit());
     assertEquals(2147483648L, defaults.getPathStateRoot().getReversibleLayerBytes());
     assertEquals(268435456L, defaults.getPathStateRoot().getWriteBufferBytes());
-    assertEquals(268435456L, defaults.getPathStateRoot().getNodeCacheBytes());
+    assertEquals(1073741824L, defaults.getPathStateRoot().getNodeCacheBytes());
     assertEquals(4, defaults.getPathStateRoot().getParticipantThreads());
     assertEquals(16, defaults.getPathStateRoot().getBranchThreads());
     assertEquals(64, defaults.getPathStateRoot().getSecondLevelParallelThreshold());

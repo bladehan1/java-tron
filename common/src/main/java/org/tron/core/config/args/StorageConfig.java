@@ -274,7 +274,10 @@ public class StorageConfig {
     private int reversibleLayerLimit = 128;
     private long reversibleLayerBytes = 2147483648L;
     private long writeBufferBytes = 268435456L;
-    private long nodeCacheBytes = 268435456L;
+    // L1 resident-node cache budget (JVM heap, striped LRU). Adopted 1 GiB on
+    // 2026-11-06 (user decision): long-window ABA +3.29% tx/s, evictions -39%,
+    // nativeNodeReads -33% (ITER-553, TASK-048). Needs -Xmx >= 12G headroom.
+    private long nodeCacheBytes = 1073741824L;
     private int participantThreads = 4;
     private int branchThreads = 16;
     private int secondLevelParallelThreshold = 64;

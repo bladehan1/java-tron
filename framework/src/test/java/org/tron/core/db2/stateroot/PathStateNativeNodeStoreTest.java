@@ -31,6 +31,8 @@ import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.tron.common.arch.Arch;
 import org.tron.common.math.StrictMathWrapper;
+import org.tron.common.parameter.CommonParameter;
+import org.tron.core.config.args.Storage;
 import org.tron.core.config.args.StorageConfig.NativeDbConfig;
 import org.tron.core.db2.archive.BlockReverseDiff;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
@@ -196,6 +198,23 @@ public class PathStateNativeNodeStoreTest {
         assertArrayEquals(new byte[]{2}, store.get(new byte[]{1}));
         assertEquals(512L << 20, settings.getCacheSize());
       }
+    }
+  }
+
+  @Test
+  public void openHonorsConfiguredResidentNodeCacheBytes() throws Exception {
+    Storage storage = new Storage();
+    storage.setPathStateRootNodeCacheBytes(96L * 1024 * 1024);
+    Storage previous = CommonParameter.getInstance().getStorage();
+    CommonParameter.getInstance().storage = storage;
+    try {
+      Path directory = temporaryFolder.newFolder("configured-resident-cache").toPath();
+      try (PathStatePhysicalStoreSet stores = PathStatePhysicalStoreSet.open(directory,
+          new PathStateCanonicalizer().participantScope(), Engine.ROCKSDB)) {
+        assertEquals(96L << 20, stores.residentNodeCacheBudgetBytes());
+      }
+    } finally {
+      CommonParameter.getInstance().storage = previous;
     }
   }
 

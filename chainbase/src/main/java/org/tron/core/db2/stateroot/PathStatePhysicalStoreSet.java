@@ -114,6 +114,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
   private final ExecutorService participantPrepareExecutor;
   private final ExecutorService trieBranchExecutor;
   private final ResidentNodeCache residentNodeCache;
+  private final long residentNodeCacheBudgetBytes;
   private final PathStatePhysicalJournals journals;
   private byte[] cachedTrieTarget;
   private PathStateRoot.Snapshot cachedTrieSnapshot;
@@ -144,6 +145,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
         MAX_PARALLEL_PARTICIPANT_PREPARES);
     this.trieBranchExecutor = newTrieExecutor("branch-prepare", MAX_PARALLEL_TRIE_BRANCHES);
     this.residentNodeCache = new ResidentNodeCache(residentNodeCacheBytes);
+    this.residentNodeCacheBudgetBytes = residentNodeCacheBytes;
     try {
       for (PathStateParticipant participant : scope.getParticipants()) {
         Path participantDirectory = directory.resolve(STORES_DIRECTORY).resolve(String.format(
@@ -261,13 +263,24 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     PathStatePhysicalStoreManifest manifest = PathStatePhysicalStoreManifest.createOrOpen(root,
         Objects.requireNonNull(engine, "engine"));
     return new PathStatePhysicalStoreSet(manifest, Objects.requireNonNull(scope, "scope"),
-        STEADY_NODE_CACHE_BYTES, configuredDbSettings());
+        configuredNodeCacheBytes(), configuredDbSettings());
   }
 
   /** Opens only a fully materialized physical layout; missing child databases fail closed. */
   public static PathStatePhysicalStoreSet openExisting(Path directory,
       PathStateParticipantScope scope, Engine engine) throws IOException {
-    return openExisting(directory, scope, engine, STEADY_NODE_CACHE_BYTES);
+    return openExisting(directory, scope, engine, configuredNodeCacheBytes());
+  }
+
+  /**
+   * Resident-node cache budget for opens that take no explicit budget: the configured
+   * storage.pathStateRoot.nodeCacheBytes, falling back to STEADY_NODE_CACHE_BYTES when
+   * no storage config is available (unit tests, standalone tools).
+   */
+  static long configuredNodeCacheBytes() {
+    org.tron.core.config.args.Storage storage = CommonParameter.getInstance().getStorage();
+    long configured = storage == null ? 0L : storage.getPathStateRootNodeCacheBytes();
+    return configured > 0 ? configured : STEADY_NODE_CACHE_BYTES;
   }
 
   /** Opens a complete physical layout with an explicit shared resident-node cache budget. */
@@ -401,6 +414,11 @@ public final class PathStatePhysicalStoreSet implements Closeable {
 
   long residentNodeCacheBytes() {
     return residentNodeCache.bytes();
+  }
+
+  /** Configured budget of the shared resident-node cache (not the current fill). */
+  long residentNodeCacheBudgetBytes() {
+    return residentNodeCacheBudgetBytes;
   }
 
   int residentNodeCacheEntries() {
