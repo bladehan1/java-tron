@@ -325,6 +325,8 @@ public class ArgsTest {
     override.put("storage.pathStateRoot.participantThreads", "2");
     override.put("storage.pathStateRoot.branchThreads", "3");
     override.put("storage.pathStateRoot.asyncPrepareBenchmark", "true");
+    override.put("storage.pathStateRoot.readTraceEnabled", "true");
+    override.put("storage.pathStateRoot.readTraceMaxKeys", "65536");
     Config config = ConfigFactory.parseMap(override)
         .withFallback(ConfigFactory.defaultReference());
 
@@ -346,6 +348,8 @@ public class ArgsTest {
     Assert.assertTrue(storage.isPathStateRootVerifyEveryBlock());
     Assert.assertTrue(storage.isPathStateRootVolatileSnapshotBenchmark());
     Assert.assertTrue(storage.isPathStateRootAsyncPrepareBenchmark());
+    Assert.assertTrue(storage.isPathStateRootReadTraceEnabled());
+    Assert.assertEquals(65536L, storage.getPathStateRootReadTraceMaxKeys());
     Args.clearParam();
   }
 

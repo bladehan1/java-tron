@@ -285,6 +285,11 @@ public class StorageConfig {
     private boolean verifyEveryBlock = true;
     private boolean volatileSnapshotBenchmark = false;
     private boolean asyncPrepareBenchmark = false;
+    // Diagnostic knob (TASK-049 Phase 0.2, default off): per-block repeat-read distance
+    // histogram for diff-layer absorption sizing. Experiment-only; costs one map touch
+    // per L1 lookup while enabled.
+    private boolean readTraceEnabled = false;
+    private long readTraceMaxKeys = 1000000L;
     private PathStateDbSettingsConfig dbSettings = new PathStateDbSettingsConfig();
 
     void postProcess() {
@@ -320,6 +325,10 @@ public class StorageConfig {
       if (asyncPrepareBenchmark && !volatileSnapshotBenchmark) {
         throw new IllegalArgumentException(
             "pathStateRoot.asyncPrepareBenchmark requires volatileSnapshotBenchmark");
+      }
+      if (readTraceEnabled && (readTraceMaxKeys <= 0 || readTraceMaxKeys > 50000000L)) {
+        throw new IllegalArgumentException(
+            "pathStateRoot.readTraceMaxKeys must be in (0, 50000000] when readTraceEnabled");
       }
       dbSettings.validate();
     }

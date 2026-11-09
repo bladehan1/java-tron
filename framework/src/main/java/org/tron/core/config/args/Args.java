@@ -266,6 +266,10 @@ public class Args extends CommonParameter {
     PARAMETER.storage.setPathStateRootAsyncPrepareBenchmark(
         sc.getPathStateRoot().isAsyncPrepareBenchmark());
     PARAMETER.storage.setPathStateRootDbSettings(sc.getPathStateRoot().getDbSettings());
+    PARAMETER.storage.setPathStateRootReadTraceEnabled(
+        sc.getPathStateRoot().isReadTraceEnabled());
+    PARAMETER.storage.setPathStateRootReadTraceMaxKeys(
+        sc.getPathStateRoot().getReadTraceMaxKeys());
 
     // estimatedTransactions / maxFlushCount clamping & validation run inside
     // TxCacheConfig.postProcess / SnapshotConfig.postProcess during bean load.

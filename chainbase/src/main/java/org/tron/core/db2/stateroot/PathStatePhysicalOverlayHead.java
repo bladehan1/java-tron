@@ -32,6 +32,7 @@ import org.tron.core.db2.stateroot.format.PathStateRootMetadata;
 import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
 import org.tron.core.db2.stateroot.metrics.PathStateObservations;
 import org.tron.core.db2.stateroot.runtime.PathStateHead;
+import org.tron.core.db2.stateroot.metrics.PathStateResidentAccessMetrics;
 import org.tron.core.db2.stateroot.storage.PathStateNativeAccess;
 import org.tron.core.db2.stateroot.trie.PathNodeStore;
 
@@ -322,6 +323,9 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
     head = pending.metadata;
     snapshot = pending.snapshot;
     compactRetainedSnapshotsIfNeeded();
+    final long[] accessTotals = stores.residentAccessTotals();
+    PathStateResidentAccessMetrics.cacheState(stores.residentNodeCacheBytes(),
+        stores.residentNodeCacheEntries(), stores.residentNodeCacheEvictions());
     logger.info("Path-state volatile overlay advanced: head={}, mutations={}, "
             + "nodeMutations={}, nativeNodeReads={}, cacheBytes={}, cacheEntries={}, "
             + "cacheEvictions={}, changedParticipants={}, maxParticipantMutations={}, "
@@ -333,6 +337,7 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
             + "uniqueNodePaths={}, overwriteWrites={}, nodeCreates={}, nodeEncodes={}, "
             + "avoidedNodeEncodes={}, unencodedCreatesAfterTopLevelDecodes={}, nodeKeccaks={}, "
             + "nodeDecodes={}, nodeHashVerifies={}, hashRefsCreated={}, hashRefsResolved={}, "
+            + "l1HitsCum={}, l1CleanHitsCum={}, l1UpdatedHitsCum={}, l1MissesCum={}, "
             + "durableWrites=0, journal=0",
         head.getBlockNumber(), admitted.getMutations().size(), pending.nodeMutations,
         pending.nativeNodeReads, stores.residentNodeCacheBytes(),
@@ -351,9 +356,19 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
         StrictMathWrapper.max(0L, pending.nodeCreates - pending.nodeEncodes - pending.nodeDecodes),
         pending.nodeKeccaks,
         pending.nodeDecodes, pending.nodeHashVerifies, pending.hashRefsCreated,
-        pending.hashRefsResolved);
+        pending.hashRefsResolved, accessTotals[0], accessTotals[1], accessTotals[2],
+        accessTotals[3]);
     logger.info("Path-state artifact stores: head={}, perStore={}",
         head.getBlockNumber(), pending.stats.perStore);
+    if (stores.readTrace() != null) {
+      long[] trace = stores.readTrace().endBlock();
+      logger.info("Path-state read trace: head={}, sameBlock={}, d1={}, d2={}, d3_4={}, "
+              + "d5_8={}, d9_16={}, d17_32={}, d33_64={}, d65_128={}, d129plus={}, "
+              + "firstTouch={}, overflowNew={}, trackedKeys={}",
+          head.getBlockNumber(), trace[0], trace[1], trace[2], trace[3], trace[4], trace[5],
+          trace[6], trace[7], trace[8], trace[9], trace[10], trace[11],
+          stores.readTrace().trackedKeys());
+    }
     pending = null;
     return copy(head);
   }
@@ -498,6 +513,7 @@ public final class PathStatePhysicalOverlayHead implements PathStateHead {
     if (attribution) {
       candidate.enableParticipantReadTiming();
     }
+    stores.beginReadTraceBlock(transition.getBlockNumber());
     PathStateRoot.ParallelApplyStats parallelStats = transition.getMutations().isEmpty() ? null
         : candidate.applyParallel(transition.getMutations(), participantExecutor, branchExecutor,
             secondLevelParallelThreshold);

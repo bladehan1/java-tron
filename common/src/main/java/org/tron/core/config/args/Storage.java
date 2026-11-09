@@ -178,6 +178,14 @@ public class Storage {
 
   @Getter
   @Setter
+  private boolean pathStateRootReadTraceEnabled;
+
+  @Getter
+  @Setter
+  private long pathStateRootReadTraceMaxKeys = 1000000L;
+
+  @Getter
+  @Setter
   private int pathStateRootParticipantThreads;
 
   @Getter

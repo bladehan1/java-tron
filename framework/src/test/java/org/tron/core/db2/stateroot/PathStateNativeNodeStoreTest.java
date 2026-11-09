@@ -219,6 +219,40 @@ public class PathStateNativeNodeStoreTest {
   }
 
   @Test
+  public void openHonorsConfiguredReadTrace() throws Exception {
+    Storage storage = new Storage();
+    storage.setPathStateRootReadTraceEnabled(true);
+    storage.setPathStateRootReadTraceMaxKeys(4096);
+    Storage previous = CommonParameter.getInstance().getStorage();
+    CommonParameter.getInstance().storage = storage;
+    try {
+      Path directory = temporaryFolder.newFolder("configured-read-trace").toPath();
+      try (PathStatePhysicalStoreSet stores = PathStatePhysicalStoreSet.open(directory,
+          new PathStateCanonicalizer().participantScope(), Engine.ROCKSDB)) {
+        assertNotNull(stores.readTrace());
+        assertEquals(4096L, stores.readTrace().maxKeys());
+      }
+    } finally {
+      CommonParameter.getInstance().storage = previous;
+    }
+  }
+
+  @Test
+  public void openDisablesReadTraceByDefault() throws Exception {
+    Storage previous = CommonParameter.getInstance().getStorage();
+    CommonParameter.getInstance().storage = new Storage();
+    try {
+      Path directory = temporaryFolder.newFolder("read-trace-default-off").toPath();
+      try (PathStatePhysicalStoreSet stores = PathStatePhysicalStoreSet.open(directory,
+          new PathStateCanonicalizer().participantScope(), Engine.ROCKSDB)) {
+        assertNull(stores.readTrace());
+      }
+    } finally {
+      CommonParameter.getInstance().storage = previous;
+    }
+  }
+
+  @Test
   public void accountCacheShardsPreserveBudgetWritesAndReopen() throws Exception {
     assertEquals(4, PathStatePhysicalStoreSet.cacheShardBitsFor(4, 64L << 20));
     assertEquals(-1, PathStatePhysicalStoreSet.cacheShardBitsFor(4, 32L << 20));

@@ -50,6 +50,7 @@ import org.tron.core.db2.stateroot.physical.PathStatePhysicalRecords.GlobalInten
 import org.tron.core.db2.stateroot.physical.PathStatePhysicalRecords.IngestCheckpoint;
 import org.tron.core.db2.stateroot.physical.PathStatePhysicalRecords.OracleWindow;
 import org.tron.core.db2.stateroot.physical.PathStatePhysicalRecords.ReverseJournal;
+import org.tron.core.db2.stateroot.metrics.PathStateResidentAccessMetrics;
 import org.tron.core.db2.stateroot.storage.PathStateNativeAccess;
 import org.tron.core.db2.stateroot.storage.PathStateNativeBudget;
 import org.tron.core.db2.stateroot.trie.PathNodeStore;
@@ -71,6 +72,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
   static final int BOOTSTRAP_WRITE_BATCH_ENTRIES = 4096;
   static final long BOOTSTRAP_WRITE_BATCH_BYTES = 8L * 1024 * 1024;
   static final long STEADY_NODE_CACHE_BYTES = 256L * 1024 * 1024;
+  static final long DEFAULT_READ_TRACE_MAX_KEYS = 1_000_000L;
   private static final int MAX_PARALLEL_PARTICIPANT_WRITES = 4;
   private static final int MAX_PARALLEL_PARTICIPANT_PREPARES = 4;
   private static final int MAX_PARALLEL_TRIE_BRANCHES = 8;
@@ -115,6 +117,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
   private final ExecutorService trieBranchExecutor;
   private final ResidentNodeCache residentNodeCache;
   private final long residentNodeCacheBudgetBytes;
+  private final PathStateReadDistanceTrace readTrace;
   private final PathStatePhysicalJournals journals;
   private byte[] cachedTrieTarget;
   private PathStateRoot.Snapshot cachedTrieSnapshot;
@@ -146,6 +149,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     this.trieBranchExecutor = newTrieExecutor("branch-prepare", MAX_PARALLEL_TRIE_BRANCHES);
     this.residentNodeCache = new ResidentNodeCache(residentNodeCacheBytes);
     this.residentNodeCacheBudgetBytes = residentNodeCacheBytes;
+    this.readTrace = configuredReadTrace();
     try {
       for (PathStateParticipant participant : scope.getParticipants()) {
         Path participantDirectory = directory.resolve(STORES_DIRECTORY).resolve(String.format(
@@ -153,10 +157,10 @@ public final class PathStatePhysicalStoreSet implements Closeable {
         participants.put(participant.getDbName(), new PhysicalStore(participantDirectory,
             manifest.getEngine(), participant.getStoreId(), residentNodeCache,
             storageProfileNameFor(participant.getDbName()),
-            storageProfileFor(participant.getDbName(), dbSettings)));
+            storageProfileFor(participant.getDbName(), dbSettings), readTrace));
       }
       superStore = new PhysicalStore(directory.resolve(SUPER_DIRECTORY).resolve(NODES_DIRECTORY),
-          manifest.getEngine(), 0, residentNodeCache, "small", dbSettings.getSmall());
+          manifest.getEngine(), 0, residentNodeCache, "small", dbSettings.getSmall(), readTrace);
     } catch (IOException | RuntimeException failure) {
       closeAfterFailure(failure);
       throw failure;
@@ -281,6 +285,21 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     org.tron.core.config.args.Storage storage = CommonParameter.getInstance().getStorage();
     long configured = storage == null ? 0L : storage.getPathStateRootNodeCacheBytes();
     return configured > 0 ? configured : STEADY_NODE_CACHE_BYTES;
+  }
+
+  /**
+   * Repeat-read distance tracing for opens that take no explicit trace: enabled via
+   * storage.pathStateRoot.readTraceEnabled (TASK-049 Phase 0.2 diagnostic, default off,
+   * experiment-only). Returns null when disabled so the read path pays nothing.
+   */
+  static PathStateReadDistanceTrace configuredReadTrace() {
+    org.tron.core.config.args.Storage configured = CommonParameter.getInstance().getStorage();
+    if (configured == null || !configured.isPathStateRootReadTraceEnabled()) {
+      return null;
+    }
+    long maxKeys = configured.getPathStateRootReadTraceMaxKeys();
+    return new PathStateReadDistanceTrace(
+        maxKeys > 0 ? maxKeys : DEFAULT_READ_TRACE_MAX_KEYS);
   }
 
   /** Opens a complete physical layout with an explicit shared resident-node cache budget. */
@@ -427,6 +446,33 @@ public final class PathStatePhysicalStoreSet implements Closeable {
 
   long residentNodeCacheEvictions() {
     return residentNodeCache.evictions();
+  }
+
+  PathStateReadDistanceTrace readTrace() {
+    return readTrace;
+  }
+
+  void beginReadTraceBlock(long blockNumber) {
+    if (readTrace != null) {
+      readTrace.beginBlock(blockNumber);
+    }
+  }
+
+  /** Cumulative L1 access counters across all participant and super stores. */
+  long[] residentAccessTotals() {
+    long[] totals = new long[4];
+    for (PhysicalStore store : participants.values()) {
+      accumulateAccess(store, totals);
+    }
+    accumulateAccess(superStore, totals);
+    return totals;
+  }
+
+  private static void accumulateAccess(PhysicalStore store, long[] totals) {
+    totals[0] += store.nodeHits();
+    totals[1] += store.nodeCleanHits();
+    totals[2] += store.nodeUpdatedHits();
+    totals[3] += store.nodeNativeReads();
   }
 
   synchronized void saveIngestCheckpoint(String dbName, IngestCheckpoint value) {
@@ -961,6 +1007,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
   private TransitionPlan prepareTransition(PathStateBlockTransition supplied) throws IOException {
     long initialResidentEvictions = residentNodeCache.evictions();
     PathStateBlockTransition transition = Objects.requireNonNull(supplied, "transition");
+    beginReadTraceBlock(transition.getBlockNumber());
     GlobalIntent current = currentTarget();
     PathStateRootMetadata parent = current.getMetadata();
     if (transition.getBlockNumber() != parent.getBlockNumber() + 1
@@ -1700,7 +1747,8 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     private final ResidentNodeStore nodeStore;
 
     private PhysicalStore(Path directory, Engine engine, int storeId,
-        ResidentNodeCache residentNodeCache, String storageProfile, NativeDbConfig dbSettings)
+        ResidentNodeCache residentNodeCache, String storageProfile, NativeDbConfig dbSettings,
+        PathStateReadDistanceTrace readTrace)
         throws IOException {
       // Opt-in validation candidate; never mutate the shared giant resource profile.
       boolean largeReadCache = useLargeReadCache(storeId, engine,
@@ -1713,7 +1761,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
       nativeStore = PathStateNativeAccess.open(directory, engine, storageProfile, dbSettings,
           resolvedShardBits, PathStateObservations.observesRocksDb(storeId), cacheBytes);
       nodeStore = new ResidentNodeStore(new PhysicalNodeStore(nativeStore), residentNodeCache,
-          storeId);
+          storeId, readTrace);
     }
 
     public void putFlat(byte[] secureKey, byte[] encodedLeaf) {
@@ -1767,6 +1815,22 @@ public final class PathStatePhysicalStoreSet implements Closeable {
 
     long getUnsyncedWriteBatchCalls() {
       return nativeStore.getUnsyncedWriteBatchCalls();
+    }
+
+    long nodeHits() {
+      return nodeStore.getHits();
+    }
+
+    long nodeCleanHits() {
+      return nodeStore.getCleanHits();
+    }
+
+    long nodeUpdatedHits() {
+      return nodeStore.getUpdatedHits();
+    }
+
+    long nodeNativeReads() {
+      return nodeStore.getNativeReads();
     }
 
     void clearNodes() throws IOException {
@@ -2010,6 +2074,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     private final PathNodeStore base;
     private final ResidentNodeCache cache;
     private final int storeId;
+    private final PathStateReadDistanceTrace readTrace;
     private final PathStateObservations.Timer nativeTimer;
     private final AtomicLong hits = new AtomicLong();
     private final AtomicLong cleanHits = new AtomicLong();
@@ -2017,15 +2082,24 @@ public final class PathStatePhysicalStoreSet implements Closeable {
     private final AtomicLong nativeReads = new AtomicLong();
 
     ResidentNodeStore(PathNodeStore base, ResidentNodeCache cache, int storeId) {
+      this(base, cache, storeId, null);
+    }
+
+    ResidentNodeStore(PathNodeStore base, ResidentNodeCache cache, int storeId,
+        PathStateReadDistanceTrace readTrace) {
       this.base = Objects.requireNonNull(base, "base");
       this.cache = Objects.requireNonNull(cache, "cache");
       this.storeId = storeId;
+      this.readTrace = readTrace;
       nativeTimer = PathStateObservations.observesStore(storeId) && PathStateObservations.enabled()
           ? PathStateObservations.timer() : null;
     }
 
     @Override
     public byte[] get(byte[] path) {
+      if (readTrace != null) {
+        readTrace.touch(storeId, path);
+      }
       ResidentNodeCache.Lookup lookup = cache.get(storeId, path);
       if (lookup.found) {
         hits.incrementAndGet();
@@ -2034,6 +2108,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
         } else {
           cleanHits.incrementAndGet();
         }
+        PathStateResidentAccessMetrics.access(storeId, lookup.updated, false);
         return owned(lookup.value);
       }
       byte[] value;
@@ -2046,6 +2121,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
         }
       }
       nativeReads.incrementAndGet();
+      PathStateResidentAccessMetrics.access(storeId, false, true);
       cache.put(storeId, path, value, false);
       return owned(value);
     }

@@ -262,6 +262,8 @@ public class StorageConfigTest {
     assertTrue(defaults.getPathStateRoot().isVerifyEveryBlock());
     assertFalse(defaults.getPathStateRoot().isVolatileSnapshotBenchmark());
     assertFalse(defaults.getPathStateRoot().isAsyncPrepareBenchmark());
+    assertFalse(defaults.getPathStateRoot().isReadTraceEnabled());
+    assertEquals(1000000L, defaults.getPathStateRoot().getReadTraceMaxKeys());
 
     StorageConfig configured = StorageConfig.fromConfig(withRef(
         "storage.pathStateRoot { enabled = true, engine = leveldb, mode = shadow, "
@@ -270,7 +272,7 @@ public class StorageConfigTest {
             + "writeBufferBytes = 1024, nodeCacheBytes = 2048, participantThreads = 2, "
             + "branchThreads = 3, secondLevelParallelThreshold = 8, rebuildFromGenesis = false, "
             + "verifyEveryBlock = true, volatileSnapshotBenchmark = true, "
-            + "asyncPrepareBenchmark = true }"));
+            + "asyncPrepareBenchmark = true, readTraceEnabled = true, readTraceMaxKeys = 512 }"));
     assertTrue(configured.getPathStateRoot().isEnabled());
     assertEquals("root-test", configured.getPathStateRoot().getDirectory());
     assertEquals("LEVELDB", configured.getPathStateRoot().getEngine());
@@ -283,6 +285,14 @@ public class StorageConfigTest {
     assertEquals(8, configured.getPathStateRoot().getSecondLevelParallelThreshold());
     assertTrue(configured.getPathStateRoot().isVolatileSnapshotBenchmark());
     assertTrue(configured.getPathStateRoot().isAsyncPrepareBenchmark());
+    assertTrue(configured.getPathStateRoot().isReadTraceEnabled());
+    assertEquals(512L, configured.getPathStateRoot().getReadTraceMaxKeys());
+  }
+
+  @Test(expected = IllegalArgumentException.class)
+  public void testPathStateRootRejectsInvalidReadTraceMaxKeys() {
+    StorageConfig.fromConfig(withRef("storage.pathStateRoot { readTraceEnabled = true, "
+        + "readTraceMaxKeys = 0 }"));
   }
 
   @Test(expected = IllegalArgumentException.class)
