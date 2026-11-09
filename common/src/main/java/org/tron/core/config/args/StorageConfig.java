@@ -371,12 +371,18 @@ public class StorageConfig {
     private int cacheShardBits = -2;
 
     public static NativeDbConfig small() {
-      return new NativeDbConfig();
+      NativeDbConfig config = new NativeDbConfig();
+      // 2026-11-09 (user decision, AMD-002 IO-saturation analysis): 64 MiB
+      // memtables and files halve L0 flush frequency across the many
+      // update-heavy small participants.
+      config.writeBufferSize = 64 * 1024 * 1024;
+      config.targetFileSizeBase = 64L * 1024 * 1024;
+      return config;
     }
 
     public static NativeDbConfig large() {
       NativeDbConfig config = new NativeDbConfig();
-      config.writeBufferSize = 64 * 1024 * 1024;
+      config.writeBufferSize = 128 * 1024 * 1024;
       config.targetFileSizeBase = 64L * 1024 * 1024;
       config.maxBytesForLevelBase = 256L * 1024 * 1024;
       return config;
@@ -384,11 +390,14 @@ public class StorageConfig {
 
     public static NativeDbConfig giant() {
       NativeDbConfig config = large();
-      // Adopted 2026-11-06 (user decision, minimal-entity principle): 512 MiB
-      // without cacheShardBits override; validated by the sync-compare long
-      // window A/B (B 512MiB auto vs A 64MiB: +9.5% block/s, p99 -8.5%; D
-      // 512MiB+cacheShardBits=4 equivalent to B, rejected as unnecessary).
-      config.cacheSize = 512L * 1024 * 1024;
+      // 2026-11-09 (user decision, AMD-002 IO-saturation analysis): the disk
+      // was latency-bound at ~5k read IOPS because index+filter blocks of the
+      // ~80-133G giant stores (~1-1.6G) could not stay resident in 512 MiB,
+      // so every Get paid ~3 block IOs. 2 GiB targets residency; 256 MiB
+      // memtables cut flush/compaction churn. Supersedes the 2026-11-06
+      // 512 MiB adoption (validated on ARM-001, ITER-547).
+      config.cacheSize = 2L * 1024 * 1024 * 1024;
+      config.writeBufferSize = 256 * 1024 * 1024;
       config.targetFileSizeBase = 128L * 1024 * 1024;
       config.maxBytesForLevelBase = 512L * 1024 * 1024;
       return config;

@@ -163,7 +163,7 @@ public class PathStateNativeNodeStoreTest {
 
     String nativeOptions = new String(Files.readAllBytes(latestOptionsFile(directory)),
         StandardCharsets.US_ASCII);
-    assertTrue(nativeOptions.contains("write_buffer_size=67108864"));
+    assertTrue(nativeOptions.contains("write_buffer_size=268435456"));
     assertTrue(nativeOptions.contains("max_write_buffer_number=2"));
     assertTrue(nativeOptions.contains("compression=kSnappyCompression"));
     assertTrue(nativeOptions.contains("block_size=4096"));
@@ -196,7 +196,7 @@ public class PathStateNativeNodeStoreTest {
           store.put(new byte[]{1}, new byte[]{2});
         }
         assertArrayEquals(new byte[]{2}, store.get(new byte[]{1}));
-        assertEquals(512L << 20, settings.getCacheSize());
+        assertEquals(2L << 30, settings.getCacheSize());
       }
     }
   }

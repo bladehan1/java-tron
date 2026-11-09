@@ -110,11 +110,11 @@ public class StorageConfigTest {
         defaults.getStateArchive().getServingIndex().getCacheSize());
     assertNotSame(defaults.getStateArchive().getServingIndex(),
         defaults.getStateArchive().getHotStore().getDbSettings());
-    assertEquals(16777216,
-        defaults.getPathStateRoot().getDbSettings().getSmall().getWriteBufferSize());
     assertEquals(67108864,
+        defaults.getPathStateRoot().getDbSettings().getSmall().getWriteBufferSize());
+    assertEquals(268435456,
         defaults.getPathStateRoot().getDbSettings().getGiant().getWriteBufferSize());
-    assertEquals(536870912L,
+    assertEquals(2147483648L,
         defaults.getPathStateRoot().getDbSettings().getGiant().getCacheSize());
 
     StorageConfig configured = StorageConfig.fromConfig(withRef(
