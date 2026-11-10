@@ -69,7 +69,7 @@ public class NativeMemoryBudgetTest {
       dbs.add(NativeMemoryBudget.levelDb("chainbase", 32 * MIB, 16 * MIB));
     }
     for (PathStateNativeBudget.Entry entry : PathStateNativeBudget.entries(
-        new PathStateDbSettingsConfig(), false, false)) {
+        designExampleSettings(), false, false)) {
       dbs.add(new NativeMemoryBudget.Db("pathState", entry.getCacheBytes(),
           entry.getMemtableBytes(), entry.getPinnedBytes()));
     }
@@ -89,7 +89,7 @@ public class NativeMemoryBudgetTest {
 
   @Test
   public void rocksDbPinnedOverflowAndBenchmarkCachesAreCounted() {
-    PathStateDbSettingsConfig settings = new PathStateDbSettingsConfig();
+    PathStateDbSettingsConfig settings = designExampleSettings();
     long plain = 0;
     long overflow = 0;
     for (PathStateNativeBudget.Entry entry : PathStateNativeBudget.entries(settings, true,
@@ -119,6 +119,41 @@ public class NativeMemoryBudgetTest {
         java.util.Collections.singletonList(pinned), null, null, 4 * GIB);
     assertEquals(8 * MIB, (long) result.items.get("pathState.pinnedOverflow"));
     assertEquals("UNKNOWN", result.verdict);
+  }
+
+  /** Keep the historical design example independent of production default tuning. */
+  private static PathStateDbSettingsConfig designExampleSettings() {
+    PathStateDbSettingsConfig settings = new PathStateDbSettingsConfig();
+    settings.getSmall().setWriteBufferSize(16 * (int) MIB);
+    settings.getSmall().setCacheSize(32 * MIB);
+    settings.getSmall().setTargetFileSizeBase(16 * MIB);
+    settings.getLarge().setWriteBufferSize(64 * (int) MIB);
+    settings.getLarge().setCacheSize(32 * MIB);
+    settings.getGiant().setWriteBufferSize(64 * (int) MIB);
+    settings.getGiant().setCacheSize(64 * MIB);
+    return settings;
+  }
+
+  @Test
+  public void currentDefaultsAndBenchmarkOverrideAreBudgeted() {
+    PathStateDbSettingsConfig settings = new PathStateDbSettingsConfig();
+    long cache = 0;
+    long memtables = 0;
+    for (PathStateNativeBudget.Entry entry : PathStateNativeBudget.entries(settings, true,
+        false)) {
+      cache += entry.getCacheBytes();
+      memtables += entry.getMemtableBytes();
+    }
+    // 22 small stores (including super), 3 large and 3 giant stores.
+    assertEquals((22 * 32 + 3 * 32 + 3 * 2048) * MIB, cache);
+    assertEquals(2L * (22 * 64 + 3 * 128 + 3 * 256) * MIB, memtables);
+    long benchmarkCache = 0;
+    for (PathStateNativeBudget.Entry entry : PathStateNativeBudget.entries(settings, true,
+        true)) {
+      benchmarkCache += entry.getCacheBytes();
+    }
+    // The legacy benchmark forces two giant caches to 256 MiB, even below today's default.
+    assertEquals(2L * (256 - 2048) * MIB, benchmarkCache - cache);
   }
 
   @Test
