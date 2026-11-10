@@ -58,8 +58,14 @@ public class SolidityNode implements ApplicationListener<ContextClosedEvent> {
 
   @PostConstruct
   private void init() {
-    resolveCompatibilityIssueIfUsingFullNodeDatabase();
-    ID.set(chainBaseManager.getDynamicPropertiesStore().getLatestSolidifiedBlockNum());
+    if (Args.getInstance().getStorage().isArchiveFeaturesEnabled()) {
+      // The snapshot head is the next-block cursor, not a startup state mutation. The first
+      // trusted block records its solidified height inside Manager's block session.
+      ID.set(chainBaseManager.getHeadBlockNum());
+    } else {
+      resolveCompatibilityIssueIfUsingFullNodeDatabase();
+      ID.set(chainBaseManager.getDynamicPropertiesStore().getLatestSolidifiedBlockNum());
+    }
     getBlockExecutor = ExecutorServiceManager.newSingleThreadExecutor(getBlockName);
     processBlockExecutor = ExecutorServiceManager.newSingleThreadExecutor(processBlockName);
   }
@@ -157,7 +163,9 @@ public class SolidityNode implements ApplicationListener<ContextClosedEvent> {
       try {
         tronNetDelegate.pushVerifiedBlock(new BlockCapsule(block));
         if (!tronNetDelegate.isHitDown()) {
-          chainBaseManager.getDynamicPropertiesStore().saveLatestSolidifiedBlockNum(blockNum);
+          if (!Args.getInstance().getStorage().isArchiveFeaturesEnabled()) {
+            chainBaseManager.getDynamicPropertiesStore().saveLatestSolidifiedBlockNum(blockNum);
+          }
           logger.info("Success to process block: {}, blockQueueSize: {}.",
               blockNum, blockQueue.size());
         }

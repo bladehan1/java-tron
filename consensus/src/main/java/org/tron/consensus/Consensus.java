@@ -22,6 +22,11 @@ public class Consensus {
     consensusInterface.start(param);
   }
 
+  /** The head-0 genesis witness schedule of {@link DposService#initGenesisSchedule()}. */
+  public void initGenesisSchedule() {
+    dposService.initGenesisSchedule();
+  }
+
   public void stop() {
     consensusInterface = dposService;
     consensusInterface.stop();

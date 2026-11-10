@@ -5,8 +5,10 @@ import java.io.IOException;
 import javax.annotation.PostConstruct;
 import javax.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
+import org.junit.After;
 import org.junit.AfterClass;
 import org.junit.Assert;
+import org.junit.Before;
 import org.junit.ClassRule;
 import org.junit.rules.TemporaryFolder;
 import org.junit.runner.RunWith;
@@ -28,6 +30,8 @@ import org.tron.core.exception.BalanceInsufficientException;
 import org.tron.core.net.peer.PeerConnection;
 import org.tron.core.net.peer.PeerManager;
 import org.tron.core.store.AccountStore;
+import org.tron.core.vm.OperationRegistry;
+import org.tron.core.vm.config.VMConfig;
 import org.tron.protos.Protocol;
 
 /**
@@ -87,6 +91,13 @@ public abstract class BaseTest {
       Assert.fail("create temp folder failed");
     }
     return null;
+  }
+
+  @Before
+  @After
+  public final void clearVmRequestState() {
+    VMConfig.clearLocalSnapshot();
+    OperationRegistry.clearRequestTable();
   }
 
   @AfterClass

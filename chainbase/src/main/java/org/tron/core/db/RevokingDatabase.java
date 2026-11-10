@@ -39,6 +39,8 @@ public interface RevokingDatabase {
 
   void setMaxFlushCount(int maxFlushCount);
 
+  void flushPending();
+
   void shutdown();
 
 }
