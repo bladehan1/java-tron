@@ -382,9 +382,16 @@ public class StorageConfig {
 
     public static NativeDbConfig large() {
       NativeDbConfig config = new NativeDbConfig();
-      config.writeBufferSize = 128 * 1024 * 1024;
+      config.writeBufferSize = 64 * 1024 * 1024;
       config.targetFileSizeBase = 64L * 1024 * 1024;
       config.maxBytesForLevelBase = 256L * 1024 * 1024;
+      return config;
+    }
+
+    public static NativeDbConfig pathStateLarge() {
+      NativeDbConfig config = large();
+      // PathState tuning must not change the archive serving-index or Hot DB defaults.
+      config.writeBufferSize = 128 * 1024 * 1024;
       return config;
     }
 
@@ -422,7 +429,7 @@ public class StorageConfig {
   public static class PathStateDbSettingsConfig {
 
     private NativeDbConfig small = NativeDbConfig.small();
-    private NativeDbConfig large = NativeDbConfig.large();
+    private NativeDbConfig large = NativeDbConfig.pathStateLarge();
     private NativeDbConfig giant = NativeDbConfig.giant();
 
     void validate() {

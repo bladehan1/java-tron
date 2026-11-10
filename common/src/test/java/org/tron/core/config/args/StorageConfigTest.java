@@ -103,6 +103,13 @@ public class StorageConfigTest {
 
   @Test
   public void testArchiveNativeDatabaseProfileDefaultsAndOverrides() {
+    StorageConfig beanDefaults = new StorageConfig();
+    assertEquals(67108864,
+        beanDefaults.getStateArchive().getServingIndex().getWriteBufferSize());
+    assertEquals(67108864,
+        beanDefaults.getStateArchive().getHotStore().getDbSettings().getWriteBufferSize());
+    assertEquals(134217728,
+        beanDefaults.getPathStateRoot().getDbSettings().getLarge().getWriteBufferSize());
     StorageConfig defaults = StorageConfig.fromConfig(withRef());
     assertEquals(67108864,
         defaults.getStateArchive().getServingIndex().getWriteBufferSize());
