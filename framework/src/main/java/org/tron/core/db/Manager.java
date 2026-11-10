@@ -81,6 +81,7 @@ import org.tron.common.prometheus.MetricKeys;
 import org.tron.common.prometheus.MetricLabels;
 import org.tron.common.prometheus.Metrics;
 import org.tron.common.runtime.RuntimeImpl;
+import org.tron.common.storage.metric.ArchiveDbSizeMetrics;
 import org.tron.common.utils.ByteArray;
 import org.tron.common.utils.JsonUtil;
 import org.tron.common.utils.Pair;
@@ -783,6 +784,9 @@ public class Manager {
           stateArchiveReadableStateFaultHook);
       archiveHistoryWriter = attachment.getWriter();
       stateArchiveRuntime = attachment.getRuntime();
+      ArchiveDbSizeMetrics.register(archiveDirectory.resolve("serving-index"),
+          configuredAuxiliaryEngine(storage.getStateArchiveServingIndexEngine(),
+              storage.getDbEngine()).name(), "serving-index");
       BlockSnapshotMeta archiveHead = attachment.getRecoveredHead();
       logger.info("State archive runtime attached: directory={}, head={}, actions={}, engine={}",
           archiveDirectory, archiveHead.getBlockNumber(),
@@ -894,6 +898,8 @@ public class Manager {
                 storage.getPathStateRootBranchThreads(),
                 storage.getPathStateRootSecondLevelParallelThreshold());
       }
+      ArchiveDbSizeMetrics.register(pathDirectory, pathEngine.name(),
+          pathDirectory.getFileName().toString());
 
       PathStateRootMetadata initialHead = pathOwner.getHead();
       CommonCheckpointBaseline supplied = new CommonCheckpointBaseline(formatIdentity,
@@ -1346,6 +1352,8 @@ public class Manager {
             "Path-state CURRENT differs from the persisted Chainbase head");
       }
       pathStateSnapshotHead = recovered;
+      ArchiveDbSizeMetrics.register(directory, engine.name(),
+          directory.getFileName().toString());
       attachPathStateBlockFinalRuntime();
       logger.info("Path-state current root attached: directory={}, head={}, engine={}, "
               + "volatileSnapshotBenchmark={}, asyncPrepareBenchmark={}, nodeCacheBytes={}, "
