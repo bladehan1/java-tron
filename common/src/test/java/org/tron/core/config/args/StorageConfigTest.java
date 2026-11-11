@@ -497,4 +497,28 @@ public class StorageConfigTest {
   public void testPropertiesInvalidLongRejected() {
     props("storage.properties = [ { name = foo, cacheSize = not_a_number } ]");
   }
+
+  @Test
+  public void testCatchUpSnapshotDefaultsAndValidation() {
+    StorageConfig defaults = StorageConfig.fromConfig(withRef());
+    assertFalse(defaults.getCatchUpSnapshot().isEnabled());
+    assertEquals(200, defaults.getCatchUpSnapshot().getAnchorBlocks());
+    assertEquals(5, defaults.getCatchUpSnapshot().getAnchorIntervalMinutes());
+    assertEquals(60L, defaults.getCatchUpSnapshot().getExitGapSeconds());
+    assertEquals(10L, defaults.getCatchUpSnapshot().getReenterGapMinutes());
+
+    assertThrows(IllegalArgumentException.class,
+        () -> StorageConfig.fromConfig(withRef(
+            "storage { catchUpSnapshot { anchorIntervalMinutes = 0 } }")));
+    assertThrows(IllegalArgumentException.class,
+        () -> StorageConfig.fromConfig(withRef(
+            "storage { catchUpSnapshot { exitGapSeconds = 5 } }")));
+    assertThrows(IllegalArgumentException.class,
+        () -> StorageConfig.fromConfig(withRef(
+            "storage { catchUpSnapshot { exitGapSeconds = 600, reenterGapMinutes = 10 } }")));
+    StorageConfig valid = StorageConfig.fromConfig(withRef(
+        "storage { catchUpSnapshot { anchorIntervalMinutes = 10 } }"));
+    assertFalse(valid.getCatchUpSnapshot().isEnabled());
+    assertEquals(10, valid.getCatchUpSnapshot().getAnchorIntervalMinutes());
+  }
 }

@@ -135,6 +135,31 @@ public class Storage {
   @Setter
   private boolean commonCheckpointPerBatchSync = false;
 
+  /** Catch-up anchor snapshot mode: stretched checkpoint cadence plus one retained anchor copy. */
+  @Getter
+  @Setter
+  private boolean catchUpSnapshotEnabled;
+
+  @Getter
+  @Setter
+  private int catchUpSnapshotAnchorBlocks = 200;
+
+  @Getter
+  @Setter
+  private int catchUpSnapshotAnchorIntervalMinutes = 5;
+
+  @Getter
+  @Setter
+  private long catchUpSnapshotExitGapSeconds = 60;
+
+  @Getter
+  @Setter
+  private long catchUpSnapshotReenterGapMinutes = 10;
+
+  @Getter
+  @Setter
+  private String catchUpSnapshotDirectory = "";
+
   @Getter
   @Setter
   private boolean pathStateRootEnabled;

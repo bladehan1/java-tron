@@ -29,6 +29,7 @@ public class StorageConfig {
   private SnapshotConfig snapshot = new SnapshotConfig();
   private StateArchiveConfig stateArchive = new StateArchiveConfig();
   private CommonCheckpointConfig commonCheckpoint = new CommonCheckpointConfig();
+  private CatchUpSnapshotConfig catchUpSnapshot = new CatchUpSnapshotConfig();
   private PathStateRootConfig pathStateRoot = new PathStateRootConfig();
   private TxCacheConfig txCache = new TxCacheConfig();
   // ConfigBeanFactory requires all bean fields present per item, so we parse manually.
@@ -262,10 +263,56 @@ public class StorageConfig {
     }
   }
 
+  /** Catch-up-only anchor snapshot mode: no count-cadence checkpoints beyond a memory-safety
+   * cap, plus one filesystem snapshot of the whole output directory on a timer as the crash
+   * anchor. */
+  @Getter
+  @Setter
+  public static class CatchUpSnapshotConfig {
+
+    private boolean enabled = false;
+    // Memory-safety cap: blocks without a checkpoint while catching up, bounding the retained
+    // in-memory diff; the normal anchor driver is the timer below, not this count.
+    private int anchorBlocks = 200;
+    // Anchor snapshot cadence in minutes while catching up.
+    private int anchorIntervalMinutes = 5;
+    // Hysteresis: leave catch-up mode once the head is within this many seconds of wall clock...
+    private long exitGapSeconds = 60;
+    // ...and only re-enter once it falls behind by this many minutes, so the mode cannot flap.
+    private long reenterGapMinutes = 10;
+    // Parent directory of the anchor; empty resolves to "<output-directory>/../catchup-anchor".
+    private String directory = "";
+
+    void postProcess() {
+      if (anchorBlocks < 10 || anchorBlocks > 256) {
+        throw new IllegalArgumentException(
+            "catchUpSnapshot.anchorBlocks must be in [10, 256]");
+      }
+      if (anchorIntervalMinutes < 1 || anchorIntervalMinutes > 60) {
+        throw new IllegalArgumentException(
+            "catchUpSnapshot.anchorIntervalMinutes must be in [1, 60]");
+      }
+      if (exitGapSeconds < 10 || exitGapSeconds > 3600) {
+        throw new IllegalArgumentException(
+            "catchUpSnapshot.exitGapSeconds must be in [10, 3600]");
+      }
+      if (reenterGapMinutes < 1 || reenterGapMinutes > 120) {
+        throw new IllegalArgumentException(
+            "catchUpSnapshot.reenterGapMinutes must be in [1, 120]");
+      }
+      if (reenterGapMinutes * 60 <= exitGapSeconds) {
+        throw new IllegalArgumentException(
+            "catchUpSnapshot.reenterGapMinutes*60 must exceed exitGapSeconds");
+      }
+      if (directory == null) {
+        throw new IllegalArgumentException("catchUpSnapshot.directory must not be null");
+      }
+    }
+  }
+
   @Getter
   @Setter
   public static class PathStateRootConfig {
-
     private boolean enabled = false;
     private String engine = "ROCKSDB";
     private String mode = "shadow";
@@ -488,11 +535,16 @@ public class StorageConfig {
     sc.snapshot.postProcess();
     sc.stateArchive.postProcess();
     sc.commonCheckpoint.postProcess();
+    sc.catchUpSnapshot.postProcess();
     sc.pathStateRoot.postProcess();
     if (sc.commonCheckpoint.enabled
         && (!sc.stateArchive.enabled || !sc.pathStateRoot.enabled)) {
       throw new IllegalArgumentException(
           "commonCheckpoint.enabled requires stateArchive.enabled and pathStateRoot.enabled");
+    }
+    if (sc.catchUpSnapshot.enabled && !sc.commonCheckpoint.enabled) {
+      throw new IllegalArgumentException(
+          "catchUpSnapshot.enabled requires commonCheckpoint.enabled");
     }
     if (sc.stateArchive.hotStore.enabled && !sc.commonCheckpoint.enabled) {
       throw new IllegalArgumentException(

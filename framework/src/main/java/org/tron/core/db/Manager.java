@@ -159,6 +159,7 @@ import org.tron.core.db2.core.ChainbaseCheckpointMaterializer;
 import org.tron.core.db2.core.SnapshotManager;
 import org.tron.core.db2.core.metrics.ExecutionAttribution;
 import org.tron.core.db2.core.p66.P66LaneStartup;
+import org.tron.core.db2.snapshot.CatchUpSnapshotAnchor;
 import org.tron.core.db2.stateroot.PathStateCheckpointMaterializer;
 import org.tron.core.db2.stateroot.PathStateLayerLimits;
 import org.tron.core.db2.stateroot.PathStatePhysicalOverlayHead;
@@ -341,6 +342,8 @@ public class Manager {
   private long lastUsedSolidityNum = -1;
   @Getter
   private int maxFlushCount;
+  private CatchUpSnapshotAnchor catchUpSnapshotAnchor;
+  private CatchUpModeTracker catchUpModeTracker;
 
   @Getter
   private final ThreadLocal<Histogram.Timer> blockedTimer = new ThreadLocal<>();
@@ -599,6 +602,17 @@ public class Manager {
 
   @PostConstruct
   public void init() {
+    catchUpSnapshotAnchor = CatchUpSnapshotAnchor.fromCommonParameter();
+    if (catchUpSnapshotAnchor.isEnabled()) {
+      long restoredHeight = catchUpSnapshotAnchor.restoreIfUnclean();
+      if (restoredHeight >= 0) {
+        logger.warn("Catch-up snapshot anchor restored output directory to height {}",
+            restoredHeight);
+      }
+      catchUpSnapshotAnchor.markRunning();
+      catchUpModeTracker = new CatchUpModeTracker(catchUpSnapshotAnchor.getExitGapMs(),
+          catchUpSnapshotAnchor.getReenterGapMs());
+    }
     org.tron.core.config.archive.ArchiveRocksDbPolicy.validate(Args.getInstance().getStorage());
     ChainBaseManager.init(chainBaseManager);
     Message.setDynamicPropertiesStore(this.getDynamicPropertiesStore());
@@ -2091,8 +2105,9 @@ public class Manager {
         elapsedMillis(processedNanos, storedNanos),
         elapsedMillis(storedNanos, forkUpdatedNanos),
         elapsedMillis(startedNanos, forkUpdatedNanos));
-    if (System.currentTimeMillis() - block.getTimeStamp() >= 60_000) {
-      revokingStore.setMaxFlushCount(maxFlushCount);
+    long catchUpGapMs = System.currentTimeMillis() - block.getTimeStamp();
+    if (isCatchUpActive(catchUpGapMs)) {
+      revokingStore.setMaxFlushCount(catchUpFlushCount());
       if (Args.getInstance().getShutdownBlockTime() != null
           && Args.getInstance().getShutdownBlockTime().getNextValidTimeAfter(
             new Date(block.getTimeStamp() - maxFlushCount * 1000 * 3L))
@@ -2103,8 +2118,61 @@ public class Manager {
           <= maxFlushCount) {
         revokingStore.setMaxFlushCount(SnapshotManager.DEFAULT_MIN_FLUSH_COUNT);
       }
+      // Time-based anchor snapshot, decoupled from the (count-capped) checkpoint cadence.
+      if (catchUpSnapshotAnchor != null) {
+        catchUpSnapshotAnchor.maybeAnchor(block.getNum());
+      }
     } else {
       revokingStore.setMaxFlushCount(SnapshotManager.DEFAULT_MIN_FLUSH_COUNT);
+    }
+  }
+
+  /**
+   * Catch-up mode with hysteresis: enter only when the gap exceeds the re-enter threshold and
+   * leave only when it drops below the exit threshold, so boundary jitter cannot flap the mode
+   * (and the flush cadence) back and forth. With the feature disabled this falls back to the
+   * legacy single 60s threshold.
+   */
+  private boolean isCatchUpActive(long gapMs) {
+    if (catchUpModeTracker != null) {
+      boolean wasActive = catchUpModeTracker.isActive();
+      boolean active = catchUpModeTracker.update(gapMs);
+      if (active != wasActive) {
+        logger.info("Catch-up snapshot mode {}: gapMs={}", active ? "entered" : "exited", gapMs);
+      }
+      return active;
+    }
+    return gapMs >= 60_000;
+  }
+
+  /** Hysteresis state machine for catch-up mode; isolated for unit testing. */
+  static final class CatchUpModeTracker {
+
+    private final long exitGapMs;
+    private final long reenterGapMs;
+    private boolean active;
+
+    CatchUpModeTracker(long exitGapMs, long reenterGapMs) {
+      this.exitGapMs = exitGapMs;
+      this.reenterGapMs = reenterGapMs;
+    }
+
+    /**
+     * Feeds one observed head gap; returns the current mode. Enters only at or past the
+     * re-enter threshold, exits only at or below the exit threshold; anything in between
+     * keeps the current mode.
+     */
+    boolean update(long gapMs) {
+      if (!active && gapMs >= reenterGapMs) {
+        active = true;
+      } else if (active && gapMs <= exitGapMs) {
+        active = false;
+      }
+      return active;
+    }
+
+    boolean isActive() {
+      return active;
     }
   }
 
@@ -3871,6 +3939,18 @@ public class Manager {
     chainBaseManager.shutdown();
     revokingStore.shutdown();
     session.reset();
+    if (catchUpSnapshotAnchor != null) {
+      catchUpSnapshotAnchor.markCleanShutdown();
+      catchUpSnapshotAnchor = null;
+      catchUpModeTracker = null;
+    }
+  }
+
+  private int catchUpFlushCount() {
+    if (catchUpSnapshotAnchor != null && catchUpSnapshotAnchor.isEnabled()) {
+      return catchUpSnapshotAnchor.getAnchorBlocks();
+    }
+    return maxFlushCount;
   }
 
   private void closeStateArchive() {
