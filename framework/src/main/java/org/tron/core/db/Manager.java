@@ -2107,19 +2107,26 @@ public class Manager {
         elapsedMillis(startedNanos, forkUpdatedNanos));
     long catchUpGapMs = System.currentTimeMillis() - block.getTimeStamp();
     if (isCatchUpActive(catchUpGapMs)) {
-      // Catch-up single-phase commit replaces the periodic common checkpoint entirely:
-      // per-block session merge + per-database WAL barriers, timer-driven filesystem
-      // anchors as the only crash recovery point (design v3).
-      revokingStore.setCatchUpSolidify(true);
+      if (catchUpSnapshotAnchor != null && catchUpSnapshotAnchor.isEnabled()) {
+        // Feature on: catch-up single-phase commit replaces the periodic common checkpoint
+        // entirely — per-block session merge + per-database WAL barriers, with timer-driven
+        // filesystem anchors as the only crash recovery point (design v3).
+        revokingStore.setCatchUpSolidify(true);
+      } else {
+        // Feature off: byte-identical to the pre-feature baseline (count cadence).
+        revokingStore.setMaxFlushCount(maxFlushCount);
+      }
       if (Args.getInstance().getShutdownBlockTime() != null
           && Args.getInstance().getShutdownBlockTime().getNextValidTimeAfter(
             new Date(block.getTimeStamp() - maxFlushCount * 1000 * 3L))
           .compareTo(new Date(block.getTimeStamp())) <= 0) {
         revokingStore.setCatchUpSolidify(false);
+        revokingStore.setMaxFlushCount(SnapshotManager.DEFAULT_MIN_FLUSH_COUNT);
       }
       if (latestSolidityNumShutDown > 0 && latestSolidityNumShutDown - block.getNum()
           <= maxFlushCount) {
         revokingStore.setCatchUpSolidify(false);
+        revokingStore.setMaxFlushCount(SnapshotManager.DEFAULT_MIN_FLUSH_COUNT);
       }
       if (catchUpSnapshotAnchor != null) {
         catchUpSnapshotAnchor.maybeAnchor(block.getNum());
