@@ -2107,22 +2107,27 @@ public class Manager {
         elapsedMillis(startedNanos, forkUpdatedNanos));
     long catchUpGapMs = System.currentTimeMillis() - block.getTimeStamp();
     if (isCatchUpActive(catchUpGapMs)) {
-      revokingStore.setMaxFlushCount(catchUpFlushCount());
+      // Catch-up single-phase commit replaces the periodic common checkpoint entirely:
+      // per-block session merge + per-database WAL barriers, timer-driven filesystem
+      // anchors as the only crash recovery point (design v3).
+      revokingStore.setCatchUpSolidify(true);
       if (Args.getInstance().getShutdownBlockTime() != null
           && Args.getInstance().getShutdownBlockTime().getNextValidTimeAfter(
             new Date(block.getTimeStamp() - maxFlushCount * 1000 * 3L))
           .compareTo(new Date(block.getTimeStamp())) <= 0) {
-        revokingStore.setMaxFlushCount(SnapshotManager.DEFAULT_MIN_FLUSH_COUNT);
+        revokingStore.setCatchUpSolidify(false);
       }
       if (latestSolidityNumShutDown > 0 && latestSolidityNumShutDown - block.getNum()
           <= maxFlushCount) {
-        revokingStore.setMaxFlushCount(SnapshotManager.DEFAULT_MIN_FLUSH_COUNT);
+        revokingStore.setCatchUpSolidify(false);
       }
-      // Time-based anchor snapshot, decoupled from the (count-capped) checkpoint cadence.
       if (catchUpSnapshotAnchor != null) {
         catchUpSnapshotAnchor.maybeAnchor(block.getNum());
       }
     } else {
+      // Transition gate: leaving catch-up publishes one final checkpoint over the solidified
+      // remainder; afterwards the steady two-phase cadence resumes.
+      revokingStore.setCatchUpSolidify(false);
       revokingStore.setMaxFlushCount(SnapshotManager.DEFAULT_MIN_FLUSH_COUNT);
     }
   }
@@ -3944,13 +3949,6 @@ public class Manager {
       catchUpSnapshotAnchor = null;
       catchUpModeTracker = null;
     }
-  }
-
-  private int catchUpFlushCount() {
-    if (catchUpSnapshotAnchor != null && catchUpSnapshotAnchor.isEnabled()) {
-      return catchUpSnapshotAnchor.getAnchorBlocks();
-    }
-    return maxFlushCount;
   }
 
   private void closeStateArchive() {

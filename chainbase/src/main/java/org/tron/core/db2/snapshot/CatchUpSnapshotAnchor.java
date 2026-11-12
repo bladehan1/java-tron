@@ -24,13 +24,13 @@ import org.tron.core.config.args.Storage;
 /**
  * Catch-up anchor snapshots (test branch {@code feature/state_archive_test2}).
  *
- * <p>While the node is catching up, the common checkpoint cadence stretches to
- * {@code anchorBlocks} (a memory-safety cap only) and this component takes one filesystem
- * anchor of the whole output directory on a timer: every {@code anchorIntervalMinutes} it
- * copies the tree — reflink/clonefile where the filesystem supports it, otherwise hardlink
- * for immutable files (RocksDB SSTs) plus plain copy for everything else. An unclean restart
- * restores the output directory from the anchor and re-syncs the gap; a clean restart keeps
- * the newer live state.
+ * <p>While the node is catching up, the periodic common checkpoint is replaced by per-block
+ * single-phase solidification (session merge plus per-database WAL barriers, driven by
+ * SnapshotManager's catch-up mode), and this component takes one filesystem anchor of the
+ * whole output directory on a timer: every {@code anchorIntervalMinutes} it copies the tree —
+ * reflink/clonefile where the filesystem supports it, otherwise hardlink for immutable files
+ * (RocksDB SSTs) plus plain copy for everything else. An unclean restart restores the output
+ * directory from the anchor and re-syncs the gap; a clean restart keeps the newer live state.
  *
  * <p>The component is stateless: the anchor height/time and the RUNNING marker live only in
  * files, so restarts re-read them; in-memory caches are hints only.
@@ -57,7 +57,6 @@ public final class CatchUpSnapshotAnchor {
   }
 
   private final boolean enabled;
-  private final int anchorBlocks;
   private final long anchorIntervalMs;
   private final long exitGapMs;
   private final long reenterGapMs;
@@ -67,11 +66,10 @@ public final class CatchUpSnapshotAnchor {
 
   private volatile long lastAnchorUtcMs;
 
-  private CatchUpSnapshotAnchor(boolean enabled, int anchorBlocks, int anchorIntervalMinutes,
+  private CatchUpSnapshotAnchor(boolean enabled, int anchorIntervalMinutes,
       long exitGapSeconds, long reenterGapMinutes, String directory, Path outputDirectory,
       CopyMode copyMode) {
     this.enabled = enabled;
-    this.anchorBlocks = anchorBlocks;
     this.anchorIntervalMs = anchorIntervalMinutes * 60_000L;
     this.exitGapMs = exitGapSeconds * 1_000L;
     this.reenterGapMs = reenterGapMinutes * 60_000L;
@@ -98,7 +96,7 @@ public final class CatchUpSnapshotAnchor {
       }
       Storage storage = parameter.getStorage();
       return new CatchUpSnapshotAnchor(storage.isCatchUpSnapshotEnabled(),
-          storage.getCatchUpSnapshotAnchorBlocks(), storage.getCatchUpSnapshotAnchorIntervalMinutes(),
+          storage.getCatchUpSnapshotAnchorIntervalMinutes(),
           storage.getCatchUpSnapshotExitGapSeconds(), storage.getCatchUpSnapshotReenterGapMinutes(),
           storage.getCatchUpSnapshotDirectory(), Paths.get(parameter.getOutputDirectory()),
           CopyMode.REFLINK);
@@ -109,29 +107,25 @@ public final class CatchUpSnapshotAnchor {
   }
 
   /** Visible for tests: build an anchor against an explicit output directory. */
-  public static CatchUpSnapshotAnchor createForTest(boolean enabled, int anchorBlocks,
+  public static CatchUpSnapshotAnchor createForTest(boolean enabled,
       int anchorIntervalMinutes, String directory, Path outputDirectory) {
-    return createForTest(enabled, anchorBlocks, anchorIntervalMinutes, directory, outputDirectory,
+    return createForTest(enabled, anchorIntervalMinutes, directory, outputDirectory,
         CopyMode.HYBRID_LINK);
   }
 
-  static CatchUpSnapshotAnchor createForTest(boolean enabled, int anchorBlocks,
+  static CatchUpSnapshotAnchor createForTest(boolean enabled,
       int anchorIntervalMinutes, String directory, Path outputDirectory, CopyMode copyMode) {
-    return new CatchUpSnapshotAnchor(enabled, anchorBlocks, anchorIntervalMinutes,
+    return new CatchUpSnapshotAnchor(enabled, anchorIntervalMinutes,
         60, 10, directory, outputDirectory, copyMode);
   }
 
   private static CatchUpSnapshotAnchor disabled() {
-    return new CatchUpSnapshotAnchor(false, 0, 0, 60, 10, "", Paths.get("."),
+    return new CatchUpSnapshotAnchor(false, 0, 60, 10, "", Paths.get("."),
         CopyMode.HYBRID_LINK);
   }
 
   public boolean isEnabled() {
     return enabled;
-  }
-
-  public int getAnchorBlocks() {
-    return anchorBlocks;
   }
 
   public long getAnchorIntervalMs() {

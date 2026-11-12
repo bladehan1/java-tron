@@ -502,7 +502,6 @@ public class StorageConfigTest {
   public void testCatchUpSnapshotDefaultsAndValidation() {
     StorageConfig defaults = StorageConfig.fromConfig(withRef());
     assertFalse(defaults.getCatchUpSnapshot().isEnabled());
-    assertEquals(200, defaults.getCatchUpSnapshot().getAnchorBlocks());
     assertEquals(5, defaults.getCatchUpSnapshot().getAnchorIntervalMinutes());
     assertEquals(60L, defaults.getCatchUpSnapshot().getExitGapSeconds());
     assertEquals(10L, defaults.getCatchUpSnapshot().getReenterGapMinutes());

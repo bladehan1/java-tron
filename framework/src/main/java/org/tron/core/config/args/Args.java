@@ -239,7 +239,6 @@ public class Args extends CommonParameter {
     PARAMETER.storage.setCommonCheckpointPerBatchSync(
         sc.getCommonCheckpoint().isPerBatchSync());
     PARAMETER.storage.setCatchUpSnapshotEnabled(sc.getCatchUpSnapshot().isEnabled());
-    PARAMETER.storage.setCatchUpSnapshotAnchorBlocks(sc.getCatchUpSnapshot().getAnchorBlocks());
     PARAMETER.storage.setCatchUpSnapshotAnchorIntervalMinutes(
         sc.getCatchUpSnapshot().getAnchorIntervalMinutes());
     PARAMETER.storage.setCatchUpSnapshotExitGapSeconds(

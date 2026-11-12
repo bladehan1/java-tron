@@ -62,6 +62,7 @@ import org.tron.core.db2.archive.runtime.ArchiveRuntimeAttachment;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointFile;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointRuntimeAttachment;
 import org.tron.core.db2.common.DB;
+import org.tron.core.db2.common.RocksDB;
 import org.tron.core.db2.common.IRevokingDB;
 import org.tron.core.db2.common.Key;
 import org.tron.core.db2.common.Value;
@@ -277,6 +278,15 @@ public class SnapshotManager implements RevokingDatabase {
 
   @Setter
   private volatile int maxFlushCount = DEFAULT_MIN_FLUSH_COUNT;
+
+  /**
+   * Catch-up single-phase commit: merge finalized session layers and force per-database WALs
+   * every block while on, skipping the common checkpoint (no window payload/publication/rebase).
+   * The periodic catch-up anchor is the only crash recovery point in this mode; turning it off
+   * publishes one final checkpoint over the still-unmerged layers so the published target
+   * reaches head before the steady two-phase cadence resumes.
+   */
+  private volatile boolean catchUpSolidify;
 
   private int checkpointVersion = 1;   // default v1
 
@@ -570,8 +580,9 @@ public class SnapshotManager implements RevokingDatabase {
     }
 
     if (size > maxSize.get() && !hitDown && maintenance == null) {
-      flushCount = flushCount + (size - maxSize.get());
-      updateSolidity(size - maxSize.get());
+      int finalized = size - maxSize.get();
+      flushCount = flushCount + finalized;
+      updateSolidity(finalized);
       size = maxSize.get();
       // Only this prefix is finalized. Spread history append before the batch checkpoint;
       // current commit(meta) remains revocable and must never write finalized history.
@@ -583,7 +594,18 @@ public class SnapshotManager implements RevokingDatabase {
           throw new TronError("Finalized Archive append failed", failure, TronError.ErrCode.DB_FLUSH);
         }
       }
-      flush();
+      if (catchUpSolidify) {
+        // Catch-up single-phase commit: merge and unlink the finalized layers and force each
+        // database WAL per block, but skip the common checkpoint entirely (no window payload,
+        // no publication, no rebase). The periodic filesystem anchor is the only recovery
+        // point while this mode is on; the transition/close paths publish one final
+        // checkpoint before the steady two-phase cadence resumes.
+        refresh(finalized);
+        flushDbBarriers();
+        flushCount = 0;
+      } else {
+        flush();
+      }
     }
 
     advance();
@@ -1258,6 +1280,47 @@ public class SnapshotManager implements RevokingDatabase {
     this.maxSize.set(maxSize);
   }
 
+  /**
+   * Turns catch-up single-phase commit on or off. Turning it off is the transition gate: one
+   * final checkpoint is published over the layers solidify merged logically but never
+   * checkpointed, so the published target reaches head before the steady cadence resumes.
+   */
+  public synchronized void setCatchUpSolidify(boolean solidify) {
+    if (this.catchUpSolidify == solidify) {
+      return;
+    }
+    this.catchUpSolidify = solidify;
+    if (!solidify && commonCheckpointRuntimeAttachment != null && !unChecked) {
+      flushCount = Math.max(flushCount, size);
+      flushPending();
+    }
+  }
+
+  public boolean isCatchUpSolidify() {
+    return catchUpSolidify;
+  }
+
+  /** Forces every database WAL (split-tail barrier primitive) on the flush thread pool. */
+  private void flushDbBarriers() {
+    List<ListenableFuture<?>> futures = new ArrayList<>(dbs.size());
+    for (Chainbase db : dbs) {
+      futures.add(flushServices.get(db.getDbName()).submit(() -> {
+        DB<byte[], byte[]> source = ((SnapshotRoot) db.getHead().getRoot()).db;
+        if (source instanceof RocksDB) {
+          ((RocksDB) source).flushBarrier();
+        }
+      }));
+    }
+    try {
+      Futures.allAsList(futures).get();
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      throw new TronDBException(e);
+    } catch (ExecutionException e) {
+      throw new TronDBException(e);
+    }
+  }
+
   public synchronized void disable() {
     disabled = true;
   }
@@ -1377,6 +1440,13 @@ public class SnapshotManager implements RevokingDatabase {
 
   @Override
   public void flushPending() {
+    if (catchUpSolidify) {
+      // Solidify merges and unlinks layers without ever checkpointing them; a clean close must
+      // still publish one final checkpoint over the unmerged remainder so restart recovery
+      // starts from a published target at head instead of the pre-catch-up baseline.
+      flushCount = Math.max(flushCount, size);
+      catchUpSolidify = false;
+    }
     flush(true);
   }
 

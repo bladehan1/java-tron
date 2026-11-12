@@ -263,17 +263,14 @@ public class StorageConfig {
     }
   }
 
-  /** Catch-up-only anchor snapshot mode: no count-cadence checkpoints beyond a memory-safety
-   * cap, plus one filesystem snapshot of the whole output directory on a timer as the crash
-   * anchor. */
+  /** Catch-up-only anchor snapshot mode: the periodic common checkpoint is replaced by
+   * per-block single-phase solidification plus one filesystem snapshot of the whole output
+   * directory on a timer as the crash anchor. */
   @Getter
   @Setter
   public static class CatchUpSnapshotConfig {
 
     private boolean enabled = false;
-    // Memory-safety cap: blocks without a checkpoint while catching up, bounding the retained
-    // in-memory diff; the normal anchor driver is the timer below, not this count.
-    private int anchorBlocks = 200;
     // Anchor snapshot cadence in minutes while catching up.
     private int anchorIntervalMinutes = 5;
     // Hysteresis: leave catch-up mode once the head is within this many seconds of wall clock...
@@ -284,10 +281,6 @@ public class StorageConfig {
     private String directory = "";
 
     void postProcess() {
-      if (anchorBlocks < 10 || anchorBlocks > 256) {
-        throw new IllegalArgumentException(
-            "catchUpSnapshot.anchorBlocks must be in [10, 256]");
-      }
       if (anchorIntervalMinutes < 1 || anchorIntervalMinutes > 60) {
         throw new IllegalArgumentException(
             "catchUpSnapshot.anchorIntervalMinutes must be in [1, 60]");

@@ -142,10 +142,6 @@ public class Storage {
 
   @Getter
   @Setter
-  private int catchUpSnapshotAnchorBlocks = 200;
-
-  @Getter
-  @Setter
   private int catchUpSnapshotAnchorIntervalMinutes = 5;
 
   @Getter

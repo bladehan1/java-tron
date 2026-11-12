@@ -39,6 +39,10 @@ public interface RevokingDatabase {
 
   void setMaxFlushCount(int maxFlushCount);
 
+  void setCatchUpSolidify(boolean solidify);
+
+  boolean isCatchUpSolidify();
+
   void flushPending();
 
   void shutdown();

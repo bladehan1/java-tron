@@ -28,7 +28,7 @@ public class CatchUpSnapshotAnchorTest {
 
   private CatchUpSnapshotAnchor newAnchor() {
     // Interval 0 keeps the timer permanently due so tests need not wait.
-    return CatchUpSnapshotAnchor.createForTest(true, 10, 0, "", outputDirectory);
+    return CatchUpSnapshotAnchor.createForTest(true, 0, "", outputDirectory);
   }
 
   private Path anchorParent() {
@@ -60,7 +60,7 @@ public class CatchUpSnapshotAnchorTest {
   @Test
   public void disabledAnchorDoesNothing() throws IOException {
     CatchUpSnapshotAnchor anchor =
-        CatchUpSnapshotAnchor.createForTest(false, 10, 5, "", outputDirectory);
+        CatchUpSnapshotAnchor.createForTest(false, 5, "", outputDirectory);
     writeOutput("a.txt", "live");
     anchor.maybeAnchor(100);
     Assert.assertFalse(Files.exists(anchorParent()));
@@ -82,14 +82,14 @@ public class CatchUpSnapshotAnchorTest {
     // Fresh instance, timer not yet due (5-minute interval, marker just written): no re-anchor.
     writeOutput("a.txt", "v2");
     CatchUpSnapshotAnchor fresh =
-        CatchUpSnapshotAnchor.createForTest(true, 10, 5, "", outputDirectory);
+        CatchUpSnapshotAnchor.createForTest(true, 5, "", outputDirectory);
     fresh.maybeAnchor(105);
     Assert.assertEquals("v1", readAnchor("a.txt"));
 
     // Age the marker past the interval: re-anchor; tmp/old leftovers are gone.
     ageMarkerUtc();
     CatchUpSnapshotAnchor aged =
-        CatchUpSnapshotAnchor.createForTest(true, 10, 5, "", outputDirectory);
+        CatchUpSnapshotAnchor.createForTest(true, 5, "", outputDirectory);
     aged.maybeAnchor(120);
     Assert.assertEquals("v2", readAnchor("a.txt"));
     Assert.assertFalse(Files.exists(anchorParent().resolve(CatchUpSnapshotAnchor.TMP_DIR)));
@@ -101,7 +101,7 @@ public class CatchUpSnapshotAnchorTest {
     writeOutput("00001.sst", "sst-a");
     writeOutput("00061.log", "log-a");
     writeOutput("sub/00002.sst", "sst-b");
-    CatchUpSnapshotAnchor anchor = CatchUpSnapshotAnchor.createForTest(true, 10, 0, "",
+    CatchUpSnapshotAnchor anchor = CatchUpSnapshotAnchor.createForTest(true, 0, "",
         outputDirectory, CatchUpSnapshotAnchor.CopyMode.HYBRID_LINK);
     anchor.maybeAnchor(100);
 
@@ -161,7 +161,7 @@ public class CatchUpSnapshotAnchorTest {
 
   @Test(expected = IllegalArgumentException.class)
   public void anchorInsideOutputDirectoryRejected() {
-    CatchUpSnapshotAnchor.createForTest(true, 10, 5, outputDirectory.toString(),
+    CatchUpSnapshotAnchor.createForTest(true, 5, outputDirectory.toString(),
         outputDirectory);
   }
 
