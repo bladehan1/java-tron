@@ -1033,6 +1033,11 @@ public class Manager {
       snapshots.attachCommonCheckpointRuntime(attachment);
       commonCheckpointRuntime = attachment;
       stateArchiveAppendMaterializer = admittedAppendMaterializer;
+      if (admittedAppendMaterializer != null) {
+        attachment.startServingMonitor(() -> System.currentTimeMillis()
+            - chainBaseManager.getDynamicPropertiesStore().getLatestBlockHeaderTimestamp()
+            < 60_000);
+      }
       if (admittedAppendMaterializer != null
           && appendConfig.isTestOnlyForceServingHandoff()) {
         logger.warn("TEST-ONLY State Archive serving handoff forced at the recovered local "
@@ -2105,6 +2110,10 @@ public class Manager {
       }
     } else {
       revokingStore.setMaxFlushCount(SnapshotManager.DEFAULT_MIN_FLUSH_COUNT);
+      CommonCheckpointRuntimeAttachment common = commonCheckpointRuntime;
+      if (common != null) {
+        common.requestFastServingCatchUp();
+      }
     }
   }
 

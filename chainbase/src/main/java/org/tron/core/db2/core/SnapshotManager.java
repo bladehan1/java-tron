@@ -1403,6 +1403,11 @@ public class SnapshotManager implements RevokingDatabase {
           }
           try {
             commonCheckpointRuntimeAttachment.checkpointAndRebase(flushCount);
+          } catch (org.tron.core.db2.checkpoint.common.CommonCheckpointServingException failure) {
+            // Rebase already removed this prefix. Never encode/replay it again on shutdown.
+            flushCount = 0;
+            releasePublishedMaintenance();
+            throw new TronDBException(failure.getMessage(), failure);
           } catch (IOException | RuntimeException failure) {
             throw new TronDBException("Common checkpoint publication failed", failure);
           }

@@ -62,6 +62,11 @@ public final class ServingLease implements AutoCloseable {
     return descriptor.headHash();
   }
 
+  ArchiveIndexStorage.Reader snapshotForCommit() {
+    ensureOpen();
+    return snapshot;
+  }
+
   long handleSeq() {
     return handleSeq;
   }

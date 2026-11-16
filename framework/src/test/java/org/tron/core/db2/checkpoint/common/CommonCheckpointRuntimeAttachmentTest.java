@@ -119,6 +119,22 @@ public class CommonCheckpointRuntimeAttachmentTest {
     assertEquals(CommonCheckpointRuntimeAttachment.State.CLOSED, attachment.getState());
   }
 
+  @Test(timeout = 10_000)
+  public void servingMonitorChecksStartupWithoutAnotherBlockAndStopsOnClose() throws Exception {
+    Path root = temporaryFolder.getRoot().toPath().resolve("serving-monitor");
+    CommonCheckpointRuntime runtime = runtime(root, mock(Chainbase.class));
+    CommonCheckpointRuntimeAttachment attachment = CommonCheckpointRuntimeAttachment.open(true,
+        () -> runtime);
+    java.util.concurrent.CountDownLatch checked = new java.util.concurrent.CountDownLatch(1);
+    attachment.startServingMonitor(() -> {
+      checked.countDown();
+      return true;
+    });
+    assertTrue(checked.await(5, java.util.concurrent.TimeUnit.SECONDS));
+    attachment.close();
+    assertEquals(CommonCheckpointRuntimeAttachment.State.CLOSED, attachment.getState());
+  }
+
   private static CommonCheckpointRuntime runtime(Path root, Chainbase database) {
     return runtime(root, database, materializer(Authority.CHAINBASE),
         materializer(Authority.PATH_STATE), materializer(Authority.STATE_ARCHIVE));

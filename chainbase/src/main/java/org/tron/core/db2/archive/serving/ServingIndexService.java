@@ -11,6 +11,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
@@ -46,9 +47,9 @@ import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
  * protocol.
  *
  * <ul>
- *   <li>Decoupled (D5, §3.3.1): Common/History only call {@link #onCommonPublished}, which is an
- *       O(1) lock-free mailbox update plus unpark and never throws. Nothing in Common or History
- *       reads serving state. Serving failures only degrade serving (S-INV-2).</li>
+ *   <li>Common publication notifications remain O(1). M3 may request fast catch-up and, after
+ *       a zero-backlog handoff, await an exact durable index receipt outside the owner gate.
+ *       Receipt failure blocks further admission but never undoes committed History.</li>
  *   <li>Merged watermark (S2): the work range is always {@code (I, W]} of the published History
  *       boundary; notifications only wake the thread.</li>
  *   <li>Budgets choose boundaries, never success (S3/S4, S-INV-11): normal batches are halved at
@@ -87,6 +88,127 @@ public final class ServingIndexService implements AutoCloseable {
   private volatile ServingView view;
   private volatile boolean closing;
   private volatile boolean started;
+  private volatile CommitMode commitMode = CommitMode.BULK_ASYNC;
+  private final AtomicBoolean fastCatchUpRequested = new AtomicBoolean();
+  private volatile boolean commitWaitCancelled;
+  private volatile CommonCheckpointTarget indexedCommit;
+
+  public enum CommitMode {
+    BULK_ASYNC, FAST_CATCH_UP, HANDOFF_DRAINING, SYNC_INCREMENTAL, FAILED, CLOSED
+  }
+
+  public CommitMode getCommitMode() {
+    return commitMode == CommitMode.BULK_ASYNC && fastCatchUpRequested.get()
+        ? CommitMode.FAST_CATCH_UP : commitMode;
+  }
+
+  public CommonCheckpointTarget getIndexedCommit() {
+    return indexedCommit;
+  }
+
+  /** Sticky request: waking the worker alone would re-enter its tail-delay gate. */
+  public void requestFastCatchUp() {
+    if (!closing && fastCatchUpRequested.compareAndSet(false, true)) {
+      logger.info("Serving fast catch-up requested: {}", view);
+    }
+    LockSupport.unpark(thread);
+  }
+
+  /** Cancel before acquiring any Common/attachment monitor needed by a waiting caller. */
+  public void cancelCommitWait() {
+    synchronized (viewMonitor) {
+      commitWaitCancelled = true;
+      viewMonitor.notifyAll();
+    }
+    LockSupport.unpark(thread);
+  }
+
+  /**
+   * Called with Common target advancement serialized, but without the Common owner write lock.
+   * Initial handoff is deliberately zero-backlog; a large historical catch-up never blocks import.
+   * Once handed off, every new target must have an exact durable index receipt before returning.
+   */
+  public void completePublishedTarget(CommonCheckpointTarget target) throws IOException {
+    Objects.requireNonNull(target, "target");
+    if (getCommitMode() == CommitMode.BULK_ASYNC) {
+      return;
+    }
+    long startedNanos = System.nanoTime();
+    long deadline = startedNanos + TimeUnit.MILLISECONDS.toNanos(config.getCommitWaitMillis());
+    synchronized (viewMonitor) {
+      try {
+        if (commitMode == CommitMode.BULK_ASYNC && fastCatchUpRequested.get()) {
+          commitMode = CommitMode.FAST_CATCH_UP;
+        }
+        if (commitWaitCancelled || closing || commitMode == CommitMode.FAILED) {
+          throw new IOException("Serving commit completion is unavailable: " + commitMode);
+        }
+        if (commitMode == CommitMode.FAST_CATCH_UP) {
+          ServingView current = view;
+          if (current.getState() != ServingState.LIVE || current.isRebuildInProgress()
+              || current.getIndexedThrough() != target.getLastBlock().getBlockNumber()) {
+            return;
+          }
+          commitMode = CommitMode.HANDOFF_DRAINING;
+        }
+        while (true) {
+          if (commitWaitCancelled || closing || view.getState() == ServingState.CLOSED) {
+            throw new IOException("Serving commit wait cancelled after Common publication");
+          }
+          if (!target.equals(source.committed().getTarget())) {
+            throw new IOException("Serving source differs from the frozen Common target");
+          }
+          if (view.getState() == ServingState.DEGRADED || view.isRebuildInProgress()) {
+            throw new IOException("Serving failed after Common publication: " + view);
+          }
+          long expected = target.getLastBlock().getBlockNumber();
+          if (view.getIndexedThrough() > expected) {
+            throw new IOException("Serving index is ahead of the frozen Common target");
+          }
+          if (view.getState() == ServingState.LIVE && view.getIndexedThrough() == expected) {
+            // Pin the durable descriptor and coverage, not just a sampled height.
+            try (ServingLease lease = acquireLease()) {
+              PersistentServingKeyIndexGeneration.Descriptor descriptor =
+                  ServingIndexStore.readDescriptor(lease.snapshotForCommit());
+              PersistentServingKeyIndexGeneration.validateExactStoreCoverage(
+                  lease.snapshotForCommit(), descriptor);
+              if (lease.indexedFrom() != source.committed().getHistoryStartBlock() - 1
+                  || lease.indexedThrough() != expected
+                  || !Arrays.equals(lease.headHash(), target.getLastBlock().getBlockHash())) {
+                throw new IOException("Serving descriptor differs from the Common boundary");
+              }
+            }
+            indexedCommit = target;
+            if (commitMode == CommitMode.HANDOFF_DRAINING) {
+              logger.info("Serving commit mode SYNC_INCREMENTAL: head={}", expected);
+            }
+            commitMode = CommitMode.SYNC_INCREMENTAL;
+            logger.debug("Serving synchronous commit complete: head={}, waitUs={}", expected,
+                (System.nanoTime() - startedNanos) / 1_000L);
+            return;
+          }
+          long remaining = deadline - System.nanoTime();
+          if (remaining <= 0) {
+            throw new IOException("Serving timed out after Common publication at " + expected);
+          }
+          LockSupport.unpark(thread);
+          try {
+            TimeUnit.NANOSECONDS.timedWait(viewMonitor, remaining);
+          } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new IOException("Serving commit wait interrupted after Common publication",
+                interrupted);
+          }
+        }
+      } catch (IOException | RuntimeException failure) {
+        if (!closing && commitMode != CommitMode.CLOSED) {
+          commitMode = CommitMode.FAILED;
+        }
+        throw failure;
+      }
+    }
+  }
+
   /** Operator-thread request, consumed by the build thread. */
   private volatile boolean rebuildRequested;
   /** ch09 OPS-D6: true while the disk budget is at RED or above (ch04 §5.1 DISK_PRESSURE). */
@@ -149,7 +271,7 @@ public final class ServingIndexService implements AutoCloseable {
   }
 
   /**
-   * The only Common → Serving call (§3.3.1 rule 2): keeps the higher watermark and wakes the
+   * The non-blocking publication notification: keeps the higher watermark and wakes the
    * build thread. No lock, no I/O, never throws; it runs inside the Common owner write lock.
    */
   public void onCommonPublished(CommonCheckpointTarget target) {
@@ -450,7 +572,8 @@ public final class ServingIndexService implements AutoCloseable {
     if (state == ServingState.LIVE && w - i > config.getLiveMaxLagBlocks()) {
       transition(ServingState.BULK_CATCH_UP, w);
     }
-    if ((state == ServingState.BULK_CATCH_UP || state == ServingState.REBUILDING)
+    if (!fastCatchUpRequested.get()
+        && (state == ServingState.BULK_CATCH_UP || state == ServingState.REBUILDING)
         && config.getTailDelayMillis() > 0 && w - i < config.getBulkMinBlocks()) {
       if (pendingSinceMillis == 0) {
         pendingSinceMillis = now;
@@ -904,6 +1027,8 @@ public final class ServingIndexService implements AutoCloseable {
    */
   @Override
   public void close() {
+    cancelCommitWait();
+    commitMode = CommitMode.CLOSED;
     synchronized (viewMonitor) {
       closing = true;
       ServingView current = view;
@@ -981,6 +1106,19 @@ public final class ServingIndexService implements AutoCloseable {
     private long closeTimeoutMillis = 30_000;
     private long leaseDrainTimeoutMillis = 15_000;
     private long pollMillis = 1000;
+    // Bounded fail-closed wait; not a promise that arbitrary blocks finish within this budget.
+    private long commitWaitMillis = 60_000;
+
+    public long getCommitWaitMillis() {
+      return commitWaitMillis;
+    }
+
+    public Config setCommitWaitMillis(long value) {
+      requirePositive(value, "commitWaitMillis");
+      commitWaitMillis = value;
+      return this;
+    }
+
 
     public static Config defaults() {
       return new Config();
