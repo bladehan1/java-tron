@@ -419,6 +419,21 @@ public final class StateArchiveAppendCheckpointMaterializerV5
   }
 
   @Override
+  public void requestFastServingCatchUp() {
+    servingService.requestFastCatchUp();
+  }
+
+  @Override
+  public void completePublishedServing(CommonCheckpointTarget target) throws IOException {
+    servingService.completePublishedTarget(target);
+  }
+
+  @Override
+  public void cancelServingCommitWait() {
+    servingService.cancelCommitWait();
+  }
+
+  @Override
   public void afterCommit(CommonCheckpointTarget target) {
     servingService.start();
     servingService.onCommonPublished(target);

@@ -16,5 +16,15 @@ public interface StateArchiveAppendFileRuntime extends StateArchiveCheckpointPla
 
   void completeServingInitialSync(CommonCheckpointTarget boundary) throws IOException;
 
+  /** V5 serving handoff; other formats keep their existing lifecycle. */
+  default void requestFastServingCatchUp() {
+  }
+
+  default void completePublishedServing(CommonCheckpointTarget target) throws IOException {
+  }
+
+  default void cancelServingCommitWait() {
+  }
+
   CheckpointPointReader pinHistory(CommonCheckpointTarget target) throws IOException;
 }

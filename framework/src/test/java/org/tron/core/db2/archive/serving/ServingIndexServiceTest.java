@@ -70,6 +70,184 @@ public class ServingIndexServiceTest {
     }
   }
 
+  @Test(timeout = 60_000)
+  public void fastCatchUpBypassesTailDelayWithoutAnotherPublication() throws Exception {
+    History history = history(1);
+    CommonCheckpointTarget target = history.publishWithoutNotify(1, 1);
+    ServingIndexService service = service(history,
+        config().setTailDelayMillis(60_000).setBulkMinBlocks(1000),
+        ServingIndexService.Hooks.NONE);
+    long deadline = System.nanoTime() + WAIT.toNanos();
+    while (service.status().getState() == ServingState.OPENING && System.nanoTime() < deadline) {
+      Thread.sleep(5);
+    }
+    assertTrue(service.status().getState() == ServingState.BULK_CATCH_UP
+        || service.status().getState() == ServingState.REBUILDING);
+    assertEquals(0, service.status().getIndexedThrough());
+    service.requestFastCatchUp();
+    service.requestFastCatchUp();
+    assertTrue(awaitThrough(service, 1));
+    service.completePublishedTarget(target);
+    assertEquals(ServingIndexService.CommitMode.SYNC_INCREMENTAL, service.getCommitMode());
+    history.assertOracle(service);
+  }
+
+  @Test(timeout = 60_000)
+  public void synchronousTargetWaitsForDurableIndexAndHandlesMultiBlockTarget() throws Exception {
+    History history = history(1);
+    CountDownLatch building = new CountDownLatch(1);
+    CountDownLatch release = new CountDownLatch(1);
+    ServingIndexService service = service(history, config(), new ServingIndexService.Hooks() {
+      @Override
+      public void beforeBatch(long first, long last, boolean solo) throws IOException {
+        if (first > 1) {
+          building.countDown();
+          await(release);
+        }
+      }
+    });
+    CommonCheckpointTarget first = history.publishWithoutNotify(1, 1);
+    service.onCommonPublished(first);
+    assertTrue(awaitThrough(service, 1));
+    service.requestFastCatchUp();
+    service.completePublishedTarget(first);
+    CommonCheckpointTarget next = history.publishWithoutNotify(2, 3);
+    service.onCommonPublished(next);
+    assertTrue(building.await(10, TimeUnit.SECONDS));
+    ExecutorService executor = Executors.newSingleThreadExecutor();
+    try {
+      Future<?> completed = executor.submit(() -> {
+        service.completePublishedTarget(next);
+        return null;
+      });
+      assertThrows(java.util.concurrent.TimeoutException.class,
+          () -> completed.get(100, TimeUnit.MILLISECONDS));
+      assertEquals(1, service.status().getIndexedThrough());
+      release.countDown();
+      completed.get(10, TimeUnit.SECONDS);
+      assertEquals(3, service.status().getIndexedThrough());
+      assertEquals(next, service.getIndexedCommit());
+      history.assertOracle(service);
+    } finally {
+      release.countDown();
+      executor.shutdownNow();
+    }
+  }
+
+  @Test(timeout = 60_000)
+  public void failedReceiptDoesNotUndoHistoryOrSilentlyResumeAsync() throws Exception {
+    History history = history(1);
+    CountDownLatch release = new CountDownLatch(1);
+    ServingIndexService service = service(history, config().setCommitWaitMillis(50),
+        new ServingIndexService.Hooks() {
+          @Override
+          public void beforeBatch(long first, long last, boolean solo) throws IOException {
+            if (first > 1) {
+              await(release);
+            }
+          }
+        });
+    CommonCheckpointTarget first = history.publishWithoutNotify(1, 1);
+    service.onCommonPublished(first);
+    assertTrue(awaitThrough(service, 1));
+    service.requestFastCatchUp();
+    service.completePublishedTarget(first);
+    CommonCheckpointTarget next = history.publishWithoutNotify(2, 2);
+    service.onCommonPublished(next);
+    try {
+      assertThrows(IOException.class, () -> service.completePublishedTarget(next));
+      assertEquals(next, history.source.committed().getTarget());
+      assertEquals(ServingIndexService.CommitMode.FAILED, service.getCommitMode());
+      assertThrows(IOException.class, () -> service.completePublishedTarget(next));
+    } finally {
+      release.countDown();
+    }
+  }
+
+  @Test(timeout = 60_000)
+  public void cancellationWakesCommitWaitBeforeClosingWriter() throws Exception {
+    History history = history(1);
+    CountDownLatch release = new CountDownLatch(1);
+    CountDownLatch building = new CountDownLatch(1);
+    ServingIndexService service = service(history, config(), new ServingIndexService.Hooks() {
+      @Override
+      public void beforeBatch(long first, long last, boolean solo) throws IOException {
+        if (first > 1) {
+          building.countDown();
+          await(release);
+        }
+      }
+    });
+    CommonCheckpointTarget first = history.publishWithoutNotify(1, 1);
+    service.onCommonPublished(first);
+    assertTrue(awaitThrough(service, 1));
+    service.requestFastCatchUp();
+    service.completePublishedTarget(first);
+    CommonCheckpointTarget next = history.publishWithoutNotify(2, 2);
+    service.onCommonPublished(next);
+    assertTrue(building.await(10, TimeUnit.SECONDS));
+    ExecutorService executor = Executors.newSingleThreadExecutor();
+    try {
+      Future<?> completed = executor.submit(() -> {
+        assertThrows(IOException.class, () -> service.completePublishedTarget(next));
+      });
+      assertThrows(java.util.concurrent.TimeoutException.class,
+          () -> completed.get(100, TimeUnit.MILLISECONDS));
+      service.cancelCommitWait();
+      completed.get(2, TimeUnit.SECONDS);
+      assertEquals(next, history.source.committed().getTarget());
+    } finally {
+      release.countDown();
+      executor.shutdownNow();
+    }
+  }
+
+  @Test(timeout = 60_000)
+  public void synchronousSoloAndNoChangeTargetsReopenWithExactIndex() throws Exception {
+    History history = history(1);
+    ServingIndexService service = service(history,
+        config().setMaxSourceBytes(1024L * 1024).setMaxWriteMutations(64)
+            .setMaxWriteBytes(64 * 1024), ServingIndexService.Hooks.NONE);
+    CommonCheckpointTarget first = history.publishWithoutNotify(1, 1);
+    service.onCommonPublished(first);
+    assertTrue(awaitThrough(service, 1));
+    service.requestFastCatchUp();
+    service.completePublishedTarget(first);
+    history.keysPerBlock = 300;
+    history.payloadBytes = 16 * 1024;
+    CommonCheckpointTarget solo = history.publishWithoutNotify(2, 2);
+    service.onCommonPublished(solo);
+    service.completePublishedTarget(solo);
+    assertEquals(solo, service.getIndexedCommit());
+    assertTrue(service.batches(2) > 0);
+    history.keysPerBlock = 0;
+    CommonCheckpointTarget empty = history.publishWithoutNotify(3, 3);
+    service.onCommonPublished(empty);
+    service.completePublishedTarget(empty);
+    assertEquals(empty, service.getIndexedCommit());
+    service.close();
+    ServingIndexService reopened = service(history, config(), ServingIndexService.Hooks.NONE);
+    assertTrue(awaitThrough(reopened, 3));
+    assertEquals(ServingIndexService.CommitMode.BULK_ASYNC, reopened.getCommitMode());
+    reopened.requestFastCatchUp();
+    reopened.completePublishedTarget(empty);
+    assertEquals(empty, reopened.getIndexedCommit());
+  }
+
+  @Test(timeout = 60_000)
+  public void handoffRejectsSameHeightDifferentCommonIdentity() throws Exception {
+    History history = history(1);
+    CommonCheckpointTarget target = history.publishWithoutNotify(1, 1);
+    ServingIndexService service = service(history, config(), ServingIndexService.Hooks.NONE);
+    assertTrue(awaitThrough(service, 1));
+    service.requestFastCatchUp();
+    CommonCheckpointTarget wrong = CommonCheckpointTarget.restore(History.hash(999), History.hash(888),
+        target.getFirstBlock(), target.getLastBlock(), History.hash(777), History.hash(666));
+    assertThrows(IOException.class, () -> service.completePublishedTarget(wrong));
+    assertEquals(ServingIndexService.CommitMode.FAILED, service.getCommitMode());
+    assertEquals(target, history.source.committed().getTarget());
+  }
+
   /** T3 (R2-05): several Common targets published during one build merge into one range. */
   @Test(timeout = 60_000)
   public void coalescedWatermarksBuildOneContiguousRange() throws Exception {
@@ -803,8 +981,8 @@ public class ServingIndexServiceTest {
         entries.add(new BlockReverseDiff.Entry(key(key), OldValue.present(value)));
       }
       return new BlockReverseDiff(BlockSnapshotMeta.forBlock(block, hash(block),
-          hash(block - 1), block * 3000L), Collections.singletonList(
-              new BlockReverseDiff.DbGroup("code", entries)));
+          hash(block - 1), block * 3000L), entries.isEmpty() ? Collections.emptyList()
+              : Collections.singletonList(new BlockReverseDiff.DbGroup("code", entries)));
     }
 
     /** Every key's firstChangeAfter over a lease equals the published diffs. */

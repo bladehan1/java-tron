@@ -556,6 +556,44 @@ public class ChainbaseCheckpointMaterializerTest {
   }
 
   @Test
+  public void servingFailureAfterPublicationPreservesTargetAndRebasedPrefix() throws Exception {
+    java.nio.file.Path root = temporaryFolder.newFolder("serving-completion-failure").toPath();
+    java.nio.file.Path history = root.resolve("history");
+    byte[] format = hash(96);
+    byte[] baseline = StateArchiveAppendCheckpointMaterializerV5
+        .baselineHistoryDigest(1, hash(0));
+    V2Snapshots snapshots = new V2Snapshots();
+    StateArchiveAppendCheckpointMaterializerV5 archive = org.mockito.Mockito.spy(
+        new StateArchiveAppendCheckpointMaterializerV5(history, format, Engine.ROCKSDB,
+            1, baseline, 10_000, block -> snapshots.meta));
+    CommonCheckpointRuntimeOwner owner = new CommonCheckpointRuntimeOwner(
+        new CommonCheckpointRedoCoordinator(new CommonCheckpointFile(root.resolve("wal")),
+            new ChainbaseCheckpointMaterializer(root.resolve("chainbase"), format,
+                snapshots.databases), new PublishingMaterializer(Authority.PATH_STATE), archive));
+    CommonCheckpointRuntime runtime = new CommonCheckpointRuntime(owner, snapshots.databases,
+        history, format, Engine.ROCKSDB,
+        (number, hash) -> new TestLatest(snapshots.code, number, hash),
+        target -> () -> { }, null, archive, null, System::nanoTime, timing -> { });
+    runtime.recoverBeforeServing();
+    org.mockito.Mockito.doAnswer(call -> {
+      // Completion runs after owner publication and memory rebase, not inside prepare/redo.
+      assertEquals(CommonCheckpointRuntimeOwner.State.READY, owner.getState());
+      assertSame(snapshots.codeDatabase.getHead().getRoot(), snapshots.codeDatabase.getHead());
+      throw new IOException("injected serving receipt failure");
+    }).when(archive).completePublishedServing(org.mockito.ArgumentMatchers.any());
+    CommonCheckpointServingException failure = assertThrows(CommonCheckpointServingException.class,
+        () -> runtime.checkpointAndRebase(1));
+    assertEquals(snapshots.meta, failure.getPublishedTarget().getLastBlock());
+    assertEquals(CommonCheckpointRuntimeOwner.State.FAILED, owner.getState());
+    runtime.close();
+    try (StateArchiveAppendCheckpointMaterializerV5 reopened =
+        new StateArchiveAppendCheckpointMaterializerV5(history, format, Engine.ROCKSDB,
+            1, baseline, 10_000, block -> snapshots.meta)) {
+      assertEquals(failure.getPublishedTarget(), reopened.loadPublishedTargetIfPresent().get());
+    }
+  }
+
+  @Test
   public void appendRuntimePreparesV5BeforeWalAndReopensPublishedTarget() throws Exception {
     TestConstants.assumeLevelDbAvailable();
     java.nio.file.Path root = temporaryFolder.newFolder("append-runtime-v5").toPath();

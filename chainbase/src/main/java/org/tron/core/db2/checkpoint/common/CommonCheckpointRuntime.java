@@ -235,6 +235,9 @@ public final class CommonCheckpointRuntime implements AutoCloseable {
         timing.ownerCompletionUs = completionUs;
         timing.ownerNotifyCommittedUs = notifyCommittedUs;
       });
+      // owner.apply has released its write gate. History reads by serving are lock-free;
+      // this runtime monitor alone serializes future targets through completion.
+      completePublishedServing(target);
       timing.ownerApplyUs = elapsedUs(ownerApplyStart);
       timing.totalUs = elapsedUs(totalStart);
       emitTiming(timing);
@@ -242,6 +245,46 @@ public final class CommonCheckpointRuntime implements AutoCloseable {
     } catch (IOException | RuntimeException failure) {
       owner.fail(failure);
       throw failure;
+    }
+  }
+
+  /** Idle/startup handoff, serialized against future checkpoint publication. */
+  public synchronized void refreshServingMode(boolean nearTip) throws IOException {
+    if (!(archivePlanner instanceof StateArchiveAppendFileRuntime)) {
+      return;
+    }
+    try {
+      if (nearTip) {
+        ((StateArchiveAppendFileRuntime) archivePlanner).requestFastServingCatchUp();
+      }
+      if (publishedTarget != null) {
+        completePublishedServing(publishedTarget);
+      }
+    } catch (IOException | RuntimeException failure) {
+      owner.fail(failure);
+      throw failure;
+    }
+  }
+
+  public void requestFastServingCatchUp() {
+    if (archivePlanner instanceof StateArchiveAppendFileRuntime) {
+      ((StateArchiveAppendFileRuntime) archivePlanner).requestFastServingCatchUp();
+    }
+  }
+
+  public void cancelServingCommitWait() {
+    if (archivePlanner instanceof StateArchiveAppendFileRuntime) {
+      ((StateArchiveAppendFileRuntime) archivePlanner).cancelServingCommitWait();
+    }
+  }
+
+  private void completePublishedServing(CommonCheckpointTarget target) throws IOException {
+    if (archivePlanner instanceof StateArchiveAppendFileRuntime) {
+      try {
+        ((StateArchiveAppendFileRuntime) archivePlanner).completePublishedServing(target);
+      } catch (IOException | RuntimeException failure) {
+        throw new CommonCheckpointServingException(target, failure);
+      }
     }
   }
 

@@ -11,6 +11,7 @@ public final class CommonCheckpointRuntimeAttachment implements AutoCloseable {
 
   private final CommonCheckpointRuntime runtime;
   private volatile State state;
+  private java.util.concurrent.ScheduledExecutorService servingMonitor;
 
   private CommonCheckpointRuntimeAttachment(CommonCheckpointRuntime runtime, State state) {
     this.runtime = runtime;
@@ -64,6 +65,40 @@ public final class CommonCheckpointRuntimeAttachment implements AutoCloseable {
     }
   }
 
+  /** Non-blocking mode signal; completion still belongs to the serialized runtime. */
+  public void requestFastServingCatchUp() {
+    if (state == State.READY && runtime != null) {
+      runtime.requestFastServingCatchUp();
+    }
+  }
+
+  /** Polls even without a next block; only this attachment serializes with Common commits. */
+  public synchronized void startServingMonitor(java.util.function.BooleanSupplier nearTip) {
+    requireReady();
+    if (servingMonitor != null) {
+      return;
+    }
+    servingMonitor = java.util.concurrent.Executors.newSingleThreadScheduledExecutor(task -> {
+      Thread thread = new Thread(task, "archive-serving-handoff");
+      thread.setDaemon(true);
+      return thread;
+    });
+    servingMonitor.scheduleWithFixedDelay(() -> {
+      synchronized (CommonCheckpointRuntimeAttachment.this) {
+        if (state != State.READY) {
+          return;
+        }
+        try {
+          runtime.refreshServingMode(nearTip.getAsBoolean());
+        } catch (IOException | RuntimeException failure) {
+          state = State.FAILED;
+          org.slf4j.LoggerFactory.getLogger("DB").error(
+              "Serving handoff failed; Common admission closed", failure);
+        }
+      }
+    }, 0, 1, java.util.concurrent.TimeUnit.SECONDS);
+  }
+
   /** Pins one point-only query from a fully recovered and non-failed runtime. */
   public StateArchiveCheckpointReadSnapshot pinPoint(long targetBlock)
       throws IOException {
@@ -86,7 +121,17 @@ public final class CommonCheckpointRuntimeAttachment implements AutoCloseable {
   }
 
   @Override
-  public synchronized void close() {
+  public void close() {
+    if (runtime != null) {
+      runtime.cancelServingCommitWait();
+    }
+    closeSerialized();
+  }
+
+  private synchronized void closeSerialized() {
+    if (servingMonitor != null) {
+      servingMonitor.shutdownNow();
+    }
     if (state == State.CLOSED) {
       return;
     }
