@@ -59,6 +59,21 @@ public interface PathStateNativeAccess extends Closeable {
         directory, engine, storageProfile, config, cacheShardBits, readStatistics, cacheBytes);
   }
 
+  static PathStateNativeAccess open(
+      Path directory,
+      Engine engine,
+      String storageProfile,
+      NativeDbConfig config,
+      int cacheShardBits,
+      boolean readStatistics,
+      long cacheBytes,
+      org.rocksdb.Cache sharedBlockCache)
+      throws IOException {
+    return PathStateNativeNodeStore.open(
+        directory, engine, storageProfile, config, cacheShardBits, readStatistics, cacheBytes,
+        sharedBlockCache);
+  }
+
   Map<String, Long> readStatistics();
 
   Map<String, Long> readPerfStatistics();

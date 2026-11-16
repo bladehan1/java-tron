@@ -89,6 +89,14 @@ final class PathStateNativeNodeStore implements PathStateNativeAccess {
   static PathStateNativeNodeStore open(Path directory, Engine engine, String storageProfile,
       NativeDbConfig config, int cacheShardBits, boolean readStatistics, long cacheBytes)
       throws IOException {
+    return open(directory, engine, storageProfile, config, cacheShardBits, readStatistics,
+        cacheBytes, null);
+  }
+
+  static PathStateNativeNodeStore open(Path directory, Engine engine, String storageProfile,
+      NativeDbConfig config, int cacheShardBits, boolean readStatistics, long cacheBytes,
+      org.rocksdb.Cache sharedBlockCache)
+      throws IOException {
     if (cacheBytes <= 0) {
       throw new IllegalArgumentException("native cache size must be positive");
     }
@@ -104,13 +112,16 @@ final class PathStateNativeNodeStore implements PathStateNativeAccess {
       throw new IOException("path-state node database is not a directory: " + path);
     }
     Delegate opened = selected == Engine.LEVELDB ? new LevelDelegate(path, settings)
-        : new RocksDelegate(path, settings, cacheShardBits, readStatistics, cacheBytes);
+        : new RocksDelegate(path, settings, cacheShardBits, readStatistics, cacheBytes,
+            sharedBlockCache);
     logger.info("Path-state database opened: directory={}, engine={}, profile={}, blockBytes={}, "
-            + "writeBufferBytes={}, cacheBytes={}, maxOpenFiles={}, requestedCacheShardBits={}, readStatistics={}",
+            + "writeBufferBytes={}, cacheBytes={}, maxOpenFiles={}, requestedCacheShardBits={}, "
+            + "readStatistics={}, sharedBlockCache={}",
         path, selected, profile,
         settings.getBlockSize(), settings.getWriteBufferSize(),
         selected == Engine.ROCKSDB ? cacheBytes : settings.getCacheSize(),
-        settings.getMaxOpenFiles(), cacheShardBits, selected == Engine.ROCKSDB && readStatistics);
+        settings.getMaxOpenFiles(), cacheShardBits, selected == Engine.ROCKSDB && readStatistics,
+        selected == Engine.ROCKSDB && sharedBlockCache != null);
     return new PathStateNativeNodeStore(path, selected, profile, opened);
   }
 
@@ -365,7 +376,8 @@ final class PathStateNativeNodeStore implements PathStateNativeAccess {
 
     private final Statistics statistics;
     private final PathStateNativeGetPerf readPerf;
-    private final LRUCache blockCache;
+    private final org.rocksdb.Cache blockCache;
+    private final boolean ownsBlockCache;
     private final BloomFilter bloomFilter;
     private final org.rocksdb.Options options;
     private final org.rocksdb.WriteOptions syncWrites;
@@ -373,16 +385,24 @@ final class PathStateNativeNodeStore implements PathStateNativeAccess {
     private final org.rocksdb.RocksDB database;
 
     private RocksDelegate(Path directory, NativeDbConfig config, int cacheShardBits,
-        boolean readStatistics, long cacheBytes)
+        boolean readStatistics, long cacheBytes, org.rocksdb.Cache sharedBlockCache)
         throws IOException {
       readPerf = readStatistics && Boolean.getBoolean(PathStateNativeGetPerf.PROPERTY)
           ? new PathStateNativeGetPerf() : null;
       syncWrites = new org.rocksdb.WriteOptions().setSync(true);
       unsyncedWrites = new org.rocksdb.WriteOptions().setSync(false);
-      // Preserve the existing auto-sharded constructor unless the caller selected a measured
-      // Store/budget combination. In particular, do not extrapolate 64MiB results to small DBs.
-      blockCache = cacheShardBits < 0 ? new LRUCache(cacheBytes)
-          : new LRUCache(cacheBytes, cacheShardBits, false);
+      // Shared pool (M3 cache-allocation model): when a shared cache is supplied, attach to it
+      // and never close it; otherwise keep the legacy per-store cache ownership.
+      if (sharedBlockCache != null) {
+        blockCache = sharedBlockCache;
+        ownsBlockCache = false;
+      } else {
+        // Preserve the existing auto-sharded constructor unless the caller selected a measured
+        // Store/budget combination. In particular, do not extrapolate 64MiB results to small DBs.
+        blockCache = cacheShardBits < 0 ? new LRUCache(cacheBytes)
+            : new LRUCache(cacheBytes, cacheShardBits, false);
+        ownsBlockCache = true;
+      }
       bloomFilter = new BloomFilter(config.getBloomBitsPerKey(), false);
       BlockBasedTableConfig table = new BlockBasedTableConfig()
           .setBlockSize(config.getBlockSize())
@@ -427,7 +447,9 @@ final class PathStateNativeNodeStore implements PathStateNativeAccess {
         syncWrites.close();
         options.close();
         bloomFilter.close();
-        blockCache.close();
+        if (ownsBlockCache) {
+          blockCache.close();
+        }
         if (statistics != null) {
           statistics.close();
         }
@@ -525,7 +547,9 @@ final class PathStateNativeNodeStore implements PathStateNativeAccess {
       syncWrites.close();
       options.close();
       bloomFilter.close();
-      blockCache.close();
+      if (ownsBlockCache) {
+        blockCache.close();
+      }
       if (statistics != null) {
         statistics.close();
       }
