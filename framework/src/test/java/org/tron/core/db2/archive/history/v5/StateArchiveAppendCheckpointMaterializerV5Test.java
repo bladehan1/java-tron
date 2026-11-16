@@ -3,6 +3,7 @@ package org.tron.core.db2.archive.history.v5;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertThrows;
+import static org.junit.Assert.assertTrue;
 import static org.tron.core.db2.NativeCheckpointTestSupport.engine;
 
 import java.io.IOException;
@@ -27,6 +28,7 @@ import org.tron.core.db2.archive.history.format.V5Format;
 import org.tron.core.db2.archive.history.format.V5HistoryTail;
 import org.tron.core.db2.archive.history.hot.StateArchiveHotBatchDescriptor;
 import org.tron.core.db2.archive.history.v5.StateArchiveAppendCheckpointMaterializerV5.PublicationStage;
+import org.tron.core.db2.archive.serving.ServingIndexService;
 import org.tron.core.db2.archive.serving.ServingTestSupport.MutableIndex;
 import org.tron.core.db2.archive.serving.StateArchiveServingIndexBuildCoordinatorV3;
 import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointMaterializer.Status;
@@ -39,6 +41,51 @@ public class StateArchiveAppendCheckpointMaterializerV5Test {
 
   @Rule
   public final TemporaryFolder temporaryFolder = new TemporaryFolder();
+
+  @Test
+  public void commonRecoveryDoesNotStartWriterBeforeExplicitAdmission() throws Exception {
+    Path root = temporaryFolder.newFolder("redo-without-serving").toPath();
+    byte[] format = hash(70);
+    CommonCheckpointTarget committed;
+    try (StateArchiveAppendCheckpointMaterializerV5 recovery =
+        StateArchiveAppendCheckpointMaterializerV5.openForCommon(root, format, engine(),
+            100, hash(99), V5Format.SEGMENT_TARGET_BYTES,
+            number -> BlockSnapshotMeta.forBlock(number, hash((int) number),
+                hash((int) number - 1), number * 3_000L), null)) {
+      Thread worker = servingThread(recovery);
+      assertEquals(Thread.State.NEW, worker.getState());
+      List<BlockReverseDiff> diffs = Collections.singletonList(diff(100));
+      StateArchiveHotBatchDescriptor binding = recovery.planCheckpoint(diffs);
+      committed = recovery.prepare(CommonCheckpointCapture.create(
+          payload(format, diffs, binding), diffs, binding));
+      recovery.publish(committed);
+      recovery.afterCommit(committed);
+      // Redo notifications must not launch an unowned background writer either.
+      assertEquals(Thread.State.NEW, worker.getState());
+    }
+    try (StateArchiveAppendCheckpointMaterializerV5 runtime =
+        StateArchiveAppendCheckpointMaterializerV5.openForCommon(root, format, engine(),
+            100, hash(99), V5Format.SEGMENT_TARGET_BYTES,
+            number -> BlockSnapshotMeta.forBlock(number, hash((int) number),
+                hash((int) number - 1), number * 3_000L), committed)) {
+      assertEquals(Thread.State.NEW, servingThread(runtime).getState());
+      runtime.afterCommit(committed);
+      assertEquals(Thread.State.NEW, servingThread(runtime).getState());
+      runtime.startServingAfterRecovery();
+      runtime.startServingAfterRecovery();
+      ServingIndexService service = (ServingIndexService)
+          org.springframework.test.util.ReflectionTestUtils.getField(runtime, "servingService");
+      assertTrue(service.awaitLive(java.time.Duration.ofSeconds(10)));
+      runtime.completeServingInitialSync(committed);
+      assertEquals(100, runtime.servingIndexStatus().getIndexedThrough());
+    }
+  }
+
+  private static Thread servingThread(StateArchiveAppendCheckpointMaterializerV5 archive) {
+    Object service = org.springframework.test.util.ReflectionTestUtils.getField(
+        archive, "servingService");
+    return (Thread) org.springframework.test.util.ReflectionTestUtils.getField(service, "thread");
+  }
 
   @Test
   public void forcesDataThenIndexSyncsTailThenPublishesCommonMarker() throws Exception {

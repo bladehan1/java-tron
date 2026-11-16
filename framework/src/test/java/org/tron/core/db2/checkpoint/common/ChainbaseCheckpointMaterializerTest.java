@@ -564,8 +564,8 @@ public class ChainbaseCheckpointMaterializerTest {
         .baselineHistoryDigest(1, hash(0));
     V2Snapshots snapshots = new V2Snapshots();
     StateArchiveAppendCheckpointMaterializerV5 archive = org.mockito.Mockito.spy(
-        new StateArchiveAppendCheckpointMaterializerV5(history, format, Engine.ROCKSDB,
-            1, baseline, 10_000, block -> snapshots.meta));
+        StateArchiveAppendCheckpointMaterializerV5.openForCommon(history, format, Engine.ROCKSDB,
+            1, baseline, 10_000, block -> snapshots.meta, null));
     CommonCheckpointRuntimeOwner owner = new CommonCheckpointRuntimeOwner(
         new CommonCheckpointRedoCoordinator(new CommonCheckpointFile(root.resolve("wal")),
             new ChainbaseCheckpointMaterializer(root.resolve("chainbase"), format,
@@ -574,7 +574,12 @@ public class ChainbaseCheckpointMaterializerTest {
         history, format, Engine.ROCKSDB,
         (number, hash) -> new TestLatest(snapshots.code, number, hash),
         target -> () -> { }, null, archive, null, System::nanoTime, timing -> { });
+    org.mockito.Mockito.doAnswer(call -> {
+      assertEquals(CommonCheckpointRuntimeOwner.State.READY, owner.getState());
+      return call.callRealMethod();
+    }).when(archive).startServingAfterRecovery();
     runtime.recoverBeforeServing();
+    org.mockito.Mockito.verify(archive).startServingAfterRecovery();
     org.mockito.Mockito.doAnswer(call -> {
       // Completion runs after owner publication and memory rebase, not inside prepare/redo.
       assertEquals(CommonCheckpointRuntimeOwner.State.READY, owner.getState());

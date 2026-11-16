@@ -64,6 +64,7 @@ public final class StateArchiveAppendCheckpointMaterializerV5
   private CommonCheckpointTarget preparedTarget;
   private V5HistoryTail preparedTail;
   private boolean closed;
+  private volatile boolean servingAdmitted;
 
   StateArchiveAppendCheckpointMaterializerV5(Path directory, byte[] commonFormatIdentity,
       Engine bindingEngine, long firstBlockNumber, byte[] baselineHistoryDigest,
@@ -101,9 +102,13 @@ public final class StateArchiveAppendCheckpointMaterializerV5
       TailSyncHook beforeTailSync) throws IOException {
     this(directory, commonFormatIdentity, bindingEngine, firstBlockNumber, baselineHistoryDigest,
         rotationTargetBytes, admission, canonical, channelOpener, readObserver, observer,
-        beforeTailSync, null, false);
+        beforeTailSync, null, false, false);
   }
 
+  /**
+   * Opens Common redo without a serving writer. The admitted runtime must explicitly call
+   * {@link #startServingAfterRecovery()}; temporary recovery instances never do so.
+   */
   public static StateArchiveAppendCheckpointMaterializerV5 openForCommon(Path directory,
       byte[] format, Engine engine, long firstBlock, byte[] baselineDigest, long rotationBytes,
       StateArchiveCanonicalBlockMetaSource canonical, CommonCheckpointTarget recoveryTarget)
@@ -111,7 +116,7 @@ public final class StateArchiveAppendCheckpointMaterializerV5
     return new StateArchiveAppendCheckpointMaterializerV5(directory, format, engine, firstBlock,
         baselineDigest, rotationBytes, StateArchiveProcessFdAdmissionV5.INSTANCE, canonical,
         null, (path, position, length) -> { }, (stage, lane) -> { }, () -> { },
-        recoveryTarget, true);
+        recoveryTarget, true, true);
   }
 
   private StateArchiveAppendCheckpointMaterializerV5(Path directory, byte[] commonFormatIdentity,
@@ -120,7 +125,8 @@ public final class StateArchiveAppendCheckpointMaterializerV5
       StateArchiveCanonicalBlockMetaSource canonical, ChannelOpener channelOpener,
       ReadObserver readObserver, PublicationObserver observer,
       TailSyncHook beforeTailSync, CommonCheckpointTarget recoveryTarget,
-      boolean allowBaselineReset) throws IOException {
+      boolean allowBaselineReset, boolean deferServing) throws IOException {
+    servingAdmitted = !deferServing;
     this.directory = Objects.requireNonNull(directory, "directory");
     this.commonFormatIdentity = requireDigest(commonFormatIdentity, "Common format identity");
     this.bindingEngine = Objects.requireNonNull(bindingEngine, "bindingEngine");
@@ -252,7 +258,7 @@ public final class StateArchiveAppendCheckpointMaterializerV5
     if (openedGeneration != null) {
       readerHolder = new StateArchiveReaderGenerationHolderV5(openedGeneration);
     }
-    if (preparedTarget == null) {
+    if (servingAdmitted && preparedTarget == null) {
       servingService.start();
     }
   }
@@ -419,6 +425,13 @@ public final class StateArchiveAppendCheckpointMaterializerV5
   }
 
   @Override
+  public synchronized void startServingAfterRecovery() throws IOException {
+    requireOpen();
+    servingAdmitted = true;
+    servingService.start();
+  }
+
+  @Override
   public void requestFastServingCatchUp() {
     servingService.requestFastCatchUp();
   }
@@ -435,7 +448,11 @@ public final class StateArchiveAppendCheckpointMaterializerV5
 
   @Override
   public void afterCommit(CommonCheckpointTarget target) {
-    servingService.start();
+    // Temporary redo-only instances may receive publication notifications too.
+    // They must never start a writer that outlives their bounded close.
+    if (servingAdmitted) {
+      servingService.start();
+    }
     servingService.onCommonPublished(target);
   }
 

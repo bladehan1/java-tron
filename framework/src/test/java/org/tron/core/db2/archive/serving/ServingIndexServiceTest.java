@@ -241,7 +241,8 @@ public class ServingIndexServiceTest {
     ServingIndexService service = service(history, config(), ServingIndexService.Hooks.NONE);
     assertTrue(awaitThrough(service, 1));
     service.requestFastCatchUp();
-    CommonCheckpointTarget wrong = CommonCheckpointTarget.restore(History.hash(999), History.hash(888),
+    CommonCheckpointTarget wrong = CommonCheckpointTarget.restore(
+        History.hash(999), History.hash(888),
         target.getFirstBlock(), target.getLastBlock(), History.hash(777), History.hash(666));
     assertThrows(IOException.class, () -> service.completePublishedTarget(wrong));
     assertEquals(ServingIndexService.CommitMode.FAILED, service.getCommitMode());

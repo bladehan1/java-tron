@@ -16,6 +16,10 @@ public interface StateArchiveAppendFileRuntime extends StateArchiveCheckpointPla
 
   void completeServingInitialSync(CommonCheckpointTarget boundary) throws IOException;
 
+  /** Admits the serving writer only after the owning runtime has completed recovery. */
+  default void startServingAfterRecovery() throws IOException {
+  }
+
   /** V5 serving handoff; other formats keep their existing lifecycle. */
   default void requestFastServingCatchUp() {
   }

@@ -167,6 +167,9 @@ public final class CommonCheckpointRuntime implements AutoCloseable {
           archivePlanner.afterCommit(publishedTarget);
         }
       }
+      if (archivePlanner instanceof StateArchiveAppendFileRuntime) {
+        ((StateArchiveAppendFileRuntime) archivePlanner).startServingAfterRecovery();
+      }
       return action;
     } catch (IOException | RuntimeException failure) {
       owner.fail(failure);
