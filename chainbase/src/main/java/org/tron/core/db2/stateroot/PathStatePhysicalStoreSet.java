@@ -53,6 +53,7 @@ import org.tron.core.db2.stateroot.physical.PathStatePhysicalRecords.ReverseJour
 import org.tron.core.db2.stateroot.metrics.PathStateResidentAccessMetrics;
 import org.tron.core.db2.stateroot.storage.PathStateNativeAccess;
 import org.tron.core.db2.stateroot.storage.PathStateNativeBudget;
+import org.tron.core.db2.stateroot.storage.PathStateSharedBlockCache;
 import org.tron.core.db2.stateroot.trie.PathNodeStore;
 import org.tron.core.db2.stateroot.trie.PathStateTrieBuild;
 
@@ -157,10 +158,12 @@ public final class PathStatePhysicalStoreSet implements Closeable {
         participants.put(participant.getDbName(), new PhysicalStore(participantDirectory,
             manifest.getEngine(), participant.getStoreId(), residentNodeCache,
             storageProfileNameFor(participant.getDbName()),
-            storageProfileFor(participant.getDbName(), dbSettings), readTrace));
+            storageProfileFor(participant.getDbName(), dbSettings), readTrace,
+            dbSettings.getSharedCacheSize()));
       }
       superStore = new PhysicalStore(directory.resolve(SUPER_DIRECTORY).resolve(NODES_DIRECTORY),
-          manifest.getEngine(), 0, residentNodeCache, "small", dbSettings.getSmall(), readTrace);
+          manifest.getEngine(), 0, residentNodeCache, "small", dbSettings.getSmall(), readTrace,
+          dbSettings.getSharedCacheSize());
     } catch (IOException | RuntimeException failure) {
       closeAfterFailure(failure);
       throw failure;
@@ -1748,7 +1751,7 @@ public final class PathStatePhysicalStoreSet implements Closeable {
 
     private PhysicalStore(Path directory, Engine engine, int storeId,
         ResidentNodeCache residentNodeCache, String storageProfile, NativeDbConfig dbSettings,
-        PathStateReadDistanceTrace readTrace)
+        PathStateReadDistanceTrace readTrace, long sharedBlockCacheBytes)
         throws IOException {
       // Opt-in validation candidate; never mutate the shared giant resource profile.
       boolean largeReadCache = useLargeReadCache(storeId, engine,
@@ -1758,8 +1761,11 @@ public final class PathStatePhysicalStoreSet implements Closeable {
       int resolvedShardBits = largeReadCache ? 2
           : requestedShardBits != -2 ? requestedShardBits
               : cacheShardBitsFor(storeId, cacheBytes);
+      org.rocksdb.Cache sharedBlockCache = sharedBlockCacheBytes > 0
+          ? PathStateSharedBlockCache.acquire(sharedBlockCacheBytes, -1) : null;
       nativeStore = PathStateNativeAccess.open(directory, engine, storageProfile, dbSettings,
-          resolvedShardBits, PathStateObservations.observesRocksDb(storeId), cacheBytes);
+          resolvedShardBits, PathStateObservations.observesRocksDb(storeId), cacheBytes,
+          sharedBlockCache);
       nodeStore = new ResidentNodeStore(new PhysicalNodeStore(nativeStore), residentNodeCache,
           storeId, readTrace);
     }

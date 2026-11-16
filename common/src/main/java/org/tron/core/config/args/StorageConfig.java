@@ -432,10 +432,20 @@ public class StorageConfig {
     private NativeDbConfig large = NativeDbConfig.pathStateLarge();
     private NativeDbConfig giant = NativeDbConfig.giant();
 
+    /**
+     * Total bytes of the cross-store shared RocksDB block cache. Values <= 0 keep the
+     * per-store block caches (storage.pathStateRoot.dbSettings.sharedCacheSize).
+     */
+    private long sharedCacheSize = 0L;
+
     void validate() {
       small.validate("storage.pathStateRoot.dbSettings.small");
       large.validate("storage.pathStateRoot.dbSettings.large");
       giant.validate("storage.pathStateRoot.dbSettings.giant");
+      if (sharedCacheSize < 0) {
+        throw new IllegalArgumentException(
+            "storage.pathStateRoot.dbSettings.sharedCacheSize must be >= 0");
+      }
     }
   }
 
