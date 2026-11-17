@@ -1124,15 +1124,25 @@ public final class PersistentServingKeyIndexGeneration implements PinnedServingK
   static void appendExactChanges(ArchiveIndexStorage.Writer target,
       List<ArchiveIndexStorage.Mutation> batch, ExactKey key,
       List<Long> suppliedEpochs, long durableI) throws IOException {
+    prepareExactChanges(target, key, suppliedEpochs, durableI, new java.util.HashMap<>())
+        .appendTo(target, batch);
+  }
+
+  /** Reads metadata once per source batch; rejected prefixes never read or encode pages. */
+  static PreparedExactChanges prepareExactChanges(ArchiveIndexStorage.Writer target,
+      ExactKey key, List<Long> suppliedEpochs, long durableI, Map<ExactKey, byte[]> metadata)
+      throws IOException {
     List<Long> appended = suppliedEpochs;
     byte[] metaKey = keyMetaKey(key.dbName, key.rawKey);
-    long metaStarted = System.nanoTime();
-    byte[] existing;
-    try {
-      existing = target.get(metaKey);
-    } finally {
-      ServingIndexTiming.record(ServingIndexTiming.Stage.META_GET, metaStarted);
+    if (!metadata.containsKey(key)) {
+      long started = System.nanoTime();
+      try {
+        metadata.put(key, target.get(metaKey));
+      } finally {
+        ServingIndexTiming.record(ServingIndexTiming.Stage.META_GET, started);
+      }
     }
+    byte[] existing = metadata.get(key);
     KeyMeta meta = existing == null ? null : decodeKeyMeta(existing);
     if (meta != null && meta.lastEpoch > durableI) {
       if (durableI == Long.MAX_VALUE || meta.lastEpoch != durableI + 1 || appended.isEmpty()
@@ -1141,57 +1151,122 @@ public final class PersistentServingKeyIndexGeneration implements PinnedServingK
             "Serving R-IDEM violated: KeyMeta last epoch is ahead of durable progress");
       }
       appended = appended.subList(1, appended.size());
+    }
+    if (!appended.isEmpty()) {
+      requireStrictEpochs(appended, meta == null ? Long.MIN_VALUE : meta.lastEpoch);
+    }
+    return new PreparedExactChanges(key, metaKey, meta, appended);
+  }
+
+  static final class PreparedExactChanges {
+    private final ExactKey key;
+    private final byte[] metaKey;
+    private final KeyMeta meta;
+    private final List<Long> appended;
+
+    private PreparedExactChanges(ExactKey key, byte[] metaKey, KeyMeta meta,
+        List<Long> appended) {
+      this.key = key;
+      this.metaKey = metaKey;
+      this.meta = meta;
+      this.appended = appended;
+    }
+
+    /** Used only by the block-wise budget probe; validates each new epoch once. */
+    void appendEpoch(long epoch) {
+      long previous = appended.isEmpty() ? (meta == null ? Long.MIN_VALUE : meta.lastEpoch)
+          : appended.get(appended.size() - 1);
+      if (epoch <= previous) {
+        throw new IllegalArgumentException("Serving epochs must increase strictly");
+      }
+      appended.add(epoch);
+    }
+
+    private long rewrittenEpochs() {
+      long prior = meta == null ? 0 : meta.count;
+      if (prior + appended.size() <= INLINE_EPOCH_LIMIT) {
+        return 0;
+      }
+      return appended.size() + (meta == null ? 0
+          : meta.mode == INLINE ? prior : prior % EPOCHS_PER_PAGE);
+    }
+
+    long mutationCount() {
+      return appended.isEmpty() ? 0
+          : 1 + (rewrittenEpochs() + EPOCHS_PER_PAGE - 1) / EPOCHS_PER_PAGE;
+    }
+
+    long estimatedBytes() {
+      if (appended.isEmpty()) {
+        return 0;
+      }
+      long prior = meta == null ? 0 : meta.count;
+      long total = prior + appended.size();
+      // Same fixed-width encodings as ServingIndexRecordCodec, including CRC and
+      // Mutation.estimatedBytes overhead. No page value is loaded to determine its size.
+      long metaBytes = 1 + 3 * Long.BYTES + Integer.BYTES;
+      if (total <= INLINE_EPOCH_LIMIT) {
+        metaBytes += Integer.BYTES + total * Long.BYTES;
+      }
+      long pages = mutationCount() - 1;
+      return 32L + metaKey.length + metaBytes
+          + pages * (32L + keyPageKey(key.dbName, key.rawKey, 0).length + 2 * Integer.BYTES)
+          + rewrittenEpochs() * Long.BYTES;
+    }
+
+    void appendTo(ArchiveIndexStorage.Writer target, List<ArchiveIndexStorage.Mutation> batch)
+        throws IOException {
       if (appended.isEmpty()) {
         return;
       }
-    }
-    if (meta == null) {
-      requireStrictEpochs(appended, Long.MIN_VALUE);
-      if (appended.size() <= INLINE_EPOCH_LIMIT) {
+      if (meta == null) {
+        requireStrictEpochs(appended, Long.MIN_VALUE);
+        if (appended.size() <= INLINE_EPOCH_LIMIT) {
+          batch.add(ArchiveIndexStorage.put(metaKey,
+              encodeKeyMeta(KeyMeta.inline(toArray(appended)))));
+          return;
+        }
+        writeAllPages(batch, key, appended, 0);
         batch.add(ArchiveIndexStorage.put(metaKey,
-            encodeKeyMeta(KeyMeta.inline(toArray(appended)))));
+            encodeKeyMeta(KeyMeta.paged(appended.size(), appended.get(0),
+                appended.get(appended.size() - 1)))));
         return;
       }
-      writeAllPages(batch, key, appended, 0);
-      batch.add(ArchiveIndexStorage.put(metaKey,
-          encodeKeyMeta(KeyMeta.paged(appended.size(), appended.get(0),
-              appended.get(appended.size() - 1)))));
-      return;
-    }
-    requireStrictEpochs(appended, meta.lastEpoch);
-    if (meta.mode == INLINE && meta.count + appended.size() <= INLINE_EPOCH_LIMIT) {
-      List<Long> combined = asList(meta.inlineEpochs);
-      combined.addAll(appended);
-      batch.add(ArchiveIndexStorage.put(metaKey,
-          encodeKeyMeta(KeyMeta.inline(toArray(combined)))));
-      return;
-    }
-    if (meta.mode == INLINE) {
-      List<Long> combined = asList(meta.inlineEpochs);
-      combined.addAll(appended);
-      writeAllPages(batch, key, combined, 0);
-    } else {
-      if (meta.count % EPOCHS_PER_PAGE == 0) {
-        // A full previous page is immutable; do not read or rewrite it merely to append.
-        writeAllPages(batch, key, appended, pageCount(meta.count));
-      } else {
-        int lastPageIndex = pageCount(meta.count) - 1;
-        long tailStarted = System.nanoTime();
-        byte[] encodedPage;
-        try {
-          encodedPage = target.get(keyPageKey(key.dbName, key.rawKey, lastPageIndex));
-        } finally {
-          ServingIndexTiming.record(ServingIndexTiming.Stage.TAIL_GET, tailStarted);
-        }
-        long[] lastPage = decodeEpochPage(encodedPage);
-        List<Long> combined = asList(lastPage);
+      requireStrictEpochs(appended, meta.lastEpoch);
+      if (meta.mode == INLINE && meta.count + appended.size() <= INLINE_EPOCH_LIMIT) {
+        List<Long> combined = asList(meta.inlineEpochs);
         combined.addAll(appended);
-        writeAllPages(batch, key, combined, lastPageIndex);
+        batch.add(ArchiveIndexStorage.put(metaKey,
+            encodeKeyMeta(KeyMeta.inline(toArray(combined)))));
+        return;
       }
+      if (meta.mode == INLINE) {
+        List<Long> combined = asList(meta.inlineEpochs);
+        combined.addAll(appended);
+        writeAllPages(batch, key, combined, 0);
+      } else {
+        if (meta.count % EPOCHS_PER_PAGE == 0) {
+          // A full previous page is immutable; do not read or rewrite it merely to append.
+          writeAllPages(batch, key, appended, pageCount(meta.count));
+        } else {
+          int lastPageIndex = pageCount(meta.count) - 1;
+          long tailStarted = System.nanoTime();
+          byte[] encodedPage;
+          try {
+            encodedPage = target.get(keyPageKey(key.dbName, key.rawKey, lastPageIndex));
+          } finally {
+            ServingIndexTiming.record(ServingIndexTiming.Stage.TAIL_GET, tailStarted);
+          }
+          long[] lastPage = decodeEpochPage(encodedPage);
+          List<Long> combined = asList(lastPage);
+          combined.addAll(appended);
+          writeAllPages(batch, key, combined, lastPageIndex);
+        }
+      }
+      batch.add(ArchiveIndexStorage.put(metaKey,
+          encodeKeyMeta(KeyMeta.paged(meta.count + appended.size(),
+              meta.firstEpoch, appended.get(appended.size() - 1)))));
     }
-    batch.add(ArchiveIndexStorage.put(metaKey,
-        encodeKeyMeta(KeyMeta.paged(meta.count + appended.size(),
-            meta.firstEpoch, appended.get(appended.size() - 1)))));
   }
 
   private static void writeAllPages(List<ArchiveIndexStorage.Mutation> batch,

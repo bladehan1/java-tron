@@ -103,7 +103,8 @@ public final class ServingIndexTiming implements AutoCloseable {
   public void close() {
     CURRENT.remove();
     long elapsed = System.nanoTime() - started;
-    // DIGEST is inside PLAN; GETs are inside BUILD. Do not sum parent and child times.
+    // DIGEST is inside PLAN; TAIL_GET is inside BUILD. META_GET may precede BUILD.
+    // Do not sum parent and child times.
     LOGGER.info("Serving index batch: mode={}, from={}, through={}, success={}, entries={}, "
             + "uniqueKeys={}, writeBytes={}, totalUs={}, stageUs={}, stageCalls={}",
         mode, from, through, success, entries, uniqueKeys, writeBytes, elapsed / 1000,

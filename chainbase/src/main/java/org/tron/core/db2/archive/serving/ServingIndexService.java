@@ -216,6 +216,10 @@ public final class ServingIndexService implements AutoCloseable {
 
   // Build-thread state.
   private ServingIndexStore store;
+  // Build-thread owned: at most one decoded source window, never a recovery authority.
+  private List<CommittedBlock> bufferedBlocks;
+  private int bufferedOffset;
+
   private long handleSeq;
   private ServingState state = ServingState.OPENING;
   private long stateSince;
@@ -487,6 +491,7 @@ public final class ServingIndexService implements AutoCloseable {
         degrade(classify(failure), failure);
       }
     }
+    clearBufferedSource();
     publish();
   }
 
@@ -572,7 +577,7 @@ public final class ServingIndexService implements AutoCloseable {
     if (state == ServingState.LIVE && w - i > config.getLiveMaxLagBlocks()) {
       transition(ServingState.BULK_CATCH_UP, w);
     }
-    if (!fastCatchUpRequested.get()
+    if (bufferedBlocks == null && !fastCatchUpRequested.get()
         && (state == ServingState.BULK_CATCH_UP || state == ServingState.REBUILDING)
         && config.getTailDelayMillis() > 0 && w - i < config.getBulkMinBlocks()) {
       if (pendingSinceMillis == 0) {
@@ -584,11 +589,22 @@ public final class ServingIndexService implements AutoCloseable {
         return remaining;
       }
     }
-    ServingBatchPlanner.Selection selection = planner.select(source, history, i, w);
-    if (selection.isSolo()) {
-      buildSolo(history, selection.getFirst(), null, w);
+    if (bufferedBlocks != null) {
+      long first = bufferedBlocks.get(bufferedOffset).getDiff().getMeta().getBlockNumber();
+      long last = bufferedBlocks.get(bufferedBlocks.size() - 1)
+          .getDiff().getMeta().getBlockNumber();
+      if (first != i + 1 || last > w) {
+        throw new ServingFaultException(Reason.SOURCE_INCONSISTENT,
+            "Buffered serving source no longer extends durable I within W");
+      }
+      buildRange(history, first, last, w);
     } else {
-      buildRange(history, selection.getFirst(), selection.getLast(), w);
+      ServingBatchPlanner.Selection selection = planner.select(source, history, i, w);
+      if (selection.isSolo()) {
+        buildSolo(history, selection.getFirst(), null, w);
+      } else {
+        buildRange(history, selection.getFirst(), selection.getLast(), w);
+      }
     }
     if (store.indexedThrough() == w) {
       pendingSinceMillis = 0;
@@ -609,51 +625,70 @@ public final class ServingIndexService implements AutoCloseable {
   private void buildRange(Committed history, long first, long last, long w)
       throws IOException {
     hooks.beforeBatch(first, last, false);
-    List<CommittedBlock> blocks = source.read(history, first, last);
-    int k = planner.planPrefix(blocks);
+    if (bufferedBlocks == null) {
+      bufferedBlocks = new ArrayList<>(source.read(history, first, last));
+      bufferedOffset = 0;
+    }
+    List<CommittedBlock> blocks = bufferedBlocks.subList(bufferedOffset, bufferedBlocks.size());
+    ServingIndexStore.Preparation preparation = store.preparation();
+    int k;
+    // Preflight is separately timed with zero published blocks; include it in net-drain cost.
+    try (ServingIndexTiming timing = new ServingIndexTiming(state.name() + "_PREFLIGHT",
+        store.indexedThrough(), store.indexedThrough())) {
+      k = store.fittingPrefix(blocks, config, budget, w, preparation);
+      timing.succeeded();
+    }
+    requireOpen();
     if (k == 0) {
-      buildSolo(history, first, blocks.get(0), w);
+      buildSolo(history, first, blocks.get(0), w, preparation);
+      consumeBuffered(1);
       return;
     }
-    boolean split = k < blocks.size();
-    while (true) {
-      requireOpen();
-      List<BlockReverseDiff> diffs = new ArrayList<>(k);
-      List<byte[]> steps = new ArrayList<>(k);
-      for (int index = 0; index < k; index++) {
-        diffs.add(blocks.get(index).getDiff());
-        steps.add(blocks.get(index).getStepDigest());
-      }
-      ServingIndexIncrementalPlan plan = ServingIndexIncrementalPlan.planCommittedDiffs(
-          store.indexedThrough(), store.headHash(), diffs, steps);
-      boolean reachesW = plan.getIndexedThrough() == w;
-      long started = System.nanoTime();
-      boolean committed;
-      try (ServingIndexTiming timing = new ServingIndexTiming(state.name(),
-          plan.getIndexedFrom(), plan.getIndexedThrough())) {
-        committed = store.commit(plan, budget, reachesW);
-        if (committed) {
-          timing.succeeded();
-        }
-      }
-      if (committed) {
-        hooks.afterCommit(plan.getIndexedFrom() + 1, plan.getIndexedThrough());
-        batchCounters[split ? 1 : 0]++;
-        ServingIndexTiming.batch(split ? "split" : "normal");
-        logBatch(plan, k, started);
-        return;
-      }
-      if (k == 1) {
-        buildSolo(history, first, blocks.get(0), w);
-        return;
-      }
-      k = k / 2;
-      split = true;
+    List<BlockReverseDiff> diffs = new ArrayList<>(k);
+    List<byte[]> steps = new ArrayList<>(k);
+    for (int index = 0; index < k; index++) {
+      diffs.add(blocks.get(index).getDiff());
+      steps.add(blocks.get(index).getStepDigest());
     }
+    ServingIndexIncrementalPlan plan = ServingIndexIncrementalPlan.planCommittedDiffs(
+        store.indexedThrough(), store.headHash(), diffs, steps);
+    boolean split = k < blocks.size() || bufferedOffset > 0;
+    long started = System.nanoTime();
+    try (ServingIndexTiming timing = new ServingIndexTiming(state.name(),
+        plan.getIndexedFrom(), plan.getIndexedThrough())) {
+      if (!store.commit(plan, budget, plan.getIndexedThrough() == w, preparation)) {
+        throw new IllegalStateException("Serving prefix exceeded its preflight budget");
+      }
+      timing.succeeded();
+    }
+    consumeBuffered(k);
+    hooks.afterCommit(plan.getIndexedFrom() + 1, plan.getIndexedThrough());
+    batchCounters[split ? 1 : 0]++;
+    ServingIndexTiming.batch(split ? "split" : "normal");
+    logBatch(plan, k, started);
+  }
+
+  private void consumeBuffered(int count) {
+    for (int index = 0; index < count; index++) {
+      bufferedBlocks.set(bufferedOffset++, null);
+    }
+    if (bufferedOffset == bufferedBlocks.size()) {
+      clearBufferedSource();
+    }
+  }
+
+  private void clearBufferedSource() {
+    bufferedBlocks = null;
+    bufferedOffset = 0;
   }
 
   private void buildSolo(Committed history, long block, CommittedBlock preRead, long w)
       throws IOException {
+    buildSolo(history, block, preRead, w, store.preparation());
+  }
+
+  private void buildSolo(Committed history, long block, CommittedBlock preRead, long w,
+      ServingIndexStore.Preparation preparation) throws IOException {
     requireOpen();
     hooks.beforeBatch(block, block, true);
     CommittedBlock committed = preRead != null ? preRead
@@ -672,7 +707,7 @@ public final class ServingIndexService implements AutoCloseable {
               throw new ClosingException();
             }
             hooks.beforeSoloChunk(index, count);
-          });
+          }, preparation);
       timing.succeeded();
     }
     hooks.afterCommit(block, block);
@@ -826,6 +861,7 @@ public final class ServingIndexService implements AutoCloseable {
   }
 
   private void degrade(ServingFailure classified, Throwable cause) {
+    clearBufferedSource();
     ServingFailure failure = classified;
     this.failure = failure;
     lastFailure = failure;
@@ -947,6 +983,7 @@ public final class ServingIndexService implements AutoCloseable {
   }
 
   private void closeStoreQuietly() {
+    clearBufferedSource();
     ServingIndexStore handle = store;
     store = null;
     if (handle != null) {
