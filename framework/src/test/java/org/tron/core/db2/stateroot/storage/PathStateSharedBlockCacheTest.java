@@ -59,4 +59,20 @@ public class PathStateSharedBlockCacheTest {
   public void rejectsNonPositiveCapacity() {
     assertThrows(IllegalArgumentException.class, () -> PathStateSharedBlockCache.acquire(0, -1));
   }
+
+  @Test
+  public void storeOpensWithoutFilterWhenBloomBitsPerKeyIsZero() throws Exception {
+    NativeDbConfig config = NativeDbConfig.small();
+    config.setBloomBitsPerKey(0);
+    Path dir = temporaryFolder.newFolder("no-filter").toPath();
+    PathStateNativeNodeStore store = PathStateNativeNodeStore.open(dir, Engine.ROCKSDB,
+        "small", config, -1, false, config.getCacheSize(), null);
+    store.put("k".getBytes(UTF_8), "v".getBytes(UTF_8));
+    assertArrayEquals("v".getBytes(UTF_8), store.get("k".getBytes(UTF_8)));
+    store.close();
+    PathStateNativeNodeStore reopened = PathStateNativeNodeStore.open(dir, Engine.ROCKSDB,
+        "small", config, -1, false, config.getCacheSize(), null);
+    assertArrayEquals("v".getBytes(UTF_8), reopened.get("k".getBytes(UTF_8)));
+    reopened.close();
+  }
 }

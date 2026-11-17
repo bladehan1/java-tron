@@ -403,15 +403,24 @@ final class PathStateNativeNodeStore implements PathStateNativeAccess {
             : new LRUCache(cacheBytes, cacheShardBits, false);
         ownsBlockCache = true;
       }
-      bloomFilter = new BloomFilter(config.getBloomBitsPerKey(), false);
+      // geth-style per-store filter policy: RocksDB Java has no per-level FilterPolicy
+      // (verified absent in 5.15.10 and 9.7.4; that is a Pebble feature), so "last level
+      // without filter" is approximated per store profile via bloomBitsPerKey = 0.
+      if (config.getBloomBitsPerKey() > 0) {
+        bloomFilter = new BloomFilter(config.getBloomBitsPerKey(), false);
+      } else {
+        bloomFilter = null;
+      }
       BlockBasedTableConfig table = new BlockBasedTableConfig()
           .setBlockSize(config.getBlockSize())
           .setChecksumType(ChecksumType.kCRC32c)
           .setBlockCache(blockCache)
           .setCacheIndexAndFilterBlocks(true)
           .setPinL0FilterAndIndexBlocksInCache(true)
-          .setWholeKeyFiltering(true)
-          .setFilter(bloomFilter);
+          .setWholeKeyFiltering(bloomFilter != null);
+      if (bloomFilter != null) {
+        table.setFilter(bloomFilter);
+      }
       options = new org.rocksdb.Options()
           .setCreateIfMissing(true)
           .setParanoidChecks(true)
@@ -446,7 +455,9 @@ final class PathStateNativeNodeStore implements PathStateNativeAccess {
         unsyncedWrites.close();
         syncWrites.close();
         options.close();
-        bloomFilter.close();
+        if (bloomFilter != null) {
+          bloomFilter.close();
+        }
         if (ownsBlockCache) {
           blockCache.close();
         }
@@ -546,7 +557,9 @@ final class PathStateNativeNodeStore implements PathStateNativeAccess {
       unsyncedWrites.close();
       syncWrites.close();
       options.close();
-      bloomFilter.close();
+      if (bloomFilter != null) {
+        bloomFilter.close();
+      }
       if (ownsBlockCache) {
         blockCache.close();
       }
