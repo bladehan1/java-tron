@@ -2138,6 +2138,7 @@ public class Manager {
   }
 
   private void finalizeBlockSession(ISession blockSession, BlockCapsule block) {
+    byte[] carriedRoot = block.getStateRoot();
     blockSession.finalizeBlock(BlockSnapshotMeta.forBlock(
         block.getNum(), block.getBlockId().getBytes(), block.getParentHash().getBytes(),
         block.getTimeStamp()), stages -> {
@@ -2145,21 +2146,54 @@ public class Manager {
           stages.startBlockDiff();
           stages.buildPathState();
           stages.completeArtifacts();
+          storeMissingPathStateRoot(block);
           stages.commitSession();
         });
     // Header diagnosis is observational and must remain after the commit handoff.  It must not
     // become a second state-root publication path or be used as proof that checkpoint flush has
     // completed.
-    diagnosePathStateHeader(block);
+    diagnosePathStateHeader(block, carriedRoot);
   }
 
-  private void diagnosePathStateHeader(BlockCapsule block) {
+  /** Stores optional local metadata in the same reversible block layer, after full execution. */
+  private void storeMissingPathStateRoot(BlockCapsule block) {
+    if (block.getStateRoot().length != 0 || pathStateRuntime == null
+        || pathStateSnapshotHead == null) {
+      return;
+    }
+    byte[] blockHash = block.getBlockId().getBytes();
+    if (!pathStateRuntime.isReadyForHeaderDiagnostic(block.getNum(), blockHash)) {
+      return;
+    }
+    byte[] root;
+    try {
+      PathStateRootMetadata local = pathStateSnapshotHead.getHead();
+      if (local.getBlockNumber() != block.getNum()
+          || !Arrays.equals(local.getBlockHash(), blockHash)) {
+        return;
+      }
+      root = local.getStateRoot();
+      if (root == null || root.length != 32) {
+        return;
+      }
+    } catch (java.io.IOException | RuntimeException unavailable) {
+      logger.warn("Path-state local root unavailable for block storage", unavailable);
+      return;
+    }
+    // BlockStore is not a state-root participant. Its replacement stays in this block's
+    // Snapshot; neither the captured state mutations nor the signed raw header change.
+    BlockCapsule stored = new BlockCapsule(block.getInstance());
+    stored.setStateRoot(root);
+    chainBaseManager.getBlockStore().put(blockHash, stored);
+    block.setStateRoot(root);
+  }
+
+  private void diagnosePathStateHeader(BlockCapsule block, byte[] carriedRoot) {
     PathStateRuntimeAttachment runtime = pathStateRuntime;
     if (runtime == null) {
       return;
     }
     byte[] blockHash = block.getBlockId().getBytes();
-    byte[] carriedRoot = block.getStateRoot();
     boolean carriedRootUsable = carriedRoot != null && carriedRoot.length == 32;
     boolean ready = runtime.isReadyForHeaderDiagnostic(block.getNum(), blockHash);
     byte[] localRoot = null;
@@ -2922,7 +2956,6 @@ public class Manager {
     accountStateCallBack.executeGenerateFinish();
 
     blockCapsule.setMerkleRoot();
-    previewGeneratedPathStateRoot(blockCapsule);
     session.reset();
 
     blockCapsule.sign(miner.getPrivateKey());
@@ -2939,25 +2972,6 @@ public class Manager {
         capsule.getSerializedSize());
 
     return capsule;
-  }
-
-  private void previewGeneratedPathStateRoot(BlockCapsule block) {
-    if (pathStateRuntime == null || !(revokingStore instanceof SnapshotManager)) {
-      return;
-    }
-    try {
-      byte[] targetBlockHash = new BlockCapsule(block.getInstance()).getBlockId().getBytes();
-      byte[] root = ((SnapshotManager) revokingStore).previewPathStateRoot(
-          BlockSnapshotMeta.forBlock(block.getNum(), targetBlockHash,
-              block.getParentHash().getBytes(), block.getTimeStamp()));
-      // tag 3 plus a 32-byte length-delimited value adds exactly 34 protobuf bytes.
-      if (root != null && block.getSerializedSize() <= ChainConstant.BLOCK_SIZE - 34) {
-        block.setStateRoot(root);
-      }
-    } catch (RuntimeException previewFailure) {
-      logger.warn("Path-state producer preview unavailable; state_root remains absent",
-          previewFailure);
-    }
   }
 
   private void filterOwnerAddress(TransactionCapsule transactionCapsule, Set<String> result) {
