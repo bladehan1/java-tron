@@ -6,3 +6,5 @@
 -XX:ReservedCodeCacheSize=256m
 -XX:+CMSScavengeBeforeRemark
 -Dio.netty.allocator.type=pooled
+-XX:+UnlockExperimentalVMOptions
+-XX:G1PeriodicGCInterval=300000
