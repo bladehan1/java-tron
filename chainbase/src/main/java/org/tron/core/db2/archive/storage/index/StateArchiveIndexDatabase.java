@@ -460,18 +460,15 @@ final class StateArchiveIndexDatabase {
     private RocksResources(NativeDbConfig config, boolean create) {
       org.rocksdb.RocksDB.loadLibrary();
       cache = newServingBlockCache(config.getCacheSize());
-      filter = config.getBloomBitsPerKey() > 0
-          ? new org.rocksdb.BloomFilter(config.getBloomBitsPerKey(), false) : null;
+      filter = new org.rocksdb.BloomFilter(config.getBloomBitsPerKey(), false);
       org.rocksdb.BlockBasedTableConfig table = new org.rocksdb.BlockBasedTableConfig()
           .setBlockSize(config.getBlockSize())
           .setChecksumType(org.rocksdb.ChecksumType.kCRC32c)
           .setBlockCache(cache)
           .setCacheIndexAndFilterBlocks(true)
           .setPinL0FilterAndIndexBlocksInCache(false)
-          .setWholeKeyFiltering(filter != null);
-      if (filter != null) {
-        table.setFilter(filter);
-      }
+          .setWholeKeyFiltering(true)
+          .setFilter(filter);
       options = new org.rocksdb.Options()
           .setCreateIfMissing(create)
           .setParanoidChecks(true)
@@ -496,9 +493,7 @@ final class StateArchiveIndexDatabase {
     @Override
     public void close() {
       options.close();
-      if (filter != null) {
-        filter.close();
-      }
+      filter.close();
       cache.close();
     }
   }
@@ -542,21 +537,17 @@ final class StateArchiveIndexDatabase {
       }
       List<org.rocksdb.ColumnFamilyDescriptor> descriptors = new ArrayList<>();
       for (String name : expected) {
-        org.rocksdb.BloomFilter filter = config.getBloomBitsPerKey() > 0
-            ? new org.rocksdb.BloomFilter(config.getBloomBitsPerKey(), false) : null;
-        if (filter != null) {
-          filters.add(filter);
-        }
+        org.rocksdb.BloomFilter filter = new org.rocksdb.BloomFilter(
+            config.getBloomBitsPerKey(), false);
+        filters.add(filter);
         org.rocksdb.BlockBasedTableConfig table = new org.rocksdb.BlockBasedTableConfig()
             .setBlockSize(config.getBlockSize())
             .setChecksumType(org.rocksdb.ChecksumType.kCRC32c)
             .setBlockCache(cache)
             .setCacheIndexAndFilterBlocks(true)
             .setPinL0FilterAndIndexBlocksInCache(false)
-            .setWholeKeyFiltering(filter != null);
-        if (filter != null) {
-          table.setFilter(filter);
-        }
+            .setWholeKeyFiltering(true)
+            .setFilter(filter);
         org.rocksdb.ColumnFamilyOptions options = new org.rocksdb.ColumnFamilyOptions()
             .setCompressionType(org.rocksdb.CompressionType.SNAPPY_COMPRESSION)
             .setWriteBufferSize(config.getWriteBufferSize())
