@@ -413,7 +413,7 @@ public class StorageConfig {
     void validate(String path) {
       if (blockSize <= 0 || writeBufferSize <= 0 || cacheSize <= 0 || maxOpenFiles <= 0
           || targetFileSizeBase <= 0 || maxBytesForLevelBase <= 0
-          || bloomBitsPerKey < 0 || maxWriteBufferNumber <= 0 || levelNumber <= 0
+          || bloomBitsPerKey <= 0 || maxWriteBufferNumber <= 0 || levelNumber <= 0
           || maxBytesForLevelMultiplier <= 0 || level0FileNumCompactionTrigger <= 0
           || level0SlowdownWritesTrigger < level0FileNumCompactionTrigger
           || level0StopWritesTrigger < level0SlowdownWritesTrigger
