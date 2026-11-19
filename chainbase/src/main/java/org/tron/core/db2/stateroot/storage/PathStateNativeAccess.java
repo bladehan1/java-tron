@@ -132,6 +132,10 @@ public interface PathStateNativeAccess extends Closeable {
     public static BatchMutation delete(byte[] key) {
       return new BatchMutation(key, null);
     }
+
+    public long estimatedBytes() {
+      return (long) key.length + (value == null ? 0L : value.length);
+    }
   }
 
   final class KeyValue {

@@ -137,6 +137,22 @@ public class Storage {
 
   @Getter
   @Setter
+  private boolean commonCheckpointPeriodicSync = false;
+
+  @Getter
+  @Setter
+  private int commonCheckpointSyncFlushCount = 100;
+
+  @Getter
+  @Setter
+  private long commonCheckpointSyncEncodedBytes = 0L;
+
+  @Getter
+  @Setter
+  private long commonCheckpointTargetWriteBatchBytes = 0L;
+
+  @Getter
+  @Setter
   private boolean pathStateRootEnabled;
 
   /** Any existing Archive-related configuration enables the coupled AccountAsset lane. */

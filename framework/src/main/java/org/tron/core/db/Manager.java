@@ -971,6 +971,10 @@ public class Manager {
       if (storage.isCommonCheckpointPerBatchSync()) {
         coordinator.enablePerBatchConsolidation();
       }
+      if (storage.isCommonCheckpointPeriodicSync()) {
+        coordinator.enablePeriodicConsolidation(storage.getCommonCheckpointSyncFlushCount(),
+            storage.getCommonCheckpointSyncEncodedBytes());
+      }
       PathStatePhysicalOverlayHead admittedOwner = pathOwner;
       StateArchiveHotCheckpointMaterializer admittedHotMaterializer = hotMaterializer;
       StateArchiveHotStore admittedHotStore = hotStore;
@@ -1172,6 +1176,11 @@ public class Manager {
               admittedArchive)) {
         if (Args.getInstance().getStorage().isCommonCheckpointPerBatchSync()) {
           coordinator.enablePerBatchConsolidation();
+        }
+        if (Args.getInstance().getStorage().isCommonCheckpointPeriodicSync()) {
+          coordinator.enablePeriodicConsolidation(
+              Args.getInstance().getStorage().getCommonCheckpointSyncFlushCount(),
+              Args.getInstance().getStorage().getCommonCheckpointSyncEncodedBytes());
         }
         CommonCheckpointRedoCoordinator.RecoveryAction action = coordinator.recover();
         logger.info("Common checkpoint startup redo completed before PathState open: action={}",

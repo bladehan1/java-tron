@@ -30,6 +30,7 @@ import org.tron.common.parameter.CommonParameter;
 import org.tron.core.config.args.StorageConfig.NativeDbConfig;
 import org.tron.core.config.args.StorageConfig.PathStateDbSettingsConfig;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
+import org.tron.core.db2.checkpoint.common.materialize.CheckpointWriteBatches;
 import org.tron.core.db2.checkpoint.common.payload.CommonCheckpointPayload;
 import org.tron.core.db2.stateroot.commitment.PathStateBlockTransition;
 import org.tron.core.db2.stateroot.commitment.PathStateCanonicalizer;
@@ -1895,6 +1896,21 @@ public final class PathStatePhysicalStoreSet implements Closeable {
       nodeStore.apply(nodeMutations);
     }
 
+    private void writeCheckpointUnsynced(List<PathStateNativeAccess.BatchMutation> mutations) {
+      org.tron.core.config.args.Storage storage = CommonParameter.getInstance().getStorage();
+      long maximumBytes = storage == null ? 0L
+          : storage.getCommonCheckpointTargetWriteBatchBytes();
+      for (List<PathStateNativeAccess.BatchMutation> chunk : CheckpointWriteBatches.split(
+          mutations, PathStatePhysicalStoreSet.PhysicalStore::checkpointMutationBytes,
+          maximumBytes)) {
+        nativeStore.writeBatch(chunk, false);
+      }
+    }
+
+    private static long checkpointMutationBytes(PathStateNativeAccess.BatchMutation mutation) {
+      return mutation.estimatedBytes();
+    }
+
     void applyCheckpointParticipant(CommonCheckpointPayload.PathStoreTarget target,
         byte[] marker) {
       applyCheckpointParticipant(target, marker, true);
@@ -1904,7 +1920,11 @@ public final class PathStatePhysicalStoreSet implements Closeable {
         byte[] marker, boolean sync) {
       List<PathStateNativeAccess.BatchMutation> mutations = checkpointDataMutations(target);
       mutations.add(metadataMutation(CHECKPOINT_TARGET_METADATA, marker));
-      nativeStore.writeBatch(mutations, sync);
+      if (sync) {
+        nativeStore.writeBatch(mutations, true);
+      } else {
+        writeCheckpointUnsynced(mutations);
+      }
       nodeStore.apply(checkpointCacheMutations(target));
     }
 
@@ -1976,7 +1996,11 @@ public final class PathStatePhysicalStoreSet implements Closeable {
       List<NodeMutation> cacheMutations = new ArrayList<>();
       appendSuperMutations(supplied, mutations, cacheMutations);
       mutations.add(metadataMutation(CHECKPOINT_TARGET_METADATA, marker));
-      nativeStore.writeBatch(mutations, sync);
+      if (sync) {
+        nativeStore.writeBatch(mutations, true);
+      } else {
+        writeCheckpointUnsynced(mutations);
+      }
       nodeStore.apply(cacheMutations);
     }
 

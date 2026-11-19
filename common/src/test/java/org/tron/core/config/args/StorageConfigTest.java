@@ -165,6 +165,10 @@ public class StorageConfigTest {
     assertFalse(defaults.getCommonCheckpoint().isEnabled());
     assertEquals("common-checkpoint", defaults.getCommonCheckpoint().getDirectory());
     assertEquals(0, defaults.getCommonCheckpoint().getDurableBaseGenerations());
+    assertFalse(defaults.getCommonCheckpoint().isPeriodicSync());
+    assertEquals(100, defaults.getCommonCheckpoint().getSyncFlushCount());
+    assertEquals(0, defaults.getCommonCheckpoint().getSyncEncodedBytes());
+    assertEquals(0, defaults.getCommonCheckpoint().getTargetWriteBatchBytes());
 
     StorageConfig configured = StorageConfig.fromConfig(withRef(
         "storage.stateArchive.enabled = true\n"
@@ -174,6 +178,33 @@ public class StorageConfigTest {
     assertTrue(configured.getCommonCheckpoint().isEnabled());
     assertEquals("common-test", configured.getCommonCheckpoint().getDirectory());
     assertEquals(25, configured.getCommonCheckpoint().getDurableBaseGenerations());
+  }
+
+  @Test
+  public void testCommonCheckpointPeriodicOverrides() {
+    StorageConfig configured = StorageConfig.fromConfig(withRef(
+        "storage.commonCheckpoint { periodicSync = true, syncFlushCount = 25, "
+            + "syncEncodedBytes = 1024, targetWriteBatchBytes = 512 }"));
+    assertTrue(configured.getCommonCheckpoint().isPeriodicSync());
+    assertEquals(25, configured.getCommonCheckpoint().getSyncFlushCount());
+    assertEquals(1024, configured.getCommonCheckpoint().getSyncEncodedBytes());
+    assertEquals(512, configured.getCommonCheckpoint().getTargetWriteBatchBytes());
+  }
+
+  @Test(expected = IllegalArgumentException.class)
+  public void testCommonCheckpointRejectsConflictingSyncModes() {
+    StorageConfig.fromConfig(withRef(
+        "storage.commonCheckpoint { perBatchSync = true, periodicSync = true }"));
+  }
+
+  @Test(expected = IllegalArgumentException.class)
+  public void testCommonCheckpointRejectsNonPositivePeriodicFlushCount() {
+    StorageConfig.fromConfig(withRef("storage.commonCheckpoint.syncFlushCount = 0"));
+  }
+
+  @Test(expected = IllegalArgumentException.class)
+  public void testCommonCheckpointRejectsNegativePeriodicBytes() {
+    StorageConfig.fromConfig(withRef("storage.commonCheckpoint.syncEncodedBytes = -1"));
   }
 
   @Test(expected = IllegalArgumentException.class)

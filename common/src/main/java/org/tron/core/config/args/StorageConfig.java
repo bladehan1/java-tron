@@ -250,6 +250,10 @@ public class StorageConfig {
     // true = consolidate every committed batch (per-authority sync barriers + prune) instead of
     // advancing the durable base on a cadence; the common database keeps one crash-redo record.
     private boolean perBatchSync = false;
+    private boolean periodicSync = false;
+    private int syncFlushCount = 100;
+    private long syncEncodedBytes = 0L;
+    private long targetWriteBatchBytes = 0L;
 
     void postProcess() {
       if (directory == null || directory.trim().isEmpty()) {
@@ -258,6 +262,16 @@ public class StorageConfig {
       if (durableBaseGenerations < 0 || durableBaseGenerations > 500) {
         throw new IllegalArgumentException(
             "commonCheckpoint.durableBaseGenerations must be in [0, 500]");
+      }
+      if (perBatchSync && periodicSync) {
+        throw new IllegalArgumentException(
+            "commonCheckpoint perBatchSync and periodicSync are mutually exclusive");
+      }
+      if (syncFlushCount <= 0) {
+        throw new IllegalArgumentException("commonCheckpoint.syncFlushCount must be positive");
+      }
+      if (syncEncodedBytes < 0 || targetWriteBatchBytes < 0) {
+        throw new IllegalArgumentException("commonCheckpoint byte limits must be >= 0");
       }
     }
   }
