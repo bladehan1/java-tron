@@ -1,16 +1,11 @@
 package org.tron.core.db2.archive.serving;
 
 import java.io.IOException;
-import java.util.List;
 import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.db2.archive.serving.source.ServingHistorySource;
 import org.tron.core.db2.archive.serving.source.ServingHistorySource.Committed;
-import org.tron.core.db2.archive.serving.source.ServingHistorySource.CommittedBlock;
 
-/**
- * Deterministic batch selection (ch04 §3.5.3, S3/S4). Budgets only choose batch boundaries; they
- * never fail a build: a single block that exceeds them is a SOLO batch.
- */
+/** Selects a bounded History read window; an oversized first block is always included. */
 final class ServingBatchPlanner {
 
   private final ServingIndexService.Config config;
@@ -19,10 +14,6 @@ final class ServingBatchPlanner {
     this.config = config;
   }
 
-  /**
-   * Selects the next batch after {@code indexedThrough} from blocks.idx sizes only (no body
-   * read). SOLO is decided by the accumulated byte count, never by the last size read.
-   */
   Selection select(ServingHistorySource source, Committed view, long indexedThrough,
       long committedThrough) throws IOException {
     if (indexedThrough >= committedThrough) {
@@ -41,37 +32,16 @@ final class ServingBatchPlanner {
       n++;
       bytes += size;
     }
-    if (n == 1 && bytes > config.getMaxSourceBytes()) {
-      return new Selection(first, first, true);
-    }
-    return new Selection(first, first + n - 1, false);
-  }
-
-  /** Longest prefix within the plan budgets; 0 means the first block alone exceeds them. */
-  int planPrefix(List<CommittedBlock> blocks) {
-    long entries = 0;
-    long input = 0;
-    int k = 0;
-    for (CommittedBlock block : blocks) {
-      entries += block.getEntries();
-      input += block.getPlanInputBytes();
-      if (entries > config.getMaxPlanEntries() || input > config.getMaxPlanInputBytes()) {
-        break;
-      }
-      k++;
-    }
-    return k;
+    return new Selection(first, first + n - 1);
   }
 
   static final class Selection {
     private final long first;
     private final long last;
-    private final boolean solo;
 
-    Selection(long first, long last, boolean solo) {
+    Selection(long first, long last) {
       this.first = first;
       this.last = last;
-      this.solo = solo;
     }
 
     long getFirst() {
@@ -82,13 +52,9 @@ final class ServingBatchPlanner {
       return last;
     }
 
-    boolean isSolo() {
-      return solo;
-    }
-
     @Override
     public String toString() {
-      return (solo ? "SOLO(" + first : "RANGE(" + first + "," + last) + ")";
+      return "RANGE(" + first + "," + last + ")";
     }
   }
 }

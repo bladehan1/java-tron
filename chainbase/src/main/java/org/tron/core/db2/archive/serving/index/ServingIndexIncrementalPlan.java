@@ -168,27 +168,48 @@ public final class ServingIndexIncrementalPlan {
   /** Plans an exact-27 increment from committed reverse diffs with their step digests. */
   public static ServingIndexIncrementalPlan planCommittedDiffs(long indexedThrough, byte[] headHash,
       List<BlockReverseDiff> committedDiffs, List<byte[]> stepDigests) {
-    if (indexedThrough < 0) {
-      throw new IllegalArgumentException("indexedThrough must not be negative");
-    }
-    requireHash(headHash, "headHash");
-    List<String> participants = exactParticipants(
-        new ArrayList<>(ArchiveStoreScope.getStateDatabases()));
-    List<BlockReverseDiff> diffs = new ArrayList<>(Objects.requireNonNull(committedDiffs,
-        "committedDiffs"));
-    if (stepDigests == null || stepDigests.size() != diffs.size()) {
+    Objects.requireNonNull(committedDiffs, "committedDiffs");
+    if (stepDigests == null || stepDigests.size() != committedDiffs.size()) {
       throw new IllegalArgumentException("Serving step digests differ from committed diffs");
     }
-    Map<String, List<KeyChange>> changes = new LinkedHashMap<>();
-    participants.forEach(database -> changes.put(database, new ArrayList<>()));
-    byte[] sourceSeed = sourceSeed(indexedThrough, headHash, participants);
-    MessageDigest delta = sha256();
-    delta.update(sourceSeed);
-    List<byte[]> steps = new ArrayList<>();
-    long previousBlock = indexedThrough;
-    byte[] previousHash = Arrays.copyOf(headHash, headHash.length);
-    for (int index = 0; index < diffs.size(); index++) {
-      BlockReverseDiff diff = diffs.get(index);
+    Builder builder = new Builder(indexedThrough, headHash);
+    for (int index = 0; index < committedDiffs.size(); index++) {
+      builder.add(committedDiffs.get(index), stepDigests.get(index));
+    }
+    return builder.build();
+  }
+
+  /** One-pass validation and accumulation; thresholds are checked only after a whole block. */
+  public static final class Builder {
+    private final long indexedFrom;
+    private final byte[] indexedFromHash;
+    private final List<String> participants;
+    private final Map<String, List<KeyChange>> changes = new LinkedHashMap<>();
+    private final byte[] sourceSeed;
+    private final MessageDigest delta = sha256();
+    private final List<byte[]> steps = new ArrayList<>();
+    private long previousBlock;
+    private byte[] previousHash;
+    // Small fixed allowance for coverage/descriptor, rather than encoding them for estimation.
+    private long estimatedBytes = 16 * 1024;
+    private long estimatedMutations = 32;
+
+    public Builder(long indexedThrough, byte[] headHash) {
+      if (indexedThrough < 0) {
+        throw new IllegalArgumentException("indexedThrough must not be negative");
+      }
+      requireHash(headHash, "headHash");
+      indexedFrom = indexedThrough;
+      indexedFromHash = Arrays.copyOf(headHash, headHash.length);
+      previousBlock = indexedThrough;
+      previousHash = indexedFromHash;
+      participants = exactParticipants(new ArrayList<>(ArchiveStoreScope.getStateDatabases()));
+      participants.forEach(database -> changes.put(database, new ArrayList<>()));
+      sourceSeed = sourceSeed(indexedThrough, headHash, participants);
+      delta.update(sourceSeed);
+    }
+
+    public void add(BlockReverseDiff diff, byte[] step) {
       BlockSnapshotMeta meta = Objects.requireNonNull(diff, "committedDiff").getMeta();
       if (meta.getEpoch() != previousBlock + 1 || meta.getBlockNumber() != previousBlock + 1
           || !Arrays.equals(meta.getParentHash(), previousHash)) {
@@ -209,23 +230,37 @@ public final class ServingIndexIncrementalPlan {
             throw new IllegalArgumentException("Serving committed diff keys are not unique");
           }
           database.add(new KeyChange(key, meta.getEpoch()));
+          // Cheap proxy: metadata + a page write per changed key occurrence. Repeated keys
+          // may be overcounted; existing tail-page rewrites may be underestimated. No DB IO.
+          estimatedMutations += 2;
+          estimatedBytes += 2L * (2L * key.length + 16) + 128 + Long.BYTES;
           previousKey = key;
         }
         previousDatabase = group.getDbName();
       }
-      byte[] step = stepDigests.get(index);
       requireHash(step, "stepDigest");
       steps.add(step);
       delta.update(step);
       previousBlock = meta.getBlockNumber();
       previousHash = meta.getBlockHash();
     }
-    Map<String, List<KeyChange>> immutable = new LinkedHashMap<>();
-    changes.forEach((database, databaseChanges) -> immutable.put(database,
-        Collections.unmodifiableList(new ArrayList<>(databaseChanges))));
-    return new ServingIndexIncrementalPlan(indexedThrough, headHash, previousBlock,
-        previousHash, delta.digest(), sourceSeed, steps, participants,
-        Collections.unmodifiableMap(immutable));
+
+    public long estimatedBytes() {
+      return estimatedBytes;
+    }
+
+    public long estimatedMutations() {
+      return estimatedMutations;
+    }
+
+    public ServingIndexIncrementalPlan build() {
+      Map<String, List<KeyChange>> immutable = new LinkedHashMap<>();
+      changes.forEach((database, databaseChanges) -> immutable.put(database,
+          Collections.unmodifiableList(new ArrayList<>(databaseChanges))));
+      return new ServingIndexIncrementalPlan(indexedFrom, indexedFromHash, previousBlock,
+          previousHash, delta.digest(), sourceSeed, steps, participants,
+          Collections.unmodifiableMap(immutable));
+    }
   }
 
   public long getIndexedFrom() {

@@ -75,22 +75,10 @@ public interface ServingHistorySource {
   final class CommittedBlock {
     private final BlockReverseDiff diff;
     private final byte[] stepDigest;
-    private final long entries;
-    private final long planInputBytes;
 
     public CommittedBlock(BlockReverseDiff diff, byte[] stepDigest) {
       this.diff = Objects.requireNonNull(diff, "diff");
       this.stepDigest = Arrays.copyOf(stepDigest, stepDigest.length);
-      long count = 0;
-      long bytes = 0;
-      for (BlockReverseDiff.DbGroup group : diff.getGroups()) {
-        for (BlockReverseDiff.Entry entry : group.getEntries()) {
-          count++;
-          bytes += entry.getEstimatedIndexInputBytes();
-        }
-      }
-      this.entries = count;
-      this.planInputBytes = bytes;
     }
 
     public BlockReverseDiff getDiff() {
@@ -99,14 +87,6 @@ public interface ServingHistorySource {
 
     public byte[] getStepDigest() {
       return Arrays.copyOf(stepDigest, stepDigest.length);
-    }
-
-    public long getEntries() {
-      return entries;
-    }
-
-    public long getPlanInputBytes() {
-      return planInputBytes;
     }
   }
 }
