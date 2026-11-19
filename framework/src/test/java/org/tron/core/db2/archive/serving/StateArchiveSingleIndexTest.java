@@ -181,34 +181,19 @@ public class StateArchiveSingleIndexTest {
   }
 
   @Test
-  public void oversizedPlanIsSplitBeforeGroupingAndCommit() throws Exception {
+  public void planDoesNotRejectTheFormerEntryBudget() {
     List<BlockReverseDiff.Entry> entries = new ArrayList<>();
     for (int key = 0; key < 1000; key++) {
       entries.add(new BlockReverseDiff.Entry(hash(key), OldValue.absent()));
     }
-    List<BlockReverseDiff> input = new ArrayList<>();
+    ServingIndexIncrementalPlan.Builder builder =
+        new ServingIndexIncrementalPlan.Builder(100, hash(100));
     for (int block = 101; block <= 351; block++) {
-      input.add(new BlockReverseDiff(BlockSnapshotMeta.forBlock(block, hash(block),
+      builder.add(new BlockReverseDiff(BlockSnapshotMeta.forBlock(block, hash(block),
           hash(block - 1), block * 3000L), Collections.singletonList(
-              new BlockReverseDiff.DbGroup("code", entries))));
+              new BlockReverseDiff.DbGroup("code", entries))), hash(block));
     }
-    List<ServingHistorySource.CommittedBlock> committed = new ArrayList<>();
-    for (BlockReverseDiff diff : input) {
-      committed.add(new ServingHistorySource.CommittedBlock(diff, hash(0)));
-    }
-    ServingIndexService.Config entryBudget = ServingIndexService.Config.defaults()
-        .setMaxPlanEntries(250_000).setMaxPlanInputBytes(Long.MAX_VALUE);
-    assertEquals(250, new ServingBatchPlanner(entryBudget).planPrefix(committed));
-    ServingIndexService.Config inputBudget = ServingIndexService.Config.defaults()
-        .setMaxPlanEntries(Long.MAX_VALUE).setMaxPlanInputBytes(250L * 1000 * 160);
-    assertEquals(250, new ServingBatchPlanner(inputBudget).planPrefix(committed));
-    assertEquals(350, ServingIndexIncrementalPlan.planCommittedDiffs(100, hash(100),
-        input.subList(0, 250)).getIndexedThrough());
-    assertEquals(351, ServingIndexIncrementalPlan.planCommittedDiffs(350, hash(350),
-        input.subList(250, input.size())).getIndexedThrough());
-    ServingIndexService.Config soloBudget = ServingIndexService.Config.defaults()
-        .setMaxPlanEntries(500);
-    assertEquals(0, new ServingBatchPlanner(soloBudget).planPrefix(committed));
+    assertEquals(351, builder.build().getIndexedThrough());
   }
 
   private static ServingIndexIncrementalPlan plan(int first, int count) {

@@ -174,6 +174,7 @@ public class Storage {
 
   @Getter
   @Setter
+  // Reserved, currently unused: parsed and validated as a future format gate only.
   private int pathStateRootFormatVersion;
 
   @Getter
@@ -186,6 +187,8 @@ public class Storage {
 
   @Getter
   @Setter
+  // Reserved, currently unused: effective write buffer comes from
+  // storage.pathStateRoot.dbSettings profiles, not from this key.
   private long pathStateRootWriteBufferBytes;
 
   @Getter

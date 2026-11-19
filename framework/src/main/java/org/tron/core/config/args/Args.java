@@ -250,11 +250,14 @@ public class Args extends CommonParameter {
     PARAMETER.storage.setPathStateRootMode(sc.getPathStateRoot().getMode());
     PARAMETER.storage.setPathStateRootDirectory(sc.getPathStateRoot().getDirectory());
     PARAMETER.storage.setPathStateRootEngine(sc.getPathStateRoot().getEngine());
+    // Reserved latch; must be 1 (validated in StorageConfig.postProcess).
     PARAMETER.storage.setPathStateRootFormatVersion(sc.getPathStateRoot().getFormatVersion());
     PARAMETER.storage.setPathStateRootReversibleLayerLimit(
         sc.getPathStateRoot().getReversibleLayerLimit());
     PARAMETER.storage.setPathStateRootReversibleLayerBytes(
         sc.getPathStateRoot().getReversibleLayerBytes());
+    // Reserved: no consumer; the effective write buffer is governed by
+    // storage.pathStateRoot.dbSettings profiles.
     PARAMETER.storage.setPathStateRootWriteBufferBytes(
         sc.getPathStateRoot().getWriteBufferBytes());
     PARAMETER.storage.setPathStateRootNodeCacheBytes(

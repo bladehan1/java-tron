@@ -203,7 +203,7 @@ public class ServingIndexServiceTest {
   }
 
   @Test(timeout = 60_000)
-  public void synchronousSoloAndNoChangeTargetsReopenWithExactIndex() throws Exception {
+  public void synchronousOversizedAndNoChangeTargetsReopenWithExactIndex() throws Exception {
     History history = history(1);
     ServingIndexService service = service(history,
         config().setMaxSourceBytes(1024L * 1024).setMaxWriteMutations(64)
@@ -219,7 +219,7 @@ public class ServingIndexServiceTest {
     service.onCommonPublished(solo);
     service.completePublishedTarget(solo);
     assertEquals(solo, service.getIndexedCommit());
-    assertTrue(service.batches(2) > 0);
+    assertEquals(0, service.batches(2));
     history.keysPerBlock = 0;
     CommonCheckpointTarget empty = history.publishWithoutNotify(3, 3);
     service.onCommonPublished(empty);
@@ -296,35 +296,26 @@ public class ServingIndexServiceTest {
     history.assertOracle(service);
   }
 
-  /**
-   * T5 (service part): a block over every budget is a SOLO batch chunked by key; a query in
-   * between never sees I + 1, and the result matches the oracle.
-   */
+  /** Oversized History/input and write estimates still use one atomic publication. */
   @Test(timeout = 60_000)
-  public void oversizedBlockIsIndexedSoloInKeyAtomicChunks() throws Exception {
+  public void oversizedBlockIsIndexedInOneAtomicBatch() throws Exception {
     History history = history(1);
-    AtomicInteger chunks = new AtomicInteger();
-    AtomicReference<Long> seenDuringSolo = new AtomicReference<>();
-    AtomicReference<ServingIndexService> self = new AtomicReference<>();
+    AtomicInteger writes = new AtomicInteger();
     ServingIndexService service = service(history, config().setMaxSourceBytes(1024L * 1024)
-        .setMaxWriteMutations(64).setMaxWriteBytes(64 * 1024), new ServingIndexService.Hooks() {
+        .setMaxWriteMutations(64).setMaxWriteBytes(64 * 1024),
+        new ServingIndexService.Hooks() {
           @Override
-          public void beforeSoloChunk(int index, int count) {
-            chunks.set(count);
-            if (index == 1) {
-              seenDuringSolo.set(self.get().status().getIndexedThrough());
-            }
+          public void afterCommit(long first, long last) {
+            writes.incrementAndGet();
           }
         });
-    self.set(service);
     assertTrue(service.awaitLive(WAIT));
     history.keysPerBlock = 300;
     history.payloadBytes = 16 * 1024;
     history.publish(service, 1, 1);
     assertTrue(awaitThrough(service, 1));
-    assertEquals(1, service.batches(2));
-    assertTrue(chunks.get() > 2);
-    assertEquals(Long.valueOf(0), seenDuringSolo.get());
+    assertEquals(0, service.batches(2));
+    assertEquals(1, writes.get());
     history.assertOracle(service);
   }
 
@@ -653,11 +644,11 @@ public class ServingIndexServiceTest {
   }
 
   /**
-   * T18: close is cooperative between solo chunks; with a build stuck inside a write the close
+   * T18: with a build stuck at publication the close
    * times out and leaves the native handle to process exit, never closing it under the build.
    */
   @Test(timeout = 60_000)
-  public void closeStopsBetweenChunksAndTimesOutWithoutClosingTheHandle() throws Exception {
+  public void closeTimesOutWithoutClosingAnInFlightHandle() throws Exception {
     History history = history(1);
     CountDownLatch inChunk = new CountDownLatch(1);
     CountDownLatch release = new CountDownLatch(1);
@@ -665,8 +656,8 @@ public class ServingIndexServiceTest {
         .setMaxWriteMutations(64).setMaxWriteBytes(64 * 1024).setCloseTimeoutMillis(300),
         new ServingIndexService.Hooks() {
           @Override
-          public void beforeSoloChunk(int index, int count) {
-            if (index == 1) {
+          public void afterCommit(long first, long last) {
+            if (last == 1) {
               inChunk.countDown();
               await(release);
             }
@@ -683,7 +674,7 @@ public class ServingIndexServiceTest {
     assertTrue(System.nanoTime() - started >= TimeUnit.MILLISECONDS.toNanos(250));
     assertEquals(ServingState.CLOSED, service.status().getState());
     release.countDown();
-    // The build thread now stops at the next chunk boundary; the handle was never closed under
+    // The build thread now stops at the next batch boundary; the handle was never closed under
     // it and is never used after close.
     Thread.sleep(300);
     assertEquals(0, handle.useAfterCloseCount());

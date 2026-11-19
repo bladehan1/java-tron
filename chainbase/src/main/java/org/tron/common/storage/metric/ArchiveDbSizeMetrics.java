@@ -18,6 +18,10 @@ import org.tron.common.prometheus.Metrics;
  * RocksDbDataSourceImpl, which is what DbStatService registers. Sizes come from a file-tree
  * walk and reflect whatever files are present (including not-yet-compacted garbage), unlike the
  * per-level live SST accounting behind tron:db_size_bytes for chainbase stores.
+ *
+ * <p>Cost model: one daemon thread per registered database; the walk runs hourly and its cost
+ * scales with directory file count (on very large archive directories it can take seconds and
+ * adds read IO). There is no disable/throttle switch.
  */
 @Slf4j(topic = "metrics")
 public final class ArchiveDbSizeMetrics {
@@ -47,6 +51,11 @@ public final class ArchiveDbSizeMetrics {
       logger.debug("Archive DB {} size {} bytes", dbName, size);
     } catch (IOException e) {
       logger.warn("Archive DB {} size stats error", dbName, e);
+    } catch (RuntimeException e) {
+      // scheduleWithFixedDelay cancels all future runs if the task throws; keep the
+      // hourly metric alive on unexpected failures (e.g. a broken gauge registration).
+      logger.warn("Archive DB {} size stats failed unexpectedly; next report is still scheduled",
+          dbName, e);
     }
   }
 

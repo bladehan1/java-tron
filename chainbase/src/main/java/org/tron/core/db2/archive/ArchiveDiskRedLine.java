@@ -1,4 +1,4 @@
-package org.tron.common.setting;
+package org.tron.core.db2.archive;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -7,7 +7,11 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-/** A single 30 GiB free-space admission boundary; shutdown flush remains permitted. */
+/**
+ * A single 30 GiB free-space admission boundary; shutdown flush remains permitted.
+ * Owned by the archive admission path (Manager); kept out of the common leaf layer
+ * because the policy is caller-specific to archive writes.
+ */
 public final class ArchiveDiskRedLine {
   public static final long MIN_FREE_BYTES = 30L * 1024 * 1024 * 1024;
 

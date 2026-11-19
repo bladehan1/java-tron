@@ -1124,25 +1124,22 @@ public final class PersistentServingKeyIndexGeneration implements PinnedServingK
   static void appendExactChanges(ArchiveIndexStorage.Writer target,
       List<ArchiveIndexStorage.Mutation> batch, ExactKey key,
       List<Long> suppliedEpochs, long durableI) throws IOException {
-    prepareExactChanges(target, key, suppliedEpochs, durableI, new java.util.HashMap<>())
-        .appendTo(target, batch);
+    prepareExactChanges(target, key, suppliedEpochs, durableI).appendTo(target, batch);
   }
 
-  /** Reads metadata once per source batch; rejected prefixes never read or encode pages. */
+  /** Reads each aggregated key once, then encodes its append (including old solo replay). */
   static PreparedExactChanges prepareExactChanges(ArchiveIndexStorage.Writer target,
-      ExactKey key, List<Long> suppliedEpochs, long durableI, Map<ExactKey, byte[]> metadata)
+      ExactKey key, List<Long> suppliedEpochs, long durableI)
       throws IOException {
     List<Long> appended = suppliedEpochs;
     byte[] metaKey = keyMetaKey(key.dbName, key.rawKey);
-    if (!metadata.containsKey(key)) {
-      long started = System.nanoTime();
-      try {
-        metadata.put(key, target.get(metaKey));
-      } finally {
-        ServingIndexTiming.record(ServingIndexTiming.Stage.META_GET, started);
-      }
+    byte[] existing;
+    long started = System.nanoTime();
+    try {
+      existing = target.get(metaKey);
+    } finally {
+      ServingIndexTiming.record(ServingIndexTiming.Stage.META_GET, started);
     }
-    byte[] existing = metadata.get(key);
     KeyMeta meta = existing == null ? null : decodeKeyMeta(existing);
     if (meta != null && meta.lastEpoch > durableI) {
       if (durableI == Long.MAX_VALUE || meta.lastEpoch != durableI + 1 || appended.isEmpty()
@@ -1170,48 +1167,6 @@ public final class PersistentServingKeyIndexGeneration implements PinnedServingK
       this.metaKey = metaKey;
       this.meta = meta;
       this.appended = appended;
-    }
-
-    /** Used only by the block-wise budget probe; validates each new epoch once. */
-    void appendEpoch(long epoch) {
-      long previous = appended.isEmpty() ? (meta == null ? Long.MIN_VALUE : meta.lastEpoch)
-          : appended.get(appended.size() - 1);
-      if (epoch <= previous) {
-        throw new IllegalArgumentException("Serving epochs must increase strictly");
-      }
-      appended.add(epoch);
-    }
-
-    private long rewrittenEpochs() {
-      long prior = meta == null ? 0 : meta.count;
-      if (prior + appended.size() <= INLINE_EPOCH_LIMIT) {
-        return 0;
-      }
-      return appended.size() + (meta == null ? 0
-          : meta.mode == INLINE ? prior : prior % EPOCHS_PER_PAGE);
-    }
-
-    long mutationCount() {
-      return appended.isEmpty() ? 0
-          : 1 + (rewrittenEpochs() + EPOCHS_PER_PAGE - 1) / EPOCHS_PER_PAGE;
-    }
-
-    long estimatedBytes() {
-      if (appended.isEmpty()) {
-        return 0;
-      }
-      long prior = meta == null ? 0 : meta.count;
-      long total = prior + appended.size();
-      // Same fixed-width encodings as ServingIndexRecordCodec, including CRC and
-      // Mutation.estimatedBytes overhead. No page value is loaded to determine its size.
-      long metaBytes = 1 + 3 * Long.BYTES + Integer.BYTES;
-      if (total <= INLINE_EPOCH_LIMIT) {
-        metaBytes += Integer.BYTES + total * Long.BYTES;
-      }
-      long pages = mutationCount() - 1;
-      return 32L + metaKey.length + metaBytes
-          + pages * (32L + keyPageKey(key.dbName, key.rawKey, 0).length + 2 * Integer.BYTES)
-          + rewrittenEpochs() * Long.BYTES;
     }
 
     void appendTo(ArchiveIndexStorage.Writer target, List<ArchiveIndexStorage.Mutation> batch)
