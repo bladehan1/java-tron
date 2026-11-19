@@ -27,8 +27,7 @@ import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
 public class ServingIndexStoreLargeBlockTest {
 
   private static final long B0 = 101;
-  private static final ServingIndexStore.WriteBudget TINY =
-      new ServingIndexStore.WriteBudget(64, 64 * 1024);
+
 
   @Rule
   public final TemporaryFolder temporaryFolder = new TemporaryFolder();
@@ -49,7 +48,7 @@ public class ServingIndexStoreLargeBlockTest {
           store.indexedThrough(), store.headHash(), Collections.singletonList(huge),
           Collections.singletonList(ServingIndexIncrementalPlan.stepDigest(huge.getMeta(),
               Collections.singletonList(hash(9)))));
-      store.commitSolo(plan, TINY, false, ServingIndexStore.ChunkHook.NONE);
+      store.commit(plan, false);
       assertEquals(B0, store.indexedThrough());
     }
   }

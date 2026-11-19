@@ -22,7 +22,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.tron.common.math.StrictMathWrapper;
 import org.tron.core.db2.archive.ArchivePersistenceException;
-import org.tron.core.db2.archive.BlockReverseDiff;
 import org.tron.core.db2.archive.contract.CheckpointPointReader;
 import org.tron.core.db2.archive.contract.HistoricalQueryException;
 import org.tron.core.db2.archive.contract.StateArchivePointSource;
@@ -52,8 +51,8 @@ import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
  *       Receipt failure blocks further admission but never undoes committed History.</li>
  *   <li>Merged watermark (S2): the work range is always {@code (I, W]} of the published History
  *       boundary; notifications only wake the thread.</li>
- *   <li>Budgets choose boundaries, never success (S3/S4, S-INV-11): normal batches are halved at
- *       block boundaries; a single oversized block is a key-atomic SOLO batch.</li>
+ *   <li>Soft thresholds trigger a flush after a complete block, including an oversized one.
+ *       Data and progress always share one atomic write.</li>
  *   <li>Readiness (S5, S-INV-8): the initial state is derived from durable data; LIVE is entered
  *       when a commit reaches {@code I == W} and left when {@code W - I > live.maxLagBlocks}. No
  *       block-import call, no P2P signal.</li>
@@ -79,7 +78,6 @@ public final class ServingIndexService implements AutoCloseable {
   private final Hooks hooks;
   private final LongSupplier clock;
   private final ServingBatchPlanner planner;
-  private final ServingIndexStore.WriteBudget budget;
   private final AtomicReference<CommonCheckpointTarget> latestNotified = new AtomicReference<>();
   private final AtomicInteger leases = new AtomicInteger();
   private final AtomicReference<ServingFailure> reportedByQuery = new AtomicReference<>();
@@ -246,8 +244,6 @@ public final class ServingIndexService implements AutoCloseable {
     this.hooks = Objects.requireNonNull(hooks, "hooks");
     this.clock = Objects.requireNonNull(clock, "clock");
     this.planner = new ServingBatchPlanner(config);
-    this.budget = new ServingIndexStore.WriteBudget(config.getMaxWriteMutations(),
-        config.getMaxWriteBytes());
     this.stateSince = clock.getAsLong();
     this.view = new ServingView(ServingState.OPENING, stateSince, -1, -1, null, -1, null,
         false, 0, 0, 0, null);
@@ -446,7 +442,7 @@ public final class ServingIndexService implements AutoCloseable {
     LockSupport.unpark(thread);
   }
 
-  /** Batches by kind (normal, split, solo), for tests and metrics. */
+  /** Batch counters: normal, split read window, and legacy solo (always zero for new writes). */
   long batches(int kind) {
     return batchCounters[kind];
   }
@@ -600,11 +596,7 @@ public final class ServingIndexService implements AutoCloseable {
       buildRange(history, first, last, w);
     } else {
       ServingBatchPlanner.Selection selection = planner.select(source, history, i, w);
-      if (selection.isSolo()) {
-        buildSolo(history, selection.getFirst(), null, w);
-      } else {
-        buildRange(history, selection.getFirst(), selection.getLast(), w);
-      }
+      buildRange(history, selection.getFirst(), selection.getLast(), w);
     }
     if (store.indexedThrough() == w) {
       pendingSinceMillis = 0;
@@ -630,35 +622,24 @@ public final class ServingIndexService implements AutoCloseable {
       bufferedOffset = 0;
     }
     List<CommittedBlock> blocks = bufferedBlocks.subList(bufferedOffset, bufferedBlocks.size());
-    ServingIndexStore.Preparation preparation = store.preparation();
-    int k;
-    // Preflight is separately timed with zero published blocks; include it in net-drain cost.
-    try (ServingIndexTiming timing = new ServingIndexTiming(state.name() + "_PREFLIGHT",
-        store.indexedThrough(), store.indexedThrough())) {
-      k = store.fittingPrefix(blocks, config, budget, w, preparation);
-      timing.succeeded();
+    ServingIndexIncrementalPlan.Builder builder = new ServingIndexIncrementalPlan.Builder(
+        store.indexedThrough(), store.headHash());
+    int k = 0;
+    for (CommittedBlock block : blocks) {
+      builder.add(block.getDiff(), block.getStepDigest());
+      k++;
+      if (builder.estimatedBytes() >= config.getMaxWriteBytes()
+          || builder.estimatedMutations() >= config.getMaxWriteMutations()) {
+        break;
+      }
     }
     requireOpen();
-    if (k == 0) {
-      buildSolo(history, first, blocks.get(0), w, preparation);
-      consumeBuffered(1);
-      return;
-    }
-    List<BlockReverseDiff> diffs = new ArrayList<>(k);
-    List<byte[]> steps = new ArrayList<>(k);
-    for (int index = 0; index < k; index++) {
-      diffs.add(blocks.get(index).getDiff());
-      steps.add(blocks.get(index).getStepDigest());
-    }
-    ServingIndexIncrementalPlan plan = ServingIndexIncrementalPlan.planCommittedDiffs(
-        store.indexedThrough(), store.headHash(), diffs, steps);
+    ServingIndexIncrementalPlan plan = builder.build();
     boolean split = k < blocks.size() || bufferedOffset > 0;
     long started = System.nanoTime();
     try (ServingIndexTiming timing = new ServingIndexTiming(state.name(),
         plan.getIndexedFrom(), plan.getIndexedThrough())) {
-      if (!store.commit(plan, budget, plan.getIndexedThrough() == w, preparation)) {
-        throw new IllegalStateException("Serving prefix exceeded its preflight budget");
-      }
+      store.commit(plan, plan.getIndexedThrough() == w);
       timing.succeeded();
     }
     consumeBuffered(k);
@@ -680,41 +661,6 @@ public final class ServingIndexService implements AutoCloseable {
   private void clearBufferedSource() {
     bufferedBlocks = null;
     bufferedOffset = 0;
-  }
-
-  private void buildSolo(Committed history, long block, CommittedBlock preRead, long w)
-      throws IOException {
-    buildSolo(history, block, preRead, w, store.preparation());
-  }
-
-  private void buildSolo(Committed history, long block, CommittedBlock preRead, long w,
-      ServingIndexStore.Preparation preparation) throws IOException {
-    requireOpen();
-    hooks.beforeBatch(block, block, true);
-    CommittedBlock committed = preRead != null ? preRead
-        : source.read(history, block, block).get(0);
-    ServingIndexIncrementalPlan plan = ServingIndexIncrementalPlan.planCommittedDiffs(
-        store.indexedThrough(), store.headHash(),
-        java.util.Collections.singletonList(committed.getDiff()),
-        java.util.Collections.singletonList(committed.getStepDigest()));
-    long started = System.nanoTime();
-    int chunks;
-    try (ServingIndexTiming timing = new ServingIndexTiming(state.name(),
-        plan.getIndexedFrom(), plan.getIndexedThrough())) {
-      chunks = store.commitSolo(plan, budget, plan.getIndexedThrough() == w,
-          (index, count) -> {
-            if (index > 0 && closing) {
-              throw new ClosingException();
-            }
-            hooks.beforeSoloChunk(index, count);
-          }, preparation);
-      timing.succeeded();
-    }
-    hooks.afterCommit(block, block);
-    batchCounters[2]++;
-    ServingIndexTiming.batch("solo");
-    logger.info("Serving index solo batch: block={}, chunks={}, durationMs={}", block, chunks,
-        (System.nanoTime() - started) / 1_000_000L);
   }
 
   private void logBatch(ServingIndexIncrementalPlan plan, int blocks, long started) {
@@ -1097,7 +1043,7 @@ public final class ServingIndexService implements AutoCloseable {
     ServingIndexTiming.serving(view);
   }
 
-  /** Thrown inside the build thread to stop between batches or solo chunks. */
+  /** Thrown inside the build thread to stop between atomic batches. */
   private static final class ClosingException extends IOException {
     private ClosingException() {
       super("Serving is closing");
@@ -1111,8 +1057,7 @@ public final class ServingIndexService implements AutoCloseable {
     default void beforeBatch(long first, long last, boolean solo) throws IOException {
     }
 
-    default void beforeSoloChunk(int index, int count) throws IOException {
-    }
+
 
     /** After a durable commit; throwing simulates a lost write acknowledgement. */
     default void afterCommit(long first, long last) throws IOException {
@@ -1129,10 +1074,8 @@ public final class ServingIndexService implements AutoCloseable {
   public static final class Config {
     private int maxBlocks = 1000;
     private long maxSourceBytes = 32L * 1024 * 1024;
-    private long maxPlanEntries = 250_000;
-    private long maxPlanInputBytes = 128L * 1024 * 1024;
-    private long maxWriteMutations = 500_000;
-    private long maxWriteBytes = 64L * 1024 * 1024;
+    private long maxWriteMutations = 450_000;
+    private long maxWriteBytes = 60L * 1024 * 1024;
     private long tailDelayMillis;
     private long bulkMinBlocks = 1000;
     private long liveMaxLagBlocks = 100;
@@ -1170,8 +1113,6 @@ public final class ServingIndexService implements AutoCloseable {
       if (maxSourceBytes < 1024L * 1024) {
         throw new IllegalArgumentException("serving.batch.maxSourceBytes must be >= 1 MiB");
       }
-      requirePositive(maxPlanEntries, "batch.maxPlanEntries");
-      requirePositive(maxPlanInputBytes, "batch.maxPlanInputBytes");
       requirePositive(maxWriteMutations, "batch.maxWriteMutations");
       requirePositive(maxWriteBytes, "batch.maxWriteBytes");
       if (maxWriteBytes > 1024L * 1024 * 1024) {
@@ -1216,24 +1157,7 @@ public final class ServingIndexService implements AutoCloseable {
       return this;
     }
 
-    public long getMaxPlanEntries() {
-      return maxPlanEntries;
-    }
-
-    public Config setMaxPlanEntries(long value) {
-      maxPlanEntries = value;
-      return this;
-    }
-
-    public long getMaxPlanInputBytes() {
-      return maxPlanInputBytes;
-    }
-
-    public Config setMaxPlanInputBytes(long value) {
-      maxPlanInputBytes = value;
-      return this;
-    }
-
+    /** Soft flush trigger; the final complete block may exceed it. */
     public long getMaxWriteMutations() {
       return maxWriteMutations;
     }
@@ -1243,6 +1167,7 @@ public final class ServingIndexService implements AutoCloseable {
       return this;
     }
 
+    /** Estimated-byte soft flush trigger, not a physical WriteBatch size limit. */
     public long getMaxWriteBytes() {
       return maxWriteBytes;
     }

@@ -40,7 +40,7 @@ public class ServingIndexSourceWindowTest {
     CountingSource source = new CountingSource(history.source);
     AtomicBoolean pressure = new AtomicBoolean();
     ServingIndexService.Config config = new ServingIndexService.Config()
-        .setMaxPlanEntries(5).setPollMillis(10).setRetryInitialBackoffMillis(10)
+        .setMaxWriteMutations(40).setPollMillis(10).setRetryInitialBackoffMillis(10)
         .setRetryMaxBackoffMillis(50).setCloseTimeoutMillis(10_000);
     try (Writer ignored = history.writer) {
       history.publishWithoutNotify(1, 9);
@@ -83,7 +83,7 @@ public class ServingIndexSourceWindowTest {
     AtomicBoolean first = new AtomicBoolean(true);
     AtomicReference<ServingIndexService> self = new AtomicReference<>();
     ServingIndexService.Config config = new ServingIndexService.Config()
-        .setMaxPlanEntries(5).setPollMillis(10).setRetryInitialBackoffMillis(10)
+        .setMaxWriteMutations(40).setPollMillis(10).setRetryInitialBackoffMillis(10)
         .setRetryMaxBackoffMillis(50).setCloseTimeoutMillis(10_000);
     try (Writer ignored = history.writer;
         ServingIndexService service = new ServingIndexService(history.servingRoot, root, null,
