@@ -121,6 +121,7 @@ import org.tron.core.db.api.EnergyPriceHistoryLoader;
 import org.tron.core.db.api.MigrateTurkishKeyHelper;
 import org.tron.core.db.api.MoveAbiHelper;
 import org.tron.core.db2.ISession;
+import org.tron.core.db2.archive.ArchiveDiskRedLine;
 import org.tron.core.db2.archive.ArchiveStoreScope;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
 import org.tron.core.db2.archive.OldValue;
@@ -564,17 +565,17 @@ public class Manager {
     ExecutorServiceManager.shutdownAndAwaitTermination(validateSignService, "validate-sign");
   }
 
-  private org.tron.common.setting.ArchiveDiskRedLine archiveDiskRedLine;
+  private ArchiveDiskRedLine archiveDiskRedLine;
   private java.util.concurrent.ScheduledExecutorService archiveDiskMonitor;
 
   private void initArchiveDiskRedLine(org.tron.core.config.args.Storage storage) {
     java.nio.file.Path output = java.nio.file.Paths.get(Args.getInstance().getOutputDirectory());
-    archiveDiskRedLine = new org.tron.common.setting.ArchiveDiskRedLine(
+    archiveDiskRedLine = new ArchiveDiskRedLine(
         java.util.Arrays.asList(output.resolve(storage.getDbDirectory()),
             output.resolve(storage.getCommonCheckpointDirectory()),
             output.resolve(storage.getPathStateRootDirectory()),
             output.resolve(storage.getStateArchiveDirectory())),
-        org.tron.common.setting.ArchiveDiskRedLine::usableBytes,
+        ArchiveDiskRedLine::usableBytes,
         () -> {
           historicalQueryAdmission.stop();
           org.tron.common.exit.ExitManager.logAndExit(new org.tron.core.exception.TronError(

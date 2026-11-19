@@ -514,6 +514,11 @@ message BlockHeader {
   }
   raw raw_data = 1;
   bytes witness_signature = 2;
+  // Non-consensus path-state root. Producers that enable pathStateRoot attach it
+  // for diagnostics and sync; it is NOT covered by witness_signature (outside
+  // raw_data), so receivers MUST recompute and overwrite it locally and must never
+  // trust a network-supplied value. Pre-4.8.2 nodes pass it through as an unknown
+  // field. See docs/advanced-configuration.md (pathStateRoot).
   bytes state_root = 3;
 }
 

@@ -11,6 +11,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import org.junit.Test;
 import org.tron.core.config.archive.ArchiveRocksDbPolicy;
 import org.tron.core.config.args.Storage;
+import org.tron.core.db2.archive.ArchiveDiskRedLine;
 
 public class ArchiveAdmissionTest {
   @Test

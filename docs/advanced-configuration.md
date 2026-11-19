@@ -119,3 +119,23 @@ node.backup {
 ```
 
 Please refer to the source code of `io.grpc.netty.NettyServerBuilder` class to see the details or just make a decision according to the brief comments above.  
+
+## pathStateRoot
+
+`storage.pathStateRoot` enables the experimental, non-consensus path state root
+(Merkle root of the current physical state, written per block). It is disabled by
+default and must stay disabled outside dedicated validation nodes.
+
+When enabled, the computed root is attached to blocks as `BlockHeader.state_root`
+(proto field 3). That field sits outside `raw_data`, so it is **not covered by
+`witness_signature`**. Semantics:
+
+- Non-consensus: block ID, signatures, and all validation only cover `raw_data`.
+- Receiver-local: every node recomputes the root after executing the block and
+  overwrites the field (`Manager`); the attached value is informational.
+- Never trust the wire value: no consumer (API, gossip validation, light client)
+  may treat a network-supplied `state_root` as authoritative.
+- Older binaries pass the field through as an unknown proto field (wire compatible).
+
+`verifyEveryBlock = true` (default) recomputes and compares the root every block in
+shadow mode; `mode` currently must be `shadow`.

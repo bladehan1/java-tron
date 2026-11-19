@@ -6,6 +6,8 @@ integration points and package boundaries; implementation comments stay beside t
 | Area | Guide |
 | --- | --- |
 | History storage, serving and queries | [Storage](architecture/storage.md) |
+| Selection rationale and prior-art mapping | [Design rationale](architecture/design-rationale.md) |
+| Persistent format stability commitment | [Format stability](architecture/format-stability.md) |
 | Root implementation groups and remaining boundaries | [Root boundaries](integration/root-boundaries.md) |
 | Shared read contracts | [Read contracts](architecture/read-contracts.md) |
 | PathStateRoot packages | [PathStateRoot layout](architecture/stateroot-layout.md) |

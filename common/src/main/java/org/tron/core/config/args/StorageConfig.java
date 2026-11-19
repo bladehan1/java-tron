@@ -270,9 +270,14 @@ public class StorageConfig {
     private String engine = "ROCKSDB";
     private String mode = "shadow";
     private String directory = "path-state-root";
+    // Reserved, currently unused: parsed and validated (=1) as a future format gate.
+    // Runtime format behavior is fixed by the V5 code; see
+    // docs/archive/architecture/format-stability.md.
     private int formatVersion = 1;
     private int reversibleLayerLimit = 128;
     private long reversibleLayerBytes = 2147483648L;
+    // Reserved, currently unused: the effective native store write buffer comes from
+    // storage.pathStateRoot.dbSettings.{small,large,giant} profiles.
     private long writeBufferBytes = 268435456L;
     // L1 resident-node cache budget (JVM heap, striped LRU). Adopted 1 GiB on
     // 2026-11-06 (user decision): long-window ABA +3.29% tx/s, evictions -39%,
@@ -435,6 +440,8 @@ public class StorageConfig {
     /**
      * Total bytes of the cross-store shared RocksDB block cache. Values <= 0 keep the
      * per-store block caches (storage.pathStateRoot.dbSettings.sharedCacheSize).
+     * Within one JVM the first-created capacity wins: the RocksDB Java binding cannot
+     * resize a live cache, so a conflicting later request fails fast.
      */
     private long sharedCacheSize = 0L;
 

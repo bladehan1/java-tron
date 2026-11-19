@@ -28,8 +28,10 @@ public final class PathStateSharedBlockCache {
   }
 
   /**
-   * Returns the shared handle, creating it on first use. Later calls must request the same
-   * capacity; a mismatch is logged and ignored because the binding cannot resize a live cache.
+   * Returns the shared handle, creating it on first use. All requests in one JVM must
+   * use the same capacity: the RocksDB Java binding cannot resize a live cache
+   * (Cache::SetCapacity is not exposed), so a mismatch fails fast instead of being
+   * silently ignored. The first-created capacity wins by construction.
    */
   public static Cache acquire(long totalBytes, int shardBits) {
     if (totalBytes <= 0) {
@@ -44,8 +46,9 @@ public final class PathStateSharedBlockCache {
         logger.info("Path-state shared block cache created: capacityBytes={} shardBits={}",
             totalBytes, shardBits);
       } else if (capacityBytes != totalBytes) {
-        logger.warn("shared block cache capacity request {} ignored; live cache is fixed at {} "
-            + "(RocksDB Java binding cannot resize)", totalBytes, capacityBytes);
+        throw new IllegalStateException("Inconsistent path-state shared block cache capacity "
+            + "request " + totalBytes + "; live cache is fixed at " + capacityBytes
+            + " (RocksDB Java binding cannot resize). Fix the sharedCacheSize configuration.");
       }
       return handle;
     }
