@@ -115,6 +115,132 @@ public class SharedCheckpointDatabaseTest {
   }
 
   @Test
+  public void windowUsageTracksPostBaseGenerationsAndLegacyMetadataFallback() throws Exception {
+    Path root = temporary.newFolder().toPath();
+    long firstBytes = new CommonCheckpointPayloadCodec().encode(payload(1)).length;
+    long secondBytes = new CommonCheckpointPayloadCodec().encode(payload(2)).length;
+    try (SharedCheckpointDatabase database = new SharedCheckpointDatabase(root, engine())) {
+      database.publish(payload(1));
+      assertEquals(1, database.windowUsage().getFlushCount());
+      assertEquals(firstBytes, database.windowUsage().getEncodedBytes());
+      database.publish(payload(1));
+      assertEquals(1, database.windowUsage().getFlushCount());
+      database.applied();
+      database.publish(payload(2));
+      assertEquals(2, database.windowUsage().getFlushCount());
+      assertEquals(firstBytes + secondBytes, database.windowUsage().getEncodedBytes());
+      database.applied();
+      database.advanceDurableBase();
+      assertEquals(0, database.windowUsage().getFlushCount());
+      assertEquals(0, database.windowUsage().getEncodedBytes());
+      database.publish(payload(3));
+      assertEquals(1, database.windowUsage().getFlushCount());
+    }
+    byte[] prefix = "generation-meta/v1/".getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+    byte[] key = java.nio.ByteBuffer.allocate(prefix.length + Long.BYTES)
+        .put(prefix).putLong(3).array();
+    try (ArchiveIndexStorage.Writer writer = ArchiveIndexStorage.openWriter(root, engine())) {
+      writer.write(Collections.singletonList(ArchiveIndexStorage.delete(key)), true);
+    }
+    try (SharedCheckpointDatabase reopened = new SharedCheckpointDatabase(root, engine())) {
+      assertEquals(1, reopened.windowUsage().getFlushCount());
+      assertEquals(new CommonCheckpointPayloadCodec().encode(payload(3)).length,
+          reopened.windowUsage().getEncodedBytes());
+      reopened.applied();
+      reopened.advanceDurableBase();
+      assertEquals(0, reopened.windowUsage().getFlushCount());
+    }
+  }
+
+  @Test
+  public void periodicConsolidationUsesBarriersWithoutRetainedRewrite() throws Exception {
+    Path common = temporary.newFolder().toPath();
+    Fake chain = new Fake(CommonCheckpointMaterializer.Authority.CHAINBASE);
+    Fake path = new Fake(CommonCheckpointMaterializer.Authority.PATH_STATE);
+    Fake history = new Fake(CommonCheckpointMaterializer.Authority.STATE_ARCHIVE);
+    try (CommonCheckpointFile file = CommonCheckpointFile.openDatabase(common, engine());
+        CommonCheckpointRedoCoordinator coordinator =
+            new CommonCheckpointRedoCoordinator(file, chain, path, history)) {
+      coordinator.configureDurableBaseCadence(1);
+      coordinator.enablePeriodicConsolidation(2, 0);
+      coordinator.apply(payload(1));
+      assertEquals(0, chain.syncCheckpointCount);
+      assertEquals(1, file.retained().size());
+      coordinator.apply(payload(2));
+      assertEquals(1, chain.syncCheckpointCount);
+      assertEquals(1, path.syncCheckpointCount);
+      assertEquals(1, history.syncCheckpointCount);
+      assertEquals(0, chain.replayCount);
+      assertEquals(0, path.replayCount);
+      assertEquals(1, file.retained().size());
+      assertEquals(0, file.windowUsage().getFlushCount());
+      coordinator.apply(payload(3));
+      assertEquals(1, file.windowUsage().getFlushCount());
+      assertEquals(1, chain.syncCheckpointCount);
+    }
+  }
+
+  @Test
+  public void periodicByteThresholdAndCloseSealAreIndependent() throws Exception {
+    Path common = temporary.newFolder().toPath();
+    Fake chain = new Fake(CommonCheckpointMaterializer.Authority.CHAINBASE);
+    Fake path = new Fake(CommonCheckpointMaterializer.Authority.PATH_STATE);
+    Fake history = new Fake(CommonCheckpointMaterializer.Authority.STATE_ARCHIVE);
+    CommonCheckpointRedoCoordinator coordinator = new CommonCheckpointRedoCoordinator(
+        CommonCheckpointFile.openDatabase(common, engine()), chain, path, history);
+    coordinator.enablePeriodicConsolidation(100,
+        new CommonCheckpointPayloadCodec().encode(payload(1)).length);
+    coordinator.apply(payload(1));
+    assertEquals(1, chain.syncCheckpointCount);
+    coordinator.close();
+    assertEquals(1, chain.syncCheckpointCount);
+    assertEquals(1, coordinatorCheckpointCount(common));
+  }
+
+  @Test
+  public void periodicCloseSealsWindowBelowFlushThreshold() throws Exception {
+    Path common = temporary.newFolder().toPath();
+    Fake chain = new Fake(CommonCheckpointMaterializer.Authority.CHAINBASE);
+    Fake path = new Fake(CommonCheckpointMaterializer.Authority.PATH_STATE);
+    Fake history = new Fake(CommonCheckpointMaterializer.Authority.STATE_ARCHIVE);
+    CommonCheckpointRedoCoordinator coordinator = new CommonCheckpointRedoCoordinator(
+        CommonCheckpointFile.openDatabase(common, engine()), chain, path, history);
+    coordinator.enablePeriodicConsolidation(100, 0);
+    coordinator.apply(payload(1));
+    assertEquals(0, chain.syncCheckpointCount);
+    coordinator.close();
+    assertEquals(1, chain.syncCheckpointCount);
+    assertEquals(1, coordinatorCheckpointCount(common));
+  }
+
+  @Test
+  public void periodicFailureKeepsRedoAndRecoverySealsWithoutNewBlocks() throws Exception {
+    Path common = temporary.newFolder().toPath();
+    Fake chain = new Fake(CommonCheckpointMaterializer.Authority.CHAINBASE);
+    Fake path = new Fake(CommonCheckpointMaterializer.Authority.PATH_STATE);
+    Fake history = new Fake(CommonCheckpointMaterializer.Authority.STATE_ARCHIVE);
+    try (CommonCheckpointFile file = CommonCheckpointFile.openDatabase(common, engine());
+        CommonCheckpointRedoCoordinator coordinator =
+            new CommonCheckpointRedoCoordinator(file, chain, path, history)) {
+      coordinator.enablePeriodicConsolidation(2, 0);
+      coordinator.apply(payload(1));
+      history.failAfterSyncCheckpoint = true;
+      assertThrows(IOException.class, () -> coordinator.apply(payload(2)));
+      assertEquals(2, file.retained().size());
+      history.failAfterSyncCheckpoint = false;
+      assertEquals(RecoveryAction.COMPLETED_REDO, coordinator.recover());
+      assertEquals(1, file.retained().size());
+      assertEquals(2, path.syncCheckpointCount);
+    }
+  }
+
+  private static int coordinatorCheckpointCount(Path common) throws IOException {
+    try (CommonCheckpointFile file = CommonCheckpointFile.openDatabase(common, engine())) {
+      return file.retained().size();
+    }
+  }
+
+  @Test
   public void configuredCadenceBoundsRetainedGenerations() throws Exception {
     Path common = temporary.newFolder().toPath();
     Fake chain = new Fake(CommonCheckpointMaterializer.Authority.CHAINBASE);
@@ -346,7 +472,9 @@ public class SharedCheckpointDatabaseTest {
     private CommonCheckpointTarget published;
     private boolean failSync;
     private boolean failSyncCheckpoint;
+    private boolean failAfterSyncCheckpoint;
     private int syncCheckpointCount;
+    private int replayCount;
     private volatile CountDownLatch syncReplayStarted;
     private volatile CountDownLatch syncReplayRelease;
 
@@ -364,6 +492,9 @@ public class SharedCheckpointDatabaseTest {
       syncCheckpointCount++;
       if (failSyncCheckpoint) {
         throw new IOException("injected per-batch sync failure");
+      }
+      if (failAfterSyncCheckpoint) {
+        throw new IOException("injected failure after final target barrier");
       }
     }
 
@@ -386,6 +517,7 @@ public class SharedCheckpointDatabaseTest {
     @Override
     public void replayRetained(List<CommonCheckpointPayload> payloads, boolean sync)
         throws IOException {
+      replayCount++;
       if (sync && failSync) {
         throw new IOException("injected target force failure");
       }

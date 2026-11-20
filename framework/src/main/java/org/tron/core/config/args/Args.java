@@ -238,6 +238,14 @@ public class Args extends CommonParameter {
         sc.getCommonCheckpoint().getDurableBaseGenerations());
     PARAMETER.storage.setCommonCheckpointPerBatchSync(
         sc.getCommonCheckpoint().isPerBatchSync());
+    PARAMETER.storage.setCommonCheckpointPeriodicSync(
+        sc.getCommonCheckpoint().isPeriodicSync());
+    PARAMETER.storage.setCommonCheckpointSyncFlushCount(
+        sc.getCommonCheckpoint().getSyncFlushCount());
+    PARAMETER.storage.setCommonCheckpointSyncEncodedBytes(
+        sc.getCommonCheckpoint().getSyncEncodedBytes());
+    PARAMETER.storage.setCommonCheckpointTargetWriteBatchBytes(
+        sc.getCommonCheckpoint().getTargetWriteBatchBytes());
     PARAMETER.storage.setPathStateRootEnabled(sc.getPathStateRoot().isEnabled());
     PARAMETER.storage.setPathStateRootMode(sc.getPathStateRoot().getMode());
     PARAMETER.storage.setPathStateRootDirectory(sc.getPathStateRoot().getDirectory());

@@ -152,6 +152,35 @@ public class ChainbaseCheckpointMaterializerTest {
   }
 
   @Test
+  public void unsyncedTargetWritesHonorLogicalBatchBytesAndSyncPathIsUnchanged()
+      throws Exception {
+    Fixture unsynced = fixture("byte-split-unsynced", null);
+    unsynced.materializer.useRetainedRedo(true);
+    Args.getInstance().getStorage().setCommonCheckpointTargetWriteBatchBytes(2);
+    try {
+      unsynced.materializer.materialize(unsynced.payload, unsynced.target);
+    } finally {
+      Args.getInstance().getStorage().setCommonCheckpointTargetWriteBatchBytes(0);
+    }
+    assertEquals(2, unsynced.code.unsyncedFlushes);
+    assertEquals(1, unsynced.storage.unsyncedFlushes);
+    assertEquals(0, unsynced.code.syncedFlushes);
+    assertArrayEquals(new byte[]{2}, unsynced.code.get(new byte[]{1}));
+    assertNull(unsynced.code.get(new byte[]{9}));
+
+    Fixture synced = fixture("byte-split-synced", null);
+    Args.getInstance().getStorage().setCommonCheckpointTargetWriteBatchBytes(1);
+    try {
+      synced.materializer.materialize(synced.payload, synced.target);
+    } finally {
+      Args.getInstance().getStorage().setCommonCheckpointTargetWriteBatchBytes(0);
+    }
+    assertEquals(1, synced.code.syncedFlushes);
+    assertEquals(1, synced.storage.syncedFlushes);
+    assertEquals(0, synced.code.unsyncedFlushes);
+  }
+
+  @Test
   public void resumesEveryStoreAndMarkerBoundaryUsingCheckpointRedo() throws Exception {
     for (String stage : ChainbaseCheckpointTestSupport.stages()) {
       Fixture fixture = fixture("fault-" + stage, stage);

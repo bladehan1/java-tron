@@ -19,6 +19,7 @@ import org.tron.common.storage.rocksdb.RocksDbDataSourceImpl;
 import org.tron.common.utils.ByteArray;
 import org.tron.core.ChainBaseManager;
 import org.tron.core.capsule.AccountCapsule;
+import org.tron.core.db2.checkpoint.common.materialize.CheckpointWriteBatches;
 import org.tron.core.db2.common.DB;
 import org.tron.core.db2.common.Flusher;
 import org.tron.core.db2.common.TxCacheDB;
@@ -196,7 +197,7 @@ public class SnapshotRoot extends AbstractSnapshot<byte[], byte[]> {
       if (sync) {
         ((Flusher) db).flushSynced(batch);
       } else {
-        ((Flusher) db).flushUnsynced(batch);
+        flushUnsyncedBatches((Flusher) db, batch);
       }
       putCache(batch);
     }
@@ -289,14 +290,14 @@ public class SnapshotRoot extends AbstractSnapshot<byte[], byte[]> {
     if (synced) {
       ((Flusher) db).flushSynced(accounts);
     } else {
-      ((Flusher) db).flush(accounts);
+      flushUnsyncedBatches((Flusher) db, accounts);
     }
     putCache(accounts);
     if (assets.size() > 0) {
       if (syncedAssets) {
         assetStore.updateByBatchSynced(AccountAssetStore.convert(assets));
       } else {
-        assetStore.updateByBatch(AccountAssetStore.convert(assets));
+        updateAssetsUnsynced(assetStore, assets);
       }
     }
   }
@@ -311,6 +312,46 @@ public class SnapshotRoot extends AbstractSnapshot<byte[], byte[]> {
     if (!assets.isEmpty()) {
       updateByBatchSplit(assetStore, AccountAssetStore.convert(assets));
     }
+  }
+
+  private static void flushUnsyncedBatches(Flusher flusher,
+      Map<WrappedByteArray, WrappedByteArray> batch) {
+    long maximumBytes = targetWriteBatchBytes();
+    for (List<Map.Entry<WrappedByteArray, WrappedByteArray>> chunk
+        : CheckpointWriteBatches.split(batch.entrySet(), SnapshotRoot::mutationBytes,
+            maximumBytes)) {
+      Map<WrappedByteArray, WrappedByteArray> part = new LinkedHashMap<>();
+      chunk.forEach(entry -> part.put(entry.getKey(), entry.getValue()));
+      flusher.flushUnsynced(part);
+    }
+  }
+
+  private static long targetWriteBatchBytes() {
+    org.tron.core.config.args.Storage storage = CommonParameter.getInstance().getStorage();
+    return storage == null ? 0L : storage.getCommonCheckpointTargetWriteBatchBytes();
+  }
+
+  private static long mutationBytes(Map.Entry<WrappedByteArray, WrappedByteArray> entry) {
+    byte[] key = entry.getKey().getBytes();
+    byte[] value = entry.getValue().getBytes();
+    return (long) key.length + (value == null ? 0L : value.length);
+  }
+
+  private static void updateAssetsUnsynced(AccountAssetStore assetStore,
+      Map<WrappedByteArray, WrappedByteArray> assets) {
+    long maximumBytes = targetWriteBatchBytes();
+    for (List<Map.Entry<byte[], byte[]>> chunk : CheckpointWriteBatches.split(
+        AccountAssetStore.convert(assets).entrySet(), SnapshotRoot::assetMutationBytes,
+        maximumBytes)) {
+      Map<byte[], byte[]> part = new HashMap<>();
+      chunk.forEach(entry -> part.put(entry.getKey(), entry.getValue()));
+      assetStore.updateByBatch(part);
+    }
+  }
+
+  private static long assetMutationBytes(Map.Entry<byte[], byte[]> entry) {
+    return (long) entry.getKey().length
+        + (entry.getValue() == null ? 0L : entry.getValue().length);
   }
 
   private static void foldAccountBatch(Map<WrappedByteArray, WrappedByteArray> batch,

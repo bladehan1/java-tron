@@ -12,9 +12,13 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Collections;
+import org.junit.AfterClass;
+import org.junit.BeforeClass;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
+import org.tron.common.TestConstants;
+import org.tron.core.config.args.Args;
 import org.tron.core.db2.archive.BlockReverseDiff;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
 import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointMaterializer.Status;
@@ -28,6 +32,16 @@ public class PathStateCheckpointMaterializerTest {
 
   @Rule
   public final TemporaryFolder temporaryFolder = new TemporaryFolder();
+
+  @BeforeClass
+  public static void configure() {
+    Args.setParam(new String[]{}, TestConstants.TEST_CONF);
+  }
+
+  @AfterClass
+  public static void clearConfiguration() {
+    Args.clearParam();
+  }
 
   @Test
   public void separatesSyncedMaterializationFromCurrentPublicationAcrossReopen()
@@ -143,6 +157,31 @@ public class PathStateCheckpointMaterializerTest {
       PathStateCheckpointMaterializer recovered = new PathStateCheckpointMaterializer(reopened,
           scope, formatIdentity);
       assertEquals(Status.PUBLISHED, recovered.inspect(childTarget));
+    }
+  }
+
+  @Test
+  public void unsyncedCheckpointWritesSplitByLogicalBytesWithMarkerLast() throws Exception {
+    Fixture fixture = fixture("byte-split-unsynced", null);
+    try {
+      PathStatePhysicalStoreSet.PhysicalStore account = fixture.stores.participant("account");
+      long accountBatches = account.getUnsyncedWriteBatchCalls();
+      long superBatches = fixture.stores.superStore().getUnsyncedWriteBatchCalls();
+      fixture.materializer.useRetainedRedo(true);
+      Args.getInstance().getStorage().setCommonCheckpointTargetWriteBatchBytes(5);
+      try {
+        fixture.materializer.materialize(fixture.payload, fixture.target);
+      } finally {
+        Args.getInstance().getStorage().setCommonCheckpointTargetWriteBatchBytes(0);
+      }
+      assertEquals(accountBatches + 3, account.getUnsyncedWriteBatchCalls());
+      assertEquals(superBatches + 2, fixture.stores.superStore().getUnsyncedWriteBatchCalls());
+      assertArrayEquals(new byte[]{2}, account.getFlat(new byte[]{1}));
+      assertArrayEquals(new byte[]{4}, account.nodeStore().get(new byte[]{3}));
+      assertArrayEquals(new byte[]{6}, fixture.stores.superStore().nodeStore().get(new byte[]{5}));
+      assertEquals(Status.MATERIALIZED, fixture.materializer.inspect(fixture.target));
+    } finally {
+      fixture.stores.close();
     }
   }
 

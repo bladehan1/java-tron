@@ -11,6 +11,7 @@ import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.util.Arrays;
 import java.util.Objects;
+import org.tron.core.db2.archive.checkpoint.storage.SharedCheckpointDatabase;
 import org.tron.core.db2.checkpoint.common.payload.CommonCheckpointPayload;
 import org.tron.core.db2.checkpoint.common.payload.CommonCheckpointPayloadCodec;
 
@@ -69,6 +70,10 @@ public final class CommonCheckpointFile implements java.io.Closeable {
 
   public boolean retainsGenerations() {
     return shared != null;
+  }
+
+  public synchronized SharedCheckpointDatabase.WindowUsage windowUsage() {
+    return shared == null ? null : shared.windowUsage();
   }
 
   public java.util.List<CommonCheckpointPayload> retained() throws IOException {

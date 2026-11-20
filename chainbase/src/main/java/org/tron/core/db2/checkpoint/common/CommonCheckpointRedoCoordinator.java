@@ -13,6 +13,7 @@ import java.util.function.LongSupplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.tron.common.math.StrictMathWrapper;
+import org.tron.core.db2.archive.checkpoint.storage.SharedCheckpointDatabase.WindowUsage;
 import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointMaterializer;
 import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointMaterializer.Authority;
 import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointMaterializer.Status;
@@ -51,6 +52,10 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
   private int durableBaseCadence;
   private int completedSinceBase;
   private boolean perBatchConsolidation;
+  private boolean periodicConsolidation;
+  private int periodicFlushCount;
+  private long periodicEncodedBytes;
+  private String consolidationPolicy = "legacy";
 
   public CommonCheckpointRedoCoordinator(CommonCheckpointFile checkpointFile,
       CommonCheckpointMaterializer chainbase, CommonCheckpointMaterializer pathState,
@@ -129,6 +134,10 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
     if (perBatchConsolidation && checkpointFile.retainsGenerations()
         && action == RecoveryAction.COMPLETED_REDO) {
       awaitPendingDurableBase();
+    }
+    if (periodicConsolidation && action == RecoveryAction.COMPLETED_REDO
+        && hasPeriodicWindow()) {
+      runConsolidation(CommonCheckpointTarget.from(checkpointFile.latestCommitted()));
     }
     return action;
   }
@@ -305,6 +314,24 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
    */
   public synchronized void enablePerBatchConsolidation() {
     perBatchConsolidation = true;
+    consolidationPolicy = "perBatch";
+  }
+
+  /** Enables cross-batch WAL barriers without synchronous retained-data rewrites. */
+  public synchronized void enablePeriodicConsolidation(int flushCount, long encodedBytes) {
+    if (!checkpointFile.retainsGenerations()) {
+      throw new IllegalArgumentException("periodic consolidation requires shared redo");
+    }
+    if (perBatchConsolidation) {
+      throw new IllegalArgumentException("per-batch and periodic consolidation are exclusive");
+    }
+    if (flushCount <= 0 || encodedBytes < 0) {
+      throw new IllegalArgumentException("periodic consolidation limits are invalid");
+    }
+    periodicFlushCount = flushCount;
+    periodicEncodedBytes = encodedBytes;
+    periodicConsolidation = true;
+    consolidationPolicy = "periodic";
   }
 
   /** Force the retained target data before advancing the durable base and pruning generations. */
@@ -384,6 +411,13 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
 
   private void checkpointDurableBase(Timing timing) throws IOException {
     requireOpen();
+    if (periodicConsolidation) {
+      if (!checkpointFile.isPresent() && hasPeriodicWindow()) {
+        runConsolidation(CommonCheckpointTarget.from(checkpointFile.latestCommitted()));
+      }
+      completedSinceBase = 0;
+      return;
+    }
     if (checkpointFile.retainsGenerations() && !checkpointFile.isPresent()) {
       restoreRetained(true, timing);
       long advanceUs = timed(checkpointFile::advanceDurableBase);
@@ -446,7 +480,10 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
     faultHook.after(Stage.AFTER_CHECKPOINT_RETIRE);
     if (perBatchConsolidation) {
       scheduleConsolidation(target);
-    } else if (durableBaseCadence > 0 && ++completedSinceBase >= durableBaseCadence) {
+    } else if (periodicConsolidation && periodicThresholdReached()) {
+      runConsolidation(target);
+    } else if (!periodicConsolidation && durableBaseCadence > 0
+        && ++completedSinceBase >= durableBaseCadence) {
       scheduleDurableBase(target, timing.blocks);
     }
     return RecoveryAction.COMPLETED_REDO;
@@ -460,12 +497,23 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
    */
   private void scheduleConsolidation(CommonCheckpointTarget target) {
     pendingDurableBase = durableBaseExecutor.submit(() -> {
-      runAsyncConsolidation(target);
+      runConsolidation(target);
       return null;
     });
   }
 
-  private void runAsyncConsolidation(CommonCheckpointTarget target) throws IOException {
+  private boolean periodicThresholdReached() {
+    WindowUsage usage = checkpointFile.windowUsage();
+    return usage != null && (usage.getFlushCount() >= periodicFlushCount
+        || periodicEncodedBytes > 0 && usage.getEncodedBytes() >= periodicEncodedBytes);
+  }
+
+  private boolean hasPeriodicWindow() {
+    WindowUsage usage = checkpointFile.windowUsage();
+    return usage != null && (usage.getFlushCount() > 0 || usage.getEncodedBytes() > 0);
+  }
+
+  private void runConsolidation(CommonCheckpointTarget target) throws IOException {
     long totalStart = nanoTime.getAsLong();
     Timing timing = new Timing("consolidate", target, 0);
     try {
@@ -565,6 +613,7 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
   }
 
   private void emitTiming(Timing timing) {
+    timing.consolidationPolicy = consolidationPolicy;
     try {
       timingSink.accept(timing);
     } catch (RuntimeException ignored) {
@@ -579,7 +628,8 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
   }
 
   private static void logTiming(Timing timing) {
-    logger.info("Common checkpoint redo stages: mode={}, head={}, blocks={}, walPublishUs={}, "
+    logger.info("Common checkpoint redo stages: mode={}, consolidationPolicy={}, head={}, "
+            + "blocks={}, walPublishUs={}, "
             + "walLoadUs={}, chainbaseBeginUs={}, pathStateBeginUs={}, archiveBeginUs={}, "
             + "chainbaseInspectUs={}/{}, pathStateInspectUs={}/{}, archiveInspectUs={}/{}, "
             + "chainbaseMaterializeUs={}/{}, pathStateMaterializeUs={}/{}, "
@@ -589,7 +639,8 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
             + "retainedLoadUs={}/{}, chainbaseRetainedReplayUs={}/{}, "
             + "pathStateRetainedReplayUs={}/{}, durableBaseAdvanceUs={}, totalUs={}, "
             + "chainbaseSyncUs={}, pathStateSyncUs={}, archiveSyncUs={}",
-        timing.mode, timing.head, timing.blocks, timing.walPublishUs, timing.walLoadUs,
+        timing.mode, timing.consolidationPolicy, timing.head, timing.blocks, timing.walPublishUs,
+        timing.walLoadUs,
         timing.begin(Authority.CHAINBASE), timing.begin(Authority.PATH_STATE),
         timing.begin(Authority.STATE_ARCHIVE), timing.inspect(Authority.CHAINBASE),
         timing.inspectCount(Authority.CHAINBASE), timing.inspect(Authority.PATH_STATE),
@@ -630,6 +681,7 @@ public final class CommonCheckpointRedoCoordinator implements AutoCloseable {
   static final class Timing {
 
     private final String mode;
+    private String consolidationPolicy = "legacy";
     private final long head;
     private final int blocks;
     private final long[] beginUs = new long[Authority.values().length];
