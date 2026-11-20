@@ -3,7 +3,6 @@ package org.tron.core.service;
 import static org.tron.core.store.DelegationStore.DECIMAL_OF_VI_REWARD;
 import static org.tron.core.store.DelegationStore.REMARK;
 
-import com.google.common.collect.Streams;
 import com.google.common.primitives.Bytes;
 import com.google.protobuf.ByteString;
 import java.math.BigInteger;
@@ -14,8 +13,6 @@ import java.util.Objects;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import java.util.stream.Collectors;
-import java.util.stream.LongStream;
 import javax.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.bouncycastle.util.encoders.Hex;
@@ -65,6 +62,8 @@ public class RewardViCalService {
   private final ScheduledExecutorService es = ExecutorServiceManager
       .newSingleThreadScheduledExecutor("rewardViCalService");
 
+  private volatile boolean stopped;
+
 
   @Autowired
   public RewardViCalService(@Autowired  DynamicPropertiesStore propertiesStore,
@@ -99,6 +98,9 @@ public class RewardViCalService {
   }
 
   private void maybeRun() {
+    if (stopped) {
+      return;
+    }
     try {
       if (enableNewRewardAlgorithm()) {
         if (this.newRewardCalStartCycle > 1) {
@@ -135,8 +137,10 @@ public class RewardViCalService {
   }
 
   @PreDestroy
-  private void destroy() {
+  public void stop() {
+    stopped = true;
     es.shutdownNow();
+    ExecutorServiceManager.shutdownAndAwaitTermination(es, "rewardViCalService");
   }
 
 
@@ -173,11 +177,20 @@ public class RewardViCalService {
 
   private void calcMerkleRoot() {
     logger.info("calcMerkleRoot start");
-    DBIterator iterator = rewardViStore.iterator();
-    iterator.seekToFirst();
-    ArrayList<Sha256Hash> ids = Streams.stream(iterator)
-        .map(this::getHash)
-        .collect(Collectors.toCollection(ArrayList::new));
+    ArrayList<Sha256Hash> ids;
+    try (DBIterator iterator = rewardViStore.iterator()) {
+      iterator.seekToFirst();
+      ids = new ArrayList<>();
+      while (!stopped && iterator.hasNext()) {
+        ids.add(getHash(iterator.next()));
+      }
+    } catch (Exception e) {
+      throw new TronDBException(e);
+    }
+
+    if (stopped) {
+      return;
+    }
 
     Sha256Hash rewardViRootLocal = MerkleRoot.root(ids);
     if (!Objects.equals(rewardViRoot, rewardViRootLocal)) {
@@ -198,9 +211,17 @@ public class RewardViCalService {
   private void startRewardCal() {
     logger.info("rewardViCalService start");
     rewardViStore.reset();
-    DBIterator iterator = (DBIterator) witnessStore.iterator();
-    iterator.seekToFirst();
-    iterator.forEachRemaining(e -> accumulateWitnessReward(e.getKey()));
+    try (DBIterator iterator = (DBIterator) witnessStore.iterator()) {
+      iterator.seekToFirst();
+      while (!stopped && iterator.hasNext()) {
+        accumulateWitnessReward(iterator.next().getKey());
+      }
+    } catch (Exception e) {
+      throw new TronDBException(e);
+    }
+    if (stopped) {
+      return;
+    }
     rewardViStore.put(IS_DONE_KEY, IS_DONE_VALUE);
     logger.info("rewardViCalService is done");
 
@@ -208,11 +229,15 @@ public class RewardViCalService {
 
   private void accumulateWitnessReward(byte[] witness) {
     long startCycle = 1;
-    LongStream.range(startCycle, newRewardCalStartCycle)
-        .forEach(cycle -> accumulateWitnessVi(cycle, witness));
+    for (long cycle = startCycle; cycle < newRewardCalStartCycle && !stopped; cycle++) {
+      accumulateWitnessVi(cycle, witness);
+    }
   }
 
   private void accumulateWitnessVi(long cycle, byte[] address) {
+    if (stopped) {
+      return;
+    }
     BigInteger preVi = getWitnessVi(cycle - 1, address);
     long voteCount = getWitnessVote(cycle, address);
     long reward = getReward(cycle, address);
@@ -284,4 +309,3 @@ public class RewardViCalService {
     return value == null ? 1 : ByteArray.toLong(value);
   }
 }
-

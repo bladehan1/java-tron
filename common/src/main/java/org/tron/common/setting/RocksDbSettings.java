@@ -237,6 +237,7 @@ public class RocksDbSettings {
       options.setMaxBackgroundFlushes(1);
     }
 
+    RocksDbThreadBudget.afterChainbaseOptions();
     return options;
   }
 

@@ -9,9 +9,11 @@ import org.tron.core.actuator.Actuator;
 import org.tron.core.actuator.Actuator2;
 import org.tron.core.actuator.ActuatorCreator;
 import org.tron.core.actuator.VMActuator;
+import org.tron.core.archive.repository.HistoricalRepositoryProvider;
 import org.tron.core.db.TransactionContext;
 import org.tron.core.exception.ContractExeException;
 import org.tron.core.exception.ContractValidateException;
+import org.tron.core.vm.config.VMConfig;
 import org.tron.core.vm.program.Program;
 import org.tron.core.vm.program.Program.BadJumpDestinationException;
 import org.tron.core.vm.program.Program.IllegalOperationException;
@@ -44,14 +46,24 @@ public class RuntimeImpl implements Runtime {
     switch (contractType.getNumber()) {
       case ContractType.TriggerSmartContract_VALUE:
       case ContractType.CreateSmartContract_VALUE:
-        actuator2 = new VMActuator(context.isStatic());
+        actuator2 = context.getExecutionMode()
+            == TransactionContext.ExecutionMode.HISTORICAL_CONSTANT
+            ? new VMActuator(true, HistoricalRepositoryProvider.INSTANCE)
+            : new VMActuator(context.isStatic());
         break;
       default:
         actuatorList = ActuatorCreator.getINSTANCE().createActuator(context.getTrxCap());
     }
     if (actuator2 != null) {
-      actuator2.validate(context);
-      actuator2.execute(context);
+      try {
+        actuator2.validate(context);
+        actuator2.execute(context);
+      } finally {
+        if (context.getExecutionMode()
+            == TransactionContext.ExecutionMode.HISTORICAL_CONSTANT) {
+          VMConfig.clearLocalSnapshot();
+        }
+      }
     } else {
       for (Actuator act : actuatorList) {
         act.validate();
@@ -133,4 +145,3 @@ public class RuntimeImpl implements Runtime {
   }
 
 }
-

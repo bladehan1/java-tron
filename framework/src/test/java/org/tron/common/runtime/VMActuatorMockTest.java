@@ -40,6 +40,9 @@ public class VMActuatorMockTest {
       Field f = VMActuator.class.getDeclaredField("program");
       f.setAccessible(true);
       f.set(actuator, program);
+      Field root = VMActuator.class.getDeclaredField("rootRepository");
+      root.setAccessible(true);
+      root.set(actuator, Mockito.mock(Repository.class));
 
       TransactionContext context = Mockito.mock(TransactionContext.class);
       Mockito.when(context.getProgramResult()).thenReturn(new ProgramResult());
@@ -63,7 +66,6 @@ public class VMActuatorMockTest {
       Field f = VMActuator.class.getDeclaredField("program");
       f.setAccessible(true);
       f.set(actuator, program);
-
       Field repositoryField = VMActuator.class.getDeclaredField("rootRepository");
       repositoryField.setAccessible(true);
       repositoryField.set(actuator, Mockito.mock(Repository.class));
@@ -96,11 +98,15 @@ public class VMActuatorMockTest {
       Field f = VMActuator.class.getDeclaredField("program");
       f.setAccessible(true);
       f.set(actuator, program);
+      Field root = VMActuator.class.getDeclaredField("rootRepository");
+      root.setAccessible(true);
+      root.set(actuator, Mockito.mock(Repository.class));
 
       TransactionContext context = Mockito.mock(TransactionContext.class);
       Mockito.when(context.getProgramResult()).thenReturn(new ProgramResult());
 
       actuator.execute(context);
+      vmMock.verify(() -> VM.play(any(), any()));
 
       Assert.assertEquals(expectedSize, result.getLogInfoList().size());
       Assert.assertEquals(expectedSize, result.getDeleteAccounts().size());

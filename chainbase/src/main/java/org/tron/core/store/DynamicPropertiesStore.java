@@ -8,7 +8,11 @@ import static org.tron.core.config.Parameter.ChainConstant.DELEGATE_PERIOD;
 
 import com.google.protobuf.ByteString;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Optional;
+import java.util.function.LongSupplier;
 import java.util.stream.IntStream;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
@@ -22,12 +26,69 @@ import org.tron.common.utils.Sha256Hash;
 import org.tron.core.capsule.BytesCapsule;
 import org.tron.core.config.Parameter.ChainConstant;
 import org.tron.core.db.TronStoreWithRevoking;
+import org.tron.core.db2.core.OutOfBlockWriteGuard;
 import org.tron.core.exception.BadItemException;
 import org.tron.core.exception.ItemNotFoundException;
 
 @Slf4j(topic = "DB")
 @Component
 public class DynamicPropertiesStore extends TronStoreWithRevoking<BytesCapsule> {
+
+  private static final Map<String, LongSupplier> LONG_PROPERTY_DEFAULTS =
+      createLongPropertyDefaults();
+
+  private static Map<String, LongSupplier> createLongPropertyDefaults() {
+    // Keep this registry aligned with every typed long getter below that uses Optional.orElse.
+    Map<String, LongSupplier> defaults = new LinkedHashMap<>();
+    defaults.put("WITNESS_127_PAY_PER_BLOCK", () -> 16_000_000L);
+    defaults.put("CURRENT_CYCLE_NUMBER", () -> 0L);
+    defaults.put("ALLOW_TVM_SHANGHAI",
+        () -> CommonParameter.getInstance().getAllowTvmShangHai());
+    defaults.put("ALLOW_CANCEL_ALL_UNFREEZE_V2",
+        () -> CommonParameter.getInstance().getAllowCancelAllUnfreezeV2());
+    defaults.put("MAX_DELEGATE_LOCK_PERIOD",
+        () -> DELEGATE_PERIOD / BLOCK_PRODUCED_INTERVAL);
+    defaults.put("ALLOW_OLD_REWARD_OPT",
+        () -> CommonParameter.getInstance().getAllowOldRewardOpt());
+    defaults.put("ALLOW_ENERGY_ADJUSTMENT",
+        () -> CommonParameter.getInstance().getAllowEnergyAdjustment());
+    defaults.put("MAX_CREATE_ACCOUNT_TX_SIZE",
+        () -> CommonParameter.getInstance().getMaxCreateAccountTxSize());
+    defaults.put("ALLOW_STRICT_MATH",
+        () -> CommonParameter.getInstance().getAllowStrictMath());
+    defaults.put("CONSENSUS_LOGIC_OPTIMIZATION",
+        () -> CommonParameter.getInstance().getConsensusLogicOptimization());
+    defaults.put("ALLOW_TVM_CANCUN",
+        () -> CommonParameter.getInstance().getAllowTvmCancun());
+    defaults.put("ALLOW_TVM_BLOB",
+        () -> CommonParameter.getInstance().getAllowTvmBlob());
+    defaults.put("ALLOW_TVM_SELFDESTRUCT_RESTRICTION", () -> 0L);
+    defaults.put("PROPOSAL_EXPIRE_TIME",
+        () -> CommonParameter.getInstance().getProposalExpireTime());
+    defaults.put("ALLOW_TVM_OSAKA", () -> 0L);
+    defaults.put("ALLOW_TVM_PRAGUE", () -> 0L);
+    defaults.put("BLOCK_HASH_HISTORY_INSTALLED", () -> 0L);
+    defaults.put("ALLOW_HARDEN_RESOURCE_CALCULATION", () -> 0L);
+    defaults.put("ALLOW_HARDEN_EXCHANGE_CALCULATION", () -> 0L);
+    defaults.put("TURKISH_KEY_MIGRATION_DONE", () -> 0L);
+    return Collections.unmodifiableMap(defaults);
+  }
+
+  /**
+   * Resolves the missing-key defaults defined by the typed long getters in this Store.
+   * Existing values always remain authoritative; callers use this map only for an absent key.
+   */
+  public static Long getLongPropertyDefault(String key) {
+    LongSupplier supplier = LONG_PROPERTY_DEFAULTS.get(key);
+    return supplier == null ? null : supplier.getAsLong();
+  }
+
+  /** Returns a resolved, immutable snapshot for auditing and completeness tests. */
+  public static Map<String, Long> getLongPropertyDefaults() {
+    Map<String, Long> resolved = new LinkedHashMap<>();
+    LONG_PROPERTY_DEFAULTS.forEach((key, supplier) -> resolved.put(key, supplier.getAsLong()));
+    return Collections.unmodifiableMap(resolved);
+  }
 
   private static final byte[] LATEST_BLOCK_HEADER_TIMESTAMP = "latest_block_header_timestamp"
       .getBytes();
@@ -181,7 +242,6 @@ public class DynamicPropertiesStore extends TronStoreWithRevoking<BytesCapsule> 
   private static final byte[] ALLOW_ASSET_OPTIMIZATION =
       "ALLOW_ASSET_OPTIMIZATION".getBytes();
 
-
   private static final byte[] ENERGY_PRICE_HISTORY = "ENERGY_PRICE_HISTORY".getBytes();
   private static final byte[] ENERGY_PRICE_HISTORY_DONE = "ENERGY_PRICE_HISTORY_DONE".getBytes();
   private static final byte[] BANDWIDTH_PRICE_HISTORY = "BANDWIDTH_PRICE_HISTORY".getBytes();
@@ -258,10 +318,43 @@ public class DynamicPropertiesStore extends TronStoreWithRevoking<BytesCapsule> 
   private static final byte[] TURKISH_KEY_MIGRATION_DONE =
       "TURKISH_KEY_MIGRATION_DONE".getBytes();
 
+  /**
+   * Design v2 ch02 §3.11.3 (WP-02-12, X2-08): on a node with a Common baseline the defaults below
+   * are registered as one intent instead of being written here, at Spring construction, before
+   * Common startup recovery. {@code Manager} applies it inside the maintenance layer, against the
+   * recovered state, so a key the WAL rolls forward is never shadowed by a default computed from
+   * the pre-recovery state. In every other case the constructor writes them as upstream (D3).
+   */
+  private volatile boolean constructorDefaultsDeferred;
+
   @Autowired
   private DynamicPropertiesStore(@Value("properties") String dbName) {
     super(dbName);
+    if (OutOfBlockWriteGuard.defersConstructorDefaults()) {
+      constructorDefaultsDeferred = true;
+      return;
+    }
+    applyConstructorDefaults();
+  }
 
+  public boolean isConstructorDefaultsDeferred() {
+    return constructorDefaultsDeferred;
+  }
+
+  /**
+   * Applies the registered default intent once (no-op when none is registered): every key that
+   * is still missing in the visible state gets its default, computed from that same state.
+   */
+  public synchronized void applyDeferredConstructorDefaults() {
+    if (!constructorDefaultsDeferred) {
+      return;
+    }
+    constructorDefaultsDeferred = false;
+    applyConstructorDefaults();
+  }
+
+  /** The upstream constructor defaults; each writes only when its key is missing. */
+  private void applyConstructorDefaults() {
     try {
       this.getTotalSignNum();
     } catch (IllegalArgumentException e) {
@@ -1697,7 +1790,6 @@ public class DynamicPropertiesStore extends TronStoreWithRevoking<BytesCapsule> 
             () -> new IllegalArgumentException("not found MARKET_QUANTITY_LIMIT"));
   }
 
-
   public boolean supportTransactionFeePool() {
     return getAllowTransactionFeePool() == 1L;
   }
@@ -2032,7 +2124,6 @@ public class DynamicPropertiesStore extends TronStoreWithRevoking<BytesCapsule> 
     return getAllowCreationOfContracts() == 1L;
   }
 
-
   public void saveAllowShieldedTransaction(long allowShieldedTransaction) {
     this.put(DynamicPropertiesStore.ALLOW_SHIELDED_TRANSACTION,
         new BytesCapsule(ByteArray.fromLong(allowShieldedTransaction)));
@@ -2184,6 +2275,21 @@ public class DynamicPropertiesStore extends TronStoreWithRevoking<BytesCapsule> 
       logger.error("Get header from DB, {}.", e.getMessage());
     }
     return -1;
+  }
+
+  /**
+   * Gets the latest block hash from the persistent Snapshot root, excluding reversible layers.
+   */
+  public Sha256Hash getLatestBlockHeaderHashFromDB() {
+    try {
+      byte[] blockHash = Optional.ofNullable(getFromRoot(LATEST_BLOCK_HEADER_HASH))
+          .map(BytesCapsule::getData)
+          .orElseThrow(() -> new IllegalArgumentException("not found block hash"));
+      return Sha256Hash.wrap(blockHash);
+    } catch (ItemNotFoundException | BadItemException | IllegalArgumentException e) {
+      logger.error("Get header hash from DB, {}.", e.getMessage());
+    }
+    return null;
   }
 
   public int getStateFlag() {
@@ -2971,7 +3077,6 @@ public class DynamicPropertiesStore extends TronStoreWithRevoking<BytesCapsule> 
         .map(ByteArray::toLong)
         .orElse(CommonParameter.getInstance().getAllowTvmBlob());
   }
-
 
   public long getAllowTvmSelfdestructRestriction() {
     return Optional.ofNullable(getUnchecked(ALLOW_TVM_SELFDESTRUCT_RESTRICTION))

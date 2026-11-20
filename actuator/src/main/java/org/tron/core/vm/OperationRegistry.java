@@ -123,7 +123,64 @@ public class OperationRegistry {
   }
 
   public static JumpTable getTable(boolean isConstantCall) {
+    if (isConstantCall) {
+      JumpTable requestTable = REQUEST_TABLE.get();
+      if (requestTable != null) {
+        return requestTable;
+      }
+    }
     return isConstantCall ? CONSTANT_CALL_TABLE : tableMap.get(LATEST_VERSION);
+  }
+
+  // ---- Historical request tables (chapter 05 section 3.9.2) ----
+  //
+  // A historical constant call must not write its S(T) cost/action variants into the shared
+  // CONSTANT_CALL_TABLE that concurrent latest constant calls use. It installs a request-scoped,
+  // immutable table instead; nested frames reach it through getTable(true). The tables are
+  // cached per variant combination and are never modified after construction, so concurrent
+  // historical requests can share them. The current path above is unchanged.
+
+  private static final ThreadLocal<JumpTable> REQUEST_TABLE = new ThreadLocal<>();
+  private static final Map<Integer, JumpTable> HISTORICAL_TABLES =
+      new java.util.concurrent.ConcurrentHashMap<>();
+
+  private static final int VARIANT_DEFAULT = 0;
+  private static final int VARIANT_ADJUSTED = 1;
+  private static final int VARIANT_SPECIAL = 2; // OSAKA vote-witness / RESTRICTED selfdestruct
+
+  /**
+   * Selects (building once if needed) the immutable table for the calling thread's current VM
+   * config (the S(T) snapshot installed by {@code ConfigLoader.load(Repository)}), installs it as
+   * this thread's request table and returns it. Never calls {@link #adjustTable}.
+   */
+  public static JumpTable installHistoricalTable() {
+    boolean memAdjusted = VMConfig.allowHigherLimitForMaxCpuTimeOfOneTx();
+    int vote = VMConfig.allowTvmOsaka() ? VARIANT_SPECIAL
+        : VMConfig.allowEnergyAdjustment() ? VARIANT_ADJUSTED : VARIANT_DEFAULT;
+    int suicide = VMConfig.allowTvmSelfdestructRestriction() ? VARIANT_SPECIAL
+        : VMConfig.allowEnergyAdjustment() ? VARIANT_ADJUSTED : VARIANT_DEFAULT;
+    int key = (memAdjusted ? 1 : 0) * 9 + vote * 3 + suicide;
+    JumpTable table = HISTORICAL_TABLES.computeIfAbsent(key,
+        ignored -> buildHistoricalTable(memAdjusted, vote, suicide));
+    REQUEST_TABLE.set(table);
+    return table;
+  }
+
+  /** Removes the calling thread's request table; a no-op when none is installed. */
+  public static void clearRequestTable() {
+    REQUEST_TABLE.remove();
+  }
+
+  private static JumpTable buildHistoricalTable(boolean memAdjusted, int vote, int suicide) {
+    JumpTable table = newLatestOperationSet();
+    table.set(memAdjusted ? ADJUSTED_MLOAD : DEFAULT_MLOAD);
+    table.set(memAdjusted ? ADJUSTED_MSTORE : DEFAULT_MSTORE);
+    table.set(memAdjusted ? ADJUSTED_MSTORE8 : DEFAULT_MSTORE8);
+    table.set(vote == VARIANT_SPECIAL ? OSAKA_VOTEWITNESS
+        : vote == VARIANT_ADJUSTED ? ADJUSTED_VOTEWITNESS : DEFAULT_VOTEWITNESS);
+    table.set(suicide == VARIANT_SPECIAL ? RESTRICTED_SUICIDE
+        : suicide == VARIANT_ADJUSTED ? ADJUSTED_SUICIDE : DEFAULT_SUICIDE);
+    return table;
   }
 
   private static void adjustTable(JumpTable table) {

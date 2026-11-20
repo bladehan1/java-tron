@@ -37,7 +37,7 @@ public class SnapshotRootTest extends BaseMethodTest {
           "market_account","market_pair_to_price","recent-transaction","block-index","block",
           "market_pair_price_to_order","proposal","tree-block-index","IncrementalMerkleTree",
           "asset-issue","balance-trace","transactionHistoryStore","account-index","section-bloom",
-          "exchange","market_order","account-trace","contract-state","trans"));
+          "exchange","market_order","account-trace","contract-state","trans","account-asset"));
   private Set<String> allDBNames;
   private Set<String> allRevokingDBNames;
 
