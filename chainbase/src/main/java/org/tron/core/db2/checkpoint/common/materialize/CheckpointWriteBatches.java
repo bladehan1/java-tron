@@ -3,6 +3,7 @@ package org.tron.core.db2.checkpoint.common.materialize;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.ToLongFunction;
+import org.tron.common.math.StrictMathWrapper;
 
 /** Ordered logical-byte partitioning for unsynced checkpoint target writes. */
 public final class CheckpointWriteBatches {
@@ -16,7 +17,7 @@ public final class CheckpointWriteBatches {
     List<T> current = new ArrayList<>();
     long currentBytes = 0L;
     for (T mutation : mutations) {
-      long mutationBytes = Math.max(0L, encodedBytes.applyAsLong(mutation));
+      long mutationBytes = StrictMathWrapper.max(0L, encodedBytes.applyAsLong(mutation));
       if (maximumBytes > 0 && !current.isEmpty()
           && currentBytes + mutationBytes > maximumBytes) {
         batches.add(current);
