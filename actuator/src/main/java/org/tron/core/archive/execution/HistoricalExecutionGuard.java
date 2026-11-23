@@ -1,0 +1,41 @@
+package org.tron.core.archive.execution;
+
+import org.tron.core.vm.PrecompiledContracts;
+import org.tron.core.vm.repository.Repository;
+
+/** Runtime allowlist for capabilities reachable only after bytecode dispatch. */
+public final class HistoricalExecutionGuard {
+
+  private HistoricalExecutionGuard() {
+  }
+
+  /** Checks the allowlist and marks the request TERMINAL on rejection (chapter 05 P1). */
+  public static void requirePrecompileAllowed(Repository repository,
+      PrecompiledContracts.PrecompiledContract contract) {
+    try {
+      requirePrecompileAllowed(contract);
+    } catch (HistoricalCapabilityException rejected) {
+      throw repository.markHistoricalFailure(rejected);
+    }
+  }
+
+  public static void requirePrecompileAllowed(
+      PrecompiledContracts.PrecompiledContract contract) {
+    if (contract instanceof PrecompiledContracts.Identity
+        || contract instanceof PrecompiledContracts.Sha256
+        || contract instanceof PrecompiledContracts.Ripempd160
+        || contract instanceof PrecompiledContracts.ECRecover
+        || contract instanceof PrecompiledContracts.ModExp
+        || contract instanceof PrecompiledContracts.BN128Addition
+        || contract instanceof PrecompiledContracts.BN128Multiplication
+        || contract instanceof PrecompiledContracts.BN128Pairing
+        || contract instanceof PrecompiledContracts.EthRipemd160
+        || contract instanceof PrecompiledContracts.Blake2F
+        || contract instanceof PrecompiledContracts.P256Verify) {
+      return;
+    }
+    throw new HistoricalCapabilityException(
+        "Precompile is not allowed by historical execution: "
+            + contract.getClass().getSimpleName());
+  }
+}

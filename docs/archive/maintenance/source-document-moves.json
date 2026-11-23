@@ -1,0 +1,127 @@
+[
+  {
+    "from": "chainbase/src/main/java/org/tron/core/db2/archive/README.md",
+    "to": "docs/archive/architecture/storage.md",
+    "original_sha256": "5503289aff887c790b8497f80202e732d81f82227d9bf6d70bbd7210c805565f"
+  },
+  {
+    "from": "chainbase/src/main/java/org/tron/core/db2/archive/ROOT-BOUNDARIES.md",
+    "to": "docs/archive/integration/root-boundaries.md",
+    "original_sha256": "3835b7bc1fe8e47db7f10d4fa6591f787498e4988ff71baa822a62cb58396f2e"
+  },
+  {
+    "from": "chainbase/src/main/java/org/tron/core/db2/archive/contract/README.md",
+    "to": "docs/archive/architecture/read-contracts.md",
+    "original_sha256": "1e9bb4daf39b0919b64e1630e8eb6042ab16ae4cd8aee3482481c240c15e2672"
+  },
+  {
+    "from": "chainbase/src/main/java/org/tron/core/db2/checkpoint/common/README.md",
+    "to": "docs/archive/architecture/common-checkpoint.md",
+    "original_sha256": "421e462e1dc9e05065a643cd33ede9ee90750927a355075be68ba8da2a9b0e2f"
+  },
+  {
+    "from": "chainbase/src/main/java/org/tron/core/db2/core/README.md",
+    "to": "docs/archive/integration/snapshot-host.md",
+    "original_sha256": "7beb24e72be6db828567d232b0b3760777ddc7d130731180c601f78db5097a3c"
+  },
+  {
+    "from": "actuator/src/main/java/org/tron/core/archive/README.md",
+    "to": "docs/archive/architecture/execution.md",
+    "original_sha256": "4fe5c880a157c32e26842fd5e55b0adf075760e7ea3c1736bbe0283658861632"
+  },
+  {
+    "from": "actuator/src/main/java/org/tron/core/archive/repository/README.md",
+    "to": "docs/archive/architecture/repository.md",
+    "original_sha256": "509a5ead9c8c34e1ebe31ea4bd669e7d54f4f0b21aa79c8ede505174fe0dced6"
+  },
+  {
+    "from": "actuator/src/main/java/org/tron/core/vm/repository/README.md",
+    "to": "docs/archive/integration/vm-repository-host.md",
+    "original_sha256": "da61626076c299590897d92d39926c4bf54b2bda2e97ecc78ec06f3ebbb9357a"
+  },
+  {
+    "from": "framework/src/main/java/org/tron/core/archive/README.md",
+    "to": "docs/archive/integration/node-integration.md",
+    "original_sha256": "41ed779a8898994a176730794374f4bc127a7c7a31a6891ac667ffb17df7435a"
+  },
+  {
+    "from": "common/src/main/java/org/tron/core/config/README.md",
+    "to": "docs/advanced-configuration.md",
+    "original_sha256": "8254c9509986486e7ea74f6ee291420e955483ab784cca7f10ed4207842f9be1"
+  },
+  {
+    "from": "protocol/src/main/protos/README.md",
+    "to": "docs/protocol-source.md",
+    "original_sha256": "37d76297876663c5a25080bc5592f08b5540100153be3315da832d81e7cecb2b"
+  },
+  {
+    "from": "docs/archive/common-checkpoint.md",
+    "to": "docs/archive/architecture/common-checkpoint.md",
+    "original_sha256": "681d5f598c194729af6e9938c97da52766e8a46947c2f9e1cb51a36b583b4b61"
+  },
+  {
+    "from": "docs/archive/execution.md",
+    "to": "docs/archive/architecture/execution.md",
+    "original_sha256": "eb9b87744304ff5784dd70d43db50ce5a9210d8b8e27aea2c9d241bc9de0692e"
+  },
+  {
+    "from": "docs/archive/read-contracts.md",
+    "to": "docs/archive/architecture/read-contracts.md",
+    "original_sha256": "c8794454dbc4c044e9b7e4041ed12456d58063fb6b99266e02be5be5bf228066"
+  },
+  {
+    "from": "docs/archive/repository.md",
+    "to": "docs/archive/architecture/repository.md",
+    "original_sha256": "509a5ead9c8c34e1ebe31ea4bd669e7d54f4f0b21aa79c8ede505174fe0dced6"
+  },
+  {
+    "from": "docs/archive/stateroot-layout.md",
+    "to": "docs/archive/architecture/stateroot-layout.md",
+    "original_sha256": "e33a5deb81fa43d33eb42666b7a7d4f6836c272cb4688dfbc4351f6d1c8257a2"
+  },
+  {
+    "from": "docs/archive/storage.md",
+    "to": "docs/archive/architecture/storage.md",
+    "original_sha256": "c8d95218a39701ddccec8c8e3d799b9b1e325964bba3786c4fdaa7c324659aa2"
+  },
+  {
+    "from": "docs/archive/node-integration.md",
+    "to": "docs/archive/integration/node-integration.md",
+    "original_sha256": "29a4dcb828ba710e369758deb1dd79c4d3bc8372d680d4bbdc63e8244e2f6540"
+  },
+  {
+    "from": "docs/archive/root-boundaries.md",
+    "to": "docs/archive/integration/root-boundaries.md",
+    "original_sha256": "89ef0f590893a94e7e2f76281fed6b91b2a96fa410c7756662f11cab1bc0cf7c"
+  },
+  {
+    "from": "docs/archive/snapshot-host.md",
+    "to": "docs/archive/integration/snapshot-host.md",
+    "original_sha256": "34c4d9532715c9288b5b3672387adb0fa3abcbbee133b428a9712e9172ac2d1a"
+  },
+  {
+    "from": "docs/archive/vm-repository-host.md",
+    "to": "docs/archive/integration/vm-repository-host.md",
+    "original_sha256": "4f3db7c78cc393d8203727ef06042274e432ca0561523017928fcf906a9f0331"
+  },
+  {
+    "from": "docs/archive/directory-inventory-20261027.md",
+    "to": "docs/archive/maintenance/directory-inventory-20261027.md",
+    "original_sha256": "396f1d764e4c3360e4f5103a7cc55ea0b9e0f112050501354317f0a1ab27fa0f"
+  },
+  {
+    "from": "docs/archive/directory-split-plan-20261027.md",
+    "to": "docs/archive/maintenance/directory-split-plan-20261027.md",
+    "original_sha256": "2ddf6d5f8fae0dade3c63f29730edd3ecffe3f0c060232c535751405f7efb50c"
+  },
+  {
+    "from": "docs/archive/source-document-moves.json",
+    "to": "docs/archive/maintenance/source-document-moves.json",
+    "original_sha256": "82bc0087c1e7708cbe6329806cd51a995098c851c4e8c6e74036d06db62079c4"
+  },
+  {
+    "from": "docs/archive/source-path-moves.json",
+    "to": "docs/archive/maintenance/source-path-moves.json",
+    "original_sha256": "a98755daf00a65f1c1d30231c8bd89073b7b91a1be482b1b7e47497809910b64"
+  }
+]

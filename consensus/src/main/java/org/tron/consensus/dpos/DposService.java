@@ -84,6 +84,17 @@ public class DposService implements ConsensusInterface {
     stateManager.setDposService(this);
     maintenanceManager.setDposService(this);
 
+    initGenesisSchedule();
+    maintenanceManager.init();
+    dposTask.init();
+  }
+
+  /**
+   * The genesis witness schedule (head 0 only): active witnesses and their {@code isJobs} flag.
+   * Deterministic from the genesis state and idempotent, so a node that writes it earlier at
+   * startup (State Archive, design v2 ch02 §3.11) sees identical restatements here.
+   */
+  public void initGenesisSchedule() {
     if (consensusDelegate.getLatestBlockHeaderNumber() == 0) {
       List<ByteString> witnesses = new ArrayList<>();
       consensusDelegate.getAllWitnesses().forEach(witnessCapsule ->
@@ -96,8 +107,6 @@ public class DposService implements ConsensusInterface {
         consensusDelegate.saveWitness(witnessCapsule);
       });
     }
-    maintenanceManager.init();
-    dposTask.init();
   }
 
   @Override

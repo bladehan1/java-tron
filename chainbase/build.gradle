@@ -1,5 +1,15 @@
 description = "chainbase – a decentralized database for blockchain."
 
+// RocksDB-JNI generation differs per architecture/dependency pin (see root
+// archInfo): version-specific adapters live in src/rocksdb/<archSource>.
+sourceSets {
+    main {
+        java {
+            srcDir "src/rocksdb/${rootProject.archInfo.archSource}"
+        }
+    }
+}
+
 // Dependency versions
 // ---------------------------------------
 def jansiVersion = "1.16"
