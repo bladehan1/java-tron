@@ -848,9 +848,10 @@ public class RepositoryImpl implements Repository {
       }
     } else {
       if (stateSource.isReadOnly()) {
-        storage = new Storage(address, null, stateSource::getStorageRow);
+        storage = new Storage(address, null, getDynamicPropertiesStore(),
+            stateSource::getStorageRow);
       } else {
-        storage = new Storage(address, getStorageRowStore());
+        storage = new Storage(address, getStorageRowStore(), getDynamicPropertiesStore());
       }
     }
     ContractCapsule contract = getContract(address);

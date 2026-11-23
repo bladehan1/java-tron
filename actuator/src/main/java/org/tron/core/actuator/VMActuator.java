@@ -337,7 +337,7 @@ public class VMActuator implements Actuator2 {
       }
       logger.info("runtime result is :{}", result.getException().getMessage());
     } finally {
-      if (isConstantCall && rootRepository != null && rootRepository.isHistorical()) {
+      if (isConstantCall) {
         VMConfig.clearLocalSnapshot();
         OperationRegistry.clearRequestTable();
       }

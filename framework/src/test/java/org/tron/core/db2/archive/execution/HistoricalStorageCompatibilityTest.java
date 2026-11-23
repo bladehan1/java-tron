@@ -2,12 +2,16 @@ package org.tron.core.db2.archive.execution;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
 
 import java.util.HashMap;
 import java.util.Map;
 import org.bouncycastle.util.encoders.Hex;
 import org.junit.Test;
+import org.mockito.MockedStatic;
 import org.tron.common.runtime.vm.DataWord;
+import org.tron.common.utils.ForkController;
 import org.tron.core.capsule.StorageRowCapsule;
 import org.tron.core.config.Parameter.ForkBlockVersionEnum;
 import org.tron.core.db2.archive.query.session.HistoricalQuerySession;
@@ -19,6 +23,13 @@ public class HistoricalStorageCompatibilityTest {
 
   @Test
   public void matchesDevelopStorageReadsForPresentZeroAndMissingRows() throws Exception {
+    try (MockedStatic<ForkController> fork = mockStatic(ForkController.class)) {
+      fork.when(ForkController::instance).thenReturn(mock(ForkController.class));
+      matchesDevelopStorageReadsForPresentZeroAndMissingRowsUnchecked();
+    }
+  }
+
+  private void matchesDevelopStorageReadsForPresentZeroAndMissingRowsUnchecked() throws Exception {
     byte[] address = HistoricalTestState.address(60);
     byte[] slot = new byte[32];
     slot[31] = 1;

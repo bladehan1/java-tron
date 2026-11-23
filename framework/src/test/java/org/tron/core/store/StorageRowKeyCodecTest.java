@@ -3,11 +3,15 @@ package org.tron.core.store;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertThrows;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
 
 import java.util.Arrays;
 import org.bouncycastle.util.encoders.Hex;
 import org.junit.Test;
+import org.mockito.MockedStatic;
 import org.tron.common.runtime.vm.DataWord;
+import org.tron.common.utils.ForkController;
 import org.tron.core.capsule.StorageRowCapsule;
 import org.tron.core.vm.program.Storage;
 
@@ -38,15 +42,18 @@ public class StorageRowKeyCodecTest {
 
   @Test
   public void latestVmStorageUsesTheSharedCodec() {
-    Storage storage = new Storage(ADDRESS, null, key -> null);
-    storage.setContractVersion(1);
-    storage.generateAddrHash(TRANSACTION_HASH);
-    DataWord slot = new DataWord(SLOT);
-    storage.put(slot, new DataWord(1));
+    try (MockedStatic<ForkController> fork = mockStatic(ForkController.class)) {
+      fork.when(ForkController::instance).thenReturn(mock(ForkController.class));
+      Storage storage = new Storage(ADDRESS, null, key -> null);
+      storage.setContractVersion(1);
+      storage.generateAddrHash(TRANSACTION_HASH);
+      DataWord slot = new DataWord(SLOT);
+      storage.put(slot, new DataWord(1));
 
-    StorageRowCapsule row = storage.getRowCache().get(slot);
-    assertArrayEquals(StorageRowKeyCodec.physicalKey(ADDRESS, SLOT, 1, TRANSACTION_HASH),
-        row.getRowKey());
+      StorageRowCapsule row = storage.getRowCache().get(slot);
+      assertArrayEquals(StorageRowKeyCodec.physicalKey(ADDRESS, SLOT, 1, TRANSACTION_HASH),
+          row.getRowKey());
+    }
   }
 
   @Test
