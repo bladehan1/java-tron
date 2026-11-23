@@ -35,6 +35,13 @@ public class StrictMathWrapper {
   }
 
   /**
+   * Converts a long to an int, throwing ArithmeticException on overflow.
+   */
+  public static int toIntExact(long value) {
+    return StrictMath.toIntExact(value);
+  }
+
+  /**
    * finally calls {@link java.lang.Math#floorMod(long, long)}
    */
   public static long multiplyExact(long x, long y) {

@@ -412,6 +412,15 @@ public class ProposalService extends ProposalUtil {
               .saveAllowHardenExchangeCalculation(entry.getValue());
           break;
         }
+        case ALLOW_OPTIMIZE_TVM_STORAGE: {
+          manager.getDynamicPropertiesStore().saveAllowOptimizeTvmStorage(entry.getValue());
+          break;
+        }
+        case ALLOW_OPTIMIZE_TVM_STORAGE_KEY: {
+          manager.getDynamicPropertiesStore()
+              .saveAllowOptimizeTvmStorageKey(entry.getValue());
+          break;
+        }
         default:
           find = false;
           break;

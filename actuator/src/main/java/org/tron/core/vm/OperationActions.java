@@ -9,6 +9,7 @@ import java.util.ArrayList;
 import java.util.List;
 import org.tron.common.runtime.vm.DataWord;
 import org.tron.common.runtime.vm.LogInfo;
+import org.tron.core.archive.execution.HistoricalFailures;
 import org.tron.core.vm.config.VMConfig;
 import org.tron.core.vm.program.Program;
 import org.tron.core.vm.program.Stack;
@@ -1070,6 +1071,10 @@ public class OperationActions {
   }
 
   public static void suicideAction(Program program) {
+    if (program.getContractState().isHistorical()) {
+      throw HistoricalFailures.capability(program.getContractState(),
+          "SELFDESTRUCT is not supported by historical execution");
+    }
     if (program.isStaticCall()) {
       throw new Program.StaticCallModificationException();
     }
@@ -1085,6 +1090,10 @@ public class OperationActions {
   }
 
   public static void suicideAction2(Program program) {
+    if (program.getContractState().isHistorical()) {
+      throw HistoricalFailures.capability(program.getContractState(),
+          "SELFDESTRUCT is not supported by historical execution");
+    }
     if (program.isStaticCall()) {
       throw new Program.StaticCallModificationException();
     }

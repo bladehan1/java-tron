@@ -226,12 +226,18 @@ public class TransactionsMsgHandlerTest extends BaseTest {
 
   private void stubAdvInvRequest(PeerConnection peer, TransactionsMessage msg) {
     Map<Item, Long> advInvRequest = new ConcurrentHashMap<>();
+    seedAdvInvRequest(advInvRequest, msg);
+    Mockito.when(peer.getAdvInvRequest()).thenReturn(advInvRequest);
+  }
+
+  // Fills the shared adv-inv map without re-stubbing the mock; safe while handler worker
+  // threads concurrently invoke other methods on the same peer mock.
+  private void seedAdvInvRequest(Map<Item, Long> advInvRequest, TransactionsMessage msg) {
     for (Protocol.Transaction trx : msg.getTransactions().getTransactionsList()) {
       Item item = new Item(new TransactionMessage(trx).getMessageId(),
           Protocol.Inventory.InventoryType.TRX);
       advInvRequest.put(item, 0L);
     }
-    Mockito.when(peer.getAdvInvRequest()).thenReturn(advInvRequest);
   }
 
   @Test
@@ -343,6 +349,10 @@ public class TransactionsMsgHandlerTest extends BaseTest {
     handler.init();
     try {
       PeerConnection peer = Mockito.mock(PeerConnection.class);
+      // Stub once up front: the handler's worker pool keeps invoking peer methods in the
+      // background, and re-stubbing between processMessage calls races with those invocations.
+      Map<Item, Long> sharedAdvInvRequest = new ConcurrentHashMap<>();
+      Mockito.when(peer.getAdvInvRequest()).thenReturn(sharedAdvInvRequest);
 
       BalanceContract.TransferContract transferContract = BalanceContract.TransferContract
           .newBuilder()
@@ -363,7 +373,7 @@ public class TransactionsMsgHandlerTest extends BaseTest {
 
       List<Protocol.Transaction> shortList = new ArrayList<>();
       shortList.add(shortSigTrx);
-      stubAdvInvRequest(peer, new TransactionsMessage(shortList));
+      seedAdvInvRequest(sharedAdvInvRequest, new TransactionsMessage(shortList));
       P2pException shortEx = Assert.assertThrows(P2pException.class,
           () -> handler.processMessage(peer, new TransactionsMessage(shortList)));
       Assert.assertEquals(TypeEnum.BAD_TRX, shortEx.getType());
@@ -381,7 +391,7 @@ public class TransactionsMsgHandlerTest extends BaseTest {
 
       List<Protocol.Transaction> longList = new ArrayList<>();
       longList.add(longSigTrx);
-      stubAdvInvRequest(peer, new TransactionsMessage(longList));
+      seedAdvInvRequest(sharedAdvInvRequest, new TransactionsMessage(longList));
       P2pException longEx = Assert.assertThrows(P2pException.class,
           () -> handler.processMessage(peer, new TransactionsMessage(longList)));
       Assert.assertEquals(TypeEnum.BAD_TRX, longEx.getType());
@@ -399,7 +409,7 @@ public class TransactionsMsgHandlerTest extends BaseTest {
 
       List<Protocol.Transaction> validList = new ArrayList<>();
       validList.add(validSigTrx);
-      stubAdvInvRequest(peer, new TransactionsMessage(validList));
+      seedAdvInvRequest(sharedAdvInvRequest, new TransactionsMessage(validList));
       handler.processMessage(peer, new TransactionsMessage(validList));
 
       // 68 bytes (upper bound) also passes the length check
@@ -415,7 +425,7 @@ public class TransactionsMsgHandlerTest extends BaseTest {
 
       List<Protocol.Transaction> paddedList = new ArrayList<>();
       paddedList.add(paddedSigTrx);
-      stubAdvInvRequest(peer, new TransactionsMessage(paddedList));
+      seedAdvInvRequest(sharedAdvInvRequest, new TransactionsMessage(paddedList));
       handler.processMessage(peer, new TransactionsMessage(paddedList));
     } finally {
       handler.close();

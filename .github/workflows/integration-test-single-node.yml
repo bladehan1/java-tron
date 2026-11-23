@@ -20,6 +20,10 @@ jobs:
     name: Integration Test Single Node Smoke (JDK 8 / x86_64)
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      # v1.0.3 targets the 4.8.2 proposal set (block version 37).
+      # v1.0.4/latest requires 4.8.2.4 (block version 39), beyond this branch's baseline.
+      INTEGRATION_TEST_IMAGE: troninfra/troninfra-ci:v1.0.3@sha256:63c90000360e6cf5346667d23e7dafbe1e6b737fa6d4c096db6ff095fa83cc45
 
     steps:
       - name: Checkout java-tron
@@ -44,7 +48,7 @@ jobs:
         run: ./gradlew clean build -x test --no-daemon
 
       - name: Pull integration-test image
-        run: docker pull troninfra/troninfra-ci:latest
+        run: docker pull "$INTEGRATION_TEST_IMAGE"
 
       - name: Run integration smoke tests
         run: |
@@ -57,7 +61,7 @@ jobs:
             -e JAVA_HOME=/usr/lib/jvm/temurin-8 \
             -e JAVA_HOME_17=/opt/java/openjdk \
             -v "${{ github.workspace }}/build/libs/FullNode.jar:/javatron/FullNode.jar:ro" \
-            troninfra/troninfra-ci:latest \
+            "$INTEGRATION_TEST_IMAGE" \
             --clean --smoke
 
       - name: Extract smoke test reports from container
