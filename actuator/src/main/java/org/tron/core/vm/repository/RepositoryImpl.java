@@ -848,8 +848,9 @@ public class RepositoryImpl implements Repository {
       }
     } else {
       if (stateSource.isReadOnly()) {
-        storage = new Storage(address, null, getDynamicPropertiesStore(),
-            stateSource::getStorageRow);
+        // Historical rows predate the optimized storage layout; the flags stay off and a null
+        // dynamic store keeps this path free of head-state DynamicPropertiesStore access.
+        storage = new Storage(address, null, null, stateSource::getStorageRow);
       } else {
         storage = new Storage(address, getStorageRowStore(), getDynamicPropertiesStore());
       }

@@ -67,7 +67,8 @@ public class Storage {
     this.rowLoader = rowLoader;
     this.optimizeTvmStorage = dynamicStore != null && dynamicStore.allowTvmStorageOptimization();
     this.legacyReadProtection = dynamicStore != null && dynamicStore.allowOptimizeTvmStorageKey();
-    this.aliasCheckEnabled = ForkController.instance().pass(ForkBlockVersionEnum.VERSION_4_8_2_3);
+    this.aliasCheckEnabled = dynamicStore != null
+        && ForkController.instance().pass(ForkBlockVersionEnum.VERSION_4_8_2_3);
   }
 
   public Storage(Storage storage) {
