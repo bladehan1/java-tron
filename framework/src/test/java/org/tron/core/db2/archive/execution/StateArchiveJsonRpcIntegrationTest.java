@@ -4,9 +4,11 @@ import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.AdditionalAnswers.delegatesTo;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.doCallRealMethod;
+import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -20,6 +22,7 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -52,10 +55,12 @@ import org.tron.core.db2.archive.BlockReverseDiff.DbGroup;
 import org.tron.core.db2.archive.BlockReverseDiff.Entry;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
 import org.tron.core.db2.archive.OldValue;
+import org.tron.core.db2.archive.checkpoint.StateArchiveAppendFileRuntime;
 import org.tron.core.db2.archive.history.hot.StateArchiveHotBatchDescriptor;
 import org.tron.core.db2.archive.history.v5.StateArchiveAppendCheckpointMaterializerV5;
 import org.tron.core.db2.archive.query.HistoricalQueryAdmission;
 import org.tron.core.db2.archive.query.snapshot.ArchiveReadSnapshot;
+import org.tron.core.db2.archive.serving.ServingIndexService;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointFile;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointRedoCoordinator;
 import org.tron.core.db2.checkpoint.common.CommonCheckpointRuntime;
@@ -151,7 +156,7 @@ public class StateArchiveJsonRpcIntegrationTest {
       throws Exception {
     try (Fixture fixture = new Fixture(temporaryFolder.newFolder("negative").toPath(),
         Engine.ROCKSDB)) {
-      fixture.error("eth_getCode", RPC_ADDRESS, "0xa"); // BULK
+      fixture.error("eth_getCode", RPC_ADDRESS, "0xa"); // Serving not admitted.
       fixture.ready();
       BlockCapsule fork = new BlockCapsule(10, Sha256Hash.ZERO_HASH, 99999,
           ByteString.EMPTY);
@@ -497,26 +502,31 @@ public class StateArchiveJsonRpcIntegrationTest {
                     new Entry(callOldSlot, OldValue.present(digest(7)))),
                 new DbGroup("properties", historicalVmProperties()))));
       }
-      archive = new StateArchiveAppendCheckpointMaterializerV5(root.resolve("archive"),
+      // Keep serving admission under fixture control so the pre-serving assertion cannot
+      // race the production worker's automatic transition to LIVE on this tiny history.
+      archive = StateArchiveAppendCheckpointMaterializerV5.openForCommon(root.resolve("archive"),
           digest(77), engine, 11,
           StateArchiveAppendCheckpointMaterializerV5.baselineHistoryDigest(11,
               blocks.get(10L).getBlockId().getBytes()),
           1500, number -> {
-        BlockCapsule block = blocks.get(number);
-        return block == null ? null : BlockSnapshotMeta.forBlock(number,
-            block.getBlockId().getBytes(),
-            blocks.get(number - 1).getBlockId().getBytes(), number * 3000L);
-      });
+            BlockCapsule block = blocks.get(number);
+            return block == null ? null : BlockSnapshotMeta.forBlock(number,
+                block.getBlockId().getBytes(),
+                blocks.get(number - 1).getBlockId().getBytes(), number * 3000L);
+          }, null);
+      StateArchiveAppendFileRuntime runtimeArchive = mock(StateArchiveAppendFileRuntime.class,
+          delegatesTo(archive));
+      doNothing().when(runtimeArchive).startServingAfterRecovery();
       StateArchiveHotBatchDescriptor descriptor = archive.planCheckpoint(diffs);
       payload = payload(diffs, descriptor);
       target = archive.prepare(CommonCheckpointCapture.create(payload, diffs, descriptor));
       archive.publish(target);
       owner = new CommonCheckpointRuntimeOwner(
           new CommonCheckpointRedoCoordinator(new CommonCheckpointFile(root.resolve("wal")),
-              authority(Authority.CHAINBASE), authority(Authority.PATH_STATE), archive));
+              authority(Authority.CHAINBASE), authority(Authority.PATH_STATE), runtimeArchive));
       CommonCheckpointRuntime runtime = new CommonCheckpointRuntime(owner,
           Collections.singletonList(mock(Chainbase.class)), root.resolve("archive"), digest(77),
-          engine, this::pin, ignored -> () -> { }, archive);
+          engine, this::pin, ignored -> () -> { }, runtimeArchive);
       attachment = CommonCheckpointRuntimeAttachment.open(true, () -> runtime);
       ChainBaseManager chainbase = mock(ChainBaseManager.class);
       when(chainbase.getBlockByNum(anyLong())).thenAnswer(call -> blocks.get(call.getArgument(0)));
@@ -589,6 +599,10 @@ public class StateArchiveJsonRpcIntegrationTest {
     }
 
     private void ready() throws Exception {
+      archive.startServingAfterRecovery();
+      ServingIndexService serving = (ServingIndexService)
+          ReflectionTestUtils.getField(archive, "servingService");
+      assertTrue("Serving fixture did not become LIVE", serving.awaitLive(Duration.ofSeconds(5)));
       archive.completeServingInitialSync(target);
     }
 
