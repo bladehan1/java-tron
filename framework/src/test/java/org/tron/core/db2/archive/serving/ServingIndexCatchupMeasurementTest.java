@@ -41,7 +41,7 @@ public class ServingIndexCatchupMeasurementTest {
     AtomicBoolean stop = new AtomicBoolean();
     AtomicReference<Throwable> failure = new AtomicReference<>();
     ServingIndexService.Config config = new ServingIndexService.Config()
-        .setMaxBlocks(100).setMaxWriteMutations(64).setMaxWriteBytes(64 * 1024)
+        .setMaxBlocks(100)
         .setPollMillis(10).setCloseTimeoutMillis(30_000);
     try (Writer ignored = history.writer;
         ServingIndexService service = new ServingIndexService(history.servingRoot, root,

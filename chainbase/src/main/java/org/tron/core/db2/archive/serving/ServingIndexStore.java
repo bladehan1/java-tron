@@ -34,10 +34,13 @@ import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
  * The single long-lived write handle of the V5 serving index (ch04 §3.2, WP-S2).
  *
  * <p>Layout of {@code single-v1/keys}: KeyMeta ({@code 0x03}), KeyEpochPage ({@code 0x04}),
- * StoreCoverage ({@code 0x05}), the exact-v5 progress descriptor ({@code 7f 'S' 'I' 01}) and the
- * state record ({@code 7f 'S' 'S' 01}). Every normal batch writes its index data, the 27
- * coverage rows and the descriptor in one {@code sync} batch (S-INV-3), including oversized
- * blocks. R-IDEM still recovers interrupted solo writes produced by older versions.
+ * StoreCoverage ({@code 0x05}), the exact-v5 progress descriptor ({@code 7f 'S' 'I' 01}), the
+ * state record ({@code 7f 'S' 'S' 01}) and the transient flush intent ({@code 7f 'S' 'F' 01}).
+ * The page and KeyMeta encodings are unchanged from PR #55, so an existing index opens and
+ * keeps appending from its durable progress. A flush fitting one write still commits its index
+ * data, the 27 coverage rows and the descriptor in one {@code sync} batch (S-INV-3); a larger
+ * flush writes a durable intent and key-atomic data batches first and publishes coverage and
+ * progress last. R-IDEM still recovers interrupted solo writes by older versions.
  *
  * <p>Only the serving build thread writes. Query leases take native snapshots on this handle
  * through {@link #snapshot()}, never through the static open registry (ch04 §3.11).
@@ -47,28 +50,36 @@ final class ServingIndexStore implements Closeable {
   static final String DIRECTORY = "single-v1";
   static final String DATABASE = "keys";
   static final byte[] STATE_KEY = new byte[]{0x7f, 'S', 'S', 1};
+  /** Crash recovery intent of a multi-write flush; absent once the final publish is durable. */
+  static final byte[] FLUSH_INTENT_KEY = new byte[]{0x7f, 'S', 'F', 1};
   private static final String LEGACY_CATALOG = "current";
 
   private final Path directory;
   private final Engine engine;
   private final ArchiveIndexStorage.Writer writer;
   private final boolean initialized;
+  private final ServingIndexParallelAppender appender;
   private final AtomicInteger useAfterClose = new AtomicInteger();
   private volatile Descriptor descriptor;
   private volatile ServingStateRecord state;
+  private volatile FlushIntent pendingIntent;
   private long sequence;
   private volatile boolean failed;
   private volatile boolean closed;
+  private volatile FlushFaultHook faultHook = FlushFaultHook.NONE;
 
   private ServingIndexStore(Path directory, Engine engine,
       ArchiveIndexStorage.Writer writer, Descriptor descriptor, ServingStateRecord state,
-      boolean initialized) {
+      boolean initialized, FlushIntent pendingIntent) {
     this.directory = directory;
     this.engine = engine;
     this.writer = writer;
     this.descriptor = descriptor;
     this.state = state;
     this.initialized = initialized;
+    this.pendingIntent = pendingIntent;
+    this.appender = new ServingIndexParallelAppender(
+        ServingIndexParallelAppender.resolveParallelism());
   }
 
   /**
@@ -141,7 +152,7 @@ final class ServingIndexStore implements Closeable {
       batch.add(ArchiveIndexStorage.delete(
           PersistentServingKeyIndexGeneration.ARCHIVE_TAIL_KEY_V5));
       writer.write(batch, true);
-      return new ServingIndexStore(directory, engine, writer, initial, record, true);
+      return new ServingIndexStore(directory, engine, writer, initial, record, true, null);
     }
     Descriptor descriptor = decode(encoded);
     if (descriptor.indexedFrom() != historyStartBlock - 1) {
@@ -177,7 +188,29 @@ final class ServingIndexStore implements Closeable {
     if (!maintenance.isEmpty()) {
       writer.write(maintenance, true);
     }
-    return new ServingIndexStore(directory, engine, writer, descriptor, record, false);
+    FlushIntent pendingIntent = readPendingIntent(writer, descriptor);
+    return new ServingIndexStore(directory, engine, writer, descriptor, record, false,
+        pendingIntent);
+  }
+
+  /** Decodes and validates the recovery intent of an interrupted multi-write flush. */
+  private static FlushIntent readPendingIntent(ArchiveIndexStorage.Writer writer,
+      Descriptor descriptor) throws IOException {
+    byte[] encoded = writer.get(FLUSH_INTENT_KEY);
+    if (encoded == null) {
+      return null;
+    }
+    FlushIntent intent = FlushIntent.decode(encoded);
+    if (intent.baseThrough != descriptor.indexedThrough()
+        || !Arrays.equals(intent.baseHash, descriptor.headHash())) {
+      throw new ServingFaultException(Reason.INDEX_CORRUPT,
+          "Serving flush intent does not match the durable progress descriptor");
+    }
+    if (intent.targetThrough <= intent.baseThrough) {
+      throw new ServingFaultException(Reason.INDEX_CORRUPT,
+          "Serving flush intent target is invalid");
+    }
+    return intent;
   }
 
   private static void requireOnlyLegacyTail(ArchiveIndexStorage.Writer writer)
@@ -322,19 +355,132 @@ final class ServingIndexStore implements Closeable {
 
   /** All data and progress are atomic; soft flush estimates never reject a valid plan. */
   void commit(ServingIndexIncrementalPlan plan, boolean clearRebuild) throws IOException {
+    long grouped = System.nanoTime();
+    GroupedAppend append = toGroupedAppend(plan);
+    ServingIndexTiming.record(ServingIndexTiming.Stage.GROUP, grouped);
+    // A plan-sized flush never exceeds one write, so it keeps today's single atomic commit.
+    commit(append, clearRebuild, Long.MAX_VALUE);
+  }
+
+  /**
+   * Commits one sealed accumulation. Small flushes stay one atomic write; a flush larger than
+   * {@code dataBatchBytes} streams key-atomic data batches after a durable flush intent and
+   * publishes coverage and progress in the final write, Geth-style data-then-progress.
+   */
+  void commit(GroupedAppend append, boolean clearRebuild, long dataBatchBytes)
+      throws IOException {
     requireWritable();
-    requireExtends(plan);
-    Next next = next(plan, clearRebuild);
-    List<Mutation> batch = new ArrayList<>();
+    requireExtends(append);
+    Next next = next(append, clearRebuild);
+    FlushFlow flow = new FlushFlow(append, next, clearRebuild, dataBatchBytes, false);
     long started = System.nanoTime();
-    for (Map.Entry<ExactKey, List<Long>> entry : changes(plan).entrySet()) {
-      PersistentServingKeyIndexGeneration.appendExactChanges(writer, batch, entry.getKey(),
-          entry.getValue(), descriptor.indexedThrough());
+    try {
+      appender.appendAll(writer, append.changes, descriptor.indexedThrough(), flow);
+      flow.finish();
+    } catch (IOException | RuntimeException | Error failure) {
+      if (flow.durableWrites()) {
+        // Intent or data batches may already be durable; only reopening may resume.
+        failed = true;
+      }
+      throw failure;
     }
     ServingIndexTiming.record(ServingIndexTiming.Stage.BUILD, started);
-    batch.addAll(next.tail);
-    write(batch);
     install(next);
+  }
+
+  /**
+   * Resumes an interrupted multi-write flush: keys still at the old boundary append normally,
+   * keys the crash already wrote are verified against the replay and skipped, then the final
+   * publish batch installs coverage, progress and deletes the intent. Replaying is idempotent
+   * and may itself be interrupted.
+   */
+  void recoverFlush(GroupedAppend append, FlushIntent intent, long dataBatchBytes)
+      throws IOException {
+    requireWritable();
+    requireExtends(append);
+    if (intent.baseThrough != append.indexedFrom
+        || !Arrays.equals(intent.baseHash, append.indexedFromHash)
+        || intent.targetThrough != append.indexedThrough
+        || !Arrays.equals(intent.targetHash, append.headHash)
+        || !Arrays.equals(intent.targetSourceDigest, append.sourceDigest)
+        || intent.keyChanges != append.keyChanges) {
+      throw new ServingFaultException(Reason.INDEX_CORRUPT,
+          "Serving flush recovery replay differs from the pending intent");
+    }
+    Next next = next(append, intent.clearRebuild);
+    FlushFlow flow = new FlushFlow(append, next, intent.clearRebuild, dataBatchBytes, true);
+    long started = System.nanoTime();
+    try {
+      appender.recoverAll(writer, append.changes, intent.baseThrough, intent.targetThrough,
+          flow);
+      flow.finish();
+    } catch (IOException | RuntimeException | Error failure) {
+      if (flow.durableWrites()) {
+        failed = true;
+      }
+      throw failure;
+    }
+    pendingIntent = null;
+    ServingIndexTiming.record(ServingIndexTiming.Stage.BUILD, started);
+    install(next);
+  }
+
+  /** The recovery replay target of an interrupted flush, or null when the last one completed. */
+  FlushIntent pendingFlushIntent() {
+    return pendingIntent;
+  }
+
+  byte[] sourceDigest() {
+    return descriptor.sourceDigest();
+  }
+
+  byte[] latestIdentityDigest() {
+    return descriptor.latestSourceIdentityDigest();
+  }
+
+  List<String> participantsList() {
+    return descriptor.participants();
+  }
+
+  /** Test injection points around the multi-write flush protocol; production keeps NONE. */
+  void setFlushFaultHook(FlushFaultHook hook) {
+    this.faultHook = hook == null ? FlushFaultHook.NONE : hook;
+  }
+
+  private GroupedAppend toGroupedAppend(ServingIndexIncrementalPlan plan) {
+    Map<ExactKey, List<Long>> grouped = new LinkedHashMap<>();
+    for (Map.Entry<String, List<ServingIndexIncrementalPlan.KeyChange>> database
+        : plan.getChangesByDatabase().entrySet()) {
+      for (ServingIndexIncrementalPlan.KeyChange change : database.getValue()) {
+        grouped.computeIfAbsent(ExactKey.owned(database.getKey(), change.getRawKey()),
+            ignored -> new ArrayList<>()).add(change.getEpoch());
+      }
+    }
+    Map<ExactKey, long[]> changes = new LinkedHashMap<>();
+    grouped.forEach((key, epochs) -> {
+      long[] values = new long[epochs.size()];
+      for (int index = 0; index < values.length; index++) {
+        values[index] = epochs.get(index);
+      }
+      changes.put(key, values);
+    });
+    List<byte[]> steps = plan.getSourceStepDigests();
+    byte[] latest = steps.isEmpty() ? descriptor.latestSourceIdentityDigest()
+        : steps.get(steps.size() - 1);
+    return new GroupedAppend(plan.getIndexedFrom(), plan.getIndexedFromHash(),
+        plan.getIndexedThrough(), plan.getHeadHash(), plan.getParticipatingDatabases(),
+        PersistentServingKeyIndexGeneration.rollSourceDigest(
+            descriptor.sourceDigest(), steps),
+        latest, totalChanges(plan), changes);
+  }
+
+  private static long totalChanges(ServingIndexIncrementalPlan plan) {
+    long total = 0;
+    for (List<ServingIndexIncrementalPlan.KeyChange> database
+        : plan.getChangesByDatabase().values()) {
+      total += database.size();
+    }
+    return total;
   }
 
   private void requireExtends(ServingIndexIncrementalPlan plan) {
@@ -346,36 +492,22 @@ final class ServingIndexStore implements Closeable {
     }
   }
 
-  private Map<ExactKey, List<Long>> changes(ServingIndexIncrementalPlan plan) {
-    Map<ExactKey, List<Long>> changes = new LinkedHashMap<>();
-    for (Map.Entry<String, List<ServingIndexIncrementalPlan.KeyChange>> database
-        : plan.getChangesByDatabase().entrySet()) {
-      for (ServingIndexIncrementalPlan.KeyChange change : database.getValue()) {
-        changes.computeIfAbsent(new ExactKey(database.getKey(), change.getRawKey()),
-            ignored -> new ArrayList<>()).add(change.getEpoch());
-      }
+  private void requireExtends(GroupedAppend append) {
+    Descriptor current = descriptor;
+    if (append.indexedFrom != current.indexedThrough()
+        || !Arrays.equals(append.indexedFromHash, current.headHash())
+        || !append.participants.equals(current.participants())) {
+      throw new IllegalStateException("Serving increment does not extend durable I");
     }
-    return changes;
   }
 
-  private Next next(ServingIndexIncrementalPlan plan, boolean clearRebuild) {
+  private Next next(GroupedAppend append, boolean clearRebuild) {
     Descriptor previous = descriptor;
-    long added = 0;
-    for (List<ServingIndexIncrementalPlan.KeyChange> database
-        : plan.getChangesByDatabase().values()) {
-      added += database.size();
-    }
-    List<byte[]> steps = plan.getSourceStepDigests();
-    byte[] digest = PersistentServingKeyIndexGeneration.rollSourceDigest(
-        previous.sourceDigest(), steps);
-    // S14: latestSourceIdentity is diagnostic only, the last block's step digest.
-    byte[] latest = steps.isEmpty() ? previous.latestSourceIdentityDigest()
-        : steps.get(steps.size() - 1);
     Descriptor replacement = new Descriptor(PersistentServingKeyIndexGeneration.EXACT_VERSION,
-        previous.scopeIdentity(), generationId(plan.getIndexedThrough(),
-            plan.getHeadHash(), sequence), previous.indexedFrom(), plan.getIndexedThrough(),
-        plan.getHeadHash(), digest, latest, previous.participants(),
-        previous.keyChanges() + added);
+        previous.scopeIdentity(), generationId(append.indexedThrough, append.headHash, sequence),
+        previous.indexedFrom(), append.indexedThrough, append.headHash, append.sourceDigest,
+        append.latestStepDigest, previous.participants(),
+        previous.keyChanges() + append.keyChanges);
     List<Mutation> tail = new ArrayList<>(coverage(replacement));
     tail.add(ArchiveIndexStorage.put(PersistentServingKeyIndexGeneration.PROGRESS_KEY,
         PersistentServingKeyIndexGeneration.encodeDescriptor(replacement)));
@@ -406,6 +538,113 @@ final class ServingIndexStore implements Closeable {
     }
   }
 
+  /**
+   * Batches prepared key chunks into writes. A flush fitting {@code batchBytes} keeps data,
+   * coverage and progress in one atomic write, exactly like a plan-sized commit. A larger
+   * flush first writes a durable intent, then key-atomic data batches, and publishes coverage
+   * and progress in the final write that also deletes the intent. Chunks arrive in worker
+   * completion order; each key's mutations always share one write batch, so the order between
+   * distinct keys never matters.
+   */
+  private final class FlushFlow implements ServingIndexParallelAppender.ChunkSink {
+    private final GroupedAppend append;
+    private final Next next;
+    private final boolean clearRebuild;
+    private final long batchBytes;
+    /** An interrupted flush left an intent on disk; any completion path must remove it. */
+    private final boolean existingIntent;
+    private final List<Mutation> current = new ArrayList<>();
+    private long currentBytes;
+    private long totalBytes;
+    private long dataBatches;
+    private boolean intentWritten;
+
+    private FlushFlow(GroupedAppend append, Next next, boolean clearRebuild, long batchBytes,
+        boolean existingIntent) {
+      this.append = append;
+      this.next = next;
+      this.clearRebuild = clearRebuild;
+      this.batchBytes = batchBytes;
+      this.existingIntent = existingIntent;
+    }
+
+    @Override
+    public void accept(List<Mutation> chunk) throws IOException {
+      long chunkBytes = 0;
+      for (Mutation mutation : chunk) {
+        chunkBytes += mutation.estimatedBytes();
+      }
+      totalBytes += chunkBytes;
+      if (!current.isEmpty() && currentBytes + chunkBytes > batchBytes) {
+        if (!intentWritten) {
+          writeIntent();
+        }
+        writeData();
+      }
+      current.addAll(chunk);
+      currentBytes += chunkBytes;
+      if (intentWritten && currentBytes >= batchBytes) {
+        writeData();
+      }
+    }
+
+    void finish() throws IOException {
+      if (!intentWritten) {
+        // Everything fits one write: data, coverage and progress stay atomic together; a
+        // recovering flush still clears the intent the interrupted attempt left behind.
+        for (Mutation mutation : next.tail) {
+          totalBytes += mutation.estimatedBytes();
+        }
+        current.addAll(next.tail);
+        if (existingIntent) {
+          Mutation delete = ArchiveIndexStorage.delete(FLUSH_INTENT_KEY);
+          totalBytes += delete.estimatedBytes();
+          current.add(delete);
+        }
+        write(current);
+        return;
+      }
+      if (!current.isEmpty()) {
+        writeData();
+      }
+      faultHook.beforeFinalPublish();
+      List<Mutation> finalBatch = new ArrayList<>(next.tail);
+      for (Mutation mutation : next.tail) {
+        totalBytes += mutation.estimatedBytes();
+      }
+      Mutation delete = ArchiveIndexStorage.delete(FLUSH_INTENT_KEY);
+      totalBytes += delete.estimatedBytes();
+      finalBatch.add(delete);
+      write(finalBatch);
+    }
+
+    boolean durableWrites() {
+      return intentWritten;
+    }
+
+    long totalBytes() {
+      return totalBytes;
+    }
+
+    private void writeIntent() throws IOException {
+      Mutation intent = ArchiveIndexStorage.put(FLUSH_INTENT_KEY,
+          new FlushIntent(append.indexedFrom, append.indexedFromHash, append.indexedThrough,
+              append.headHash, append.sourceDigest, append.keyChanges, clearRebuild).encode());
+      totalBytes += intent.estimatedBytes();
+      write(java.util.Collections.singletonList(intent));
+      intentWritten = true;
+      faultHook.afterIntent();
+    }
+
+    private void writeData() throws IOException {
+      write(current);
+      dataBatches++;
+      faultHook.afterDataBatch((int) dataBatches - 1);
+      current.clear();
+      currentBytes = 0;
+    }
+  }
+
   private void requireWritable() throws IOException {
     if (closed) {
       useAfterClose.incrementAndGet();
@@ -427,7 +666,11 @@ final class ServingIndexStore implements Closeable {
   public void close() throws IOException {
     if (!closed) {
       closed = true;
-      writer.close();
+      try {
+        appender.close();
+      } finally {
+        writer.close();
+      }
     }
   }
 
@@ -440,6 +683,185 @@ final class ServingIndexStore implements Closeable {
       this.descriptor = descriptor;
       this.state = state;
       this.tail = tail;
+    }
+  }
+
+  /** One sealed change accumulation: identity, rolled digest and per-key ordered epochs. */
+  static final class GroupedAppend {
+    private final long indexedFrom;
+    private final byte[] indexedFromHash;
+    private final long indexedThrough;
+    private final byte[] headHash;
+    private final List<String> participants;
+    /** Source digest rolled from the base descriptor through every step of this batch. */
+    private final byte[] sourceDigest;
+    private final byte[] latestStepDigest;
+    private final long keyChanges;
+    private final Map<ExactKey, long[]> changes;
+
+    GroupedAppend(long indexedFrom, byte[] indexedFromHash, long indexedThrough,
+        byte[] headHash, List<String> participants, byte[] sourceDigest,
+        byte[] latestStepDigest, long keyChanges, Map<ExactKey, long[]> changes) {
+      if (indexedFrom < 0 || indexedThrough < indexedFrom) {
+        throw new IllegalArgumentException("Serving append range is invalid");
+      }
+      this.indexedFrom = indexedFrom;
+      this.indexedFromHash = Objects.requireNonNull(indexedFromHash, "indexedFromHash").clone();
+      this.indexedThrough = indexedThrough;
+      this.headHash = Objects.requireNonNull(headHash, "headHash").clone();
+      this.participants = java.util.Collections.unmodifiableList(
+          new ArrayList<>(Objects.requireNonNull(participants, "participants")));
+      this.sourceDigest = Objects.requireNonNull(sourceDigest, "sourceDigest").clone();
+      this.latestStepDigest = Objects.requireNonNull(latestStepDigest,
+          "latestStepDigest").clone();
+      this.keyChanges = keyChanges;
+      this.changes = java.util.Collections.unmodifiableMap(
+          new LinkedHashMap<>(Objects.requireNonNull(changes, "changes")));
+    }
+
+    long indexedFrom() {
+      return indexedFrom;
+    }
+
+    long indexedThrough() {
+      return indexedThrough;
+    }
+
+    byte[] headHash() {
+      return headHash.clone();
+    }
+
+    byte[] sourceDigest() {
+      return sourceDigest.clone();
+    }
+
+    long keyChanges() {
+      return keyChanges;
+    }
+  }
+
+  /**
+   * The durable intent of an interrupted multi-write flush: while it exists, data between the
+   * durable progress and {@code targetThrough} may be partly written and must be recovered by
+   * replay before normal building resumes.
+   */
+  static final class FlushIntent {
+    private static final int MAGIC = 0x53465449; // SFTI
+    private static final short VERSION = 1;
+    private static final int LENGTH = 132;
+
+    private final long baseThrough;
+    private final byte[] baseHash;
+    private final long targetThrough;
+    private final byte[] targetHash;
+    private final byte[] targetSourceDigest;
+    private final long keyChanges;
+    private final boolean clearRebuild;
+
+    private FlushIntent(long baseThrough, byte[] baseHash, long targetThrough,
+        byte[] targetHash, byte[] targetSourceDigest, long keyChanges, boolean clearRebuild) {
+      this.baseThrough = baseThrough;
+      this.baseHash = baseHash.clone();
+      this.targetThrough = targetThrough;
+      this.targetHash = targetHash.clone();
+      this.targetSourceDigest = targetSourceDigest.clone();
+      this.keyChanges = keyChanges;
+      this.clearRebuild = clearRebuild;
+    }
+
+    private byte[] encode() {
+      ByteBuffer buffer = ByteBuffer.allocate(LENGTH).putInt(MAGIC).putShort(VERSION)
+          .putShort(clearRebuild ? (short) 1 : 0).putLong(baseThrough).put(baseHash)
+          .putLong(targetThrough).put(targetHash).put(targetSourceDigest)
+          .putLong(keyChanges);
+      buffer.putInt(Hashing.crc32c().hashBytes(buffer.array(), 0, LENGTH - 4).asInt());
+      return buffer.array();
+    }
+
+    private static FlushIntent decode(byte[] encoded) throws ServingFaultException {
+      if (encoded == null || encoded.length != LENGTH) {
+        throw new ServingFaultException(Reason.INDEX_CORRUPT,
+            "Serving flush intent length is invalid");
+      }
+      ByteBuffer buffer = ByteBuffer.wrap(encoded);
+      if (buffer.getInt(LENGTH - 4)
+          != Hashing.crc32c().hashBytes(encoded, 0, LENGTH - 4).asInt()) {
+        throw new ServingFaultException(Reason.INDEX_CORRUPT,
+            "Serving flush intent checksum differs");
+      }
+      if (buffer.getInt() != MAGIC) {
+        throw new ServingFaultException(Reason.INDEX_CORRUPT, "Serving flush intent magic");
+      }
+      short version = buffer.getShort();
+      if (version != VERSION) {
+        throw new ServingFaultException(Reason.INDEX_INCOMPATIBLE,
+            "Serving flush intent version is unsupported");
+      }
+      short flags = buffer.getShort();
+      if ((flags & ~1) != 0) {
+        throw new ServingFaultException(Reason.INDEX_CORRUPT,
+            "Serving flush intent flags are invalid");
+      }
+      long base = buffer.getLong();
+      byte[] baseHash = new byte[32];
+      buffer.get(baseHash);
+      long target = buffer.getLong();
+      byte[] targetHash = new byte[32];
+      buffer.get(targetHash);
+      byte[] digest = new byte[32];
+      buffer.get(digest);
+      long keyChanges = buffer.getLong();
+      if (base < 0 || target <= base || keyChanges < 0) {
+        throw new ServingFaultException(Reason.INDEX_CORRUPT,
+            "Serving flush intent fields are invalid");
+      }
+      return new FlushIntent(base, baseHash, target, targetHash, digest, keyChanges,
+          flags == 1);
+    }
+
+    long baseThrough() {
+      return baseThrough;
+    }
+
+    byte[] baseHash() {
+      return baseHash.clone();
+    }
+
+    long targetThrough() {
+      return targetThrough;
+    }
+
+    byte[] targetHash() {
+      return targetHash.clone();
+    }
+
+    byte[] targetSourceDigest() {
+      return targetSourceDigest.clone();
+    }
+
+    long keyChanges() {
+      return keyChanges;
+    }
+
+    boolean clearRebuild() {
+      return clearRebuild;
+    }
+  }
+
+  /** Test injection points of the multi-write flush protocol; production keeps NONE. */
+  interface FlushFaultHook {
+    FlushFaultHook NONE = new FlushFaultHook() { };
+
+    /** After the durable intent write. */
+    default void afterIntent() throws IOException {
+    }
+
+    /** After the durable write of the zero-based data batch. */
+    default void afterDataBatch(int index) throws IOException {
+    }
+
+    /** Before the final coverage and progress publish write. */
+    default void beforeFinalPublish() throws IOException {
     }
   }
 

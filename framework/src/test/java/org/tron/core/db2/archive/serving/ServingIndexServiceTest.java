@@ -206,8 +206,7 @@ public class ServingIndexServiceTest {
   public void synchronousOversizedAndNoChangeTargetsReopenWithExactIndex() throws Exception {
     History history = history(1);
     ServingIndexService service = service(history,
-        config().setMaxSourceBytes(1024L * 1024).setMaxWriteMutations(64)
-            .setMaxWriteBytes(64 * 1024), ServingIndexService.Hooks.NONE);
+        config().setMaxSourceBytes(1024L * 1024), ServingIndexService.Hooks.NONE);
     CommonCheckpointTarget first = history.publishWithoutNotify(1, 1);
     service.onCommonPublished(first);
     assertTrue(awaitThrough(service, 1));
@@ -291,7 +290,9 @@ public class ServingIndexServiceTest {
     history.payloadBytes = 300 * 1024;
     history.publish(service, 1, 2);
     assertTrue(awaitThrough(service, 2));
-    assertEquals(2, service.batches(0) + service.batches(1));
+    // The source budget still splits the range into separate read windows; the round now
+    // accumulates them and publishes one flush covering both.
+    assertEquals(1, service.batches(0) + service.batches(1));
     assertNull(service.status().getLastFailure());
     history.assertOracle(service);
   }
@@ -301,8 +302,7 @@ public class ServingIndexServiceTest {
   public void oversizedBlockIsIndexedInOneAtomicBatch() throws Exception {
     History history = history(1);
     AtomicInteger writes = new AtomicInteger();
-    ServingIndexService service = service(history, config().setMaxSourceBytes(1024L * 1024)
-        .setMaxWriteMutations(64).setMaxWriteBytes(64 * 1024),
+    ServingIndexService service = service(history, config().setMaxSourceBytes(1024L * 1024),
         new ServingIndexService.Hooks() {
           @Override
           public void afterCommit(long first, long last) {
@@ -653,7 +653,7 @@ public class ServingIndexServiceTest {
     CountDownLatch inChunk = new CountDownLatch(1);
     CountDownLatch release = new CountDownLatch(1);
     ServingIndexService service = service(history, config().setMaxSourceBytes(1024L * 1024)
-        .setMaxWriteMutations(64).setMaxWriteBytes(64 * 1024).setCloseTimeoutMillis(300),
+        .setCloseTimeoutMillis(300),
         new ServingIndexService.Hooks() {
           @Override
           public void afterCommit(long first, long last) {

@@ -23,26 +23,19 @@ import org.tron.core.db2.archive.serving.telemetry.ServingIndexTiming.Stage;
 import org.tron.core.db2.archive.serving.telemetry.ServingTimingTestAccess;
 import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
 
-public class ServingIndexSoftBatchTest {
+/** One atomic commit per selected History read window, without write-size estimation. */
+public class ServingIndexWindowCommitTest {
   @Rule
   public final TemporaryFolder temporaryFolder = new TemporaryFolder();
 
   @Test
-  public void mutationTriggerIncludesTheCrossingBlockAndFlushesWindowRemainder() throws Exception {
-    run(new ServingIndexService.Config().setMaxWriteMutations(39)
-        .setMaxWriteBytes(1024L * 1024 * 1024), 3, Arrays.asList(2L, 4L, 5L));
+  public void wholeSelectionCommitsOnceIncludingDenseBlocks() throws Exception {
+    run(new ServingIndexService.Config(), 3, Arrays.asList(5L));
   }
 
   @Test
-  public void byteTriggerIncludesTheCrossingBlockIndependentlyOfMutationTrigger() throws Exception {
-    run(new ServingIndexService.Config().setMaxWriteMutations(Long.MAX_VALUE)
-        .setMaxWriteBytes(17_000), 3, Arrays.asList(2L, 4L, 5L));
-  }
-
-  @Test
-  public void singleBlockBeyondBothTriggersStillCommitsAtomically() throws Exception {
-    run(new ServingIndexService.Config().setMaxWriteMutations(1).setMaxWriteBytes(1),
-        80, Arrays.asList(1L, 2L, 3L, 4L, 5L));
+  public void maxBlocksOneAccumulatesIntoOneFlushPerRound() throws Exception {
+    run(new ServingIndexService.Config().setMaxBlocks(1), 3, Arrays.asList(5L));
   }
 
   @Test
@@ -51,21 +44,17 @@ public class ServingIndexSoftBatchTest {
   }
 
   @Test
-  public void estimationDoesNotReadMetadataAndEncodingReadsEachDistinctKeyOnce() throws Exception {
+  public void commitReadsEachDistinctKeyOnce() throws Exception {
     Path directory = temporaryFolder.newFolder().toPath();
     try (ServingIndexStore store = ServingIndexStore.open(directory, Engine.ROCKSDB,
         1, hash(0), false, 1)) {
       store.commit(plan(store, blocks(1, 511, 8)), false);
       ServingIndexIncrementalPlan.Builder builder =
           new ServingIndexIncrementalPlan.Builder(511, hash(511));
-      try (ServingIndexTiming timing = new ServingIndexTiming("soft-estimate", 511, 514)) {
+      try (ServingIndexTiming timing = new ServingIndexTiming("window-commit", 511, 514)) {
         for (BlockReverseDiff diff : blocks(512, 3, 8)) {
           builder.add(diff, hash(diff.getMeta().getBlockNumber()));
         }
-        assertTrue(builder.estimatedBytes() > 0);
-        assertEquals(0, ServingTimingTestAccess.calls(timing, Stage.META_GET));
-        assertEquals(0, ServingTimingTestAccess.calls(timing, Stage.TAIL_GET));
-        assertEquals(0, ServingTimingTestAccess.calls(timing, Stage.BUILD));
         store.commit(builder.build(), false);
         assertEquals(8, ServingTimingTestAccess.calls(timing, Stage.META_GET));
         assertEquals(8, ServingTimingTestAccess.calls(timing, Stage.TAIL_GET));
