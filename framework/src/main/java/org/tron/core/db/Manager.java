@@ -1038,12 +1038,14 @@ public class Manager {
       snapshots.attachCommonCheckpointRuntime(attachment);
       commonCheckpointRuntime = attachment;
       stateArchiveAppendMaterializer = admittedAppendMaterializer;
-      if (admittedAppendMaterializer != null) {
+      if (admittedAppendMaterializer != null && appendConfig.isServingIndexBuildEnabled()) {
         attachment.startServingMonitor(() -> System.currentTimeMillis()
             - chainBaseManager.getDynamicPropertiesStore().getLatestBlockHeaderTimestamp()
             < 60_000);
+      } else if (admittedAppendMaterializer != null) {
+        logger.info("Archive ServingIndex builder disabled; V5 History remains active");
       }
-      if (admittedAppendMaterializer != null
+      if (admittedAppendMaterializer != null && appendConfig.isServingIndexBuildEnabled()
           && appendConfig.isTestOnlyForceServingHandoff()) {
         logger.warn("TEST-ONLY State Archive serving handoff forced at the recovered local "
             + "Common boundary; historical results during catch-up are not reliable");

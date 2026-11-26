@@ -24,6 +24,7 @@ import org.tron.core.db2.archive.BlockReverseDiff.Entry;
 import org.tron.core.db2.archive.BlockSnapshotMeta;
 import org.tron.core.db2.archive.OldValue;
 import org.tron.core.db2.archive.checkpoint.storage.ArchiveCheckpointFiles;
+import org.tron.core.db2.archive.contract.HistoricalQueryException;
 import org.tron.core.db2.archive.history.format.V5Format;
 import org.tron.core.db2.archive.history.format.V5HistoryTail;
 import org.tron.core.db2.archive.history.hot.StateArchiveHotBatchDescriptor;
@@ -62,6 +63,21 @@ public class StateArchiveAppendCheckpointMaterializerV5Test {
       recovery.afterCommit(committed);
       // Redo notifications must not launch an unowned background writer either.
       assertEquals(Thread.State.NEW, worker.getState());
+    }
+    try (StateArchiveAppendCheckpointMaterializerV5 disabled =
+        StateArchiveAppendCheckpointMaterializerV5.openForCommon(root, format, engine(),
+            100, hash(99), V5Format.SEGMENT_TARGET_BYTES,
+            number -> BlockSnapshotMeta.forBlock(number, hash((int) number),
+                hash((int) number - 1), number * 3_000L), committed, false)) {
+      assertEquals(committed, disabled.loadPublishedTargetIfPresent().get());
+      disabled.startServingAfterRecovery();
+      disabled.requestFastServingCatchUp();
+      disabled.afterCommit(committed);
+      disabled.completePublishedServing(committed);
+      assertEquals(Thread.State.NEW, servingThread(disabled).getState());
+      assertEquals(HistoricalQueryException.Reason.UNAVAILABLE,
+          assertThrows(HistoricalQueryException.class,
+              () -> disabled.pinHistory(committed)).getReason());
     }
     try (StateArchiveAppendCheckpointMaterializerV5 runtime =
         StateArchiveAppendCheckpointMaterializerV5.openForCommon(root, format, engine(),

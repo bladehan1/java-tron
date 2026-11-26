@@ -184,6 +184,7 @@ public class StorageConfig {
 
     private boolean enabled = false;
     private boolean testOnlyForceServingHandoff = false;
+    private boolean servingIndexBuildEnabled = true;
     private int appendBufferBytes = 2097152;
     private int maxBlockFrameBytes = 67108864;
     private long segmentTargetBytes = 2L * 1024 * 1024 * 1024;

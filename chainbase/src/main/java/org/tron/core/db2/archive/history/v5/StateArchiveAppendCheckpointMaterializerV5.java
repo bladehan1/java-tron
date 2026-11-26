@@ -19,6 +19,7 @@ import org.tron.core.db2.archive.OldValue;
 import org.tron.core.db2.archive.checkpoint.StateArchiveAppendFileRuntime;
 import org.tron.core.db2.archive.checkpoint.storage.ArchiveCheckpointFiles;
 import org.tron.core.db2.archive.contract.CheckpointPointReader;
+import org.tron.core.db2.archive.contract.HistoricalQueryException;
 import org.tron.core.db2.archive.contract.StateArchiveCanonicalBlockMetaSource;
 import org.tron.core.db2.archive.history.format.StateArchiveFileFormatV3;
 import org.tron.core.db2.archive.history.format.V5Format;
@@ -64,6 +65,7 @@ public final class StateArchiveAppendCheckpointMaterializerV5
   private CommonCheckpointTarget preparedTarget;
   private V5HistoryTail preparedTail;
   private boolean closed;
+  private final boolean servingIndexBuildEnabled;
   private volatile boolean servingAdmitted;
 
   StateArchiveAppendCheckpointMaterializerV5(Path directory, byte[] commonFormatIdentity,
@@ -102,7 +104,7 @@ public final class StateArchiveAppendCheckpointMaterializerV5
       TailSyncHook beforeTailSync) throws IOException {
     this(directory, commonFormatIdentity, bindingEngine, firstBlockNumber, baselineHistoryDigest,
         rotationTargetBytes, admission, canonical, channelOpener, readObserver, observer,
-        beforeTailSync, null, false, false);
+        beforeTailSync, null, false, false, true);
   }
 
   /**
@@ -113,10 +115,18 @@ public final class StateArchiveAppendCheckpointMaterializerV5
       byte[] format, Engine engine, long firstBlock, byte[] baselineDigest, long rotationBytes,
       StateArchiveCanonicalBlockMetaSource canonical, CommonCheckpointTarget recoveryTarget)
       throws IOException {
+    return openForCommon(directory, format, engine, firstBlock, baselineDigest, rotationBytes,
+        canonical, recoveryTarget, true);
+  }
+
+  public static StateArchiveAppendCheckpointMaterializerV5 openForCommon(Path directory,
+      byte[] format, Engine engine, long firstBlock, byte[] baselineDigest, long rotationBytes,
+      StateArchiveCanonicalBlockMetaSource canonical, CommonCheckpointTarget recoveryTarget,
+      boolean servingIndexBuildEnabled) throws IOException {
     return new StateArchiveAppendCheckpointMaterializerV5(directory, format, engine, firstBlock,
         baselineDigest, rotationBytes, StateArchiveProcessFdAdmissionV5.INSTANCE, canonical,
         null, (path, position, length) -> { }, (stage, lane) -> { }, () -> { },
-        recoveryTarget, true, true);
+        recoveryTarget, true, true, servingIndexBuildEnabled);
   }
 
   private StateArchiveAppendCheckpointMaterializerV5(Path directory, byte[] commonFormatIdentity,
@@ -125,8 +135,10 @@ public final class StateArchiveAppendCheckpointMaterializerV5
       StateArchiveCanonicalBlockMetaSource canonical, ChannelOpener channelOpener,
       ReadObserver readObserver, PublicationObserver observer,
       TailSyncHook beforeTailSync, CommonCheckpointTarget recoveryTarget,
-      boolean allowBaselineReset, boolean deferServing) throws IOException {
-    servingAdmitted = !deferServing;
+      boolean allowBaselineReset, boolean deferServing, boolean servingIndexBuildEnabled)
+      throws IOException {
+    this.servingIndexBuildEnabled = servingIndexBuildEnabled;
+    servingAdmitted = servingIndexBuildEnabled && !deferServing;
     this.directory = Objects.requireNonNull(directory, "directory");
     this.commonFormatIdentity = requireDigest(commonFormatIdentity, "Common format identity");
     this.bindingEngine = Objects.requireNonNull(bindingEngine, "bindingEngine");
@@ -183,7 +195,7 @@ public final class StateArchiveAppendCheckpointMaterializerV5
           openedCoordinator.retireLegacyArchiveTail();
           openedCoordinator.close();
           openedCoordinator = null;
-        } else {
+        } else if (servingIndexBuildEnabled) {
           // The tail is already authoritative. Derived serving damage must not block history.
           try {
             StateArchiveServingIndexBuildCoordinatorV3.retireLegacyArchiveTail(
@@ -427,18 +439,24 @@ public final class StateArchiveAppendCheckpointMaterializerV5
   @Override
   public synchronized void startServingAfterRecovery() throws IOException {
     requireOpen();
-    servingAdmitted = true;
-    servingService.start();
+    if (servingIndexBuildEnabled) {
+      servingAdmitted = true;
+      servingService.start();
+    }
   }
 
   @Override
   public void requestFastServingCatchUp() {
-    servingService.requestFastCatchUp();
+    if (servingIndexBuildEnabled) {
+      servingService.requestFastCatchUp();
+    }
   }
 
   @Override
   public void completePublishedServing(CommonCheckpointTarget target) throws IOException {
-    servingService.completePublishedTarget(target);
+    if (servingIndexBuildEnabled) {
+      servingService.completePublishedTarget(target);
+    }
   }
 
   @Override
@@ -453,13 +471,18 @@ public final class StateArchiveAppendCheckpointMaterializerV5
     if (servingAdmitted) {
       servingService.start();
     }
-    servingService.onCommonPublished(target);
+    if (servingIndexBuildEnabled) {
+      servingService.onCommonPublished(target);
+    }
   }
 
   @Override
   public synchronized void completeServingInitialSync(CommonCheckpointTarget boundary)
       throws IOException {
     requireOpen();
+    if (!servingIndexBuildEnabled) {
+      throw new IOException("ServingIndex builder is disabled");
+    }
     CommonCheckpointTarget admitted = requireTarget(boundary);
     servingService.onCommonPublished(admitted);
     if (!servingService.awaitIndexedThrough(admitted.getLastBlock().getBlockNumber(),
@@ -493,6 +516,10 @@ public final class StateArchiveAppendCheckpointMaterializerV5
   public synchronized CheckpointPointReader pinHistory(CommonCheckpointTarget target)
       throws IOException {
     requireOpen();
+    if (!servingIndexBuildEnabled) {
+      throw new HistoricalQueryException(HistoricalQueryException.Reason.UNAVAILABLE,
+          "ServingIndex builder is disabled");
+    }
     CommonCheckpointTarget admitted = requireTarget(target);
     PinnedReader point = pinReader();
     try {

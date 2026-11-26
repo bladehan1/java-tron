@@ -49,6 +49,7 @@ public final class StateArchiveCheckpointStartup {
     return StateArchiveAppendCheckpointMaterializerV5.openForCommon(appendDirectory, formatIdentity,
         archiveEngine, firstBlockNumber, baselineHistoryDigest,
         appendConfig.getSegmentTargetBytes(), canonical::loadIfPresent, recoveryPayload == null
-            ? null : CommonCheckpointTarget.from(recoveryPayload));
+            ? null : CommonCheckpointTarget.from(recoveryPayload),
+        appendConfig.isServingIndexBuildEnabled());
   }
 }
