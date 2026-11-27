@@ -503,6 +503,12 @@ public final class ServingIndexService implements AutoCloseable {
     Path directory = servingRoot.resolve(ServingIndexStore.DIRECTORY);
     ServingIndexStore opened = ServingIndexStore.open(directory, engine, start,
         history.getBaselineParentHash(), w >= start, clock.getAsLong());
+    opened.setFlushFaultHook(new ServingIndexStore.FlushFaultHook() {
+      @Override
+      public void afterDataBatch(int index) throws IOException {
+        hooks.afterDataBatch(index);
+      }
+    });
     try {
       long i = opened.indexedThrough();
       if (i > w) {
@@ -514,10 +520,12 @@ public final class ServingIndexService implements AutoCloseable {
             "Serving hash(I) differs from History at " + i);
       }
       recoverPendingFlush(opened, history, w);
-    } catch (IOException | RuntimeException failure) {
+    } catch (IOException | RuntimeException | Error failure) {
+      // The writer is not installed yet, so later cleanup has no reference to it. Close it for
+      // every failure type, including an Error from replay or parallel preparation.
       try {
         opened.close();
-      } catch (IOException | RuntimeException closing) {
+      } catch (IOException | RuntimeException | Error closing) {
         failure.addSuppressed(closing);
       }
       throw failure;
@@ -572,6 +580,9 @@ public final class ServingIndexService implements AutoCloseable {
           : source.read(history, selection.getFirst(), selection.getLast())) {
         replay.addBlock(block.getDiff(), block.getStepDigest());
       }
+      // Stop between History windows just like a normal round; the uninstalled writer is closed
+      // by open(), and the durable intent remains for the next open.
+      requireOpen();
     }
     ServingIndexStore.GroupedAppend replayed = replay.seal();
     if (replayed.indexedThrough() != intent.targetThrough()
@@ -581,7 +592,7 @@ public final class ServingIndexService implements AutoCloseable {
       throw new ServingFaultException(Reason.SOURCE_INCONSISTENT,
           "Serving flush recovery replay differs from the durable intent");
     }
-    opened.recoverFlush(replayed, intent, config.getDataBatchBytes());
+    opened.recoverFlush(replayed, intent, config.getDataBatchBytes(), this::requireOpen);
   }
 
   /**
@@ -600,6 +611,11 @@ public final class ServingIndexService implements AutoCloseable {
       throw new ServingFaultException(Reason.INDEX_AHEAD, "Serving I is ahead of History W");
     }
     long now = clock.getAsLong();
+    // Durable I can stay fixed for many windows in one round; enforce the LIVE lag limit on
+    // every step, not only when a new accumulator is created.
+    if (state == ServingState.LIVE && w - i > config.getLiveMaxLagBlocks()) {
+      transition(ServingState.BULK_CATCH_UP, w);
+    }
     if (accumulator == null && i == w) {
       pendingSinceMillis = 0;
       backlogObservedSinceMillis = 0;
@@ -617,9 +633,6 @@ public final class ServingIndexService implements AutoCloseable {
     if (accumulator == null) {
       if (backlogObservedSinceMillis == 0) {
         backlogObservedSinceMillis = now;
-      }
-      if (state == ServingState.LIVE && w - i > config.getLiveMaxLagBlocks()) {
-        transition(ServingState.BULK_CATCH_UP, w);
       }
       if (!fastCatchUpRequested.get()
           && (state == ServingState.BULK_CATCH_UP || state == ServingState.REBUILDING)
@@ -679,7 +692,8 @@ public final class ServingIndexService implements AutoCloseable {
     long started = System.nanoTime();
     try (ServingIndexTiming timing = new ServingIndexTiming(state.name(),
         append.indexedFrom(), append.indexedThrough())) {
-      store.commit(append, append.indexedThrough() == w, config.getDataBatchBytes());
+      store.commit(append, append.indexedThrough() == w, config.getDataBatchBytes(),
+          this::requireOpen);
       timing.succeeded();
     }
     hooks.afterCommit(append.indexedFrom() + 1, append.indexedThrough());
@@ -1094,6 +1108,13 @@ public final class ServingIndexService implements AutoCloseable {
 
     /** After a durable commit; throwing simulates a lost write acknowledgement. */
     default void afterCommit(long first, long last) throws IOException {
+    }
+
+    /**
+     * After the durable write of a streamed flush's data batch; throwing simulates a crash or
+     * a lost acknowledgement between two atomic writes of one flush.
+     */
+    default void afterDataBatch(int index) throws IOException {
     }
 
     default void afterLeaseCounted() {

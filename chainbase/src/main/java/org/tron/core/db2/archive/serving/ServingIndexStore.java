@@ -369,10 +369,21 @@ final class ServingIndexStore implements Closeable {
    */
   void commit(GroupedAppend append, boolean clearRebuild, long dataBatchBytes)
       throws IOException {
+    commit(append, clearRebuild, dataBatchBytes, FlushGate.NONE);
+  }
+
+  /**
+   * Commits one sealed accumulation. Small flushes stay one atomic write; a flush larger than
+   * {@code dataBatchBytes} streams key-atomic data batches after a durable flush intent and
+   * publishes coverage and progress in the final write, Geth-style data-then-progress. The gate
+   * is checked before every durable write, so closing can stop between atomic writes.
+   */
+  void commit(GroupedAppend append, boolean clearRebuild, long dataBatchBytes, FlushGate gate)
+      throws IOException {
     requireWritable();
     requireExtends(append);
     Next next = next(append, clearRebuild);
-    FlushFlow flow = new FlushFlow(append, next, clearRebuild, dataBatchBytes, false);
+    FlushFlow flow = new FlushFlow(append, next, clearRebuild, dataBatchBytes, false, gate);
     long started = System.nanoTime();
     try {
       appender.appendAll(writer, append.changes, descriptor.indexedThrough(), flow);
@@ -396,6 +407,17 @@ final class ServingIndexStore implements Closeable {
    */
   void recoverFlush(GroupedAppend append, FlushIntent intent, long dataBatchBytes)
       throws IOException {
+    recoverFlush(append, intent, dataBatchBytes, FlushGate.NONE);
+  }
+
+  /**
+   * Resumes an interrupted multi-write flush: keys still at the old boundary append normally,
+   * keys the crash already wrote are verified against the replay and skipped, then the final
+   * publish batch installs coverage, progress and deletes the intent. Replaying is idempotent
+   * and may itself be interrupted. The gate is checked before every durable write.
+   */
+  void recoverFlush(GroupedAppend append, FlushIntent intent, long dataBatchBytes,
+      FlushGate gate) throws IOException {
     requireWritable();
     requireExtends(append);
     if (intent.baseThrough != append.indexedFrom
@@ -408,7 +430,8 @@ final class ServingIndexStore implements Closeable {
           "Serving flush recovery replay differs from the pending intent");
     }
     Next next = next(append, intent.clearRebuild);
-    FlushFlow flow = new FlushFlow(append, next, intent.clearRebuild, dataBatchBytes, true);
+    FlushFlow flow = new FlushFlow(append, next, intent.clearRebuild, dataBatchBytes, true,
+        gate);
     long started = System.nanoTime();
     try {
       appender.recoverAll(writer, append.changes, intent.baseThrough, intent.targetThrough,
@@ -553,6 +576,8 @@ final class ServingIndexStore implements Closeable {
     private final long batchBytes;
     /** An interrupted flush left an intent on disk; any completion path must remove it. */
     private final boolean existingIntent;
+    /** Checked before every durable write; throwing stops between atomic writes. */
+    private final FlushGate gate;
     private final List<Mutation> current = new ArrayList<>();
     private long currentBytes;
     private long totalBytes;
@@ -560,12 +585,13 @@ final class ServingIndexStore implements Closeable {
     private boolean intentWritten;
 
     private FlushFlow(GroupedAppend append, Next next, boolean clearRebuild, long batchBytes,
-        boolean existingIntent) {
+        boolean existingIntent, FlushGate gate) {
       this.append = append;
       this.next = next;
       this.clearRebuild = clearRebuild;
       this.batchBytes = batchBytes;
       this.existingIntent = existingIntent;
+      this.gate = gate;
     }
 
     @Override
@@ -601,6 +627,7 @@ final class ServingIndexStore implements Closeable {
           totalBytes += delete.estimatedBytes();
           current.add(delete);
         }
+        gate.check();
         write(current);
         return;
       }
@@ -615,6 +642,7 @@ final class ServingIndexStore implements Closeable {
       Mutation delete = ArchiveIndexStorage.delete(FLUSH_INTENT_KEY);
       totalBytes += delete.estimatedBytes();
       finalBatch.add(delete);
+      gate.check();
       write(finalBatch);
     }
 
@@ -631,12 +659,14 @@ final class ServingIndexStore implements Closeable {
           new FlushIntent(append.indexedFrom, append.indexedFromHash, append.indexedThrough,
               append.headHash, append.sourceDigest, append.keyChanges, clearRebuild).encode());
       totalBytes += intent.estimatedBytes();
+      gate.check();
       write(java.util.Collections.singletonList(intent));
       intentWritten = true;
       faultHook.afterIntent();
     }
 
     private void writeData() throws IOException {
+      gate.check();
       write(current);
       dataBatches++;
       faultHook.afterDataBatch((int) dataBatches - 1);
@@ -846,6 +876,14 @@ final class ServingIndexStore implements Closeable {
     boolean clearRebuild() {
       return clearRebuild;
     }
+  }
+
+  /** Consulted before every durable write; throwing stops between two atomic writes. */
+  @FunctionalInterface
+  interface FlushGate {
+    FlushGate NONE = () -> { };
+
+    void check() throws IOException;
   }
 
   /** Test injection points of the multi-write flush protocol; production keeps NONE. */

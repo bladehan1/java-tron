@@ -2,11 +2,15 @@ package org.tron.core.db2.archive.serving;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
+import static org.junit.Assume.assumeTrue;
 import static org.tron.core.db2.archive.serving.ServingIndexStoreTest.blocks;
 import static org.tron.core.db2.archive.serving.ServingIndexStoreTest.hash;
 import static org.tron.core.db2.archive.serving.ServingIndexStoreTest.plan;
+import static org.tron.core.db2.archive.serving.ServingIndexStoreTest.restoreBuildThreads;
+import static org.tron.core.db2.archive.serving.ServingIndexStoreTest.setBuildThreads;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -224,22 +228,66 @@ public class ServingIndexParallelBuildTest {
     try (ServingIndexStore store = openParallel(directory, 4)) {
       store.commit(plan(store, blocks(1, 30, 16)), false);
     }
-    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+    assertWorkersStopped();
+  }
+
+  @Test
+  public void sinkErrorDrainsWorkersBeforePropagating() throws Exception {
+    // 200 keys over 4 workers make chunkKeys 6, so 33 more chunks are waiting when the sink
+    // fails with an Error: every worker must still stop and exit before it propagates.
+    Map<ExactKey, long[]> changeMap = new LinkedHashMap<>();
+    for (int key = 0; key < 200; key++) {
+      changeMap.put(new ExactKey("code", ByteBuffer.allocate(4).putInt(key).array()),
+          new long[] {100 + key});
+    }
+    Error sinkFailure = new Error("injected sink failure");
+    try (ServingIndexParallelAppender appender = new ServingIndexParallelAppender(4)) {
+      try {
+        appender.appendAll(new StubWriter(), changeMap, Long.MAX_VALUE, chunk -> {
+          throw sinkFailure;
+        });
+        fail("expected the sink error to propagate");
+      } catch (Error expected) {
+        assertSame(sinkFailure, expected);
+      }
+      assertWorkersDrained();
+    }
+  }
+
+  /** All submitted work must have finished before a sink failure propagates. */
+  private static void assertWorkersDrained() {
+    for (Thread thread : Thread.getAllStackTraces().keySet()) {
+      if (!thread.getName().startsWith("serving-index-build-")) {
+        continue;
+      }
+      for (StackTraceElement frame : thread.getStackTrace()) {
+        assertFalse("worker is still preparing or delivering: " + frame,
+            frame.getClassName().equals(ServingIndexParallelAppender.class.getName()));
+      }
+    }
+  }
+
+  /** No preparation worker may outlive the appender that submitted it. */
+  private static void assertWorkersStopped() throws InterruptedException {
+    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
     while (Thread.getAllStackTraces().keySet().stream()
         .anyMatch(thread -> thread.getName().startsWith("serving-index-build-"))) {
-      assertTrue("worker threads did not stop on close", System.nanoTime() < deadline);
-      Thread.sleep(50);
+      assertTrue("worker threads did not stop", System.nanoTime() < deadline);
+      Thread.sleep(20);
     }
   }
 
   private static ServingIndexStore openParallel(Path directory, int threads)
       throws IOException {
-    System.setProperty(ServingIndexParallelAppender.THREADS_PROPERTY,
-        Integer.toString(threads));
+    // resolveParallelism() caps the request at the host's processors: skip rather than
+    // silently compare two serial builds.
+    assumeTrue("needs " + threads + " processors",
+        Runtime.getRuntime().availableProcessors() >= threads);
+    String previous = setBuildThreads(threads);
     try {
       return ServingIndexStore.open(directory, Engine.ROCKSDB, 1, hash(0), false, 1);
     } finally {
-      System.clearProperty(ServingIndexParallelAppender.THREADS_PROPERTY);
+      restoreBuildThreads(previous);
     }
   }
 

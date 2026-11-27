@@ -166,19 +166,16 @@ final class ServingIndexParallelAppender implements AutoCloseable {
         sink.accept(chunk);
         emitted++;
       }
-      for (Future<?> future : futures) {
-        future.get();
+    } catch (IOException | RuntimeException | Error consumerFailure) {
+      // The sink aborted the flush. Record it before draining, whatever its type, so workers
+      // stop after their current key instead of waiting forever on a queue nobody drains.
+      if (!failure.compareAndSet(null, consumerFailure)
+          && failure.get() != consumerFailure) {
+        failure.get().addSuppressed(consumerFailure);
       }
-    } catch (ExecutionException submitFailure) {
-      // runWorker converts its own failures; this only covers submit-level errors.
-      failure.compareAndSet(null, submitFailure.getCause());
-    } catch (InterruptedException interrupted) {
-      failure.compareAndSet(null, interrupted);
-    } catch (IOException | RuntimeException sinkFailure) {
-      // The sink aborted the flush; record it so workers stop and exit before propagating.
-      failure.compareAndSet(null, sinkFailure);
     }
-    if (awaitTerminated(futures)) {
+    // Drain unconditionally, including after a sink Error or a partial submission failure.
+    if (awaitTerminated(futures, failure)) {
       Thread.currentThread().interrupt();
     }
     Throwable cause = failure.get();
@@ -255,7 +252,8 @@ final class ServingIndexParallelAppender implements AutoCloseable {
   }
 
   /** Waits for every worker to exit (they stop after their current key once failure is set). */
-  private static boolean awaitTerminated(List<Future<?>> futures) {
+  private static boolean awaitTerminated(List<Future<?>> futures,
+      AtomicReference<Throwable> failure) {
     boolean interrupted = false;
     for (Future<?> future : futures) {
       while (true) {
@@ -264,8 +262,14 @@ final class ServingIndexParallelAppender implements AutoCloseable {
           break;
         } catch (InterruptedException waiting) {
           interrupted = true;
+          failure.compareAndSet(null, waiting);
         } catch (ExecutionException unexpected) {
-          break; // already routed through the failure reference
+          // A worker normally routes its own failures; this covers any other fatal exit.
+          failure.compareAndSet(null, unexpected.getCause());
+          break;
+        } catch (RuntimeException unexpected) {
+          failure.compareAndSet(null, unexpected);
+          break;
         }
       }
     }

@@ -45,7 +45,21 @@ key's complete mutation group; a key's epochs are always appended by one worker 
 Finished chunks reach the build thread in completion order, so a slow chunk never delays
 already-finished chunks and no re-sequencing buffer exists. Only the build thread writes.
 The first failure stops dispatching, in-flight workers finish their current key, and the
-failure propagates after they exit.
+failure propagates after they exit. This also holds when the sink throws an `Error`: the
+consumer records the failure and drains every submitted worker before rethrowing it. The
+worker pool itself is long-lived, so idle workers waiting for the next flush are expected;
+only active preparation or delivery must be drained.
+
+## Storage API and batching
+
+`ArchiveIndexStorage.Writer` exposes point `get` and synchronous batch `write`; the shared
+storage abstraction does not expose RocksDB `MultiGet`. Preparation therefore reads one
+KeyMeta and, when needed, one tail page per key, while publication stays in explicit
+key-atomic batches with a separate final progress write. A future bulk-read optimization
+would need an engine-neutral batched-read contract first; it could reduce preparation reads
+but would not change the publish boundary or the need to replay History during recovery.
+Recovery cannot be replaced by `MultiGet`: durable epochs still have to be checked against
+the replayed History range before an already-written key is skipped.
 
 ## Flush protocol
 
@@ -56,6 +70,11 @@ failure propagates after they exit.
   publishes coverage and progress and deletes the intent. A key's mutations are never split
   across batches. Queries keep using the old descriptor until the final write, so data above
   `I` is invisible while batches are already durable.
+
+Background catch-up and synchronous Common targets use the same commit policy. A synchronous
+caller waits for the final descriptor write: neither the index nor its receipt advances while
+only data batches are durable, and a later target stays blocked. If that flush fails, reopen
+replays its intent and completes the same target.
 
 ## Recovery
 
@@ -74,9 +93,26 @@ For paged keys the suffix is read from the fixed-size pages it touches; when it 
 page boundary the preceding page is read too so the "nothing else above `I`" check has an
 entry to compare. Recovery is idempotent and may itself be interrupted.
 
-**Downgrade note:** an intent is invisible to the PR #55 build. If an older build is started
-while an intent exists, keys ahead of `I` fail the old R-IDEM rule with `INDEX_CORRUPT`
-(fail-closed, no silent corruption). Finish the recovery with this build before downgrading.
+## Shutdown and failure ownership
+
+The service checks closing between History windows and before every data or publish write,
+both for a normal streamed flush and for recovery. It stops after the current atomic write,
+drains preparation workers and closes the native writer; the durable intent remains for the
+next open. A writer that recovery has not installed yet is also closed when replay or worker
+preparation throws an `Error`. The LIVE lag limit is evaluated on every build step, including
+while a round is still accumulating.
+
+**Downgrade note:** do not downgrade while an intent exists. The PR #55 build neither reads
+nor deletes it, and its old R-IDEM rule has two outcomes:
+
+- If any durable key has more than one epoch above `I`, the old build rejects it with
+  `INDEX_CORRUPT` and stops without advancing `I`; reopening with this build can still recover.
+- If every durable key has exactly `I + 1`, the old build accepts the residue and can publish
+  progress without deleting the intent. Reopening with this build then rejects the stale intent
+  because its base no longer equals the descriptor's `I`, which needs manual handling.
+
+Neither case silently corrupts History, but the second can leave a stale intent that blocks
+this build at open. Finish the recovery with this build before downgrading.
 
 ## Configuration
 
@@ -97,5 +133,9 @@ longer exist.
 injection point, old-`I` query bounds, legacy solo residue and a PR #55-shaped index that
 reopens untouched and continues through a streamed parallel flush.
 `ServingIndexParallelBuildTest` covers serial/parallel row equality, GET-count equality,
-completion-order delivery and worker failure; `ServingIndexWindowCommitTest` replaces the
-former soft-batch tests.
+completion-order delivery and worker failure, including a sink `Error` with workers still
+queued. `ServingIndexWindowCommitTest` replaces the former soft-batch tests.
+`ServingIndexServiceTest` also covers LIVE lag while a round is accumulating and streamed
+flushes behind synchronous targets. `ServingIndexAccumulationTest` covers closing between
+History windows and between recovery data batches, closing a normal streamed flush, and an
+`Error` during recovery; the last case checks that no native writer reference remains.

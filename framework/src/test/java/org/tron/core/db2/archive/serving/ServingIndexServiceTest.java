@@ -2,6 +2,7 @@ package org.tron.core.db2.archive.serving;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
@@ -41,9 +42,13 @@ import org.tron.core.db2.archive.OldValue;
 import org.tron.core.db2.archive.contract.HistoricalQueryException;
 import org.tron.core.db2.archive.history.v5.V5TestSupport.Source;
 import org.tron.core.db2.archive.history.v5.V5TestSupport.Writer;
+import org.tron.core.db2.archive.serving.source.ServingHistorySource;
+import org.tron.core.db2.archive.serving.source.ServingHistorySource.Committed;
+import org.tron.core.db2.archive.serving.source.ServingHistorySource.CommittedBlock;
 import org.tron.core.db2.archive.serving.status.ServingFailure.Reason;
 import org.tron.core.db2.archive.serving.status.ServingState;
 import org.tron.core.db2.archive.storage.index.ArchiveIndexStorage;
+import org.tron.core.db2.archive.storage.index.IndexStorageTestSupport;
 import org.tron.core.db2.archive.storage.index.StateArchiveIndexEngineManifest;
 import org.tron.core.db2.checkpoint.common.materialize.CommonCheckpointTarget;
 import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
@@ -350,6 +355,144 @@ public class ServingIndexServiceTest {
     assertTrue(awaitThrough(service, 10));
     assertTrue(seen.toString(), seen.contains(ServingState.BULK_CATCH_UP));
     assertEquals(ServingState.LIVE, service.status().getState());
+  }
+
+  /**
+   * The LIVE lag limit is enforced on every step, also while a round is still accumulating: a
+   * watermark advance between two windows falls back to BULK_CATCH_UP before the round's flush.
+   */
+  @Test(timeout = 60_000)
+  public void lagBeyondThresholdDuringARoundFallsBackToBulkBeforeTheFlush() throws Exception {
+    History history = history(1);
+    GatedSource gate = new GatedSource(history.source);
+    List<String> windows = new CopyOnWriteArrayList<>();
+    AtomicReference<ServingIndexService> self = new AtomicReference<>();
+    ServingIndexService service = service(history, gate,
+        config().setMaxBlocks(2).setLiveMaxLagBlocks(3), new ServingIndexService.Hooks() {
+          @Override
+          public void beforeBatch(long first, long last, boolean solo) {
+            windows.add(first + ":" + self.get().status().getState());
+          }
+        });
+    self.set(service);
+    assertTrue(service.awaitLive(WAIT));
+    history.publish(service, 1, 2);
+    assertTrue(awaitThrough(service, 2));
+    // A lag of 3 is still within the limit, so the round for 3-5 starts in LIVE. The watermark
+    // reaches 7 after the round's first window; its second window must observe the excess.
+    gate.parkAfterRead(3);
+    history.publish(service, 3, 5);
+    assertTrue(gate.entered.await(10, TimeUnit.SECONDS));
+    assertEquals(ServingState.LIVE, service.status().getState());
+    history.publishWithoutNotify(6, 7);
+    gate.release.countDown();
+    assertTrue(awaitThrough(service, 7));
+    assertTrue(windows.toString(), windows.contains("5:BULK_CATCH_UP"));
+    assertEquals(ServingState.LIVE, service.status().getState());
+    history.assertOracle(service);
+  }
+
+  /** Twelve blocks over three keys stream through a durable intent and several data batches. */
+  private static ServingIndexService.Config streamed() {
+    return config().setDataBatchBytes(128);
+  }
+
+  /** Passes the initial handoff, which moves the service into SYNC_INCREMENTAL. */
+  private static CommonCheckpointTarget handoff(ServingIndexService service, History history)
+      throws Exception {
+    assertTrue(service.awaitLive(WAIT));
+    CommonCheckpointTarget handoff = history.publishWithoutNotify(1, 1);
+    service.onCommonPublished(handoff);
+    assertTrue(awaitThrough(service, 1));
+    service.requestFastCatchUp();
+    service.completePublishedTarget(handoff);
+    assertEquals(ServingIndexService.CommitMode.SYNC_INCREMENTAL, service.getCommitMode());
+    return handoff;
+  }
+
+  /** A synchronous Common target may flush through intent plus data batches. */
+  @Test(timeout = 60_000)
+  public void synchronousTargetWaitsForAStreamedFlushToPublish() throws Exception {
+    History history = history(1);
+    AtomicInteger dataBatches = new AtomicInteger();
+    ServingIndexService service = service(history, streamed(), new ServingIndexService.Hooks() {
+      @Override
+      public void afterDataBatch(int index) {
+        dataBatches.incrementAndGet();
+      }
+    });
+    handoff(service, history);
+
+    CommonCheckpointTarget target = history.publishWithoutNotify(2, 13);
+    long started = System.nanoTime();
+    service.onCommonPublished(target);
+    service.completePublishedTarget(target);
+    long receiptMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+    assertTrue("the flush never streamed: " + dataBatches.get() + " data batches",
+        dataBatches.get() >= 2);
+    assertEquals(13, service.status().getIndexedThrough());
+    assertEquals(target, service.getIndexedCommit());
+    assertEquals(ServingIndexService.CommitMode.SYNC_INCREMENTAL, service.getCommitMode());
+    history.assertOracle(service);
+    System.out.printf(java.util.Locale.ROOT,
+        "Synchronous streamed flush: receipt after %d ms, %d data batches%n",
+        receiptMillis, dataBatches.get());
+  }
+
+  /**
+   * A streamed flush behind a synchronous target publishes the index and the receipt only with
+   * its final write. A failure after a durable data batch leaves Common published and both the
+   * target and the next one unacknowledged until reopen replays the intent.
+   */
+  @Test(timeout = 60_000)
+  public void streamedFlushFailureKeepsTheSynchronousReceiptAtTheOldTarget() throws Exception {
+    History history = history(1);
+    AtomicInteger dataBatches = new AtomicInteger();
+    CountDownLatch parked = new CountDownLatch(1);
+    CountDownLatch release = new CountDownLatch(1);
+    ServingIndexService service = service(history, streamed().setCommitWaitMillis(300),
+        new ServingIndexService.Hooks() {
+          @Override
+          public void afterDataBatch(int index) throws IOException {
+            if (dataBatches.incrementAndGet() == 1) {
+              throw new IOException("injected failure after durable data batch " + index);
+            }
+            // The reopen parks right after its first recovery data batch is durable.
+            parked.countDown();
+            await(release);
+          }
+        });
+    CommonCheckpointTarget handoff = handoff(service, history);
+
+    CommonCheckpointTarget target = history.publishWithoutNotify(2, 13);
+    service.onCommonPublished(target);
+    assertTrue(parked.await(10, TimeUnit.SECONDS));
+    // Common stays published, and neither the index nor the receipt has reached the target.
+    assertEquals(target, history.source.committed().getTarget());
+    assertTrue(String.valueOf(service.status()), service.status().getIndexedThrough() < 13);
+    assertEquals(handoff, service.getIndexedCommit());
+    assertThrows(IOException.class, () -> service.completePublishedTarget(target));
+    // The next target stays blocked while the interrupted one is unacknowledged.
+    CommonCheckpointTarget next = history.publishWithoutNotify(14, 15);
+    service.onCommonPublished(next);
+    assertThrows(IOException.class, () -> service.completePublishedTarget(next));
+    assertNotEquals(next, service.getIndexedCommit());
+
+    // Reopen replays the interrupted flush under its intent, then the backlog to the next target.
+    release.countDown();
+    assertTrue(awaitThrough(service, 15));
+    history.assertOracle(service);
+    assertNotEquals(target, service.getIndexedCommit());
+    service.close();
+    assertEquals(0, IndexStorageTestSupport.openReferenceCount(
+        history.servingRoot.resolve(ServingIndexStore.DIRECTORY)
+            .resolve(ServingIndexStore.DATABASE), Engine.ROCKSDB));
+    try (ServingIndexStore reopened = ServingIndexStore.open(
+        history.servingRoot.resolve(ServingIndexStore.DIRECTORY), Engine.ROCKSDB,
+        1, History.hash(0), false, 1)) {
+      assertEquals(15, reopened.indexedThrough());
+      assertNull(reopened.pendingFlushIntent());
+    }
   }
 
   /**
@@ -824,8 +967,13 @@ public class ServingIndexServiceTest {
 
   private ServingIndexService service(History history, ServingIndexService.Config config,
       ServingIndexService.Hooks hooks) {
+    return service(history, history.source, config, hooks);
+  }
+
+  private ServingIndexService service(History history, ServingHistorySource source,
+      ServingIndexService.Config config, ServingIndexService.Hooks hooks) {
     ServingIndexService service = new ServingIndexService(history.servingRoot, history.root,
-        null, Engine.ROCKSDB, history.source, config.validate(), hooks,
+        null, Engine.ROCKSDB, source, config.validate(), hooks,
         System::currentTimeMillis);
     closeables.add(service);
     service.start();
@@ -858,7 +1006,7 @@ public class ServingIndexServiceTest {
     return false;
   }
 
-  private static void awaitFailure(ServingIndexService service, Reason reason)
+  static void awaitFailure(ServingIndexService service, Reason reason)
       throws InterruptedException {
     long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
     while (System.nanoTime() < deadline) {
@@ -1009,6 +1157,52 @@ public class ServingIndexServiceTest {
 
     static byte[] hash(long value) {
       return ByteBuffer.allocate(32).putLong(value).array();
+    }
+  }
+
+  /**
+   * Delegates to the real source and parks one chosen History read after it has returned, so a
+   * test can act while the build thread sits between two windows.
+   */
+  static final class GatedSource implements ServingHistorySource {
+    private final ServingHistorySource delegate;
+    private final AtomicLong parkAfterFirst = new AtomicLong(Long.MIN_VALUE);
+    final CountDownLatch entered = new CountDownLatch(1);
+    final CountDownLatch release = new CountDownLatch(1);
+
+    GatedSource(ServingHistorySource delegate) {
+      this.delegate = delegate;
+    }
+
+    /** The next read that starts at {@code first} blocks after decoding until released. */
+    void parkAfterRead(long first) {
+      parkAfterFirst.set(first);
+    }
+
+    @Override
+    public Committed committed() {
+      return delegate.committed();
+    }
+
+    @Override
+    public long[] bundleBytes(Committed view, long first, long last) throws IOException {
+      return delegate.bundleBytes(view, first, last);
+    }
+
+    @Override
+    public List<CommittedBlock> read(Committed view, long first, long last)
+        throws IOException {
+      List<CommittedBlock> blocks = delegate.read(view, first, last);
+      if (parkAfterFirst.compareAndSet(first, Long.MIN_VALUE)) {
+        entered.countDown();
+        await(release);
+      }
+      return blocks;
+    }
+
+    @Override
+    public byte[] blockHash(Committed view, long block) throws IOException {
+      return delegate.blockHash(view, block);
     }
   }
 }

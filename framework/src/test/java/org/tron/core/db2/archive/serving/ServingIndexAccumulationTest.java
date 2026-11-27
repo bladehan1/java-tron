@@ -11,6 +11,8 @@ import static org.tron.core.db2.archive.serving.ServingIndexStoreTest.blocks;
 import static org.tron.core.db2.archive.serving.ServingIndexStoreTest.diff;
 import static org.tron.core.db2.archive.serving.ServingIndexStoreTest.hash;
 import static org.tron.core.db2.archive.serving.ServingIndexStoreTest.plan;
+import static org.tron.core.db2.archive.serving.ServingIndexStoreTest.restoreBuildThreads;
+import static org.tron.core.db2.archive.serving.ServingIndexStoreTest.setBuildThreads;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -22,7 +24,12 @@ import java.util.Collections;
 import java.util.List;
 import java.util.OptionalLong;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.bouncycastle.util.encoders.Hex;
 import org.junit.Rule;
 import org.junit.Test;
@@ -32,10 +39,14 @@ import org.tron.core.db2.archive.history.v5.V5TestSupport.Writer;
 import org.tron.core.db2.archive.serving.ServingIndexService.Hooks;
 import org.tron.core.db2.archive.serving.ServingIndexServiceTest.History;
 import org.tron.core.db2.archive.serving.index.ServingIndexIncrementalPlan;
+import org.tron.core.db2.archive.serving.source.ServingHistorySource;
 import org.tron.core.db2.archive.serving.source.ServingHistorySource.Committed;
 import org.tron.core.db2.archive.serving.source.ServingHistorySource.CommittedBlock;
+import org.tron.core.db2.archive.serving.status.ServingFailure.Reason;
+import org.tron.core.db2.archive.serving.status.ServingState;
 import org.tron.core.db2.archive.storage.index.ArchiveIndexStorage;
 import org.tron.core.db2.archive.storage.index.ArchiveIndexStorage.KeyValue;
+import org.tron.core.db2.archive.storage.index.IndexStorageTestSupport;
 import org.tron.core.db2.stateroot.format.PathStateStoreManifest.Engine;
 
 /**
@@ -199,7 +210,7 @@ public class ServingIndexAccumulationTest {
         assertEquals("injected AFTER_FIRST_DATA", expected.getMessage());
       }
     }
-    // The first recovery also crashes after its first data batch, leaving later keys unwritten.
+    // The first recovery also crashes after its second data batch, leaving later keys unwritten.
     try (ServingIndexStore recovering = ServingIndexStore.open(crashedDirectory,
         Engine.ROCKSDB, 1, hash(0), false, 1)) {
       ServingIndexStore.FlushIntent intent = recovering.pendingFlushIntent();
@@ -446,7 +457,7 @@ public class ServingIndexAccumulationTest {
       clean.commit(plan(clean, blocks(1, 511, 8)), false);
       clean.commit(accumulate(clean, flushWindow()), false, Long.MAX_VALUE);
     }
-    System.setProperty(ServingIndexParallelAppender.THREADS_PROPERTY, "4");
+    String previousThreads = setBuildThreads(4);
     try {
       // A streamed flush assembled by parallel workers matches the serial atomic result.
       try (ServingIndexStore parallel = open(parallelDirectory)) {
@@ -473,7 +484,7 @@ public class ServingIndexAccumulationTest {
             TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started) < 5000);
       }
     } finally {
-      System.clearProperty(ServingIndexParallelAppender.THREADS_PROPERTY);
+      restoreBuildThreads(previousThreads);
     }
     long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
     while (Thread.getAllStackTraces().keySet().stream()
@@ -487,7 +498,7 @@ public class ServingIndexAccumulationTest {
   public void legacyIndexReopensAndContinuesThroughStreamedParallelFlush() throws Exception {
     // A PR #55 index: one atomic commit per window, fixed 512-entry pages. Key 0/1 end with two
     // full pages plus a 3-entry tail page; key 200 with exactly two full pages; keys 300-302
-    // INLINE with 1/2/3 epochs; keys 2-7 with a 514-entry partial page.
+    // INLINE with 1/2/3 epochs; keys 2-7 with a full page plus a 2-entry tail page.
     List<List<BlockReverseDiff>> legacyWindows = new ArrayList<>();
     legacyWindows.add(blocks(1, 511, 8));
     legacyWindows.add(blocks(512, 3, 8));
@@ -527,7 +538,7 @@ public class ServingIndexAccumulationTest {
       }
     }
 
-    System.setProperty(ServingIndexParallelAppender.THREADS_PROPERTY, "4");
+    String previousThreads = setBuildThreads(4);
     try {
       try (ServingIndexStore continued = open(legacyDirectory)) {
         // Reopening an existing index neither rewrites nor re-indexes anything.
@@ -565,7 +576,142 @@ public class ServingIndexAccumulationTest {
             index.firstChangeAfter("code", intKey(7), 2058, 2067));
       }
     } finally {
-      System.clearProperty(ServingIndexParallelAppender.THREADS_PROPERTY);
+      restoreBuildThreads(previousThreads);
+    }
+  }
+
+  /**
+   * Closing while a pending flush is being recovered stops the replay between two History
+   * windows: the uninstalled writer is closed and the intent stays for the next open.
+   */
+  @Test
+  public void closeDuringFlushRecoveryStopsBetweenHistoryWindows() throws Exception {
+    Path root = temporaryFolder.newFolder().toPath();
+    History history = new History(root, root.resolve("serving"), 1);
+    AtomicInteger failAt = new AtomicInteger(-1);
+    ServingIndexServiceTest.GatedSource gate =
+        new ServingIndexServiceTest.GatedSource(history.source);
+    try (Writer ignored = history.writer;
+        ServingIndexService service = service(history, root, gate,
+            streamed().setMaxBlocks(4).setRetryInitialBackoffMillis(300), new Hooks() {
+              @Override
+              public void afterDataBatch(int index) throws IOException {
+                if (index == failAt.get()) {
+                  throw new IOException("injected failure after durable data batch " + index);
+                }
+              }
+            })) {
+      history.publishWithoutNotify(1, 12);
+      failAt.set(0);
+      service.start();
+      ServingIndexServiceTest.awaitFailure(service, Reason.TRANSIENT_IO);
+      // Recovery replays 1-4, then parks inside its second window while close() is requested.
+      failAt.set(-1);
+      gate.parkAfterRead(5);
+      assertTrue(gate.entered.await(10, TimeUnit.SECONDS));
+      closeWhileParked(service, gate.release);
+    }
+    assertWriterReleased(history);
+    try (ServingIndexStore reopened = open(history.servingRoot.resolve("single-v1"))) {
+      assertNotNull(reopened.pendingFlushIntent());
+      assertEquals(0, reopened.indexedThrough());
+    }
+  }
+
+  /**
+   * Closing while recovery is between two of its data batches stops it before the next one;
+   * the batches already durable stay guarded by the intent.
+   */
+  @Test
+  public void closeDuringFlushRecoveryStopsBeforeTheNextDataBatch() throws Exception {
+    Path root = temporaryFolder.newFolder().toPath();
+    History history = new History(root, root.resolve("serving"), 1);
+    AtomicInteger dataBatches = new AtomicInteger();
+    CountDownLatch parked = new CountDownLatch(1);
+    CountDownLatch unpark = new CountDownLatch(1);
+    try (Writer ignored = history.writer;
+        ServingIndexService service = service(history, root, streamed(), new Hooks() {
+          @Override
+          public void afterDataBatch(int index) throws IOException {
+            if (dataBatches.incrementAndGet() == 1) {
+              throw new IOException("injected failure after durable data batch " + index);
+            }
+            // The reopen parks right after its first recovery data batch is durable.
+            parked.countDown();
+            awaitLatch(unpark);
+          }
+        })) {
+      history.publishWithoutNotify(1, 12);
+      service.start();
+      ServingIndexServiceTest.awaitFailure(service, Reason.TRANSIENT_IO);
+      assertTrue(parked.await(10, TimeUnit.SECONDS));
+      closeWhileParked(service, unpark);
+    }
+    assertWriterReleased(history);
+    try (ServingIndexStore reopened = open(history.servingRoot.resolve("single-v1"))) {
+      assertNotNull(reopened.pendingFlushIntent());
+      assertEquals(0, reopened.indexedThrough());
+    }
+  }
+
+  /**
+   * Closing while a streamed flush is between two data batches stops it before the next one;
+   * nothing is published and the intent stays for the next open.
+   */
+  @Test
+  public void closeDuringStreamedFlushStopsBeforeTheNextDataBatch() throws Exception {
+    Path root = temporaryFolder.newFolder().toPath();
+    History history = new History(root, root.resolve("serving"), 1);
+    CountDownLatch parked = new CountDownLatch(1);
+    CountDownLatch unpark = new CountDownLatch(1);
+    try (Writer ignored = history.writer;
+        ServingIndexService service = service(history, root, streamed(), new Hooks() {
+          @Override
+          public void afterDataBatch(int index) {
+            // The first flush parks right after its first data batch is durable.
+            parked.countDown();
+            awaitLatch(unpark);
+          }
+        })) {
+      history.publishWithoutNotify(1, 12);
+      service.start();
+      assertTrue(parked.await(10, TimeUnit.SECONDS));
+      closeWhileParked(service, unpark);
+    }
+    assertWriterReleased(history);
+    try (ServingIndexStore reopened = open(history.servingRoot.resolve("single-v1"))) {
+      assertNotNull(reopened.pendingFlushIntent());
+      assertEquals(0, reopened.indexedThrough());
+    }
+  }
+
+  /** An Error thrown while recovery runs closes the writer that was never installed. */
+  @Test
+  public void errorDuringFlushRecoveryClosesTheUninstalledWriter() throws Exception {
+    Path root = temporaryFolder.newFolder().toPath();
+    History history = new History(root, root.resolve("serving"), 1);
+    AtomicInteger dataBatches = new AtomicInteger();
+    try (Writer ignored = history.writer;
+        ServingIndexService service = service(history, root, streamed(), new Hooks() {
+          @Override
+          public void afterDataBatch(int index) throws IOException {
+            if (dataBatches.incrementAndGet() == 1) {
+              throw new IOException("injected failure after durable data batch " + index);
+            }
+            throw new AssertionError("injected error during flush recovery");
+          }
+        })) {
+      history.publishWithoutNotify(1, 12);
+      service.start();
+      ServingIndexServiceTest.awaitFailure(service, Reason.TRANSIENT_IO);
+      ServingIndexServiceTest.awaitFailure(service, Reason.JVM_ERROR);
+    }
+    // Writers are shared per directory and reference-counted, so reopening proves nothing: the
+    // writer that was never installed must have been closed by the failed open itself.
+    assertWriterReleased(history);
+    try (ServingIndexStore reopened = open(history.servingRoot.resolve("single-v1"))) {
+      assertNotNull(reopened.pendingFlushIntent());
+      assertEquals(0, reopened.indexedThrough());
     }
   }
 
@@ -621,9 +767,63 @@ public class ServingIndexAccumulationTest {
 
   private static ServingIndexService service(History history, Path root,
       ServingIndexService.Config config, Hooks hooks) {
+    return service(history, root, history.source, config, hooks);
+  }
+
+  private static ServingIndexService service(History history, Path root,
+      ServingHistorySource source, ServingIndexService.Config config, Hooks hooks) {
     config.setPollMillis(10).setCloseTimeoutMillis(10_000);
     return new ServingIndexService(history.servingRoot, root, null, Engine.ROCKSDB,
-        history.source, config, hooks, System::currentTimeMillis);
+        source, config, hooks, System::currentTimeMillis);
+  }
+
+  /**
+   * Twelve blocks over three keys make three chunks of roughly 170 to 220 estimated bytes
+   * each; a 128-byte batch budget streams them through a durable intent and data batches.
+   */
+  private static ServingIndexService.Config streamed() {
+    return new ServingIndexService.Config().setDataBatchBytes(128);
+  }
+
+  /**
+   * Closes the service from another thread while the build thread is parked, then unparks it:
+   * the build thread must stop at its next check instead of running into the close timeout.
+   */
+  private static void closeWhileParked(ServingIndexService service, CountDownLatch unpark)
+      throws Exception {
+    ExecutorService closer = Executors.newSingleThreadExecutor();
+    try {
+      Future<?> closed = closer.submit(service::close);
+      long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+      while (service.status().getState() != ServingState.CLOSED
+          && System.nanoTime() < deadline) {
+        Thread.sleep(5);
+      }
+      long started = System.nanoTime();
+      unpark.countDown();
+      closed.get(10, TimeUnit.SECONDS);
+      assertTrue("the build thread ran into the close timeout",
+          TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started) < 5_000);
+    } finally {
+      unpark.countDown();
+      closer.shutdownNow();
+    }
+  }
+
+  private static void awaitLatch(CountDownLatch latch) {
+    try {
+      assertTrue("test latch timed out", latch.await(30, TimeUnit.SECONDS));
+    } catch (InterruptedException interrupted) {
+      Thread.currentThread().interrupt();
+      throw new IllegalStateException(interrupted);
+    }
+  }
+
+  /** No writer reference may outlive a closed service, installed or not. */
+  private static void assertWriterReleased(History history) {
+    Path database = history.servingRoot.resolve(ServingIndexStore.DIRECTORY)
+        .resolve(ServingIndexStore.DATABASE);
+    assertEquals(0, IndexStorageTestSupport.openReferenceCount(database, Engine.ROCKSDB));
   }
 
   private static ServingIndexStore open(Path directory) throws IOException {
