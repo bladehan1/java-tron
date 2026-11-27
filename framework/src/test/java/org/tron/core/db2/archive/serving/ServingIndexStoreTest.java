@@ -355,6 +355,22 @@ public class ServingIndexStoreTest {
     return ByteBuffer.allocate(32).putLong(value).array();
   }
 
+  /** Overrides the build-thread count; the returned value restores the JVM-supplied one. */
+  static String setBuildThreads(int threads) {
+    String previous = System.getProperty(ServingIndexParallelAppender.THREADS_PROPERTY);
+    System.setProperty(ServingIndexParallelAppender.THREADS_PROPERTY,
+        Integer.toString(threads));
+    return previous;
+  }
+
+  static void restoreBuildThreads(String previous) {
+    if (previous == null) {
+      System.clearProperty(ServingIndexParallelAppender.THREADS_PROPERTY);
+    } else {
+      System.setProperty(ServingIndexParallelAppender.THREADS_PROPERTY, previous);
+    }
+  }
+
   /** Expected epoch lists per key. */
   private static final class Oracle {
     private final Map<Integer, List<Long>> epochs = new TreeMap<>();

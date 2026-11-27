@@ -1127,6 +1127,116 @@ public final class PersistentServingKeyIndexGeneration implements PinnedServingK
     prepareExactChanges(target, key, suppliedEpochs, durableI).appendTo(target, batch);
   }
 
+  /** Primitive-height form used by the parallel appender; the page encoding is unchanged. */
+  static void appendExactChanges(ArchiveIndexStorage.Writer target,
+      List<ArchiveIndexStorage.Mutation> batch, ExactKey key,
+      long[] suppliedEpochs, long durableI) throws IOException {
+    appendExactChanges(target, batch, key, asList(suppliedEpochs), durableI);
+  }
+
+  /**
+   * Crash recovery for one key of an interrupted multi-batch flush, which wrote whole
+   * key-atomic data batches before the final progress publish: the durable state either still
+   * sits at or below {@code baseI} (append the replayed epochs normally) or already carries
+   * exactly the replayed epochs of {@code (baseI, target]} (verify the suffix and skip).
+   * Anything ahead of {@code target} or differing from the replay is corruption.
+   */
+  static List<ArchiveIndexStorage.Mutation> recoverExactChanges(
+      ArchiveIndexStorage.Writer target, ExactKey key, long[] epochs, long baseI,
+      long targetThrough) throws IOException {
+    byte[] existing;
+    long started = System.nanoTime();
+    try {
+      existing = target.get(keyMetaKey(key.dbName, key.rawKey));
+    } finally {
+      ServingIndexTiming.record(ServingIndexTiming.Stage.META_GET, started);
+    }
+    KeyMeta meta = existing == null ? null : decodeKeyMeta(existing);
+    // lastEpoch == baseI + 1 is either this flush's already-written single-epoch group
+    // (R-IDEM drops it and nothing remains to append) or the legacy solo residue of an
+    // earlier version that R-IDEM also absorbs; both must recover, never report corruption.
+    if (meta == null || meta.lastEpoch <= baseI || meta.lastEpoch == baseI + 1) {
+      List<ArchiveIndexStorage.Mutation> mutations = new ArrayList<>();
+      appendExactChanges(target, mutations, key, epochs, baseI);
+      return mutations;
+    }
+    if (meta.lastEpoch > targetThrough) {
+      throw new ArchivePersistenceException(
+          "Serving flush residue is ahead of the interrupted flush target");
+    }
+    verifyFlushResidue(target, key, meta, epochs, baseI);
+    return new ArrayList<>();
+  }
+
+  /** The last {@code expected.length} durable epochs must equal the replay and start above I. */
+  private static void verifyFlushResidue(ArchiveIndexStorage.Writer target, ExactKey key,
+      KeyMeta meta, long[] expected, long baseI) throws IOException {
+    if (meta.count < expected.length) {
+      throw residueCorrupt();
+    }
+    if (meta.mode == INLINE) {
+      verifyResidueSuffix(meta.inlineEpochs, meta.inlineEpochs.length - expected.length,
+          expected, baseI);
+      return;
+    }
+    if (meta.mode != PAGED) {
+      throw new ArchivePersistenceException("Unknown serving key metadata mode");
+    }
+    // Fixed-size pages: the suffix starts at entry (count - expected.length). When that is a
+    // page start, the predecessor lives in the previous page, which is read as well so the
+    // "nothing else above I" check still has an entry to look at.
+    long suffixStart = meta.count - expected.length;
+    int firstPage = (int) (suffixStart / EPOCHS_PER_PAGE);
+    if (suffixStart % EPOCHS_PER_PAGE == 0 && firstPage > 0) {
+      firstPage--;
+    }
+    long[] region = new long[(int) (meta.count - (long) firstPage * EPOCHS_PER_PAGE)];
+    int filled = 0;
+    for (int page = firstPage, pageCount = pageCount(meta.count); page < pageCount; page++) {
+      long started = System.nanoTime();
+      byte[] encoded;
+      try {
+        encoded = target.get(keyPageKey(key.dbName, key.rawKey, page));
+      } finally {
+        ServingIndexTiming.record(ServingIndexTiming.Stage.TAIL_GET, started);
+      }
+      if (encoded == null) {
+        throw new ArchivePersistenceException("Exact serving epoch page is missing");
+      }
+      long[] epochs = decodeEpochPage(encoded);
+      if (filled + epochs.length > region.length) {
+        throw residueCorrupt();
+      }
+      System.arraycopy(epochs, 0, region, filled, epochs.length);
+      filled += epochs.length;
+    }
+    if (filled != region.length) {
+      throw residueCorrupt();
+    }
+    verifyResidueSuffix(region, region.length - expected.length, expected, baseI);
+  }
+
+  private static void verifyResidueSuffix(long[] region, int offset, long[] expected,
+      long baseI) {
+    if (offset < 0) {
+      throw residueCorrupt();
+    }
+    // The entry before the suffix must not already belong to this flush's block range.
+    if (offset > 0 && region[offset - 1] > baseI) {
+      throw residueCorrupt();
+    }
+    for (int index = 0; index < expected.length; index++) {
+      if (region[offset + index] != expected[index]) {
+        throw residueCorrupt();
+      }
+    }
+  }
+
+  private static ArchivePersistenceException residueCorrupt() {
+    return new ArchivePersistenceException(
+        "Serving flush residue differs from the replayed batch");
+  }
+
   /** Reads each aggregated key once, then encodes its append (including old solo replay). */
   static PreparedExactChanges prepareExactChanges(ArchiveIndexStorage.Writer target,
       ExactKey key, List<Long> suppliedEpochs, long durableI)
@@ -1915,8 +2025,20 @@ public final class PersistentServingKeyIndexGeneration implements PinnedServingK
     private final byte[] rawKey;
 
     ExactKey(String dbName, byte[] rawKey) {
+      this(dbName, rawKey, false);
+    }
+
+    /**
+     * Takes ownership of a caller-private key copy, e.g. the defensive copy returned by
+     * KeyChange.getRawKey(), so grouping copies each changed key once instead of twice.
+     */
+    static ExactKey owned(String dbName, byte[] privateCopy) {
+      return new ExactKey(dbName, privateCopy, true);
+    }
+
+    private ExactKey(String dbName, byte[] rawKey, boolean owned) {
       this.dbName = dbName;
-      this.rawKey = Arrays.copyOf(rawKey, rawKey.length);
+      this.rawKey = owned ? rawKey : Arrays.copyOf(rawKey, rawKey.length);
     }
 
     @Override

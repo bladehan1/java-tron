@@ -179,7 +179,7 @@ public final class ServingIndexIncrementalPlan {
     return builder.build();
   }
 
-  /** One-pass validation and accumulation; thresholds are checked only after a whole block. */
+  /** One-pass validation and accumulation of the selected source window. */
   public static final class Builder {
     private final long indexedFrom;
     private final byte[] indexedFromHash;
@@ -190,9 +190,6 @@ public final class ServingIndexIncrementalPlan {
     private final List<byte[]> steps = new ArrayList<>();
     private long previousBlock;
     private byte[] previousHash;
-    // Small fixed allowance for coverage/descriptor, rather than encoding them for estimation.
-    private long estimatedBytes = 16 * 1024;
-    private long estimatedMutations = 32;
 
     public Builder(long indexedThrough, byte[] headHash) {
       if (indexedThrough < 0) {
@@ -230,10 +227,6 @@ public final class ServingIndexIncrementalPlan {
             throw new IllegalArgumentException("Serving committed diff keys are not unique");
           }
           database.add(new KeyChange(key, meta.getEpoch()));
-          // Cheap proxy: metadata + a page write per changed key occurrence. Repeated keys
-          // may be overcounted; existing tail-page rewrites may be underestimated. No DB IO.
-          estimatedMutations += 2;
-          estimatedBytes += 2L * (2L * key.length + 16) + 128 + Long.BYTES;
           previousKey = key;
         }
         previousDatabase = group.getDbName();
@@ -243,14 +236,6 @@ public final class ServingIndexIncrementalPlan {
       delta.update(step);
       previousBlock = meta.getBlockNumber();
       previousHash = meta.getBlockHash();
-    }
-
-    public long estimatedBytes() {
-      return estimatedBytes;
-    }
-
-    public long estimatedMutations() {
-      return estimatedMutations;
     }
 
     public ServingIndexIncrementalPlan build() {
